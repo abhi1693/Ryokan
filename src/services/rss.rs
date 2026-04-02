@@ -1,0 +1,1189 @@
+use std::{cmp::Ordering, collections::{HashMap, HashSet}, sync::LazyLock};
+
+use regex_lite::Regex;
+
+use crate::{
+    models::{config, monitoring, rss, series},
+    models::log::LogCategory,
+    services::{auto_search, logger, media, monitoring as monitoring_service, quality},
+    AppState,
+};
+
+static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+const NYAA_RSS_URL: &str = "https://nyaa.si/?page=rss&c=1_0&f=0";
+
+// ── Pre-compiled regexes ───────────────────────────────────────────────────
+// Feed parsing
+static RE_ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<item>(.*?)</item>").unwrap());
+static RE_BATCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:e?\d{1,4}|s\d{1,2}e\d{1,4})\s*[-~]\s*(?:e?\d{1,4}|\d{1,4})\b").unwrap());
+
+// Core-title normalisation
+static RE_CORE_TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:season\s*\d+|\d+(?:st|nd|rd|th)\s+season|s\d{1,2}(?:e\d{1,4})?|part\s*\d+|cour\s*\d+|final|end(?:ing)?s?)\b").unwrap());
+
+// Season number extraction (tried in order)
+static RE_SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
+    Regex::new(r"(?i)\bseason\s*(\d{1,2})\b").unwrap(),
+    Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b").unwrap(),
+    Regex::new(r"(?i)\bs(\d{1,2})\b").unwrap(),
+    Regex::new(r"(?i)\bpart\s*(\d{1,2})\b").unwrap(),
+    Regex::new(r"(?i)\bcour\s*(\d{1,2})\b").unwrap(),
+]);
+
+// Season+episode range patterns
+static RE_SEASON_EP_RANGE: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
+    Regex::new(r"(?i)\bs(\d{1,2})\s*e(\d{1,4})\s*[-~]\s*e?(\d{1,4})(?:v\d+)?\b").unwrap(),
+    Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
+    Regex::new(r"(?i)\bseason\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
+    Regex::new(r"(?i)\bpart\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
+    Regex::new(r"(?i)\bcour\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
+]);
+
+// Season+episode single patterns
+static RE_SEASON_EP_SINGLE: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
+    Regex::new(r"(?i)\bs(\d{1,2})\s*e(\d{1,4})(?:v\d+)?\b").unwrap(),
+    Regex::new(r"(?i)\bs(\d{1,2})[ ._-]*ep?(\d{1,4})(?:v\d+)?\b").unwrap(),
+]);
+
+// Season+dash+episode patterns
+static RE_SEASON_DASH: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
+    Regex::new(r"(?i)\bs(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
+    Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
+    Regex::new(r"(?i)\bseason\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
+    Regex::new(r"(?i)\bpart\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
+    Regex::new(r"(?i)\bcour\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
+]);
+
+// Range pattern (no season prefix)
+static RE_RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?\b").unwrap());
+
+// Absolute episode patterns (tried in order)
+static RE_ABSOLUTE: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| vec![
+    ("absolute_dash", Regex::new(r"(?i)(?:^|\s)-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap()),
+    ("absolute", Regex::new(r"(?i)\bepisode\s*(\d{1,4})(?:v\d+)?\b").unwrap()),
+    ("absolute", Regex::new(r"(?i)\be(?:p\.?|pisode)?\s*(\d{1,4})(?:v\d+)?\b").unwrap()),
+    ("absolute", Regex::new(r"(?i)\b(\d{1,4})(?:v\d+)?\s*(?:\(|\[)").unwrap()),
+    ("absolute_dash", Regex::new(r"(?i)\b-\s*(\d{1,4})(?:v\d+)?(?:\s+final|\s+end)?(?:\.[a-z0-9]{2,4}|$)").unwrap()),
+    ("absolute", Regex::new(r"(?i)\b(\d{1,4})(?:v\d+)?\s*(?:final|end)\b").unwrap()),
+]);
+
+#[derive(Debug, Clone)]
+pub struct RssItem {
+    pub title: String,
+    pub link: String,
+    pub guid: String,
+    pub torrent: String,
+    pub magnet: String,
+    pub info_hash: String,
+    pub group: String,
+    pub resolution: String,
+    pub is_batch: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncSummary {
+    pub items_seen: i32,
+    pub matched: i32,
+    pub grabbed: i32,
+    pub skipped: i32,
+    pub detail: String,
+}
+
+#[derive(Clone)]
+struct ParsedRelease {
+    normalized_title: String,
+    core_title: String,
+    collapsed_title: String,
+    collapsed_core_title: String,
+    season_hint: Option<i32>,
+    season_relative_eps: HashSet<i32>,
+    absolute_eps: HashSet<i32>,
+    parse_mode: &'static str,
+}
+
+#[derive(Clone)]
+struct MatchResult {
+    series: series::Series,
+    parsed: ParsedRelease,
+    resolved_eps: HashSet<i32>,
+    canonical_abs_eps: HashSet<i32>,
+    family_key: String,
+    alias_score: f32,
+    resolution_mode: &'static str,
+}
+
+struct CandidateDecision {
+    reject_reason: Option<String>,
+    new_episode_count: i32,
+    is_upgrade: bool,
+}
+
+#[derive(Clone)]
+struct SeriesMeta {
+    series: series::Series,
+    aliases: Vec<String>,
+    core_aliases: Vec<String>,
+    collapsed_aliases: Vec<String>,
+    collapsed_core_aliases: Vec<String>,
+    season_num: Option<i32>,
+}
+
+#[derive(Clone)]
+struct PendingCandidate {
+    item: RssItem,
+    item_key: String,
+    found: MatchResult,
+    score: i32,
+    new_episode_count: i32,
+    is_upgrade: bool,
+}
+
+impl SeriesMeta {
+    fn from_series(series: &series::Series) -> Self {
+        let aliases = auto_search::dedupe_strings(vec![
+            series.title.clone(),
+            series.title_romaji.clone(),
+            series.title_english.clone(),
+            series.title_native.clone(),
+        ]);
+
+        let season_num = aliases
+            .iter()
+            .find_map(|alias| parse_season_number(&auto_search::normalize_title(alias)));
+
+        let mut expanded = aliases.clone();
+        let mut core_aliases = Vec::new();
+        let mut collapsed_aliases = Vec::new();
+        let mut collapsed_core_aliases = Vec::new();
+
+        for alias in &aliases {
+            let normalized = auto_search::normalize_title(alias);
+            if !normalized.is_empty() {
+                expanded.push(normalized.clone());
+                collapsed_aliases.push(collapse_alias(&normalized));
+            }
+            let core = normalize_core_title(&normalized);
+            if !core.is_empty() {
+                core_aliases.push(core.clone());
+                expanded.push(core.clone());
+                collapsed_core_aliases.push(collapse_alias(&core));
+                if let Some(season) = season_num {
+                    expanded.push(format!("{} s{}", core, season));
+                    expanded.push(format!("{} season {}", core, season));
+                    expanded.push(format!("{} {} season", core, ordinal_suffix(season)));
+                }
+            }
+        }
+
+        Self {
+            series: series.clone(),
+            aliases: auto_search::dedupe_strings(expanded),
+            core_aliases: auto_search::dedupe_strings(core_aliases),
+            collapsed_aliases: auto_search::dedupe_strings(collapsed_aliases),
+            collapsed_core_aliases: auto_search::dedupe_strings(collapsed_core_aliases),
+            season_num,
+        }
+    }
+}
+
+pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, String> {
+    let _guard = RSS_SYNC_LOCK.try_lock().map_err(|_| "RSS sync is already running".to_string())?;
+
+    let run_id = rss::start_run(&state.db, trigger).await.map_err(|e| e.to_string())?;
+    let result = sync_once_inner(state, trigger).await;
+
+    match &result {
+        Ok(summary) => {
+            let _ = rss::finish_run(
+                &state.db,
+                run_id,
+                "ok",
+                summary.items_seen,
+                summary.matched,
+                summary.grabbed,
+                summary.skipped,
+                &summary.detail,
+            ).await;
+        }
+        Err(err) => {
+            let _ = rss::finish_run(&state.db, run_id, "error", 0, 0, 0, 0, err).await;
+        }
+    }
+
+    result
+}
+
+async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary, String> {
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or(config::Config {
+            qbit_url: String::new(),
+            qbit_user: String::new(),
+            qbit_pass: String::new(),
+            qbit_category: String::new(),
+            jellyfin_url: String::new(),
+            jellyfin_api_key: String::new(),
+            preferred_groups: String::new(),
+            blocked_groups: String::new(),
+            preferred_resolution: "1080".to_string(),
+            quality_profile: "web_1080".to_string(),
+            quality_cutoff: "bd_1080".to_string(),
+            finished_series_quality: "prefer_bd".to_string(),
+            media_root: String::new(),
+            title_language: "english".to_string(),
+            force_mal_fallback: false,
+            rss_enabled: false,
+            rss_interval_minutes: 5,
+            force_kitsu_fallback: false,
+        });
+
+    let items = fetch_feed().await?;
+    let tracked = series::get_all(&state.db).await.map_err(|e| e.to_string())?;
+    for row in &tracked {
+        let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
+    }
+    let qbit = state.qbit.read().await.clone();
+
+    let whitelist = quality::parse_group_list(&cfg.preferred_groups);
+    let blacklist = quality::parse_group_list(&cfg.blocked_groups);
+    let all_meta: Vec<SeriesMeta> = tracked.iter().map(SeriesMeta::from_series).collect();
+    let mut canonical_history = load_canonical_history(&state.db, qbit.as_ref(), &all_meta).await;
+
+    // Cache on-disk episode scans per folder to avoid repeated filesystem walks.
+    let mut disk_cache: HashMap<String, Vec<media::EpisodeFile>> = HashMap::new();
+    let mut monitored_cache: HashMap<i64, HashSet<i32>> = HashMap::new();
+
+    let cutoff_tier = quality::QualityTier::from_str(&cfg.quality_cutoff);
+
+    let mut items_seen = 0;
+    let mut matched = 0;
+    let mut grabbed = 0;
+    let mut skipped = 0;
+    let mut pending: Vec<PendingCandidate> = Vec::new();
+
+    logger::info(&state.db, LogCategory::System, "RSS sync started", &format!("trigger={} items={}", trigger, items.len())).await;
+
+    for item in items {
+        items_seen += 1;
+        let item_key = build_item_key(&item);
+        if rss::item_was_grabbed(&state.db, &item_key).await.map_err(|e| e.to_string())? {
+            skipped += 1;
+            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, None, "", &item.group, item.is_batch, "skipped", "Already grabbed earlier; skipping duplicate RSS item", "rss").await;
+            continue;
+        }
+
+        let Some(found) = best_series_match(&item, &all_meta) else {
+            skipped += 1;
+            let diag = build_match_diag(&item, None, 0);
+            let reason = format!("No tracked series match | {}", diag);
+            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, None, "", &item.group, item.is_batch, "skipped", &reason, "rss").await;
+            continue;
+        };
+
+        matched += 1;
+
+        if group_matches_blacklist(&item.group, &blacklist) {
+            skipped += 1;
+            let reason = format!("Blocked group: {} | {}", item.group, build_match_diag(&item, Some(&found), 0));
+            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            continue;
+        }
+
+        if !whitelist.is_empty() && !group_matches_whitelist(&item.group, &whitelist) {
+            skipped += 1;
+            let reason = if item.group.trim().is_empty() {
+                format!("Release group missing and whitelist is enabled | {}", build_match_diag(&item, Some(&found), 0))
+            } else {
+                format!("Group not in whitelist: {} | {}", item.group, build_match_diag(&item, Some(&found), 0))
+            };
+            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            continue;
+        }
+
+        let monitored_eps = if let Some(cached) = monitored_cache.get(&found.series.id) {
+            cached.clone()
+        } else {
+            let values: HashSet<i32> = monitoring::get_monitored_episode_numbers(&state.db, found.series.id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            monitored_cache.insert(found.series.id, values.clone());
+            values
+        };
+
+        let actionable_eps: HashSet<i32> = found
+            .resolved_eps
+            .iter()
+            .copied()
+            .filter(|ep| monitored_eps.contains(ep))
+            .collect();
+
+        let disk_files = disk_cache
+            .entry(found.series.folder_name.clone())
+            .or_insert_with(|| media::scan_series_folder(&cfg.media_root, &found.series.folder_name));
+        let decision = evaluate_candidate(&found.series, &item, disk_files, &actionable_eps, cutoff_tier);
+        if let Some(reason) = decision.reject_reason {
+            skipped += 1;
+            let reason = format!("{} | {}", reason, build_match_diag(&item, Some(&found), 0));
+            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            continue;
+        }
+
+        let canonical_key = canonical_episode_key(&found, item.is_batch);
+        if !canonical_key.is_empty() && canonical_history.contains(&canonical_key) {
+            skipped += 1;
+            let reason = format!("Logical episode is already queued or was grabbed earlier | {}", build_match_diag(&item, Some(&found), 0));
+            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            continue;
+        }
+
+        let score = score_candidate(&cfg, &item, &found.series, &found.resolved_eps, found.alias_score, found.parsed.parse_mode);
+        pending.push(PendingCandidate {
+            item,
+            item_key,
+            found,
+            score,
+            new_episode_count: decision.new_episode_count,
+            is_upgrade: decision.is_upgrade,
+        });
+    }
+
+    let mut bucket_best: HashMap<String, usize> = HashMap::new();
+    for (idx, cand) in pending.iter().enumerate() {
+        let bucket = logical_bucket_key(cand);
+        match bucket_best.get(&bucket).copied() {
+            Some(prev_idx) => {
+                if compare_candidates(cand, &pending[prev_idx]) == Ordering::Greater {
+                    bucket_best.insert(bucket, idx);
+                }
+            }
+            None => {
+                bucket_best.insert(bucket, idx);
+            }
+        }
+    }
+
+    let Some(client) = qbit.as_ref() else {
+        for cand in pending {
+            skipped += 1;
+            let reason = format!("qBittorrent is not configured | {}", build_match_diag(&cand.item, Some(&cand.found), cand.score));
+            let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "rejected", &reason, "rss").await;
+        }
+        let detail = format!("Processed {} items • matched {} • grabbed {} • skipped {}", items_seen, matched, grabbed, skipped);
+        logger::info(&state.db, LogCategory::System, "RSS sync finished", &detail).await;
+        return Ok(SyncSummary { items_seen, matched, grabbed, skipped, detail });
+    };
+
+    for (idx, cand) in pending.into_iter().enumerate() {
+        let bucket = logical_bucket_key(&cand);
+        if bucket_best.get(&bucket).copied() != Some(idx) {
+            skipped += 1;
+            let reason = format!(
+                "Lower score than selected candidate for the same logical episode | {}",
+                build_match_diag(&cand.item, Some(&cand.found), cand.score)
+            );
+            let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "rejected", &reason, "rss").await;
+            continue;
+        }
+
+        let grab_url = if !cand.item.torrent.is_empty() {
+            cand.item.torrent.clone()
+        } else if !cand.item.magnet.is_empty() {
+            cand.item.magnet.clone()
+        } else {
+            cand.item.link.clone()
+        };
+
+        match client.add_torrent(&grab_url).await {
+            Ok(_) => {
+                grabbed += 1;
+                let action = if cand.is_upgrade { "upgrade" } else { "new" };
+                let reason = if cand.item.is_batch {
+                    format!("Accepted best batch candidate ({}) for {} episode(s) | {}", action, cand.new_episode_count.max(1), build_match_diag(&cand.item, Some(&cand.found), cand.score))
+                } else {
+                    format!("Accepted best candidate ({}) for {} episode(s) | {}", action, cand.new_episode_count.max(1), build_match_diag(&cand.item, Some(&cand.found), cand.score))
+                };
+                canonical_history.insert(canonical_episode_key(&cand.found, cand.item.is_batch));
+                let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "grabbed", &reason, "rss").await;
+            }
+            Err(err) => {
+                skipped += 1;
+                let reason = format!("{} | {}", err, build_match_diag(&cand.item, Some(&cand.found), cand.score));
+                let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "error", &reason, "rss").await;
+            }
+        }
+    }
+
+    let detail = format!("Processed {} items • matched {} • grabbed {} • skipped {}", items_seen, matched, grabbed, skipped);
+    logger::info(&state.db, LogCategory::System, "RSS sync finished", &detail).await;
+    Ok(SyncSummary { items_seen, matched, grabbed, skipped, detail })
+}
+
+async fn load_canonical_history(
+    db: &sqlx::SqlitePool,
+    qbit: Option<&crate::services::qbit::QbitClient>,
+    all_meta: &[SeriesMeta],
+) -> HashSet<String> {
+    let mut keys = HashSet::new();
+
+    if let Ok(titles) = rss::grabbed_titles(db, 5000).await {
+        for title in titles {
+            if let Some(key) = canonical_key_for_title(&title, all_meta) {
+                keys.insert(key);
+            }
+        }
+    }
+
+    if let Some(client) = qbit {
+        if let Ok(torrents) = client.get_torrents().await {
+            for torrent in torrents {
+                if let Some(key) = canonical_key_for_title(&torrent.name, all_meta) {
+                    keys.insert(key);
+                }
+            }
+        }
+    }
+
+    keys
+}
+
+fn canonical_key_for_title(title: &str, all_meta: &[SeriesMeta]) -> Option<String> {
+    let pseudo = RssItem {
+        title: title.to_string(),
+        link: String::new(),
+        guid: String::new(),
+        torrent: String::new(),
+        magnet: String::new(),
+        info_hash: String::new(),
+        group: extract_group(title),
+        resolution: extract_resolution(title),
+        is_batch: detect_batch(title),
+    };
+    let found = best_series_match(&pseudo, all_meta)?;
+    let key = canonical_episode_key(&found, pseudo.is_batch);
+    if key.is_empty() { None } else { Some(key) }
+}
+
+fn compare_candidates(a: &PendingCandidate, b: &PendingCandidate) -> Ordering {
+    a.score
+        .cmp(&b.score)
+        .then_with(|| (!a.item.is_batch).cmp(&(!b.item.is_batch)))
+        .then_with(|| resolution_rank(&a.item.resolution).cmp(&resolution_rank(&b.item.resolution)))
+        .then_with(|| a.item.group.cmp(&b.item.group))
+        .then_with(|| a.item.title.cmp(&b.item.title))
+}
+
+fn logical_bucket_key(cand: &PendingCandidate) -> String {
+    canonical_episode_key(&cand.found, cand.item.is_batch)
+}
+
+fn canonical_episode_key(found: &MatchResult, is_batch: bool) -> String {
+    let episode_key = if !found.canonical_abs_eps.is_empty() {
+        format_episode_set(&found.canonical_abs_eps)
+    } else {
+        format_episode_set(&found.resolved_eps)
+    };
+    if episode_key == "none" {
+        return String::new();
+    }
+    format!(
+        "{}|{}|{}",
+        found.family_key,
+        if is_batch { "batch" } else { "single" },
+        episode_key,
+    )
+}
+
+fn score_candidate(
+    cfg: &config::Config,
+    item: &RssItem,
+    found: &series::Series,
+    parsed_eps: &HashSet<i32>,
+    alias_score: f32,
+    parse_mode: &str,
+) -> i32 {
+    let preferred_tier = quality::QualityTier::from_str(&cfg.quality_profile);
+    let cutoff_tier = quality::QualityTier::from_str(&cfg.quality_cutoff);
+    let finished_mode = quality::FinishedSeriesMode::from_str(&cfg.finished_series_quality);
+    let detected_tier = quality::detect_tier(&item.title, &item.resolution);
+    let mut score = quality::tier_score(detected_tier, preferred_tier, cutoff_tier);
+
+    score += quality::preferred_group_bonus(&item.group, &quality::parse_group_list(&cfg.preferred_groups));
+    score += (alias_score * 50.0) as i32;
+
+    if !item.is_batch {
+        score += 25;
+    } else if is_finished_status(&found.status) || finished_mode != quality::FinishedSeriesMode::SameAsAiring {
+        score += 5;
+    } else {
+        score -= 15;
+    }
+
+    if item.resolution == cfg.preferred_resolution {
+        score += 20;
+    }
+    if parsed_eps.is_empty() {
+        score -= 60;
+    } else {
+        score += 15;
+    }
+
+    match parse_mode {
+        "season_episode" | "season_dash_episode" | "season_episode_range" => score += 25,
+        "absolute" | "absolute_dash" => score += 15,
+        "range" => score += 10,
+        _ => score -= 10,
+    }
+
+    score
+}
+
+fn resolution_rank(value: &str) -> i32 {
+    match value.trim() {
+        "2160" => 2160,
+        "1080" => 1080,
+        "720" => 720,
+        "480" => 480,
+        _ => 0,
+    }
+}
+
+fn evaluate_candidate(
+    found: &series::Series,
+    item: &RssItem,
+    disk_files: &[media::EpisodeFile],
+    parsed_eps: &HashSet<i32>,
+    cutoff_tier: quality::QualityTier,
+) -> CandidateDecision {
+    let existing_ep_numbers: HashSet<i32> = disk_files.iter().map(|f| f.episode_number).collect();
+
+    if item.is_batch {
+        if !parsed_eps.is_empty() {
+            // For batches, count episodes that are either missing or upgradeable.
+            let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
+            let upgrade_count = parsed_eps.iter().filter(|ep| {
+                existing_ep_numbers.contains(ep) && episode_is_upgradeable(*ep, disk_files, item, cutoff_tier)
+            }).count() as i32;
+            let actionable = new_count + upgrade_count;
+            if actionable == 0 {
+                return CandidateDecision {
+                    reject_reason: Some("Batch episodes are already on disk at or above cutoff".to_string()),
+                    new_episode_count: 0,
+                    is_upgrade: false,
+                };
+            }
+            return CandidateDecision {
+                reject_reason: None,
+                new_episode_count: actionable,
+                is_upgrade: upgrade_count > 0 && new_count == 0,
+            };
+        }
+
+        if is_finished_status(&found.status) {
+            return CandidateDecision { reject_reason: None, new_episode_count: 0, is_upgrade: false };
+        }
+
+        return CandidateDecision {
+            reject_reason: Some("Batch release does not include monitored episodes".to_string()),
+            new_episode_count: 0,
+            is_upgrade: false,
+        };
+    }
+
+    if parsed_eps.is_empty() {
+        return CandidateDecision {
+            reject_reason: Some("Resolved episode is not monitored".to_string()),
+            new_episode_count: 0,
+            is_upgrade: false,
+        };
+    }
+
+    let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
+    let upgrade_count = parsed_eps.iter().filter(|ep| {
+        existing_ep_numbers.contains(ep) && episode_is_upgradeable(*ep, disk_files, item, cutoff_tier)
+    }).count() as i32;
+    let actionable = new_count + upgrade_count;
+
+    if actionable == 0 {
+        return CandidateDecision {
+            reject_reason: Some("Episode is already on disk at or above cutoff".to_string()),
+            new_episode_count: 0,
+            is_upgrade: false,
+        };
+    }
+
+    CandidateDecision {
+        reject_reason: None,
+        new_episode_count: actionable,
+        is_upgrade: upgrade_count > 0 && new_count == 0,
+    }
+}
+
+/// Check if an episode on disk is below the quality cutoff and the incoming
+/// release would be an upgrade.
+fn episode_is_upgradeable(
+    ep: &i32,
+    disk_files: &[media::EpisodeFile],
+    incoming: &RssItem,
+    cutoff_tier: quality::QualityTier,
+) -> bool {
+    let Some(existing) = disk_files.iter().find(|f| f.episode_number == *ep) else {
+        return false; // not on disk — not an "upgrade", it's a new episode
+    };
+    let existing_tier = quality::tier_from_disk_quality(&existing.quality);
+    // Only upgrade if existing is below cutoff
+    if existing_tier.rank() >= cutoff_tier.rank() {
+        return false;
+    }
+    let incoming_tier = quality::detect_tier(&incoming.title, &incoming.resolution);
+    // Incoming must be strictly better than what's on disk
+    incoming_tier.rank() > existing_tier.rank()
+}
+
+fn is_finished_status(status: &str) -> bool {
+    matches!(status, "FINISHED" | "FINISHED_AIRING")
+}
+
+fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchResult> {
+    let parsed = parse_release(item);
+    let item_tokens = auto_search::token_set(&parsed.normalized_title);
+    let item_core_tokens = auto_search::token_set(&parsed.core_title);
+
+    let mut best: Option<(f32, MatchResult)> = None;
+
+    for meta in all_meta {
+        let alias_score = score_alias_overlap(
+            &parsed.normalized_title,
+            &item_tokens,
+            &parsed.core_title,
+            &item_core_tokens,
+            &parsed.collapsed_title,
+            &parsed.collapsed_core_title,
+            &meta.aliases,
+            &meta.core_aliases,
+            &meta.collapsed_aliases,
+            &meta.collapsed_core_aliases,
+        );
+        if alias_score < 0.82 {
+            continue;
+        }
+
+        let siblings = related_family(meta, all_meta);
+        let (resolved_eps, resolution_mode) = resolve_episode_numbers(&parsed, meta, &siblings);
+        let canonical_abs_eps = canonical_absolute_numbers(meta, &siblings, &resolved_eps);
+        let family_key = canonical_family_key(&siblings);
+
+        let mut score = alias_score;
+        if let Some(item_season) = parsed.season_hint {
+            match meta.season_num {
+                Some(season) if season == item_season => score += 0.55,
+                Some(_) => score -= 0.45,
+                None => score -= 0.10,
+            }
+        }
+        if !parsed.season_relative_eps.is_empty() || !parsed.absolute_eps.is_empty() {
+            if resolved_eps.is_empty() {
+                score -= 0.45;
+            } else {
+                score += 0.22;
+            }
+        }
+        if !canonical_abs_eps.is_empty() {
+            score += 0.08;
+        }
+
+        if score < 0.88 {
+            continue;
+        }
+
+        let result = MatchResult {
+            series: meta.series.clone(),
+            parsed: parsed.clone(),
+            resolved_eps,
+            canonical_abs_eps,
+            family_key,
+            alias_score,
+            resolution_mode,
+        };
+        match &best {
+            Some((best_score, _)) if *best_score >= score => {}
+            _ => best = Some((score, result)),
+        }
+    }
+
+    best.map(|(_, result)| result)
+}
+
+fn canonical_family_key(family: &[SeriesMeta]) -> String {
+    let mut keys: Vec<String> = family
+        .iter()
+        .flat_map(|meta| meta.collapsed_core_aliases.iter().cloned())
+        .filter(|value| !value.is_empty())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter().next().unwrap_or_else(|| "unknownfamily".to_string())
+}
+
+fn canonical_absolute_numbers(meta: &SeriesMeta, family: &[SeriesMeta], resolved_eps: &HashSet<i32>) -> HashSet<i32> {
+    if resolved_eps.is_empty() {
+        return HashSet::new();
+    }
+    let offset = family_offset_for(meta, family);
+    resolved_eps.iter().map(|ep| ep + offset).collect()
+}
+
+fn family_offset_for(meta: &SeriesMeta, family: &[SeriesMeta]) -> i32 {
+    let target_season = meta.season_num.unwrap_or(1);
+    let mut offset = 0i32;
+    for entry in family {
+        let season = entry.season_num.unwrap_or(1);
+        if season >= target_season {
+            break;
+        }
+        offset += entry.series.episodes.unwrap_or(0).max(0);
+    }
+    offset
+}
+
+fn related_family<'a>(target: &'a SeriesMeta, all_meta: &'a [SeriesMeta]) -> Vec<SeriesMeta> {
+    let mut related: Vec<SeriesMeta> = all_meta
+        .iter()
+        .filter(|meta| shares_core_alias(target, meta))
+        .cloned()
+        .collect();
+    related.sort_by(compare_series_meta);
+    related
+}
+
+fn shares_core_alias(a: &SeriesMeta, b: &SeriesMeta) -> bool {
+    if a.series.id == b.series.id {
+        return true;
+    }
+    for ac in &a.collapsed_core_aliases {
+        for bc in &b.collapsed_core_aliases {
+            if !ac.is_empty() && ac == bc {
+                return true;
+            }
+        }
+    }
+    for ac in &a.core_aliases {
+        for bc in &b.core_aliases {
+            if ac == bc {
+                return true;
+            }
+            let at = auto_search::token_set(ac);
+            let bt = auto_search::token_set(bc);
+            if auto_search::token_overlap_ratio(&at, &bt) >= 0.95 && auto_search::token_overlap_ratio(&bt, &at) >= 0.95 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn compare_series_meta(a: &SeriesMeta, b: &SeriesMeta) -> Ordering {
+    match (a.season_num, b.season_num) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => a.series.id.cmp(&b.series.id),
+    }
+}
+
+fn score_alias_overlap(
+    normalized_item: &str,
+    item_tokens: &HashSet<String>,
+    item_core: &str,
+    item_core_tokens: &HashSet<String>,
+    collapsed_item: &str,
+    collapsed_item_core: &str,
+    aliases: &[String],
+    core_aliases: &[String],
+    collapsed_aliases: &[String],
+    collapsed_core_aliases: &[String],
+) -> f32 {
+    let alias_max = aliases.iter().map(|alias| {
+        let normalized_alias = auto_search::normalize_title(alias);
+        let alias_tokens = auto_search::token_set(&normalized_alias);
+        let mut score = 0.0f32;
+        if !normalized_alias.is_empty() && (normalized_item.contains(&normalized_alias) || normalized_alias.contains(normalized_item)) {
+            score = score.max(1.0);
+        }
+        let overlap_ab = auto_search::token_overlap_ratio(item_tokens, &alias_tokens);
+        let overlap_ba = auto_search::token_overlap_ratio(&alias_tokens, item_tokens);
+        score.max(overlap_ab.min(overlap_ba))
+    }).fold(0.0f32, f32::max);
+
+    let core_max = core_aliases.iter().map(|alias_core| {
+        let core_tokens = auto_search::token_set(alias_core);
+        let mut score = 0.0f32;
+        if !alias_core.is_empty() && !item_core.is_empty() && (item_core.contains(alias_core) || alias_core.contains(item_core)) {
+            score = score.max(1.0);
+        }
+        let overlap_ab = auto_search::token_overlap_ratio(item_core_tokens, &core_tokens);
+        let overlap_ba = auto_search::token_overlap_ratio(&core_tokens, item_core_tokens);
+        score.max(overlap_ab.min(overlap_ba))
+    }).fold(0.0f32, f32::max);
+
+    let collapsed_max = collapsed_aliases.iter().chain(collapsed_core_aliases.iter()).map(|alias| {
+        if alias.is_empty() {
+            return 0.0;
+        }
+        if collapsed_item == *alias || collapsed_item_core == *alias || collapsed_item.contains(alias) || alias.contains(collapsed_item_core) {
+            1.0
+        } else {
+            0.0
+        }
+    }).fold(0.0f32, f32::max);
+
+    alias_max.max(core_max).max(collapsed_max)
+}
+
+fn normalize_core_title(value: &str) -> String {
+    RE_CORE_TITLE.replace_all(value, " ")
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "season" | "part" | "cour"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn collapse_alias(value: &str) -> String {
+    value.chars().filter(|ch| ch.is_alphanumeric()).collect()
+}
+
+fn parse_season_number(value: &str) -> Option<i32> {
+    for re in RE_SEASON_PATTERNS.iter() {
+        if let Some(value) = re.captures(value)
+            .and_then(|caps| caps.get(1))
+            .and_then(|m| m.as_str().parse::<i32>().ok()) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_release(item: &RssItem) -> ParsedRelease {
+    let normalized_title = auto_search::normalize_title(&item.title);
+    let core_title = normalize_core_title(&normalized_title);
+    let collapsed_title = collapse_alias(&normalized_title);
+    let collapsed_core_title = collapse_alias(&core_title);
+    let lower = item.title.to_lowercase();
+
+    let mut season_hint = parse_season_number(&normalized_title);
+    let mut season_relative_eps = HashSet::new();
+    let mut absolute_eps = HashSet::new();
+    let mut parse_mode = "unknown";
+
+    // Season+episode range patterns
+    for re in RE_SEASON_EP_RANGE.iter() {
+        if let Some(caps) = re.captures(&lower) {
+            season_hint = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).or(season_hint);
+            let start = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
+            let end = caps.get(3).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
+            if start > 0 && end >= start && end - start <= 200 {
+                for ep in start..=end {
+                    season_relative_eps.insert(ep);
+                }
+                parse_mode = "season_episode_range";
+                return ParsedRelease { normalized_title, core_title, collapsed_title, collapsed_core_title, season_hint, season_relative_eps, absolute_eps, parse_mode };
+            }
+        }
+    }
+
+    // Season+episode single patterns
+    for re in RE_SEASON_EP_SINGLE.iter() {
+        if let Some(caps) = re.captures(&lower) {
+            season_hint = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).or(season_hint);
+            if let Some(ep) = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                season_relative_eps.insert(ep);
+                parse_mode = "season_episode";
+                return ParsedRelease { normalized_title, core_title, collapsed_title, collapsed_core_title, season_hint, season_relative_eps, absolute_eps, parse_mode };
+            }
+        }
+    }
+
+    // Season+dash+episode patterns
+    for re in RE_SEASON_DASH.iter() {
+        if let Some(caps) = re.captures(&lower) {
+            season_hint = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).or(season_hint);
+            if let Some(ep) = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                season_relative_eps.insert(ep);
+                parse_mode = "season_dash_episode";
+                return ParsedRelease { normalized_title, core_title, collapsed_title, collapsed_core_title, season_hint, season_relative_eps, absolute_eps, parse_mode };
+            }
+        }
+    }
+
+    // Plain range (no season prefix)
+    if let Some(caps) = RE_RANGE.captures(&lower) {
+        let start = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
+        let end = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
+        if start > 0 && end >= start && end - start <= 200 {
+            for ep in start..=end {
+                absolute_eps.insert(ep);
+            }
+            parse_mode = "range";
+        }
+    }
+
+    // Absolute episode patterns
+    if absolute_eps.is_empty() {
+        for (mode, re) in RE_ABSOLUTE.iter() {
+            for caps in re.captures_iter(&lower) {
+                if let Some(value) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                    absolute_eps.insert(value);
+                }
+            }
+            if !absolute_eps.is_empty() {
+                parse_mode = mode;
+                break;
+            }
+        }
+    }
+
+    ParsedRelease { normalized_title, core_title, collapsed_title, collapsed_core_title, season_hint, season_relative_eps, absolute_eps, parse_mode }
+}
+
+fn resolve_episode_numbers(
+    parsed: &ParsedRelease,
+    meta: &SeriesMeta,
+    family: &[SeriesMeta],
+) -> (HashSet<i32>, &'static str) {
+    if let Some(item_season) = parsed.season_hint {
+        match meta.season_num {
+            Some(season) if season != item_season => {
+                return (HashSet::new(), "season_hint_miss");
+            }
+            None if item_season > 1 => {
+                return (HashSet::new(), "season_hint_miss");
+            }
+            _ => {}
+        }
+    }
+
+    if !parsed.season_relative_eps.is_empty() {
+        if parsed.season_hint.is_some() {
+            return (parsed.season_relative_eps.clone(), "explicit_season");
+        }
+        let direct_fit = meta.series.episodes.map(|eps| parsed.season_relative_eps.iter().all(|n| *n >= 1 && *n <= eps)).unwrap_or(true);
+        if direct_fit {
+            return (parsed.season_relative_eps.clone(), "season_relative");
+        }
+    }
+
+    if !parsed.absolute_eps.is_empty() {
+        if parsed.season_hint.is_some() {
+            let direct_fit = meta.series.episodes.map(|eps| parsed.absolute_eps.iter().all(|n| *n >= 1 && *n <= eps)).unwrap_or(true);
+            if direct_fit {
+                return (parsed.absolute_eps.clone(), "season_hint_relative");
+            }
+            return (HashSet::new(), "season_hint_abs_miss");
+        }
+
+        if let Some(target_season) = meta.season_num {
+            let mut offset = 0i32;
+            for entry in family {
+                let season = entry.season_num.unwrap_or(1);
+                if season >= target_season { break; }
+                offset += entry.series.episodes.unwrap_or(0).max(0);
+            }
+            let mut mapped = HashSet::new();
+            for number in &parsed.absolute_eps {
+                let relative = *number - offset;
+                if relative < 1 { return (HashSet::new(), "absolute_miss"); }
+                if let Some(total) = meta.series.episodes {
+                    if relative > total { return (HashSet::new(), "absolute_miss"); }
+                }
+                mapped.insert(relative);
+            }
+            if !mapped.is_empty() {
+                return (mapped, "absolute_mapped");
+            }
+        } else if meta.series.episodes.map(|eps| parsed.absolute_eps.iter().all(|n| *n >= 1 && *n <= eps)).unwrap_or(true) {
+            return (parsed.absolute_eps.clone(), "absolute_direct");
+        }
+    }
+
+    (HashSet::new(), "unresolved")
+}
+
+fn ordinal_suffix(value: i32) -> String {
+    let suffix = match value % 100 {
+        11 | 12 | 13 => "th",
+        _ => match value % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        },
+    };
+    format!("{}{}", value, suffix)
+}
+
+fn format_episode_set(values: &HashSet<i32>) -> String {
+    let mut items: Vec<i32> = values.iter().copied().collect();
+    items.sort_unstable();
+    if items.is_empty() {
+        return "none".to_string();
+    }
+    items.into_iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+}
+
+fn build_match_diag(item: &RssItem, found: Option<&MatchResult>, score: i32) -> String {
+    let parsed = parse_release(item);
+    let raw_numbers_str = format_episode_set(&parsed.absolute_eps);
+    let season_numbers_str = format_episode_set(&parsed.season_relative_eps);
+    let resolved_eps_str = found.map(|m| format_episode_set(&m.resolved_eps)).unwrap_or_else(|| "none".to_string());
+    let canonical_abs_str = found.map(|m| format_episode_set(&m.canonical_abs_eps)).unwrap_or_else(|| "none".to_string());
+    let series_label = found.map(|m| m.series.title.as_str()).unwrap_or("none");
+    let explicit_season = parsed.season_hint
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let resolution_mode = found.map(|m| m.resolution_mode).unwrap_or("none");
+    let family_key = found.map(|m| m.family_key.as_str()).unwrap_or("none");
+    format!(
+        "series={} | family={} | group={} | batch={} | season={} | rel={} | abs={} | resolved={} | canonical_abs={} | score={} | parse={} | mode={} | core={}",
+        series_label,
+        family_key,
+        if item.group.trim().is_empty() { "none" } else { item.group.trim() },
+        item.is_batch,
+        explicit_season,
+        season_numbers_str,
+        raw_numbers_str,
+        resolved_eps_str,
+        canonical_abs_str,
+        score,
+        parsed.parse_mode,
+        resolution_mode,
+        parsed.core_title
+    )
+}
+
+fn group_matches_whitelist(group: &str, whitelist: &[String]) -> bool {
+    whitelist.iter().any(|wanted| wanted.eq_ignore_ascii_case(group.trim()))
+}
+
+fn group_matches_blacklist(group: &str, blacklist: &[String]) -> bool {
+    blacklist.iter().any(|blocked| blocked.eq_ignore_ascii_case(group.trim()))
+}
+
+fn build_item_key(item: &RssItem) -> String {
+    if !item.info_hash.is_empty() {
+        return format!("hash:{}", item.info_hash.to_lowercase());
+    }
+    if !item.guid.is_empty() {
+        return format!("guid:{}", item.guid);
+    }
+    if !item.link.is_empty() {
+        return format!("link:{}", item.link);
+    }
+    format!("title:{}", item.title.to_lowercase())
+}
+
+async fn fetch_feed() -> Result<Vec<RssItem>, String> {
+    let client = reqwest::Client::new();
+    let xml = client
+        .get(NYAA_RSS_URL)
+        .header("User-Agent", "Ryokan/0.1")
+        .send()
+        .await
+        .map_err(|e| format!("RSS request failed: {}", e))?
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read RSS response: {}", e))?;
+
+    Ok(parse_feed(&xml))
+}
+
+fn parse_feed(xml: &str) -> Vec<RssItem> {
+    let mut items = Vec::new();
+
+    for caps in RE_ITEM.captures_iter(xml) {
+        let block = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let title = decode_xml(&extract_tag(block, "title")).trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+
+        let link = decode_xml(&extract_tag(block, "link")).trim().to_string();
+        let guid = decode_xml(&extract_tag(block, "guid")).trim().to_string();
+        let torrent = decode_xml(&extract_tag(block, "nyaa:downloadurl")).trim().to_string();
+        let magnet = decode_xml(&extract_tag(block, "nyaa:magneturi")).trim().to_string();
+        let info_hash = decode_xml(&extract_tag(block, "nyaa:infohash")).trim().to_lowercase();
+        let group = extract_group(&title);
+        let resolution = extract_resolution(&title);
+        let is_batch = detect_batch(&title);
+
+        items.push(RssItem {
+            title,
+            link,
+            guid,
+            torrent,
+            magnet,
+            info_hash,
+            group,
+            resolution,
+            is_batch,
+        });
+    }
+
+    items
+}
+
+fn extract_tag(block: &str, tag: &str) -> String {
+    let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>", tag = tag);
+    let re = Regex::new(&pattern).unwrap();
+    re.captures(block)
+        .and_then(|caps| caps.get(1))
+        .map(|m| strip_cdata(m.as_str()))
+        .unwrap_or_default()
+}
+
+fn strip_cdata(value: &str) -> String {
+    value
+        .trim()
+        .strip_prefix("<![CDATA[")
+        .and_then(|s| s.strip_suffix("]]>") )
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn decode_xml(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+fn extract_group(title: &str) -> String {
+    if let Some(start) = title.find('[') {
+        if let Some(end) = title[start..].find(']') {
+            return title[start + 1..start + end].to_string();
+        }
+    }
+    String::new()
+}
+
+fn extract_resolution(title: &str) -> String {
+    let lower = title.to_lowercase();
+    for res in ["2160", "1080", "720", "576", "480"] {
+        if lower.contains(&format!("{}p", res)) || lower.contains(&format!(" {} ", res)) {
+            return res.to_string();
+        }
+    }
+    String::new()
+}
+
+fn detect_batch(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    RE_BATCH.is_match(&lower)
+        || lower.contains(" batch")
+        || lower.contains(" complete")
+        || lower.contains(" mini batch")
+        || lower.contains(" full season")
+        || lower.contains("全集")
+}

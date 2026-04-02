@@ -1,0 +1,16 @@
+services:
+  ryokan:
+    build: .
+    container_name: ryokan
+    ports:
+      - "8978:8978"
+    volumes:
+      - ryokan-data:/data
+    environment:
+      - DATABASE_URL=sqlite:///data/ryokan.db?mode=rwc
+      - LISTEN_ADDR=0.0.0.0:8978
+      - RUST_LOG=ryokan=info
+    restart: unless-stopped
+
+volumes:
+  ryokan-data:

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ryokan{% block title %}{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <script>
+    (function() {
+        const applyTitleLanguage = () => {
+            const lang = localStorage.getItem('titleLanguage') || 'english';
+            document.documentElement.setAttribute('data-title-language', lang);
+        };
+        try { applyTitleLanguage(); } catch (_) {}
+        window.addEventListener('storage', applyTitleLanguage);
+        window.addEventListener('DOMContentLoaded', applyTitleLanguage);
+    })();
+    </script>
+    <nav class="nav">
+        <a href="/" class="nav-brand">旅館 Ryokan</a>
+        <div class="nav-links">
+            <a href="/" class="{% if page == "library" %}active{% endif %}">Library</a>
+            <a href="/search" class="{% if page == "search" %}active{% endif %}">Search</a>
+            <a href="/settings" class="{% if page == "settings" %}active{% endif %}">Settings</a>
+            <a href="/system" class="{% if page == "system" %}active{% endif %}">System</a>
+            <a href="/logout" class="nav-logout">Logout</a>
+        </div>
+    </nav>
+    <main class="content">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

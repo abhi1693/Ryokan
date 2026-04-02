@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+
+{% block title %} - Library{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div class="page-header-row">
+        <div>
+            <h2>Library</h2>
+            <p class="page-desc">Your tracked anime series.</p>
+        </div>
+        <button class="btn btn-primary" onclick="openAddModal()">+ Add Series</button>
+    </div>
+</div>
+
+{% if library.is_empty() %}
+<div class="empty-state">
+    <p>No series tracked yet.</p>
+    <button class="btn btn-primary" onclick="openAddModal()">Search AniList to add anime</button>
+</div>
+{% else %}
+<div class="library-grid" id="library-grid">
+    {% for s in library %}
+    <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}">
+        <div class="series-cover">
+            {% if !s.cover_url.is_empty() %}
+            <img src="{{ s.cover_url }}" alt="{{ s.title }}" loading="lazy">
+            {% else %}
+            <div class="series-cover-placeholder">No Image</div>
+            {% endif %}
+        </div>
+        <div class="series-info">
+            <p class="series-title title-switcher" title="{{ s.title }}">
+                <span class="title-option" data-title-lang="english">{% if !s.title_english.is_empty() %}{{ s.title_english }}{% else if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_native.is_empty() %}{{ s.title_native }}{% else %}{{ s.title }}{% endif %}</span>
+                <span class="title-option" data-title-lang="romaji">{% if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_english.is_empty() %}{{ s.title_english }}{% else if !s.title_native.is_empty() %}{{ s.title_native }}{% else %}{{ s.title }}{% endif %}</span>
+                <span class="title-option" data-title-lang="native">{% if !s.title_native.is_empty() %}{{ s.title_native }}{% else if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_english.is_empty() %}{{ s.title_english }}{% else %}{{ s.title }}{% endif %}</span>
+            </p>
+            <div class="series-meta">
+                <span class="tag tag-res">{% if !s.format.is_empty() %}{{ s.format.replace("_", " ") }}{% else %}TBA{% endif %}</span>
+                {% if let Some(eps) = s.episodes %}<span class="tag tag-res series-eps">{{ eps }} eps</span>{% endif %}
+                <span class="tag tag-status-{{ s.status|lowercase }}">{{ s.status.replace("_", " ") }}</span>
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="modal-backdrop" id="add-modal" style="display:none" onclick="closeAddModal(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h3>Add Series</h3>
+            <button class="btn-icon" onclick="closeAddModal()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="search-bar" style="margin-bottom:16px">
+                <input type="text" id="anilist-query" placeholder="Search AniList / MAL..." onkeydown="if(event.key==='Enter'){event.preventDefault();searchAnilist()}" autofocus>
+                <button class="btn btn-primary" onclick="searchAnilist()">Search</button>
+            </div>
+            <div id="anilist-results" class="anilist-results"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+const initialTitleLanguage = '{{ title_language }}';
+
+function openAddModal() {
+    document.getElementById('add-modal').style.display = 'flex';
+    document.getElementById('anilist-query').focus();
+}
+
+function closeAddModal(e) {
+    if (e && e.target !== document.getElementById('add-modal')) return;
+    document.getElementById('add-modal').style.display = 'none';
+    document.getElementById('anilist-results').innerHTML = '';
+    document.getElementById('anilist-query').value = '';
+}
+
+function getTitleByLang(entry, lang) {
+    if (lang === 'native') return entry.title_native || entry.title_romaji || entry.title_english || '';
+    if (lang === 'romaji') return entry.title_romaji || entry.title_english || entry.title_native || '';
+    return entry.title_english || entry.title_romaji || entry.title_native || '';
+}
+
+function applyTitleLanguage(lang) {
+    const normalized = ['english', 'romaji', 'native'].includes(lang) ? lang : 'english';
+    document.querySelectorAll('.title-switcher').forEach(el => {
+        const options = el.querySelectorAll('.title-option');
+        let shown = false;
+        options.forEach(opt => {
+            const match = opt.dataset.titleLang === normalized && opt.textContent.trim() !== '';
+            opt.style.display = match ? 'inline' : 'none';
+            if (match) shown = true;
+        });
+        if (!shown) {
+            for (const opt of options) {
+                if (opt.textContent.trim() !== '') {
+                    opt.style.display = 'inline';
+                    break;
+                }
+            }
+        }
+    });
+}
+
+function searchAnilist() {
+    const q = document.getElementById('anilist-query').value.trim();
+    if (!q) return;
+
+    const container = document.getElementById('anilist-results');
+    container.innerHTML = '<p class="loading-text">Searching titles...</p>';
+
+    fetch(`/api/anilist/search?q=${encodeURIComponent(q)}`)
+        .then(r => {
+            if (!r.ok) throw new Error('Search failed');
+            return r.json();
+        })
+        .then(results => {
+            if (!results.length) {
+                container.innerHTML = '<p class="loading-text">No results found.</p>';
+                return;
+            }
+
+            const lang = localStorage.getItem('titleLanguage') || initialTitleLanguage || 'english';
+            container.innerHTML = results.map(r => {
+                const title = getTitleByLang(r, lang);
+                const subtitle = lang === 'english'
+                    ? (r.title_romaji || r.title_native || '')
+                    : (r.title_english || r.title_romaji || r.title_native || '');
+                const eps = r.episodes ? `${r.episodes} eps` : '?';
+                const sourceLabel = r.source === 'mal' ? 'MAL' : 'AniList';
+                return `
+                    <div class="anilist-result">
+                        <img src="${escAttr(r.cover_url)}" alt="" class="anilist-cover" loading="lazy">
+                        <div class="anilist-info">
+                            <p class="anilist-title">${escHtml(title)}</p>
+                            <p class="anilist-subtitle">${escHtml(subtitle)}</p>
+                            <div class="anilist-meta">
+                                <span class="tag tag-res">${escHtml((r.format || 'TBA').replace(/_/g, ' '))}</span>
+                                <span class="tag tag-res">${eps}</span>
+                                <span class="tag tag-status-${escAttr((r.status || "").toLowerCase())}">${escHtml((r.status_display || r.status || "").replace(/_/g, " "))}</span>
+                                <span>${escHtml(sourceLabel)}</span>
+                            </div>
+                        </div>
+                        <button class="btn btn-primary btn-add" onclick="addSeries(${r.id}, this)" data-entry='${escAttr(JSON.stringify(r))}'>Add</button>
+                    </div>
+                `;
+            }).join('');
+        })
+        .catch(err => {
+            container.innerHTML = `<p class="loading-text">Error: ${escHtml(err.message)}</p>`;
+        });
+}
+
+function addSeries(anilistId, btn) {
+    const entry = JSON.parse(btn.dataset.entry);
+    btn.disabled = true;
+    btn.textContent = '...';
+
+    fetch('/api/library/add', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            anilist_id: entry.id,
+            mal_id: entry.id_mal || null,
+            title: entry.title_english || entry.title_romaji || entry.title_native,
+            title_romaji: entry.title_romaji || '',
+            title_english: entry.title_english || '',
+            title_native: entry.title_native || '',
+            cover_url: entry.cover_url,
+            format: entry.format,
+            status: entry.status,
+            episodes: entry.episodes,
+        })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Add failed');
+        return data;
+    })
+    .then(() => {
+        btn.textContent = 'Added';
+        btn.classList.add('btn-success');
+        setTimeout(() => location.reload(), 600);
+    })
+    .catch(() => {
+        btn.textContent = 'Error';
+        btn.classList.add('btn-error');
+        btn.disabled = false;
+    });
+}
+
+function escHtml(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+function escAttr(s) {
+    if (!s) return '';
+    return s.replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+applyTitleLanguage(localStorage.getItem('titleLanguage') || initialTitleLanguage || 'english');
+window.addEventListener('storage', () => applyTitleLanguage(localStorage.getItem('titleLanguage') || initialTitleLanguage || 'english'));
+</script>
+{% endblock %}

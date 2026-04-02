@@ -1,0 +1,9 @@
+/target
+/data
+*.db
+*.db-shm
+*.db-wal
+.env
+/.claude
+CLAUDE.md
+CHANGELOG.md

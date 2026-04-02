@@ -1,0 +1,492 @@
+{% extends "base.html" %}
+
+{% block title %} - System{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>System</h2>
+</div>
+
+<div class="system-tabs">
+    <a href="/system?tab=logs" class="system-tab {% if tab == "logs" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        Logs
+    </a>
+    <a href="/system?tab=help" class="system-tab {% if tab == "help" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        Help
+    </a>
+    <a href="/system?tab=rss" class="system-tab {% if tab == "rss" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M4 11a9 9 0 019 9"/><path d="M4 4a16 16 0 0116 16"/><circle cx="5" cy="19" r="1.5"/></svg>
+        RSS
+    </a>
+    <a href="/system?tab=tasks" class="system-tab {% if tab == "tasks" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
+        Scheduled Tasks
+    </a>
+    <a href="/system?tab=debug" class="system-tab {% if tab == "debug" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86l-7.5 13A2 2 0 004.53 20h14.94a2 2 0 001.74-3l-7.5-13a2 2 0 00-3.42 0z"/></svg>
+        Debug
+    </a>
+</div>
+
+{% if let Some(msg) = debug_message %}
+    {% if tab == "debug" %}<div class="alert alert-success">{{ msg }}</div>{% endif %}
+{% endif %}
+{% if let Some(err) = debug_error %}
+    {% if tab == "debug" %}<div class="alert alert-error">{{ err }}</div>{% endif %}
+{% endif %}
+
+{% if tab == "logs" %}
+<!-- Logs Tab -->
+<div class="logs-toolbar">
+    <div class="logs-filters">
+        <select id="filter-level" class="log-filter-select" onchange="applyFilters()">
+            <option value="trace" {% if filter_level == "trace" %}selected{% endif %}>Trace</option>
+            <option value="debug" {% if filter_level == "debug" %}selected{% endif %}>Debug</option>
+            <option value="info" {% if filter_level == "info" %}selected{% endif %}>Info</option>
+            <option value="warn" {% if filter_level == "warn" %}selected{% endif %}>Warn</option>
+            <option value="error" {% if filter_level == "error" %}selected{% endif %}>Error</option>
+        </select>
+        <select id="filter-category" class="log-filter-select" onchange="applyFilters()">
+            <option value="">All Categories</option>
+            {% for cat in categories %}
+            <option value="{{ cat.0 }}" {% if filter_category == cat.0 %}selected{% endif %}>{{ cat.1 }}</option>
+            {% endfor %}
+        </select>
+        <input type="text" id="filter-search" class="log-filter-input" placeholder="Filter messages..." value="{{ filter_search }}" onkeydown="if(event.key==='Enter')applyFilters()">
+        <button class="btn btn-ghost btn-sm" onclick="applyFilters()" title="Apply filters">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        </button>
+    </div>
+    <div class="logs-actions">
+        <span class="log-count">{{ log_count }} entries</span>
+        <label class="log-poll-toggle" title="Auto-refresh">
+            <input type="checkbox" id="poll-toggle" checked>
+            <span class="log-poll-label">Live</span>
+        </label>
+        <button class="btn btn-ghost btn-sm" onclick="clearLogs()" title="Clear all logs">Clear</button>
+    </div>
+</div>
+
+<div class="logs-container" id="logs-container">
+    <table class="log-table" id="log-table">
+        <thead>
+            <tr>
+                <th class="log-col-time">Time</th>
+                <th class="log-col-level">Level</th>
+                <th class="log-col-cat">Category</th>
+                <th class="log-col-msg">Message</th>
+            </tr>
+        </thead>
+        <tbody id="log-tbody">
+            {% for entry in logs %}
+            <tr class="log-row log-level-{{ entry.level }}" data-id="{{ entry.id }}">
+                <td class="log-col-time" title="{{ entry.timestamp }}">{{ entry.timestamp }}</td>
+                <td class="log-col-level"><span class="log-badge log-badge-{{ entry.level }}">{{ entry.level }}</span></td>
+                <td class="log-col-cat">{{ entry.category }}</td>
+                <td class="log-col-msg">
+                    <span class="log-message">{{ entry.message }}</span>
+                    {% if !entry.detail.is_empty() %}
+                    <span class="log-detail" title="{{ entry.detail }}">{{ entry.detail }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% if logs.is_empty() %}
+    <div class="logs-empty">No log entries matching filters.</div>
+    {% endif %}
+</div>
+
+<script>
+let pollTimer = null;
+let latestId = {% if !logs.is_empty() %}{{ logs[0].id }}{% else %}0{% endif %};
+
+function applyFilters() {
+    const level = document.getElementById('filter-level').value;
+    const category = document.getElementById('filter-category').value;
+    const search = document.getElementById('filter-search').value;
+    const params = new URLSearchParams({tab: 'logs', level});
+    if (category) params.set('category', category);
+    if (search) params.set('search', search);
+    window.location.href = '/system?' + params.toString();
+}
+
+function clearLogs() {
+    if (!confirm('Clear all log entries?')) return;
+    fetch('/api/logs/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}})
+        .then(r => r.json())
+        .then(() => location.reload())
+        .catch(err => console.error('Failed to clear logs:', err));
+}
+
+function formatTimestamp(iso) {
+    try {
+        const d = new Date(iso + 'Z');
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    } catch (_) {
+        return iso;
+    }
+}
+
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+function pollLogs() {
+    const toggle = document.getElementById('poll-toggle');
+    if (!toggle || !toggle.checked) return;
+
+    const level = document.getElementById('filter-level').value;
+    const category = document.getElementById('filter-category').value;
+    const params = new URLSearchParams({after: latestId});
+    if (level) params.set('level', level);
+    if (category) params.set('category', category);
+
+    fetch('/api/logs/poll?' + params.toString())
+        .then(r => r.json())
+        .then(entries => {
+            if (!entries || !entries.length) return;
+            const tbody = document.getElementById('log-tbody');
+            const empty = document.querySelector('.logs-empty');
+            if (empty) empty.remove();
+
+            // Entries come newest-first; insert at top in order.
+            for (let i = entries.length - 1; i >= 0; i--) {
+                const e = entries[i];
+                if (e.id > latestId) latestId = e.id;
+                const tr = document.createElement('tr');
+                tr.className = `log-row log-level-${e.level} log-row-new`;
+                tr.dataset.id = e.id;
+                tr.innerHTML = `
+                    <td class="log-col-time" title="${escapeHtml(e.timestamp)}">${escapeHtml(e.timestamp)}</td>
+                    <td class="log-col-level"><span class="log-badge log-badge-${e.level}">${escapeHtml(e.level)}</span></td>
+                    <td class="log-col-cat">${escapeHtml(e.category)}</td>
+                    <td class="log-col-msg">
+                        <span class="log-message">${escapeHtml(e.message)}</span>
+                        ${e.detail ? `<span class="log-detail" title="${escapeHtml(e.detail)}">${escapeHtml(e.detail)}</span>` : ''}
+                    </td>`;
+                tbody.insertBefore(tr, tbody.firstChild);
+                // Remove new-row highlight after animation.
+                setTimeout(() => tr.classList.remove('log-row-new'), 2000);
+            }
+        })
+        .catch(() => {}); // Silently fail polling.
+}
+
+function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollLogs, 3000);
+}
+
+function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+document.getElementById('poll-toggle').addEventListener('change', function() {
+    if (this.checked) startPolling(); else stopPolling();
+});
+
+startPolling();
+</script>
+
+
+{% else if tab == "rss" %}
+<div class="rss-panel">
+    <div class="rss-summary-grid">
+        <fieldset>
+            <legend>Status</legend>
+            <div class="rss-stat-row"><span>Auto sync</span><strong>{% if rss_enabled %}Enabled{% else %}Disabled{% endif %}</strong></div>
+            <div class="rss-stat-row"><span>Interval</span><strong>{{ rss_interval_minutes }} min</strong></div>
+            {% if let Some(run) = rss_last_run %}
+            <div class="rss-stat-row"><span>Last run</span><strong>{{ run.started_at }}</strong></div>
+            <div class="rss-stat-row"><span>Result</span><strong>{{ run.status }}</strong></div>
+            <div class="rss-stat-row"><span>Summary</span><strong>{{ run.detail }}</strong></div>
+            {% else %}
+            <div class="form-hint">No RSS sync has been recorded yet.</div>
+            {% endif %}
+            <div class="settings-inline-actions" style="margin-top:16px;">
+                <button type="button" class="btn btn-primary" onclick="runRssSync(this)">Sync RSS Now</button>
+                <span id="rss-sync-result" class="form-hint"></span>
+            </div>
+        </fieldset>
+    </div>
+
+    <fieldset>
+        <legend>Recent RSS decisions</legend>
+        {% if rss_recent.is_empty() %}
+        <div class="logs-empty">No RSS decisions recorded yet.</div>
+        {% else %}
+        <div class="rss-table-controls">
+            <input type="search" id="rss-filter-search" class="settings-input" placeholder="Filter by series, release, group, or reason" oninput="filterRssRows()">
+            <select id="rss-filter-decision" onchange="filterRssRows()">
+                <option value="all">All decisions</option>
+                <option value="grabbed">Grabbed</option>
+                <option value="rejected">Rejected</option>
+                <option value="skipped">Skipped</option>
+                <option value="error">Error</option>
+            </select>
+        </div>
+        <div class="rss-table-wrap">
+            <table class="rss-table" id="rss-decision-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Series</th>
+                        <th>Release</th>
+                        <th>Decision</th>
+                        <th>Reason</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for entry in rss_recent %}
+                    <tr data-rss-decision="{{ entry.decision }}" data-rss-text="{{ entry.series_title }} {{ entry.title }} {{ entry.group_name }} {{ entry.reason }}">
+                        <td>{{ entry.created_at }}</td>
+                        <td>{% if entry.series_title.is_empty() %}—{% else %}{{ entry.series_title }}{% endif %}</td>
+                        <td>
+                            <div>{{ entry.title }}</div>
+                            <div class="rss-release-meta">{% if !entry.group_name.is_empty() %}[{{ entry.group_name }}]{% endif %}{% if entry.is_batch %} • batch{% endif %}</div>
+                        </td>
+                        <td><span class="log-badge rss-decision-badge rss-decision-{{ entry.decision }}">{{ entry.decision }}</span></td>
+                        <td class="rss-reason-cell"><div class="rss-reason-text">{{ entry.reason }}</div></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </fieldset>
+</div>
+
+<script>
+
+function filterRssRows() {
+    const search = (document.getElementById('rss-filter-search')?.value || '').toLowerCase().trim();
+    const decision = document.getElementById('rss-filter-decision')?.value || 'all';
+    const rows = document.querySelectorAll('#rss-decision-table tbody tr');
+    rows.forEach(row => {
+        const text = (row.dataset.rssText || '').toLowerCase();
+        const rowDecision = row.dataset.rssDecision || '';
+        const matchesDecision = decision === 'all' || rowDecision === decision;
+        const matchesSearch = !search || text.includes(search);
+        row.style.display = (matchesDecision && matchesSearch) ? '' : 'none';
+    });
+}
+
+function runRssSync(btn) {
+    const result = document.getElementById('rss-sync-result');
+    btn.disabled = true;
+    result.textContent = 'Syncing...';
+    fetch('/api/rss/sync', { method: 'POST', headers: {'Content-Type': 'application/json'} })
+        .then(async r => {
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.message || 'RSS sync failed');
+            result.textContent = data.message || 'RSS sync finished.';
+            setTimeout(() => window.location.reload(), 600);
+        })
+        .catch(err => {
+            result.textContent = err.message;
+        })
+        .finally(() => { btn.disabled = false; });
+}
+</script>
+{% else if tab == "tasks" %}
+<div class="rss-panel">
+    <fieldset>
+        <legend>Scheduled tasks</legend>
+        {% if scheduled_tasks.is_empty() %}
+        <div class="logs-empty">No scheduled task definitions registered yet.</div>
+        {% else %}
+        <div class="rss-table-wrap">
+            <table class="rss-table">
+                <thead>
+                    <tr>
+                        <th>Task</th>
+                        <th>Schedule</th>
+                        <th>Enabled</th>
+                        <th>Last status</th>
+                        <th>Last started</th>
+                        <th>Last finished</th>
+                        <th>Detail</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for task in scheduled_tasks %}
+                    <tr>
+                        <td>
+                            <div>{{ task.display_name }}</div>
+                            <div class="rss-release-meta">{{ task.task_key }}</div>
+                        </td>
+                        <td>{{ task.schedule_label }}</td>
+                        <td>{% if task.enabled %}<span class="log-badge log-badge-info">enabled</span>{% else %}<span class="log-badge log-badge-warn">disabled</span>{% endif %}</td>
+                        <td>{% if task.last_status == "ok" %}<span class="log-badge log-badge-info">ok</span>{% else if task.last_status == "warn" %}<span class="log-badge log-badge-warn">warn</span>{% else if task.last_status == "error" %}<span class="log-badge log-badge-error">error</span>{% else if task.last_status == "running" %}<span class="log-badge log-badge-debug">running</span>{% else %}<span class="log-badge">{{ task.last_status }}</span>{% endif %}</td>
+                        <td>{% if let Some(started) = task.last_started_at %}{{ started }}{% else %}—{% endif %}</td>
+                        <td>{% if let Some(finished) = task.last_finished_at %}{{ finished }}{% else %}—{% endif %}</td>
+                        <td class="rss-reason-cell"><div class="rss-reason-text">{{ task.last_detail }}</div></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </fieldset>
+</div>
+{% else if tab == "debug" %}
+<div class="debug-panel">
+    <form method="post" action="/system" class="settings-form">
+        <fieldset>
+            <legend>Debug</legend>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="force_mal_fallback" id="force_mal_fallback" {% if force_mal_fallback %}checked{% endif %}>
+                    <span>Force MAL/Jikan fallback for search and tracked fallback entries</span>
+                </label>
+                <span class="form-hint">Debug option for testing the fallback path after AniList comes back. AniList-only entries without a MAL ID cannot be forced into fallback mode.</span>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="force_kitsu_fallback" id="force_kitsu_fallback" {% if force_kitsu_fallback %}checked{% endif %}>
+                    <span>Force Kitsu fallback for episode titles and air dates</span>
+                </label>
+                <span class="form-hint">Debug option for testing Kitsu episode metadata even when Jikan returns titles. This only affects series episode metadata on the detail page.</span>
+            </div>
+            <div class="settings-inline-actions">
+                <button type="submit" class="btn btn-primary">Save Debug Settings</button>
+                <button type="button" class="btn btn-secondary" onclick="reconcileFallbacks(this)">Reconcile fallback entries</button>
+                <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
+                <span id="reconcile-result" class="form-hint"></span>
+                <span id="rebuild-cache-result" class="form-hint"></span>
+            </div>
+        </fieldset>
+    </form>
+
+    <fieldset>
+        <legend>RSS Grab History</legend>
+        <span class="form-hint">Clear the RSS grab history so previously grabbed episodes can be re-evaluated on the next sync. Use this if you deleted a file from disk and want Ryokan to re-grab it.</span>
+        <div class="settings-inline-actions" style="margin-top: 0.5rem;">
+            <button type="button" class="btn btn-secondary" onclick="clearRssHistory(this)">Clear Grab History</button>
+            <span id="rss-clear-result" class="form-hint"></span>
+        </div>
+    </fieldset>
+</div>
+
+<script>
+
+function reconcileFallbacks(btn) {
+    const result = document.getElementById('reconcile-result');
+    btn.disabled = true;
+    result.textContent = 'Reconciling...';
+    fetch('/api/library/reconcile-fallbacks', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+    })
+    .then(async r => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.message || 'Reconciliation failed');
+        result.textContent = data.message || 'Fallback reconciliation complete.';
+    .catch(err => {
+        result.textContent = err.message;
+    })
+    .finally(() => {
+        btn.disabled = false;
+    });
+}
+
+function rebuildAniListCache(btn) {
+    if (!confirm('Rebuild cached metadata, relations, episode data, and artwork for tracked series using the best currently available provider data? This can use MAL/Jikan fallback when AniList is unavailable.')) return;
+    const result = document.getElementById('rebuild-cache-result');
+    btn.disabled = true;
+    result.textContent = 'Rebuilding...';
+    fetch('/api/system/rebuild-anilist-cache', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+    })
+    .then(async r => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.message || 'Rebuild failed');
+        result.textContent = data.message || 'Metadata cache rebuild complete.';
+    .catch(err => {
+        result.textContent = err.message;
+    })
+    .finally(() => {
+        btn.disabled = false;
+    });
+}
+
+function clearRssHistory(btn) {
+    if (!confirm('Clear all RSS grab history? Previously grabbed episodes will be re-evaluated on the next RSS sync.')) return;
+    const result = document.getElementById('rss-clear-result');
+    btn.disabled = true;
+    result.textContent = 'Clearing...';
+    fetch('/api/rss/clear-history', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+    })
+    .then(async r => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.message || 'Clear failed');
+        result.textContent = data.message || 'Grab history cleared.';
+    .catch(err => {
+        result.textContent = err.message;
+    })
+    .finally(() => {
+        btn.disabled = false;
+    });
+}
+</script>
+{% else %}
+<!-- Help Tab -->
+<div class="help-content">
+    <section class="help-section">
+        <h3>What is Ryokan?</h3>
+        <p>Ryokan is a self-hosted anime PVR (Personal Video Recorder). It searches Nyaa for anime releases, scores them based on your preferences, and sends the best matches to qBittorrent for downloading. It uses AniList as its metadata source instead of TVDB, which means it understands how anime is actually released and catalogued.</p>
+    </section>
+
+    <section class="help-section">
+        <h3>Getting Started</h3>
+        <p>After creating your account, head to <strong>Settings</strong> and configure your qBittorrent connection. Enter the URL, credentials, and a download category. Then go to <strong>Search</strong> to find releases on Nyaa. Results are scored automatically based on your configured preferences.</p>
+    </section>
+
+    <section class="help-section">
+        <h3>How Scoring Works</h3>
+        <p>Each result receives a composite score based on multiple factors:</p>
+        <table class="help-table">
+            <thead><tr><th>Factor</th><th>Points</th></tr></thead>
+            <tbody>
+                <tr><td>Seeders &gt; 100</td><td>+30</td></tr>
+                <tr><td>Seeders &gt; 50</td><td>+25</td></tr>
+                <tr><td>Seeders &gt; 10</td><td>+20</td></tr>
+                <tr><td>Seeders &gt; 0</td><td>+10</td></tr>
+                <tr><td>Zero seeders</td><td>-10</td></tr>
+                <tr><td>Preferred release group</td><td>+25</td></tr>
+                <tr><td>Preferred resolution</td><td>+20</td></tr>
+                <tr><td>Batch release</td><td>+15</td></tr>
+                <tr><td>Trusted uploader</td><td>+10</td></tr>
+                <tr><td>10bit / x265 / BD source</td><td>+5</td></tr>
+                <tr><td>Dual audio / multi</td><td>-5</td></tr>
+                <tr><td>Downloads &gt; 10,000</td><td>+15</td></tr>
+                <tr><td>Downloads &gt; 5,000</td><td>+10</td></tr>
+                <tr><td>Downloads &gt; 1,000</td><td>+5</td></tr>
+                <tr><td>Batch under 25 GB</td><td>+10</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section class="help-section">
+        <h3>Search Tips</h3>
+        <p>Use the uploader field to filter by a specific release group's Nyaa account. The category filter lets you narrow to English-translated or raw releases. "Trusted only" shows releases from verified Nyaa uploaders.</p>
+        <p>Try searching for batch releases by including "batch" in your query, e.g. "Jujutsu Kaisen batch 1080p".</p>
+    </section>
+
+    <section class="help-section">
+        <h3>Grabbing Releases</h3>
+        <p>Click the <strong>Grab</strong> button next to any result to send it to qBittorrent. The torrent will be added with your configured category. Make sure qBittorrent is running and the connection is configured in Settings.</p>
+    </section>
+</div>
+{% endif %}
+{% endblock %}

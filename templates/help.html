@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %} - Help{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Help</h2>
+</div>
+
+<div class="help-content">
+    <section class="help-section">
+        <h3>What is Ryokan?</h3>
+        <p>Ryokan is a self-hosted anime PVR (Personal Video Recorder). It searches Nyaa for anime releases, scores them based on your preferences, and sends the best matches to qBittorrent for downloading. It uses AniList as its metadata source instead of TVDB, which means it understands how anime is actually released and catalogued.</p>
+    </section>
+
+    <section class="help-section">
+        <h3>Getting Started</h3>
+        <p>After creating your account, head to <strong>Settings</strong> and configure your qBittorrent connection. Enter the URL, credentials, and a download category. Then go to <strong>Search</strong> to find releases on Nyaa. Results are scored automatically based on your configured preferences.</p>
+    </section>
+
+    <section class="help-section">
+        <h3>How Scoring Works</h3>
+        <p>Each result receives a composite score based on multiple factors:</p>
+        <table class="help-table">
+            <thead><tr><th>Factor</th><th>Points</th></tr></thead>
+            <tbody>
+                <tr><td>Seeders &gt; 100</td><td>+30</td></tr>
+                <tr><td>Seeders &gt; 50</td><td>+25</td></tr>
+                <tr><td>Seeders &gt; 10</td><td>+20</td></tr>
+                <tr><td>Seeders &gt; 0</td><td>+10</td></tr>
+                <tr><td>Zero seeders</td><td>-10</td></tr>
+                <tr><td>Preferred release group</td><td>+25</td></tr>
+                <tr><td>Preferred resolution</td><td>+20</td></tr>
+                <tr><td>Batch release</td><td>+15</td></tr>
+                <tr><td>Trusted uploader</td><td>+10</td></tr>
+                <tr><td>10bit / x265 / BD source</td><td>+5</td></tr>
+                <tr><td>Dual audio / multi</td><td>-5</td></tr>
+                <tr><td>Downloads &gt; 10,000</td><td>+15</td></tr>
+                <tr><td>Downloads &gt; 5,000</td><td>+10</td></tr>
+                <tr><td>Downloads &gt; 1,000</td><td>+5</td></tr>
+                <tr><td>Batch under 25 GB</td><td>+10</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section class="help-section">
+        <h3>Search Tips</h3>
+        <p>Use the uploader field to filter by a specific release group's Nyaa account. The category filter lets you narrow to English-translated or raw releases. "Trusted only" shows releases from verified Nyaa uploaders.</p>
+        <p>Try searching for batch releases by including "batch" in your query, e.g. "Jujutsu Kaisen batch 1080p".</p>
+    </section>
+
+    <section class="help-section">
+        <h3>Grabbing Releases</h3>
+        <p>Click the <strong>Grab</strong> button next to any result to send it to qBittorrent. The torrent will be added with your configured category. Make sure qBittorrent is running and the connection is configured in Settings.</p>
+    </section>
+</div>
+{% endblock %}
