@@ -4,6 +4,12 @@ A self-hosted anime PVR and media manager written in Rust. Tracks series from An
 
 Built as a practical replacement for Sonarr + Prowlarr for anime. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named — leading to missed releases or suboptimal grabs. Batch/season pack searches are worse: Sonarr has no real concept of them for anime and largely fails to find or handle them correctly. Ryokan is built around how Nyaa actually works.
 
+## Screenshots
+<img width="1920" height="1080" alt="2026-04-02_17-44-59" src="https://github.com/user-attachments/assets/0e557ff2-c074-453a-a49b-a5c4f3c8789e" />
+<img width="1920" height="1080" alt="2026-04-02_17-45-39" src="https://github.com/user-attachments/assets/621235cc-ea69-4b23-bac5-1a516e17e8bb" />
+
+
+
 ## Features
 
 - **AniList-native metadata** — search and track series using AniList IDs; titles, covers, episode counts, relations, and scores are cached locally at add-time
