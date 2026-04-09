@@ -9,6 +9,7 @@ pub mod metadata_cache;
 pub mod local_metadata;
 pub mod scheduled_tasks;
 pub mod artwork_cache;
+pub mod grabbed_torrents;
 
 use sqlx::SqlitePool;
 
@@ -481,6 +482,42 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+
+    sqlx::query("ALTER TABLE config ADD COLUMN post_processing_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    sqlx::query("ALTER TABLE config ADD COLUMN post_processing_mode TEXT NOT NULL DEFAULT 'hardlink'")
+        .execute(db)
+        .await
+        .ok();
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS grabbed_torrents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash TEXT NOT NULL DEFAULT '',
+            torrent_name TEXT NOT NULL DEFAULT '',
+            series_id INTEGER NOT NULL,
+            episode_numbers TEXT NOT NULL DEFAULT '[]',
+            state TEXT NOT NULL DEFAULT 'pending',
+            grabbed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            imported_at DATETIME,
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_state ON grabbed_torrents (state)")
+        .execute(db)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_hash ON grabbed_torrents (hash) WHERE hash != ''")
+        .execute(db)
+        .await?;
 
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.

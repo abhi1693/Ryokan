@@ -61,6 +61,8 @@ pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Res
             rss_enabled: false,
             rss_interval_minutes: 5,
             force_kitsu_fallback: false,
+            post_processing_enabled: false,
+            post_processing_mode: "hardlink".to_string(),
         });
 
     let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);

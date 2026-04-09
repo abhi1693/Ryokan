@@ -177,6 +177,8 @@ pub async fn debug_settings_submit(
             rss_enabled: false,
             rss_interval_minutes: 5,
             force_kitsu_fallback: false,
+            post_processing_enabled: false,
+            post_processing_mode: "hardlink".to_string(),
         });
 
     cfg.force_mal_fallback = form.force_mal_fallback.is_some();

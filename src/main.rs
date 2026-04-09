@@ -140,6 +140,7 @@ async fn main() {
     let _ = models::scheduled_tasks::touch_definition(&db, "rss_sync", "RSS sync", "Every N minutes", false).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "metadata_refresh", "Metadata refresh", "Every 12 hours", true).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "cleanup", "Cleanup", "Every 1 hour", true).await;
+    let _ = models::scheduled_tasks::touch_definition(&db, "post_processing", "Post-processing", "Every 1 minute (when enabled)", false).await;
 
     // Log startup to the database.
     services::logger::info(
@@ -254,6 +255,36 @@ async fn main() {
                 let status = if cleanup_errors.is_empty() { "ok" } else { "warn" };
                 let detail = if cleanup_errors.is_empty() { "Cleanup completed".to_string() } else { cleanup_errors.join("; ") };
                 let _ = models::scheduled_tasks::mark_finished(&cleanup_db, "cleanup", status, &detail).await;
+            }
+        });
+    }
+
+    // Background task: post-processing — move/rename completed downloads every minute.
+    {
+        let pp_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let enabled = models::config::get_config(&pp_state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|c| c.post_processing_enabled)
+                    .unwrap_or(false);
+                let _ = models::scheduled_tasks::touch_definition(
+                    &pp_state.db,
+                    "post_processing",
+                    "Post-processing",
+                    "Every 1 minute (when enabled)",
+                    enabled,
+                ).await;
+                if !enabled {
+                    continue;
+                }
+                let _ = models::scheduled_tasks::mark_started(&pp_state.db, "post_processing", "Checking for completed downloads").await;
+                services::post_processing::run_once(&pp_state).await;
+                let _ = models::scheduled_tasks::mark_finished(&pp_state.db, "post_processing", "ok", "").await;
             }
         });
     }

@@ -118,7 +118,7 @@ fn parse_episode_file(path: &Path) -> Option<EpisodeFile> {
 ///   - 05 (v2), - 05v2, [group] Title - 05 [1080p]
 ///   E05, EP05, Ep.05
 ///   Episode 05
-fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
+pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // SxxExx pattern — most reliable.
     let re_sxex = Regex::new(r"s(\d{1,2})e(\d{1,4})").unwrap();
     if let Some(caps) = re_sxex.captures(lower) {

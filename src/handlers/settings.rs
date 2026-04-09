@@ -41,6 +41,8 @@ pub struct SettingsForm {
     title_language: String,
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
+    post_processing_enabled: Option<String>,
+    post_processing_mode: String,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +79,8 @@ fn default_config() -> config::Config {
         rss_enabled: false,
         rss_interval_minutes: 5,
         force_kitsu_fallback: false,
+        post_processing_enabled: false,
+        post_processing_mode: "hardlink".to_string(),
     }
 }
 
@@ -165,6 +169,11 @@ pub async fn settings_submit(
         rss_enabled: form.rss_enabled.is_some(),
         rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
         force_kitsu_fallback: current_force_kitsu_fallback,
+        post_processing_enabled: form.post_processing_enabled.is_some(),
+        post_processing_mode: match form.post_processing_mode.as_str() {
+            "move" | "copy" | "hardlink" => form.post_processing_mode,
+            _ => "hardlink".to_string(),
+        },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

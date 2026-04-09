@@ -22,3 +22,6 @@ pub mod metadata_sync;
 pub mod artwork;
 
 pub mod html;
+
+pub mod nfo;
+pub mod post_processing;
