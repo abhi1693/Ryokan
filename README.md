@@ -11,7 +11,7 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 
 ## What it does
 
-- Tracks series using AniList as the primary metadata source, with Jikan/MAL and Kitsu as fallbacks
+- Tracks series using AniList as the primary metadata source, with MAL (via Jikan) and Kitsu as fallbacks
 - Searches Nyaa and scores releases across nine quality tiers (WEB 480p through BD Remux 1080p)
 - Automatically grabs new episodes and quality upgrades via RSS
 - Monitors series with Sonarr-style modes: all, future, missing, existing, or none
