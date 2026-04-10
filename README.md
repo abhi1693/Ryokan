@@ -4,6 +4,7 @@ A self-hosted anime PVR written in Rust. Searches Nyaa for releases, scores them
 
 I built this because Sonarr doesn't always work well for anime. The RSS sync for currently airing shows works just fine, but downloading season batches of shows that've finished airing almost always hangs the interactive search. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named.
 
+This is a work in progress. Some features are incomplete or rough around the edges, and it's not quite a full Sonarr replacement just yet.
 ## Screenshots
 
 <img width="1920" height="1080" alt="Series list" src="https://github.com/user-attachments/assets/0e557ff2-c074-453a-a49b-a5c4f3c8789e" />
