@@ -12,10 +12,6 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
         Logs
     </a>
-    <a href="/system?tab=help" class="system-tab {% if tab == "help" %}active{% endif %}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        Help
-    </a>
     <a href="/system?tab=rss" class="system-tab {% if tab == "rss" %}active{% endif %}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M4 11a9 9 0 019 9"/><path d="M4 4a16 16 0 0116 16"/><circle cx="5" cy="19" r="1.5"/></svg>
         RSS
@@ -23,6 +19,10 @@
     <a href="/system?tab=tasks" class="system-tab {% if tab == "tasks" %}active{% endif %}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
         Scheduled Tasks
+    </a>
+    <a href="/system?tab=scoring" class="system-tab {% if tab == "scoring" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        Scoring
     </a>
     <a href="/system?tab=debug" class="system-tab {% if tab == "debug" %}active{% endif %}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86l-7.5 13A2 2 0 004.53 20h14.94a2 2 0 001.74-3l-7.5-13a2 2 0 00-3.42 0z"/></svg>
@@ -355,12 +355,18 @@ function runRssSync(btn) {
                 </label>
                 <span class="form-hint">Debug option for testing Kitsu episode metadata even when Jikan returns titles. This only affects series episode metadata on the detail page.</span>
             </div>
-            <div class="settings-inline-actions">
-                <button type="submit" class="btn btn-primary">Save Debug Settings</button>
-                <button type="button" class="btn btn-secondary" onclick="reconcileFallbacks(this)">Reconcile fallback entries</button>
-                <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
-                <span id="reconcile-result" class="form-hint"></span>
-                <span id="rebuild-cache-result" class="form-hint"></span>
+            <div class="debug-actions-group">
+                <div class="debug-action-row">
+                    <button type="button" class="btn btn-secondary" onclick="reconcileFallbacks(this)">Reconcile fallback entries</button>
+                    <span id="reconcile-result" class="form-hint debug-action-result"></span>
+                </div>
+                <div class="debug-action-row">
+                    <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
+                    <span id="rebuild-cache-result" class="form-hint debug-action-result"></span>
+                </div>
+                <div class="settings-inline-actions" style="margin-top:8px">
+                    <button type="submit" class="btn btn-primary">Save Debug Settings</button>
+                </div>
             </div>
         </fieldset>
     </form>
@@ -368,9 +374,9 @@ function runRssSync(btn) {
     <fieldset>
         <legend>RSS Grab History</legend>
         <span class="form-hint">Clear the RSS grab history so previously grabbed episodes can be re-evaluated on the next sync. Use this if you deleted a file from disk and want Ryokan to re-grab it.</span>
-        <div class="settings-inline-actions" style="margin-top: 0.5rem;">
+        <div class="debug-action-row" style="margin-top: 0.5rem;">
             <button type="button" class="btn btn-secondary" onclick="clearRssHistory(this)">Clear Grab History</button>
-            <span id="rss-clear-result" class="form-hint"></span>
+            <span id="rss-clear-result" class="form-hint debug-action-result"></span>
         </div>
     </fieldset>
 </div>
@@ -442,22 +448,12 @@ function clearRssHistory(btn) {
     });
 }
 </script>
-{% else %}
-<!-- Help Tab -->
+{% else if tab == "scoring" %}
+<!-- Scoring Tab -->
 <div class="help-content">
     <section class="help-section">
-        <h3>What is Ryokan?</h3>
-        <p>Ryokan is a self-hosted anime PVR (Personal Video Recorder). It searches Nyaa for anime releases, scores them based on your preferences, and sends the best matches to qBittorrent for downloading. It uses AniList as its metadata source instead of TVDB, which means it understands how anime is actually released and catalogued.</p>
-    </section>
-
-    <section class="help-section">
-        <h3>Getting Started</h3>
-        <p>After creating your account, head to <strong>Settings</strong> and configure your qBittorrent connection. Enter the URL, credentials, and a download category. Then go to <strong>Search</strong> to find releases on Nyaa. Results are scored automatically based on your configured preferences.</p>
-    </section>
-
-    <section class="help-section">
         <h3>How Scoring Works</h3>
-        <p>Each result receives a composite score based on multiple factors:</p>
+        <p>Each result receives a composite score based on multiple factors. Higher scores are preferred when Ryokan automatically picks a release.</p>
         <table class="help-table">
             <thead><tr><th>Factor</th><th>Points</th></tr></thead>
             <tbody>

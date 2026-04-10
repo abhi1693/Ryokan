@@ -216,7 +216,7 @@ fieldset legend {
 
 .btn-grab:hover { border-color: var(--accent); color: var(--accent); }
 .btn-grab:disabled { opacity: 0.6; cursor: default; }
-.btn-grab.btn-success { border-color: var(--green); color: var(--green); }
+.btn-grab.btn-success { border-color: var(--green); color: var(--green); background: var(--bg-elevated); }
 .btn-grab.btn-error { border-color: var(--red); color: var(--red); }
 
 /* --- Alerts --- */
@@ -1146,13 +1146,7 @@ fieldset legend {
     align-items: center;
     justify-content: space-between;
     padding: 14px 18px;
-    cursor: pointer;
-    user-select: none;
     transition: background 0.1s;
-}
-
-.season-header:hover {
-    background: var(--bg-elevated);
 }
 
 .season-header-left {
@@ -1707,7 +1701,7 @@ fieldset legend {
 }
 
 .icon-btn.is-loading .icon-btn-inner {
-    animation: spin 0.85s linear infinite;
+    /* spinner is handled by ep-search-spinner child element */
 }
 
 .icon-btn.is-success {
@@ -2216,3 +2210,184 @@ fieldset legend {
 .error-actions .btn-secondary:hover {
     background: var(--bg-hover);
 }
+
+/* --- Episode monitoring toggle buttons --- */
+.ep-mon-btn {
+    padding: 3px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.ep-mon-btn.ep-mon-yes {
+    border-color: rgba(125, 211, 147, 0.35);
+    color: var(--green);
+    background: rgba(125, 211, 147, 0.08);
+}
+
+.ep-mon-btn.ep-mon-no {
+    border-color: var(--border);
+    color: var(--text-dim);
+}
+
+.ep-mon-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.ep-mon-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* --- Episode title button --- */
+.ep-title-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+    display: block;
+    width: 100%;
+}
+
+.ep-title-btn .ep-title-name {
+    color: var(--text-bright);
+    text-decoration: none;
+    transition: color 0.15s;
+}
+
+.ep-title-btn:hover .ep-title-name {
+    color: var(--accent);
+}
+
+/* --- Circle loading spinner for episode search --- */
+.ep-search-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(125, 174, 211, 0.25);
+    border-top-color: var(--blue);
+    border-radius: 50%;
+    animation: spin-ring 0.7s linear infinite;
+}
+
+@keyframes spin-ring {
+    to { transform: rotate(360deg); }
+}
+
+/* --- Season header layout update --- */
+.season-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-right: 4px;
+}
+
+/* --- Episode detail popup --- */
+.modal-sm {
+    max-width: 480px;
+    width: 100%;
+}
+
+.ep-detail-info {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ep-detail-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.ep-detail-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+}
+
+.ep-detail-value {
+    font-size: 13px;
+    color: var(--text);
+}
+
+.ep-detail-path {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    word-break: break-all;
+    color: var(--text-bright);
+}
+
+/* --- Debug action rows --- */
+.debug-actions-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.debug-action-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.debug-action-result {
+    font-size: 13px;
+}
+
+/* --- Monitor option list (add series modal) --- */
+.monitor-option-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.monitor-option-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, background 0.15s;
+    width: 100%;
+}
+
+.monitor-option-btn.active {
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.08);
+}
+
+.monitor-option-btn:hover:not(.active) {
+    border-color: var(--border-accent);
+    background: var(--bg-card);
+}
+
+.monitor-option-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-bright);
+}
+
+.monitor-option-desc {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+/* ep-col-monitor fixed width */
+.ep-col-monitor { width: 60px; text-align: center; }

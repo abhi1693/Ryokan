@@ -8,7 +8,7 @@
 </div>
 
 {% if let Some(msg) = message %}
-    <div class="alert alert-success">{{ msg }}</div>
+    <div class="alert alert-success">{{ msg|safe }}</div>
 {% endif %}
 {% if let Some(err) = error %}
     <div class="alert alert-error">{{ err }}</div>

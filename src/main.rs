@@ -99,6 +99,7 @@ async fn main() {
         .route("/api/series/{anilist_id}", get(handlers::library::api_series_detail))
         .route("/api/library/folder", post(handlers::library::set_folder))
         .route("/api/library/monitoring", post(handlers::library::set_monitoring))
+        .route("/api/library/episode-monitoring", post(handlers::library::set_episode_monitoring))
         .route("/api/series/{anilist_id}/auto-search", post(handlers::library::auto_search_series))
         .route("/api/series/{anilist_id}/auto-search/{episode_number}", post(handlers::library::auto_search_episode))
         .route("/api/library/folders", get(handlers::library::list_folders))

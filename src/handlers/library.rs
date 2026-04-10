@@ -124,6 +124,13 @@ pub struct SetMonitoringForm {
     monitor_mode: String,
 }
 
+#[derive(Deserialize)]
+pub struct SetEpisodeMonitoringForm {
+    series_id: i64,
+    episode_number: i32,
+    monitored: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ReconcileReport {
     pub checked: usize,
@@ -732,7 +739,7 @@ async fn build_episodes(
             quality,
             size_display,
             filename,
-            can_auto_search: !on_disk && monitored,
+            can_auto_search: !on_disk,
             monitored,
         });
     }
@@ -1228,6 +1235,20 @@ pub async fn set_monitoring(
     })))
 }
 
+pub async fn set_episode_monitoring(
+    State(state): State<AppState>,
+    Json(form): Json<SetEpisodeMonitoringForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    monitoring::set_episode_monitored(&state.db, form.series_id, form.episode_number, form.monitored)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "episode_number": form.episode_number,
+        "monitored": form.monitored,
+    })))
+}
+
 pub async fn list_folders(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<String>>, (axum::http::StatusCode, String)> {
@@ -1462,13 +1483,8 @@ pub async fn auto_search_episode(
 
     let series_id_for_grab: Option<i64> = tracked_row.as_ref().map(|s| s.id);
 
-    if let Some(tracked) = tracked_row {
-        let monitored_eps = monitoring::get_monitored_episode_numbers(&state.db, tracked.id)
-            .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        if !monitored_eps.contains(&episode_number) {
-            return Err((axum::http::StatusCode::BAD_REQUEST, format!("Episode {} is not monitored ({})", episode_number, tracked.monitor_mode_enum().label())));
-        }
+    if let Some(_tracked) = tracked_row {
+        // Monitoring status does not block manual episode searches.
     } else if matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA") && episode_number != 1 {
         return Err((axum::http::StatusCode::BAD_REQUEST, "Single-entry media can only search episode 1".to_string()));
     }
