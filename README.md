@@ -1,47 +1,40 @@
 # Ryokan
 
-A self-hosted anime PVR and media manager written in Rust. Tracks series from AniList, searches Nyaa for releases, scores them by quality, and sends them to qBittorrent — all from a single web UI with no external dependencies at runtime.
+A self-hosted anime PVR written in Rust. Searches Nyaa for releases, scores them by quality, and sends them to qBittorrent from a single web UI.
 
-Built as a practical replacement for Sonarr + Prowlarr for anime. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named — leading to missed releases or suboptimal grabs. Batch/season pack searches are worse: Sonarr has no real concept of them for anime and largely fails to find or handle them correctly. Ryokan is built around how Nyaa actually works.
+I built this because Sonarr doesn't always work well for anime. The RSS sync for currently airing shows works just fine, but downloading season batches of shows that've finished airing almost always hangs the interactive search. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named.
 
 ## Screenshots
-<img width="1920" height="1080" alt="2026-04-02_17-44-59" src="https://github.com/user-attachments/assets/0e557ff2-c074-453a-a49b-a5c4f3c8789e" />
-<img width="1920" height="1080" alt="2026-04-02_17-45-39" src="https://github.com/user-attachments/assets/621235cc-ea69-4b23-bac5-1a516e17e8bb" />
 
+<img width="1920" height="1080" alt="Series list" src="https://github.com/user-attachments/assets/0e557ff2-c074-453a-a49b-a5c4f3c8789e" />
+<img width="1920" height="1080" alt="Series detail" src="https://github.com/user-attachments/assets/621235cc-ea69-4b23-bac5-1a516e17e8bb" />
 
+## What it does
 
-## Features
-
-- **AniList-native metadata** — search and track series using AniList IDs; titles, covers, episode counts, relations, and scores are cached locally at add-time
-- **Nyaa torrent search** — search by series title with quality scoring, group filtering, and one-click grab
-- **Quality tier system** — nine tiers from WEB 480p to BD Remux 1080p; configurable quality profile, cutoff, and finished-series preference
-- **RSS auto-grab** — polls the Nyaa RSS feed, matches releases to tracked series, and grabs the best candidate automatically
-- **Quality upgrades** — RSS pipeline detects below-cutoff on-disk episodes and grabs upgrades when they appear
-- **Series monitoring** — Sonarr-style per-series monitoring modes (`all`, `future`, `missing`, `existing`, `none`)
-- **Metadata fallback chain** — AniList → Jikan/MAL → Kitsu; episode titles and air dates cached locally with 7-day TTL per source
-- **Local metadata cache** — all metadata, episode data, relation cards, and artwork stored in SQLite; tracked series pages served from local DB with zero network round-trips
-- **Jellyfin integration** — trigger library refresh after a grab
-- **Structured logging** — SQLite-backed log viewer in the UI with level/category filtering and live poll
+- Tracks series using AniList as the primary metadata source, with Jikan/MAL and Kitsu as fallbacks
+- Searches Nyaa and scores releases across nine quality tiers (WEB 480p through BD Remux 1080p)
+- Automatically grabs new episodes and quality upgrades via RSS
+- Monitors series with Sonarr-style modes: all, future, missing, existing, or none
+- Integrates with qBittorrent for downloads and Jellyfin for library refresh
+- Caches all metadata locally so pages load instantly after initial setup
 
 ## Running with Docker
 
 ```bash
-docker compose up
+docker compose up -d
 ```
 
-The app listens on port `8978` and stores all data in a named Docker volume. On first run, navigate to `http://localhost:8978` to complete setup (create an admin account).
-
-To use a pre-built image or pin a version, edit `docker-compose.yml`.
+Listens on port `8978`. On first run, go to `http://localhost:8978` to create an admin account.
 
 ## Running locally
 
-**Prerequisites:** Rust toolchain (1.85+), a C linker, OpenSSL dev headers.
+Requires Rust 1.85+, a C linker, and OpenSSL dev headers.
 
 ```bash
 cargo run
 ```
 
-The app will create `data/ryokan.db` on first run and listen on `0.0.0.0:8978`.
+Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 
 ## Environment variables
 
@@ -54,26 +47,14 @@ The app will create `data/ryokan.db` on first run and listen on `0.0.0.0:8978`.
 
 ## Configuration
 
-All runtime settings are managed through the web UI under **Settings**:
-
-- **Connections** — qBittorrent URL/credentials, Jellyfin URL/API key
-- **Quality & Scoring** — quality profile, quality cutoff, finished-series quality, preferred/blocked release groups
-- **General** — media root path, title language preference, metadata source toggles
+All runtime settings are managed through the web UI under **Settings**: qBittorrent and Jellyfin connections, quality profiles and cutoffs, preferred/blocked release groups, media root path, and title language preference.
 
 ## Self-hosting Jikan
 
-The public Jikan API has rate limits (~3 req/s). For heavy use or initial library hydration, run a local instance:
+The public Jikan API is rate-limited to roughly 3 requests per second. If you're adding a lot of series at once or want faster metadata loading, you can run a local instance:
 
 ```bash
-docker run -p 8080:8080 jikanme/jikan-rest:latest
+docker run -p 6769:8080 jikanme/jikan-rest:latest
 ```
 
-Then set `JIKAN_API_BASE=http://localhost:8080/v4`.
-
-## Tech stack
-
-- **Runtime:** Rust, Tokio, Axum
-- **Database:** SQLite via sqlx
-- **Templating:** Askama (Jinja2-style, compiled at build time)
-- **HTTP client:** reqwest
-- **Auth:** bcrypt password hashing, cookie-based sessions
+Then set `JIKAN_API_BASE=http://localhost:6769/v4`.
