@@ -93,12 +93,21 @@ async fn import_torrent(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("series {} not found", grab.series_id))?;
 
-    if series.folder_name.is_empty() {
-        return Err(format!(
-            "series '{}' has no folder configured",
-            series.title
-        ));
-    }
+    // Auto-generate folder_name from the best title if it was never set.
+    let folder_name = if series.folder_name.is_empty() {
+        let generated = media::sanitize_folder_name(&nfo::best_title(&series));
+        if generated.is_empty() {
+            return Err(format!(
+                "series '{}' has no usable title for folder name",
+                series.title
+            ));
+        }
+        // Persist it so future imports skip this path.
+        let _ = series::update_folder(&state.db, series.id, &generated).await;
+        generated
+    } else {
+        series.folder_name.clone()
+    };
 
     let qbit = state
         .qbit
@@ -129,7 +138,7 @@ async fn import_torrent(
     let season = 1_i32;
 
     let season_dir = Path::new(&cfg.media_root)
-        .join(&series.folder_name)
+        .join(&folder_name)
         .join(format!("Season {:02}", season));
 
     std::fs::create_dir_all(&season_dir)
@@ -137,9 +146,17 @@ async fn import_torrent(
 
     let mut imported_count = 0_usize;
 
+    // Determine the source base path. If qbit_download_path is configured, use
+    // that instead of qBit's internal save_path — this handles Docker path
+    // mapping where qBit sees /downloads/ but Ryokan sees a different mount.
+    let source_base = if !cfg.qbit_download_path.is_empty() {
+        cfg.qbit_download_path.clone()
+    } else {
+        torrent_save_path.to_string()
+    };
+
     for file in &video_files {
-        // Full source path on disk (qBit's save_path + relative file name).
-        let src: PathBuf = Path::new(torrent_save_path).join(&file.name);
+        let src: PathBuf = Path::new(&source_base).join(&file.name);
 
         let filename_only = Path::new(&file.name)
             .file_name()
@@ -243,7 +260,7 @@ async fn import_torrent(
 
     // Write series-level NFO once.
     let series_nfo = Path::new(&cfg.media_root)
-        .join(&series.folder_name)
+        .join(&folder_name)
         .join("tvshow.nfo");
     if !series_nfo.exists() {
         let _ = nfo::write_series_nfo(&series_nfo, &series);
@@ -251,7 +268,7 @@ async fn import_torrent(
 
     // Copy poster once.
     let poster_dest = Path::new(&cfg.media_root)
-        .join(&series.folder_name)
+        .join(&folder_name)
         .join("poster.jpg");
     if !poster_dest.exists() {
         copy_poster(&state.db, series.id, &poster_dest).await;

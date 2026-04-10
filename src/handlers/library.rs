@@ -34,7 +34,6 @@ struct SeriesTemplate {
     ep_total: i32,
     on_disk_count: i32,
     size_display: String,
-    available_folders: Vec<String>,
     title_language: String,
     relation_groups: Vec<RelationGroup>,
     external_url: String,
@@ -443,7 +442,6 @@ pub async fn series_detail(
     let (episodes, on_disk_count, size_display, monitored_count) =
         build_episodes(&state.db, &detail, db_id, &folder_name, &media_root).await;
     let ep_total = detail.episodes.unwrap_or(0);
-    let available_folders = media::list_media_folders(&media_root);
     if let Some(series_id) = db_series.as_ref().map(|s| s.id) {
         detail.cover_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-cover", series_id), &detail.cover_url).await;
         detail.banner_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-banner", series_id), &detail.banner_url).await;
@@ -479,7 +477,6 @@ pub async fn series_detail(
         ep_total,
         on_disk_count,
         size_display,
-        available_folders,
         title_language,
         relation_groups,
         external_url,

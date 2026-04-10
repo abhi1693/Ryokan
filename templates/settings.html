@@ -44,6 +44,11 @@
                 <label for="qbit_category">Download Category</label>
                 <input type="text" name="qbit_category" id="qbit_category" value="{{ config.qbit_category }}" placeholder="anime">
             </div>
+            <div class="form-group">
+                <label for="qbit_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="qbit_download_path" id="qbit_download_path" value="{{ config.qbit_download_path }}" placeholder="/downloads">
+                <span class="form-hint">The local path where qBittorrent's completed downloads are accessible to Ryokan. When both run in Docker, this is the container-side mount point (e.g. <code>/downloads</code>). When Ryokan runs on the host, use the host path that maps to qBit's download directory.</span>
+            </div>
             <div class="settings-inline-actions">
                 <button type="button" class="btn btn-secondary" onclick="testQbit(this)">Test</button>
                 <span id="qbit-test-result" class="form-hint"></span>

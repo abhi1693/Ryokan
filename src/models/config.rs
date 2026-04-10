@@ -7,6 +7,7 @@ pub struct Config {
     pub qbit_user: String,
     pub qbit_pass: String,
     pub qbit_category: String,
+    pub qbit_download_path: String,
     pub jellyfin_url: String,
     pub jellyfin_api_key: String,
     pub preferred_groups: String,
@@ -31,6 +32,7 @@ struct ConfigRow {
     qbit_user: String,
     qbit_pass: String,
     qbit_category: String,
+    qbit_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -52,7 +54,7 @@ struct ConfigRow {
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode FROM config WHERE id = 1",
+        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -62,6 +64,7 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         qbit_user: r.qbit_user,
         qbit_pass: r.qbit_pass,
         qbit_category: r.qbit_category,
+        qbit_download_path: r.qbit_download_path,
         jellyfin_url: r.jellyfin_url,
         jellyfin_api_key: r.jellyfin_api_key,
         preferred_groups: r.preferred_groups,
@@ -85,13 +88,14 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             qbit_url = excluded.qbit_url,
             qbit_user = excluded.qbit_user,
             qbit_pass = excluded.qbit_pass,
             qbit_category = excluded.qbit_category,
+            qbit_download_path = excluded.qbit_download_path,
             jellyfin_url = excluded.jellyfin_url,
             jellyfin_api_key = excluded.jellyfin_api_key,
             preferred_groups = excluded.preferred_groups,
@@ -114,6 +118,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(&config.qbit_user)
     .bind(&config.qbit_pass)
     .bind(&config.qbit_category)
+    .bind(&config.qbit_download_path)
     .bind(&config.jellyfin_url)
     .bind(&config.jellyfin_api_key)
     .bind(&config.preferred_groups)
