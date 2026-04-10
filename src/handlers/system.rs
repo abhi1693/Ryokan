@@ -163,6 +163,7 @@ pub async fn debug_settings_submit(
             qbit_user: String::new(),
             qbit_pass: String::new(),
             qbit_category: String::new(),
+            qbit_download_path: String::new(),
             jellyfin_url: String::new(),
             jellyfin_api_key: String::new(),
             preferred_groups: String::new(),
