@@ -38,16 +38,7 @@ fn is_video_file(name: &str) -> bool {
 
 /// Replace filesystem-unsafe characters in a filename component.
 fn sanitize_filename(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect::<String>()
-        .trim_matches('.')
-        .trim()
-        .to_string()
+    media::sanitize_folder_name(s)
 }
 
 /// Hardlink → copy fallback. For "move" mode: rename → copy+delete fallback.

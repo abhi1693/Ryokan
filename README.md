@@ -35,7 +35,7 @@ To use a pre-built image or pin a version, edit `docker-compose.yml`.
 
 ## Running locally
 
-**Prerequisites:** Rust toolchain (1.82+), a C linker, OpenSSL dev headers.
+**Prerequisites:** Rust toolchain (1.85+), a C linker, OpenSSL dev headers.
 
 ```bash
 cargo run
@@ -77,3 +77,10 @@ Then set `JIKAN_API_BASE=http://localhost:8080/v4`.
 - **Templating:** Askama (Jinja2-style, compiled at build time)
 - **HTTP client:** reqwest
 - **Auth:** bcrypt password hashing, cookie-based sessions
+
+## Changelog
+
+### 2026-04-10
+- **Auto-generate folder name on series add** — `folder_name` is now set automatically from the best available title (English → Romaji → title) when a series is first added to the library, with filesystem-unsafe characters sanitized. Previously it was left empty, requiring manual mapping before post-processing could work.
+- **Shared `sanitize_folder_name` helper** — moved the filename sanitization logic from `post_processing.rs` to `services/media.rs` as a public function, reused by both series insert and post-processing import.
+- **Dockerfile bumped to Rust 1.94** — the `time-core` crate now requires the `edition2024` Cargo feature, which needs Rust 1.85+. Updated from 1.82 to 1.94 (current stable).

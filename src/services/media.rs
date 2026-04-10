@@ -2,6 +2,21 @@ use regex_lite::Regex;
 use serde::Serialize;
 use std::path::Path;
 
+/// Sanitize a string for use as a folder name on disk.
+/// Replaces filesystem-unsafe characters and trims leading/trailing dots and whitespace.
+pub fn sanitize_folder_name(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect::<String>()
+        .trim_matches('.')
+        .trim()
+        .to_string()
+}
+
 /// A file found on disk that represents an episode.
 #[derive(Debug, Clone, Serialize)]
 pub struct EpisodeFile {
