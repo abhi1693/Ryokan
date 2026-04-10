@@ -2,6 +2,21 @@ use regex_lite::Regex;
 use serde::Serialize;
 use std::path::Path;
 
+/// Sanitize a string for use as a folder name on disk.
+/// Replaces filesystem-unsafe characters and trims leading/trailing dots and whitespace.
+pub fn sanitize_folder_name(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect::<String>()
+        .trim_matches('.')
+        .trim()
+        .to_string()
+}
+
 /// A file found on disk that represents an episode.
 #[derive(Debug, Clone, Serialize)]
 pub struct EpisodeFile {
@@ -118,7 +133,7 @@ fn parse_episode_file(path: &Path) -> Option<EpisodeFile> {
 ///   - 05 (v2), - 05v2, [group] Title - 05 [1080p]
 ///   E05, EP05, Ep.05
 ///   Episode 05
-fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
+pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // SxxExx pattern — most reliable.
     let re_sxex = Regex::new(r"s(\d{1,2})e(\d{1,4})").unwrap();
     if let Some(caps) = re_sxex.captures(lower) {

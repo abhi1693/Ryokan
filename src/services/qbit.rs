@@ -24,6 +24,16 @@ pub struct Torrent {
     pub state: String,
     pub category: String,
     pub eta: i64,
+    #[serde(default)]
+    pub save_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TorrentFile {
+    /// Relative path of the file within the torrent (from save_path).
+    pub name: String,
+    pub size: i64,
+    pub progress: f64,
 }
 
 impl QbitClient {
@@ -151,6 +161,17 @@ impl QbitClient {
             .map_err(|e| format!("failed to parse torrents: {}", e))?;
 
         Ok(torrents)
+    }
+
+    /// Get the files inside a specific torrent.
+    pub async fn get_torrent_files(&self, hash: &str) -> Result<Vec<TorrentFile>, String> {
+        let endpoint = format!("/api/v2/torrents/files?hash={}", hash);
+        let resp = self.do_get(&endpoint).await?;
+        let files: Vec<TorrentFile> = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse torrent files: {}", e))?;
+        Ok(files)
     }
 
     /// Test the connection by fetching the app version.

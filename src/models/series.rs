@@ -172,10 +172,22 @@ pub async fn upsert(
         return Ok((existing.id, false));
     }
 
+    // Auto-generate a folder name from the best available title.
+    let folder = {
+        let raw = if !title_english.is_empty() {
+            title_english
+        } else if !title_romaji.is_empty() {
+            title_romaji
+        } else {
+            title
+        };
+        crate::services::media::sanitize_folder_name(raw)
+    };
+
     let result = sqlx::query(
         r#"
         INSERT INTO series (anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, folder_name, monitor_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(anilist_id)
@@ -188,6 +200,7 @@ pub async fn upsert(
     .bind(format)
     .bind(status)
     .bind(episodes)
+    .bind(&folder)
     .bind(default_monitor_mode(status).as_str())
     .execute(db)
     .await?;

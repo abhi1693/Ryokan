@@ -44,6 +44,11 @@
                 <label for="qbit_category">Download Category</label>
                 <input type="text" name="qbit_category" id="qbit_category" value="{{ config.qbit_category }}" placeholder="anime">
             </div>
+            <div class="form-group">
+                <label for="qbit_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="qbit_download_path" id="qbit_download_path" value="{{ config.qbit_download_path }}" placeholder="/downloads">
+                <span class="form-hint">The local path where qBittorrent's completed downloads are accessible to Ryokan. When both run in Docker, this is the container-side mount point (e.g. <code>/downloads</code>). When Ryokan runs on the host, use the host path that maps to qBit's download directory.</span>
+            </div>
             <div class="settings-inline-actions">
                 <button type="button" class="btn btn-secondary" onclick="testQbit(this)">Test</button>
                 <span id="qbit-test-result" class="form-hint"></span>
@@ -158,6 +163,26 @@
                 <label for="rss_interval_minutes">RSS Sync Interval (minutes)</label>
                 <input type="number" min="1" max="60" name="rss_interval_minutes" id="rss_interval_minutes" value="{{ config.rss_interval_minutes }}">
                 <span class="form-hint">Used by the background RSS poller. Manual sync is available on the System page.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Post-Processing</legend>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="post_processing_enabled" id="post_processing_enabled" {% if config.post_processing_enabled %}checked{% endif %}>
+                    <span>Enable post-processing</span>
+                </label>
+                <span class="form-hint">When enabled, Ryokan will rename and move completed downloads into your media library and write NFO sidecar files for Jellyfin. No external metadata providers are queried — data already in the database is used. Requires a configured media root and qBittorrent.</span>
+            </div>
+            <div class="form-group">
+                <label for="post_processing_mode">File operation mode</label>
+                <select name="post_processing_mode" id="post_processing_mode">
+                    <option value="hardlink" {% if config.post_processing_mode == "hardlink" %}selected{% endif %}>Hardlink (recommended — preserves seeding, no extra disk space)</option>
+                    <option value="copy" {% if config.post_processing_mode == "copy" %}selected{% endif %}>Copy (safe across filesystems, uses extra disk space)</option>
+                    <option value="move" {% if config.post_processing_mode == "move" %}selected{% endif %}>Move (frees download space, breaks seeding)</option>
+                </select>
+                <span class="form-hint">Hardlink is instant and uses no extra disk space, but only works when qBittorrent and the media root are on the same filesystem. Copy is used automatically as a fallback if hardlinking fails.</span>
             </div>
         </fieldset>
 

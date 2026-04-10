@@ -389,6 +389,7 @@ function reconcileFallbacks(btn) {
         const data = await r.json();
         if (!r.ok) throw new Error(data.message || 'Reconciliation failed');
         result.textContent = data.message || 'Fallback reconciliation complete.';
+    })
     .catch(err => {
         result.textContent = err.message;
     })
@@ -410,6 +411,7 @@ function rebuildAniListCache(btn) {
         const data = await r.json();
         if (!r.ok) throw new Error(data.message || 'Rebuild failed');
         result.textContent = data.message || 'Metadata cache rebuild complete.';
+    })
     .catch(err => {
         result.textContent = err.message;
     })
@@ -431,6 +433,7 @@ function clearRssHistory(btn) {
         const data = await r.json();
         if (!r.ok) throw new Error(data.message || 'Clear failed');
         result.textContent = data.message || 'Grab history cleared.';
+    })
     .catch(err => {
         result.textContent = err.message;
     })

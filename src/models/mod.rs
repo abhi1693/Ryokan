@@ -9,6 +9,7 @@ pub mod metadata_cache;
 pub mod local_metadata;
 pub mod scheduled_tasks;
 pub mod artwork_cache;
+pub mod grabbed_torrents;
 
 use sqlx::SqlitePool;
 
@@ -482,6 +483,50 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    sqlx::query("ALTER TABLE config ADD COLUMN post_processing_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    sqlx::query("ALTER TABLE config ADD COLUMN post_processing_mode TEXT NOT NULL DEFAULT 'hardlink'")
+        .execute(db)
+        .await
+        .ok();
+
+    // The path where qBittorrent downloads live, as seen by Ryokan.
+    // When qBit runs in Docker its internal save_path (e.g. /downloads/) differs
+    // from where the host (or Ryokan) can actually read the files.
+    sqlx::query("ALTER TABLE config ADD COLUMN qbit_download_path TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS grabbed_torrents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash TEXT NOT NULL DEFAULT '',
+            torrent_name TEXT NOT NULL DEFAULT '',
+            series_id INTEGER NOT NULL,
+            episode_numbers TEXT NOT NULL DEFAULT '[]',
+            state TEXT NOT NULL DEFAULT 'pending',
+            grabbed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            imported_at DATETIME,
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_state ON grabbed_torrents (state)")
+        .execute(db)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_hash ON grabbed_torrents (hash) WHERE hash != ''")
+        .execute(db)
+        .await?;
+
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.
     sqlx::query("ALTER TABLE series ADD COLUMN tmdb_id INTEGER")
@@ -589,6 +634,33 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await?;
+
+    // Backfill folder_name for any existing series that have an empty value.
+    // Uses English title → Romaji → title, with filesystem-unsafe chars sanitized.
+    let empty_folder_rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, title, title_romaji, title_english FROM series WHERE folder_name = '' OR folder_name IS NULL",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    for (id, title, title_romaji, title_english) in &empty_folder_rows {
+        let best = if !title_english.is_empty() {
+            title_english.as_str()
+        } else if !title_romaji.is_empty() {
+            title_romaji.as_str()
+        } else {
+            title.as_str()
+        };
+        let folder = crate::services::media::sanitize_folder_name(best);
+        if !folder.is_empty() {
+            let _ = sqlx::query("UPDATE series SET folder_name = ? WHERE id = ?")
+                .bind(&folder)
+                .bind(id)
+                .execute(db)
+                .await;
+        }
+    }
 
     Ok(())
 }

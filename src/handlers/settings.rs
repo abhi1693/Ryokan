@@ -29,6 +29,7 @@ pub struct SettingsForm {
     qbit_user: String,
     qbit_pass: String,
     qbit_category: String,
+    qbit_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -41,6 +42,8 @@ pub struct SettingsForm {
     title_language: String,
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
+    post_processing_enabled: Option<String>,
+    post_processing_mode: String,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +66,7 @@ fn default_config() -> config::Config {
         qbit_user: String::new(),
         qbit_pass: String::new(),
         qbit_category: String::new(),
+        qbit_download_path: String::new(),
         jellyfin_url: String::new(),
         jellyfin_api_key: String::new(),
         preferred_groups: String::new(),
@@ -77,6 +81,8 @@ fn default_config() -> config::Config {
         rss_enabled: false,
         rss_interval_minutes: 5,
         force_kitsu_fallback: false,
+        post_processing_enabled: false,
+        post_processing_mode: "hardlink".to_string(),
     }
 }
 
@@ -131,6 +137,7 @@ pub async fn settings_submit(
         qbit_user: form.qbit_user.trim().to_string(),
         qbit_pass: form.qbit_pass,
         qbit_category: form.qbit_category.trim().to_string(),
+        qbit_download_path: form.qbit_download_path.trim().trim_end_matches('/').to_string(),
         jellyfin_url: form.jellyfin_url.trim().trim_end_matches('/').to_string(),
         jellyfin_api_key: form.jellyfin_api_key.trim().to_string(),
         preferred_groups: form.preferred_groups.trim().to_string(),
@@ -165,6 +172,11 @@ pub async fn settings_submit(
         rss_enabled: form.rss_enabled.is_some(),
         rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
         force_kitsu_fallback: current_force_kitsu_fallback,
+        post_processing_enabled: form.post_processing_enabled.is_some(),
+        post_processing_mode: match form.post_processing_mode.as_str() {
+            "move" | "copy" | "hardlink" => form.post_processing_mode,
+            _ => "hardlink".to_string(),
+        },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

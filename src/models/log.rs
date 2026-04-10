@@ -51,6 +51,7 @@ pub enum LogCategory {
     Library,
     Auth,
     System,
+    PostProcess,
 }
 
 impl LogCategory {
@@ -68,6 +69,7 @@ impl LogCategory {
             LogCategory::Library => "library",
             LogCategory::Auth => "auth",
             LogCategory::System => "system",
+            LogCategory::PostProcess => "post_process",
         }
     }
 
@@ -86,6 +88,7 @@ impl LogCategory {
             "library" => Some(LogCategory::Library),
             "auth" => Some(LogCategory::Auth),
             "system" => Some(LogCategory::System),
+            "post_process" => Some(LogCategory::PostProcess),
             _ => None,
         }
     }
@@ -104,6 +107,7 @@ impl LogCategory {
             LogCategory::Library => "Library",
             LogCategory::Auth => "Auth",
             LogCategory::System => "System",
+            LogCategory::PostProcess => "Post-Process",
         }
     }
 }

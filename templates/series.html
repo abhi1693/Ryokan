@@ -120,16 +120,10 @@
             Path:
         </span>
         {% if folder_name.is_empty() %}
-        <span class="folder-path folder-unmapped">No folder mapped</span>
+        <span class="folder-path folder-unmapped">Will be created on first import</span>
         {% else %}
         <span class="folder-path">{{ media_root }}/{{ folder_name }}</span>
         {% endif %}
-        <select id="folder-select" class="folder-select" onchange="setFolder(this.value)">
-            <option value="">-- Select folder --</option>
-            {% for f in available_folders %}
-            <option value="{{ f }}" {% if f.as_str() == folder_name.as_str() %}selected{% endif %}>{{ f }}</option>
-            {% endfor %}
-        </select>
     </div>
 </div>
 {% endif %}
@@ -432,20 +426,6 @@ function setMonitoring(mode) {
         if (summary) summary.textContent = err.message || 'Failed to update monitoring';
         if (select) select.disabled = false;
     });
-}
-
-function setFolder(folderName) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-
-    fetch('/api/library/folder', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, folder_name: folderName })
-    })
-    .then(r => r.json())
-    .then(() => location.reload())
-    .catch(err => console.error('Failed to set folder:', err));
 }
 
 function addSeries() {

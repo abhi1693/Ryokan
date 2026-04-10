@@ -35,7 +35,7 @@ To use a pre-built image or pin a version, edit `docker-compose.yml`.
 
 ## Running locally
 
-**Prerequisites:** Rust toolchain (1.82+), a C linker, OpenSSL dev headers.
+**Prerequisites:** Rust toolchain (1.85+), a C linker, OpenSSL dev headers.
 
 ```bash
 cargo run

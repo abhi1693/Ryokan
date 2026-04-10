@@ -221,6 +221,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             qbit_user: String::new(),
             qbit_pass: String::new(),
             qbit_category: String::new(),
+            qbit_download_path: String::new(),
             jellyfin_url: String::new(),
             jellyfin_api_key: String::new(),
             preferred_groups: String::new(),
@@ -235,6 +236,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             rss_enabled: false,
             rss_interval_minutes: 5,
             force_kitsu_fallback: false,
+            post_processing_enabled: false,
+            post_processing_mode: "hardlink".to_string(),
         });
 
     let items = fetch_feed().await?;
@@ -406,6 +409,15 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 };
                 canonical_history.insert(canonical_episode_key(&cand.found, cand.item.is_batch));
                 let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "grabbed", &reason, "rss").await;
+                // Record for post-processing.
+                let ep_list: Vec<i32> = cand.found.resolved_eps.iter().copied().collect();
+                let _ = crate::models::grabbed_torrents::record_grab(
+                    &state.db,
+                    &cand.item.info_hash,
+                    &cand.item.title,
+                    cand.found.series.id,
+                    &ep_list,
+                ).await;
             }
             Err(err) => {
                 skipped += 1;

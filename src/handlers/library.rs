@@ -34,7 +34,6 @@ struct SeriesTemplate {
     ep_total: i32,
     on_disk_count: i32,
     size_display: String,
-    available_folders: Vec<String>,
     title_language: String,
     relation_groups: Vec<RelationGroup>,
     external_url: String,
@@ -443,7 +442,6 @@ pub async fn series_detail(
     let (episodes, on_disk_count, size_display, monitored_count) =
         build_episodes(&state.db, &detail, db_id, &folder_name, &media_root).await;
     let ep_total = detail.episodes.unwrap_or(0);
-    let available_folders = media::list_media_folders(&media_root);
     if let Some(series_id) = db_series.as_ref().map(|s| s.id) {
         detail.cover_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-cover", series_id), &detail.cover_url).await;
         detail.banner_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-banner", series_id), &detail.banner_url).await;
@@ -479,7 +477,6 @@ pub async fn series_detail(
         ep_total,
         on_disk_count,
         size_display,
-        available_folders,
         title_language,
         relation_groups,
         external_url,
@@ -1245,6 +1242,7 @@ async fn run_auto_search_targets(
     request_id: i64,
     targets: Vec<auto_search::SearchTarget>,
     allow_batch: bool,
+    series_id: Option<i64>,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
     let qbit = {
         let qbit = state.qbit.read().await;
@@ -1261,6 +1259,7 @@ async fn run_auto_search_targets(
             qbit_user: String::new(),
             qbit_pass: String::new(),
             qbit_category: String::new(),
+            qbit_download_path: String::new(),
             jellyfin_url: String::new(),
             jellyfin_api_key: String::new(),
             preferred_groups: String::new(),
@@ -1275,6 +1274,8 @@ async fn run_auto_search_targets(
             rss_enabled: false,
             rss_interval_minutes: 5,
             force_kitsu_fallback: false,
+            post_processing_enabled: false,
+            post_processing_mode: "hardlink".to_string(),
         });
 
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
@@ -1314,6 +1315,20 @@ async fn run_auto_search_targets(
                             &format!("Grabbed: {}", result.title),
                             &format!("target={}, group={}, score={}, tier={}, batch={}", label, result.group, result.score, tier.label(), result.is_batch),
                         ).await;
+                        // Record for post-processing.
+                        if let Some(sid) = series_id {
+                            let ep_nums: Vec<i32> = match &target {
+                                auto_search::SearchTarget::Episode(n) => vec![*n],
+                                auto_search::SearchTarget::Single => vec![],
+                            };
+                            let _ = crate::models::grabbed_torrents::record_grab(
+                                &state.db,
+                                &result.info_hash,
+                                &result.title,
+                                sid,
+                                &ep_nums,
+                            ).await;
+                        }
                     }
                     Err(e) => {
                         logger::error(&state.db, LogCategory::QBit, &format!("Failed to add torrent for {}", label), &e).await;
@@ -1369,6 +1384,7 @@ pub async fn auto_search_series(
             qbit_user: String::new(),
             qbit_pass: String::new(),
             qbit_category: String::new(),
+            qbit_download_path: String::new(),
             jellyfin_url: String::new(),
             jellyfin_api_key: String::new(),
             preferred_groups: String::new(),
@@ -1383,6 +1399,8 @@ pub async fn auto_search_series(
             rss_enabled: false,
             rss_interval_minutes: 5,
             force_kitsu_fallback: false,
+            post_processing_enabled: false,
+            post_processing_mode: "hardlink".to_string(),
         });
 
     let (tracked_row, provider_id, detail) = resolve_series_context(&state.db, request_id)
@@ -1429,7 +1447,8 @@ pub async fn auto_search_series(
         &format!("Missing targets for {}: {}", title_for_log, target_summary),
         &format!("on_disk={}, monitored={}, total={:?}", existing_eps.len(), monitored_eps.len(), detail.episodes),
     ).await;
-    let report = run_auto_search_targets(&state, request_id, targets, true).await?;
+    let series_id_for_grab = tracked.as_ref().map(|s| s.id);
+    let report = run_auto_search_targets(&state, request_id, targets, true, series_id_for_grab).await?;
     Ok(Json(report))
 }
 
@@ -1440,6 +1459,8 @@ pub async fn auto_search_episode(
     let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let series_id_for_grab: Option<i64> = tracked_row.as_ref().map(|s| s.id);
 
     if let Some(tracked) = tracked_row {
         let monitored_eps = monitoring::get_monitored_episode_numbers(&state.db, tracked.id)
@@ -1463,6 +1484,7 @@ pub async fn auto_search_episode(
         request_id,
         vec![auto_search::SearchTarget::Episode(episode_number)],
         false,
+        series_id_for_grab,
     )
     .await?;
     Ok(Json(report))
