@@ -24,6 +24,10 @@ This is a work in progress. Some features are incomplete or rough around the edg
 ```bash
 docker compose up -d
 ```
+Or, for non-clean installs:
+```bash
+docker compose up -d --build
+```
 
 Listens on port `8978`. On first run, go to `http://localhost:8978` to create an admin account.
 
