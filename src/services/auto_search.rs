@@ -114,6 +114,7 @@ pub async fn find_best_for_target(
     config: &Config,
     target: &SearchTarget,
     allow_batch: bool,
+    batch_episode_match: bool,
 ) -> Option<SearchResult> {
     let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
@@ -131,7 +132,7 @@ pub async fn find_best_for_target(
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
 
     // Phase 1: standard queries (alias + episode variants).
-    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
+    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
 
     // Phase 2: if no candidate from a preferred group, try group-prefixed queries.
     let has_preferred_hit = !preferred_groups.is_empty()
@@ -141,7 +142,7 @@ pub async fn find_best_for_target(
 
     if !has_preferred_hit && !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
+        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
     }
 
     // Phase 3: for finished series with BD preference, probe for BD releases.
@@ -152,7 +153,7 @@ pub async fn find_best_for_target(
 
         if !has_bd_candidate {
             let bd_queries = quality::bd_probe_queries(&aliases);
-            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
+            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
         }
     }
 
@@ -187,6 +188,7 @@ async fn run_queries(
     categories: &[String],
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
+    batch_episode_match: bool,
 ) {
     for category in categories {
         for query in queries {
@@ -217,7 +219,7 @@ async fn run_queries(
                 if !allow_batch && result.is_batch {
                     continue;
                 }
-                if !matches_target(&result.title, aliases, target, expected_season, result.is_batch) {
+                if !matches_target(&result.title, aliases, target, expected_season, batch_episode_match && result.is_batch) {
                     continue;
                 }
                 // For FINISHED series, reject non-BD results uploaded 2+ years after airing
@@ -481,7 +483,7 @@ pub fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     out
 }
 
-pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, expected_season: i32, is_batch: bool) -> bool {
+pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, expected_season: i32, allow_batch_episode: bool) -> bool {
     let normalized_title = normalize_title(title);
     let title_tokens = token_set(&normalized_title);
 
@@ -507,11 +509,11 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, ex
             if parsed.is_empty() {
                 return false;
             }
-            // For non-batch releases, reject if there are 3+ episode numbers
-            // (likely a batch release that wasn't detected as one). Actual batch
-            // releases are allowed through so BD season packs can match episode
-            // upgrade targets.
-            if !is_batch && parsed.len() > 2 {
+            // Reject releases with 3+ episode numbers (batch/multi-episode)
+            // unless the caller explicitly allows batch-to-episode matching
+            // (used for quality upgrade searches where BD season packs are the
+            // only source for higher-quality individual episodes).
+            if !allow_batch_episode && parsed.len() > 2 {
                 return false;
             }
             parsed.contains(target_ep)

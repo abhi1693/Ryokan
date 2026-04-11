@@ -1378,7 +1378,8 @@ async fn run_auto_search_targets_with_upgrades(
     let mut skipped = Vec::new();
     for target in targets {
         let label = auto_search::target_label(&target);
-        match auto_search::find_best_for_target(&detail, &cfg, &target, allow_batch).await {
+        let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrade_tiers.contains_key(n));
+        match auto_search::find_best_for_target(&detail, &cfg, &target, allow_batch, is_upgrade).await {
             Some(result) => {
                 // For upgrade targets, verify the found release is actually
                 // better quality than what's already on disk.
@@ -1647,6 +1648,7 @@ pub async fn search_batch_releases(
         &cfg,
         &auto_search::SearchTarget::Single,
         true,
+        false,
     ).await;
 
     // We want batch-only, so filter.
