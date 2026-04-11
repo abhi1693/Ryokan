@@ -240,6 +240,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     // Cache on-disk episode scans per folder to avoid repeated filesystem walks.
     let mut disk_cache: HashMap<String, Vec<media::EpisodeFile>> = HashMap::new();
     let mut monitored_cache: HashMap<i64, HashSet<i32>> = HashMap::new();
+    let mut quality_tags_cache: HashMap<i64, HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>> = HashMap::new();
 
     let cutoff_tier = quality::QualityTier::from_str(&cfg.quality_cutoff);
 
@@ -310,7 +311,15 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         let disk_files = disk_cache
             .entry(found.series.folder_name.clone())
             .or_insert_with(|| media::scan_series_folder(&cfg.media_root, &found.series.folder_name));
-        let decision = evaluate_candidate(&found.series, &item, disk_files, &actionable_eps, cutoff_tier);
+        let qtags = if let Some(cached) = quality_tags_cache.get(&found.series.id) {
+            cached
+        } else {
+            let tags = episode_tags::get_for_series(&state.db, found.series.id)
+                .await
+                .unwrap_or_default();
+            quality_tags_cache.entry(found.series.id).or_insert(tags)
+        };
+        let decision = evaluate_candidate(&found.series, &item, disk_files, &actionable_eps, cutoff_tier, qtags);
         if let Some(reason) = decision.reject_reason {
             skipped += 1;
             let reason = format!("{} | {}", reason, build_match_diag(&item, Some(&found), 0));
@@ -564,6 +573,7 @@ fn evaluate_candidate(
     disk_files: &[media::EpisodeFile],
     parsed_eps: &HashSet<i32>,
     cutoff_tier: quality::QualityTier,
+    quality_tags: &HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> CandidateDecision {
     let existing_ep_numbers: HashSet<i32> = disk_files.iter().map(|f| f.episode_number).collect();
 
@@ -572,7 +582,7 @@ fn evaluate_candidate(
             // For batches, count episodes that are either missing or upgradeable.
             let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
             let upgrade_count = parsed_eps.iter().filter(|ep| {
-                existing_ep_numbers.contains(ep) && episode_is_upgradeable(*ep, disk_files, item, cutoff_tier)
+                existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff_tier, quality_tags)
             }).count() as i32;
             let actionable = new_count + upgrade_count;
             if actionable == 0 {
@@ -610,7 +620,7 @@ fn evaluate_candidate(
 
     let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
     let upgrade_count = parsed_eps.iter().filter(|ep| {
-        existing_ep_numbers.contains(ep) && episode_is_upgradeable(*ep, disk_files, item, cutoff_tier)
+        existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff_tier, quality_tags)
     }).count() as i32;
     let actionable = new_count + upgrade_count;
 
@@ -630,17 +640,28 @@ fn evaluate_candidate(
 }
 
 /// Check if an episode on disk is below the quality cutoff and the incoming
-/// release would be an upgrade.
+/// release would be an upgrade.  Prefers the DB-stored quality tag (from the
+/// original release title at grab time) over the post-processed filename,
+/// which often loses resolution/source markers.
 fn episode_is_upgradeable(
     ep: &i32,
     disk_files: &[media::EpisodeFile],
     incoming: &RssItem,
     cutoff_tier: quality::QualityTier,
+    quality_tags: &HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> bool {
     let Some(existing) = disk_files.iter().find(|f| f.episode_number == *ep) else {
         return false; // not on disk — not an "upgrade", it's a new episode
     };
-    let existing_tier = quality::tier_from_disk_quality(&existing.quality);
+    let existing_tier = if let Some(tag) = quality_tags.get(ep) {
+        let tier = quality::QualityTier::from_str(&tag.quality_tag);
+        if tier != quality::QualityTier::Unknown { tier } else { quality::tier_from_disk_quality(&existing.quality) }
+    } else {
+        quality::tier_from_disk_quality(&existing.quality)
+    };
+    if existing_tier == quality::QualityTier::Unknown {
+        return false;
+    }
     // Only upgrade if existing is below cutoff
     if existing_tier.rank() >= cutoff_tier.rank() {
         return false;

@@ -217,7 +217,7 @@ async fn run_queries(
                 if !allow_batch && result.is_batch {
                     continue;
                 }
-                if !matches_target(&result.title, aliases, target, expected_season) {
+                if !matches_target(&result.title, aliases, target, expected_season, result.is_batch) {
                     continue;
                 }
                 // For FINISHED series, reject non-BD results uploaded 2+ years after airing
@@ -481,7 +481,7 @@ pub fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     out
 }
 
-pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, expected_season: i32) -> bool {
+pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, expected_season: i32, is_batch: bool) -> bool {
     let normalized_title = normalize_title(title);
     let title_tokens = token_set(&normalized_title);
 
@@ -507,9 +507,11 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, ex
             if parsed.is_empty() {
                 return false;
             }
-            // If this looks like a batch (many episode numbers), reject for single-episode targets.
-            // A range of 3+ episodes means this is a batch/multi-episode release.
-            if parsed.len() > 2 {
+            // For non-batch releases, reject if there are 3+ episode numbers
+            // (likely a batch release that wasn't detected as one). Actual batch
+            // releases are allowed through so BD season packs can match episode
+            // upgrade targets.
+            if !is_batch && parsed.len() > 2 {
                 return false;
             }
             parsed.contains(target_ep)
