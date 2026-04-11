@@ -1779,34 +1779,48 @@ pub async fn grab_interactive_result(
 pub async fn delete_episode_file(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let (tracked_row, _, _detail) = resolve_series_context(&state.db, request_id)
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let json_err = |status: axum::http::StatusCode, msg: &str| {
+        (status, Json(serde_json::json!({"ok": false, "message": msg})))
+    };
 
-    let tracked = tracked_row.ok_or((
-        axum::http::StatusCode::BAD_REQUEST,
-        "Series not in library".to_string(),
-    ))?;
+    let (tracked_row, _, _detail) = match resolve_series_context(&state.db, request_id).await {
+        Ok(v) => v,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_GATEWAY, &e),
+    };
 
-    let cfg = config::get_config(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .ok_or((axum::http::StatusCode::INTERNAL_SERVER_ERROR, "No config".to_string()))?;
+    let tracked = match tracked_row {
+        Some(t) => t,
+        None => return json_err(axum::http::StatusCode::BAD_REQUEST, "Series not in library"),
+    };
+
+    let cfg = match config::get_config(&state.db).await.ok().flatten() {
+        Some(c) => c,
+        None => return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "No config"),
+    };
 
     let files = media::scan_series_folder(&cfg.media_root, &tracked.folder_name);
     let target = files.iter().find(|f| f.episode_number == episode_number);
 
     match target {
-        None => Err((axum::http::StatusCode::NOT_FOUND, "Episode file not found on disk".to_string())),
+        None => json_err(axum::http::StatusCode::NOT_FOUND, "Episode file not found on disk"),
         Some(file) => {
             let full_path = std::path::Path::new(&cfg.media_root)
                 .join(&tracked.folder_name)
                 .join(&file.filename);
 
-            std::fs::remove_file(&full_path)
-                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            if let Err(e) = std::fs::remove_file(&full_path) {
+                return json_err(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to delete file: {}", e),
+                );
+            }
+
+            // Also remove the accompanying .nfo file if it exists.
+            let nfo_path = full_path.with_extension("nfo");
+            if nfo_path.exists() {
+                let _ = std::fs::remove_file(&nfo_path);
+            }
 
             // Clear the episode quality tag so it shows as missing again.
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
@@ -1818,7 +1832,7 @@ pub async fn delete_episode_file(
                 &format!("series_id={}, path={}", tracked.id, full_path.display()),
             ).await;
 
-            Ok(Json(serde_json::json!({"ok": true, "deleted": file.filename})))
+            (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": file.filename})))
         }
     }
 }
