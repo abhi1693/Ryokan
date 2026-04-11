@@ -189,7 +189,13 @@ pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, S
     let _guard = RSS_SYNC_LOCK.try_lock().map_err(|_| "RSS sync is already running".to_string())?;
 
     let run_id = rss::start_run(&state.db, trigger).await.map_err(|e| e.to_string())?;
-    let result = sync_once_inner(state, trigger).await;
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        sync_once_inner(state, trigger),
+    ).await {
+        Ok(inner) => inner,
+        Err(_) => Err("RSS sync timed out after 5 minutes".to_string()),
+    };
 
     match &result {
         Ok(summary) => {

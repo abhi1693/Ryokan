@@ -25,7 +25,7 @@
 
     <div class="settings-tab-panel {% if tab == "integrations" %}active{% endif %}">
         <fieldset>
-            <legend>qBittorrent</legend>
+            <legend>qBittorrent <span id="qbit-health" class="form-hint"></span></legend>
             <div class="form-group">
                 <label for="qbit_url">URL</label>
                 <input type="text" name="qbit_url" id="qbit_url" value="{{ config.qbit_url }}" placeholder="http://localhost:8080">
@@ -56,7 +56,7 @@
         </fieldset>
 
         <fieldset>
-            <legend>Jellyfin</legend>
+            <legend>Jellyfin <span id="jellyfin-health" class="form-hint"></span></legend>
             <div class="form-group">
                 <label for="jellyfin_url">URL</label>
                 <input type="text" name="jellyfin_url" id="jellyfin_url" value="{{ config.jellyfin_url }}" placeholder="http://192.168.68.61:8096">
@@ -354,6 +354,33 @@ function refreshJellyfin(btn) {
         btn.disabled = false;
     });
 }
+
+// Auto-check connection health on integrations tab load
+(function() {
+    const qbitHealth = document.getElementById('qbit-health');
+    const jellyfinHealth = document.getElementById('jellyfin-health');
+    if (!qbitHealth && !jellyfinHealth) return;
+
+    fetch('/api/health')
+        .then(r => r.json())
+        .then(data => {
+            if (qbitHealth && data.qbit) {
+                if (data.qbit.ok) {
+                    qbitHealth.innerHTML = '<span class="log-badge log-badge-info">' + data.qbit.message + '</span>';
+                } else if (data.qbit.message !== 'Not configured') {
+                    qbitHealth.innerHTML = '<span class="log-badge log-badge-error">Disconnected</span>';
+                }
+            }
+            if (jellyfinHealth && data.jellyfin) {
+                if (data.jellyfin.ok) {
+                    jellyfinHealth.innerHTML = '<span class="log-badge log-badge-info">' + data.jellyfin.message + '</span>';
+                } else if (data.jellyfin.message !== 'Not configured') {
+                    jellyfinHealth.innerHTML = '<span class="log-badge log-badge-error">Disconnected</span>';
+                }
+            }
+        })
+        .catch(() => {});
+})();
 
 </script>
 {% endblock %}

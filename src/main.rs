@@ -121,6 +121,7 @@ async fn main() {
         .route("/settings", get(handlers::settings::settings_page).post(handlers::settings::settings_submit))
         .route("/api/qbit/test", post(handlers::settings::qbit_test))
         .route("/api/jellyfin/test", post(handlers::settings::jellyfin_test))
+        .route("/api/health", get(handlers::settings::api_health))
         .route("/api/jellyfin/refresh", post(handlers::settings::jellyfin_refresh))
         .route("/system", get(handlers::system::system_page).post(handlers::system::debug_settings_submit))
         .route("/api/rss/sync", post(handlers::system::api_rss_sync))

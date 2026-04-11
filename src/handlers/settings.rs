@@ -296,6 +296,44 @@ pub async fn jellyfin_test(
     }
 }
 
+pub async fn api_health(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let qbit_status = {
+        let client = state.qbit.read().await.clone();
+        match client {
+            Some(c) => match c.test_connection().await {
+                Ok(version) => serde_json::json!({"ok": true, "message": format!("qBittorrent {}", version)}),
+                Err(e) => serde_json::json!({"ok": false, "message": e}),
+            },
+            None => serde_json::json!({"ok": false, "message": "Not configured"}),
+        }
+    };
+
+    let jellyfin_status = {
+        let client = state.jellyfin.read().await.clone();
+        match client {
+            Some(c) => match c.test_connection().await {
+                Ok(info) => {
+                    let label = if info.server_name.trim().is_empty() {
+                        format!("Jellyfin {}", info.version)
+                    } else {
+                        format!("{} ({})", info.server_name, info.version)
+                    };
+                    serde_json::json!({"ok": true, "message": label})
+                }
+                Err(e) => serde_json::json!({"ok": false, "message": e}),
+            },
+            None => serde_json::json!({"ok": false, "message": "Not configured"}),
+        }
+    };
+
+    Json(serde_json::json!({
+        "qbit": qbit_status,
+        "jellyfin": jellyfin_status,
+    }))
+}
+
 pub async fn jellyfin_refresh(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
