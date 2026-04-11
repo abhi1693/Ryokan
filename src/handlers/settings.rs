@@ -83,6 +83,7 @@ fn default_config() -> config::Config {
         force_kitsu_fallback: false,
         post_processing_enabled: false,
         post_processing_mode: "hardlink".to_string(),
+        auto_grab_on_add: true,
     }
 }
 
@@ -177,6 +178,7 @@ pub async fn settings_submit(
             "move" | "copy" | "hardlink" => form.post_processing_mode,
             _ => "hardlink".to_string(),
         },
+        auto_grab_on_add: existing_cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true),
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

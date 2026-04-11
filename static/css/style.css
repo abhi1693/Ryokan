@@ -1255,7 +1255,7 @@ fieldset legend {
     color: var(--text-dim);
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
-    background: var(--bg);
+    background: var(--bg-card);
 }
 
 .episode-table tbody tr {
@@ -1280,7 +1280,7 @@ fieldset legend {
 .ep-col-num { width: 48px; font-family: var(--font-mono); color: var(--text-dim); text-align: center; }
 .ep-col-title { }
 .ep-col-aired { width: 100px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
-.ep-col-quality { width: 120px; text-align: right; }
+.ep-col-quality { width: 140px; text-align: center; }
 .ep-col-size { width: 80px; text-align: right; font-family: var(--font-mono); color: var(--text-dim); font-size: 12px; }
 
 .ep-status-icon { display: flex; align-items: center; justify-content: center; }
@@ -1936,6 +1936,7 @@ fieldset legend {
     vertical-align: top;
     overflow: hidden;
     text-overflow: ellipsis;
+    background: var(--bg-card);
 }
 
 .log-col-time { width: 160px; white-space: nowrap; color: var(--text-dim); font-size: 12px; }
@@ -2296,6 +2297,11 @@ fieldset legend {
     width: 100%;
 }
 
+.modal-ep {
+    max-width: 860px;
+    width: 100%;
+}
+
 .ep-detail-info {
     display: flex;
     flex-direction: column;
@@ -2391,3 +2397,167 @@ fieldset legend {
 
 /* ep-col-monitor fixed width */
 .ep-col-monitor { width: 60px; text-align: center; }
+
+/* --- Monitor All toggle button --- */
+.monitor-all-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.monitor-all-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.monitor-all-btn.is-active {
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.15);
+    color: var(--accent);
+}
+
+/* --- Episode actions column (wider for 2 buttons) --- */
+.ep-col-actions {
+    width: 84px;
+    text-align: right;
+    white-space: nowrap;
+}
+
+/* --- Quality tag states --- */
+.tag-quality-grabbed {
+    background: rgba(211, 176, 125, 0.15);
+    color: var(--orange);
+    font-size: 10px;
+    padding: 2px 8px;
+}
+
+.tag-quality-failed {
+    background: rgba(211, 125, 125, 0.12);
+    color: var(--red);
+    font-size: 10px;
+    padding: 2px 8px;
+}
+
+/* --- Episode detail popup (wider) --- */
+.ep-detail-two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.ep-detail-full {
+    grid-column: 1 / -1;
+}
+
+/* --- Grab history table --- */
+.grab-history-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+.grab-history-table th {
+    text-align: left;
+    padding: 5px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+}
+
+.grab-history-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(42, 42, 58, 0.3);
+    vertical-align: middle;
+}
+
+.grab-history-table tr:last-child td {
+    border-bottom: none;
+}
+
+.grab-state-grabbed { color: var(--green); font-weight: 600; }
+.grab-state-failed  { color: var(--red); font-weight: 600; }
+
+.btn-mark-failed {
+    font-size: 11px;
+    padding: 3px 8px;
+    background: rgba(211, 125, 125, 0.1);
+    color: var(--red);
+    border: 1px solid rgba(211, 125, 125, 0.3);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn-mark-failed:hover { background: rgba(211, 125, 125, 0.2); }
+.btn-mark-failed:disabled { opacity: 0.5; cursor: default; }
+
+/* --- Interactive search modal --- */
+.interactive-search-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.interactive-search-table th {
+    text-align: left;
+    padding: 7px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elevated);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.interactive-search-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(42, 42, 58, 0.35);
+    vertical-align: middle;
+}
+
+.interactive-search-table tr:hover td {
+    background: var(--bg-elevated);
+}
+
+.interactive-search-table .col-score { width: 55px; text-align: center; }
+.interactive-search-table .col-grab  { width: 70px; text-align: right; }
+.interactive-search-table .col-size  { width: 80px; white-space: nowrap; }
+.interactive-search-table .col-seeds { width: 50px; text-align: right; }
+
+.is-modal-scroll {
+    overflow-y: auto;
+    max-height: 480px;
+}
+
+/* --- Delete file button in ep-detail --- */
+.btn-delete-file {
+    background: rgba(211, 125, 125, 0.1);
+    color: var(--red);
+    border: 1px solid rgba(211, 125, 125, 0.3);
+    padding: 7px 14px;
+    font-size: 13px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-weight: 600;
+    transition: background 0.15s;
+}
+
+.btn-delete-file:hover { background: rgba(211, 125, 125, 0.22); }
+.btn-delete-file:disabled { opacity: 0.5; cursor: default; }

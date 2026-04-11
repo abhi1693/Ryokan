@@ -355,6 +355,13 @@ function runRssSync(btn) {
                 </label>
                 <span class="form-hint">Debug option for testing Kitsu episode metadata even when Jikan returns titles. This only affects series episode metadata on the detail page.</span>
             </div>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="auto_grab_on_add" id="auto_grab_on_add" {% if auto_grab_on_add %}checked{% endif %}>
+                    <span>Auto-grab monitored episodes when adding a new series</span>
+                </label>
+                <span class="form-hint">When enabled (default), Ryokan automatically searches for and grabs all monitored episodes after you add a series to the library. Disable to add series without triggering an immediate download.</span>
+            </div>
             <div class="debug-actions-group">
                 <div class="debug-action-row">
                     <button type="button" class="btn btn-secondary" onclick="reconcileFallbacks(this)">Reconcile fallback entries</button>

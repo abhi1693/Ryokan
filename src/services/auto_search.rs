@@ -28,6 +28,41 @@ pub struct AutoSearchReport {
     pub quality_profile: String,
 }
 
+/// Return all scored candidates for an episode target without grabbing anything.
+/// Used by the interactive search feature.
+pub async fn find_all_for_target(
+    detail: &AnimeDetail,
+    config: &Config,
+    target: &SearchTarget,
+    allow_batch: bool,
+) -> Vec<SearchResult> {
+    let queries = build_queries(detail, target);
+    let aliases = collect_aliases(detail);
+    let preferred_groups = quality::parse_group_list(&config.preferred_groups);
+    let preferred_res = preferred_resolution_for_profile(&config.quality_profile);
+    let is_finished = detail.status == "FINISHED";
+    let finished_mode = quality::FinishedSeriesMode::from_str(&config.finished_series_quality);
+    let preferred_tier = quality::QualityTier::from_str(&config.quality_profile);
+    let cutoff_tier = quality::QualityTier::from_str(&config.quality_cutoff);
+
+    let mut seen = HashSet::new();
+    let mut candidates: Vec<SearchResult> = Vec::new();
+
+    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, &mut seen, &mut candidates).await;
+
+    if !preferred_groups.is_empty() {
+        let group_queries = build_group_queries(detail, target, &preferred_groups);
+        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, &mut seen, &mut candidates).await;
+    }
+
+    for c in &mut candidates {
+        c.score = rescore_for_auto_search(c, config, &aliases, target, is_finished, finished_mode, preferred_tier, cutoff_tier);
+    }
+
+    candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
+    candidates
+}
+
 pub async fn find_best_for_target(
     detail: &AnimeDetail,
     config: &Config,
