@@ -20,6 +20,9 @@ pub struct SearchResult {
     pub is_trusted: bool,
     pub score: i32,
     pub info_hash: String,
+    /// Unix timestamp of when the torrent was uploaded (0 if unknown).
+    #[serde(skip_serializing)]
+    pub upload_timestamp: i64,
 }
 
 pub struct SearchOptions {
@@ -29,6 +32,7 @@ pub struct SearchOptions {
     pub user: String,
     pub preferred_groups: Vec<String>,
     pub preferred_resolution: String,
+    pub prefer_subs: bool,
 }
 
 impl Default for SearchOptions {
@@ -40,6 +44,7 @@ impl Default for SearchOptions {
             user: String::new(),
             preferred_groups: Vec::new(),
             preferred_resolution: "1080".to_string(),
+            prefer_subs: true,
         }
     }
 }
@@ -156,6 +161,13 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
         let size = tds[3].text().collect::<String>().trim().to_string();
         let size_bytes = parse_size(&size);
 
+        // Date (td index 4) — try data-timestamp attr first, then parse text.
+        let upload_timestamp: i64 = tds[4]
+            .value()
+            .attr("data-timestamp")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or_else(|| parse_date_text(&tds[4].text().collect::<String>()));
+
         // Seeders, leechers, downloads (td indices 5, 6, 7).
         let seeders = parse_int(&tds[5].text().collect::<String>());
         let leechers = parse_int(&tds[6].text().collect::<String>());
@@ -187,9 +199,10 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
             is_trusted,
             score: 0,
             info_hash,
+            upload_timestamp,
         };
 
-        result.score = crate::services::scoring::score_result(&result, opts);
+        result.score = crate::services::scoring::score_result_with_sub_pref(&result, opts, opts.prefer_subs);
         results.push(result);
     }
 
@@ -265,4 +278,22 @@ fn parse_size(s: &str) -> i64 {
 
 fn parse_int(s: &str) -> i32 {
     s.trim().parse().unwrap_or(0)
+}
+
+/// Try to parse a Nyaa date string into a Unix timestamp.
+/// Handles formats like "2024-01-15 12:34" (common on Nyaa).
+fn parse_date_text(text: &str) -> i64 {
+    let trimmed = text.trim();
+    // Try "YYYY-MM-DD HH:MM" format — extract just the year for a rough timestamp.
+    if trimmed.len() >= 10 {
+        if let Ok(year) = trimmed[..4].parse::<i64>() {
+            if year >= 2000 && year <= 2100 {
+                // Approximate: seconds since epoch for Jan 1 of that year.
+                // Good enough for year-level comparisons.
+                let month: i64 = trimmed.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(1);
+                return (year - 1970) * 31_536_000 + (month - 1) * 2_592_000;
+            }
+        }
+    }
+    0
 }

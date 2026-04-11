@@ -64,6 +64,39 @@
     </div>
 </div>
 
+<!-- Monitoring selection modal shown after adding a series -->
+<div class="modal-backdrop" id="monitor-modal" style="display:none">
+    <div class="modal modal-sm" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h3>Monitor Episodes</h3>
+        </div>
+        <div class="modal-body">
+            <p style="margin-bottom:16px;color:var(--text-dim);font-size:14px">Choose which episodes to monitor for <strong id="monitor-series-title"></strong>.</p>
+            <div class="monitor-option-list">
+                <button class="monitor-option-btn active" data-mode="all" onclick="selectMonitorMode(this)">
+                    <span class="monitor-option-label">All Episodes</span>
+                    <span class="monitor-option-desc">Monitor every episode</span>
+                </button>
+                <button class="monitor-option-btn" data-mode="future" onclick="selectMonitorMode(this)">
+                    <span class="monitor-option-label">Future Episodes</span>
+                    <span class="monitor-option-desc">Only episodes that haven't aired yet</span>
+                </button>
+                <button class="monitor-option-btn" data-mode="missing" onclick="selectMonitorMode(this)">
+                    <span class="monitor-option-label">Missing Episodes</span>
+                    <span class="monitor-option-desc">Episodes not yet on disk</span>
+                </button>
+                <button class="monitor-option-btn" data-mode="none" onclick="selectMonitorMode(this)">
+                    <span class="monitor-option-label">None</span>
+                    <span class="monitor-option-desc">Don't monitor any episodes</span>
+                </button>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
+                <button class="btn btn-primary" id="monitor-confirm-btn" onclick="confirmMonitoring()">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 const initialTitleLanguage = '{{ title_language }}';
 
@@ -155,6 +188,9 @@ function searchAnilist() {
         });
 }
 
+let _pendingSeriesId = null;
+let _selectedMonitorMode = 'all';
+
 function addSeries(anilistId, btn) {
     const entry = JSON.parse(btn.dataset.entry);
     btn.disabled = true;
@@ -182,16 +218,47 @@ function addSeries(anilistId, btn) {
         if (!r.ok) throw new Error(data.message || 'Add failed');
         return data;
     })
-    .then(() => {
+    .then(data => {
         btn.textContent = 'Added';
         btn.classList.add('btn-success');
-        setTimeout(() => location.reload(), 600);
+        _pendingSeriesId = data.id;
+        _selectedMonitorMode = 'all';
+        const lang = localStorage.getItem('titleLanguage') || initialTitleLanguage || 'english';
+        const title = getTitleByLang(entry, lang) || entry.title_romaji || entry.title_english || 'this series';
+        document.getElementById('monitor-series-title').textContent = title;
+        // Reset mode buttons
+        document.querySelectorAll('.monitor-option-btn').forEach(b => b.classList.remove('active'));
+        const allBtn = document.querySelector('.monitor-option-btn[data-mode="all"]');
+        if (allBtn) allBtn.classList.add('active');
+        // Close add modal and show monitoring modal
+        document.getElementById('add-modal').style.display = 'none';
+        document.getElementById('monitor-modal').style.display = 'flex';
     })
     .catch(() => {
         btn.textContent = 'Error';
         btn.classList.add('btn-error');
         btn.disabled = false;
     });
+}
+
+function selectMonitorMode(btn) {
+    document.querySelectorAll('.monitor-option-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    _selectedMonitorMode = btn.dataset.mode;
+}
+
+function confirmMonitoring() {
+    if (!_pendingSeriesId) { location.reload(); return; }
+    const confirmBtn = document.getElementById('monitor-confirm-btn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = '...';
+    fetch('/api/library/monitoring', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ series_id: _pendingSeriesId, monitor_mode: _selectedMonitorMode })
+    })
+    .then(() => location.reload())
+    .catch(() => location.reload());
 }
 
 function escHtml(s) {

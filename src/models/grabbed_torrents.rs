@@ -9,6 +9,7 @@ pub struct GrabbedTorrent {
     pub series_id: i64,
     pub episode_numbers: Vec<i32>,
     pub state: String,
+    pub grabbed_at: String,
 }
 
 /// Record a torrent grab for post-processing. Skips silently if we already
@@ -50,7 +51,7 @@ pub async fn record_grab(
 /// Get all grabs that have not yet been processed.
 pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, hash, torrent_name, series_id, episode_numbers FROM grabbed_torrents WHERE state = 'pending' ORDER BY grabbed_at ASC",
+        "SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at FROM grabbed_torrents WHERE state = 'pending' ORDER BY grabbed_at ASC",
     )
     .fetch_all(db)
     .await?;
@@ -68,6 +69,7 @@ pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sql
                 series_id: row.get("series_id"),
                 episode_numbers,
                 state: "pending".to_string(),
+                grabbed_at: row.get("grabbed_at"),
             }
         })
         .collect())
@@ -89,4 +91,106 @@ pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
     Ok(())
+}
+
+pub async fn mark_removed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE grabbed_torrents SET state = 'removed' WHERE id = ?")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Get all grabbed torrents with series title, ordered by most recent first.
+pub async fn get_all_with_series(db: &SqlitePool, limit: i64) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
+                  COALESCE(s.title_english, s.title_romaji, s.title, '') AS series_title,
+                  COALESCE(s.anilist_id, 0) AS anilist_id
+           FROM grabbed_torrents g
+           LEFT JOIN series s ON s.id = g.series_id
+           ORDER BY g.grabbed_at DESC
+           LIMIT ?"#,
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let eps_json: String = row.get("episode_numbers");
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            GrabbedTorrentWithSeries {
+                id: row.get("id"),
+                hash: row.get("hash"),
+                torrent_name: row.get("torrent_name"),
+                series_id: row.get("series_id"),
+                episode_numbers,
+                state: row.get("state"),
+                grabbed_at: row.get("grabbed_at"),
+                imported_at: row.get("imported_at"),
+                series_title: row.get("series_title"),
+                anilist_id: row.get("anilist_id"),
+            }
+        })
+        .collect())
+}
+
+/// Get all failed/blocked torrents.
+pub async fn get_blocked(db: &SqlitePool) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
+                  COALESCE(s.title_english, s.title_romaji, s.title, '') AS series_title,
+                  COALESCE(s.anilist_id, 0) AS anilist_id
+           FROM grabbed_torrents g
+           LEFT JOIN series s ON s.id = g.series_id
+           WHERE g.state = 'failed'
+           ORDER BY g.grabbed_at DESC"#,
+    )
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let eps_json: String = row.get("episode_numbers");
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            GrabbedTorrentWithSeries {
+                id: row.get("id"),
+                hash: row.get("hash"),
+                torrent_name: row.get("torrent_name"),
+                series_id: row.get("series_id"),
+                episode_numbers,
+                state: row.get("state"),
+                grabbed_at: row.get("grabbed_at"),
+                imported_at: row.get("imported_at"),
+                series_title: row.get("series_title"),
+                anilist_id: row.get("anilist_id"),
+            }
+        })
+        .collect())
+}
+
+/// Remove a grabbed torrent record entirely.
+pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM grabbed_torrents WHERE id = ?")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GrabbedTorrentWithSeries {
+    pub id: i64,
+    pub hash: String,
+    pub torrent_name: String,
+    pub series_id: i64,
+    pub episode_numbers: Vec<i32>,
+    pub state: String,
+    pub grabbed_at: String,
+    pub imported_at: Option<String>,
+    pub series_title: String,
+    pub anilist_id: i64,
 }

@@ -10,6 +10,7 @@ pub mod local_metadata;
 pub mod scheduled_tasks;
 pub mod artwork_cache;
 pub mod grabbed_torrents;
+pub mod episode_tags;
 
 use sqlx::SqlitePool;
 
@@ -616,6 +617,60 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_image_refs_blob_hash ON image_refs (blob_hash)")
         .execute(db)
         .await?;
+
+    // Episode quality tags: store the latest grabbed release for each episode.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS episode_quality_tags (
+            series_id INTEGER NOT NULL,
+            episode_number INTEGER NOT NULL,
+            quality_tag TEXT NOT NULL DEFAULT '',
+            release_title TEXT NOT NULL DEFAULT '',
+            release_group TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'grabbed',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (series_id, episode_number),
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    // Full grab history per episode (all grabs, with state tracking for failed marks).
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS episode_grab_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            series_id INTEGER NOT NULL,
+            episode_number INTEGER NOT NULL,
+            quality_tag TEXT NOT NULL DEFAULT '',
+            release_title TEXT NOT NULL DEFAULT '',
+            release_group TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'grabbed',
+            grabbed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_episode_grab_history_series ON episode_grab_history (series_id, episode_number, grabbed_at DESC)")
+        .execute(db)
+        .await?;
+
+    // auto_grab_on_add: whether to automatically search for monitored episodes after adding a series.
+    sqlx::query("ALTER TABLE config ADD COLUMN auto_grab_on_add INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
+
+    // prefer_subs: when true (default), penalize dual audio / dub releases in scoring.
+    sqlx::query("ALTER TABLE config ADD COLUMN prefer_subs INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
 
     sqlx::query(
         r#"

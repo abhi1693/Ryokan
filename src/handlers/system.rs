@@ -17,6 +17,7 @@ struct SystemTemplate {
     tab: String,
     force_mal_fallback: bool,
     force_kitsu_fallback: bool,
+    auto_grab_on_add: bool,
     debug_message: Option<String>,
     debug_error: Option<String>,
     logs: Vec<log::LogEntry>,
@@ -46,11 +47,13 @@ pub struct SystemQuery {
 pub struct DebugSettingsForm {
     force_mal_fallback: Option<String>,
     force_kitsu_fallback: Option<String>,
+    auto_grab_on_add: Option<String>,
 }
 
 fn normalize_system_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
-        Some("help") => "help".to_string(),
+        Some("scoring") => "scoring".to_string(),
+        Some("help") => "scoring".to_string(), // legacy alias
         Some("debug") => "debug".to_string(),
         Some("rss") => "rss".to_string(),
         Some("tasks") => "tasks".to_string(),
@@ -100,6 +103,7 @@ pub async fn system_page(
 
     let force_mal_fallback = cfg.as_ref().map(|cfg| cfg.force_mal_fallback).unwrap_or(false);
     let force_kitsu_fallback = cfg.as_ref().map(|cfg| cfg.force_kitsu_fallback).unwrap_or(false);
+    let auto_grab_on_add = cfg.as_ref().map(|cfg| cfg.auto_grab_on_add).unwrap_or(true);
     let rss_enabled = cfg.as_ref().map(|cfg| cfg.rss_enabled).unwrap_or(false);
     let rss_interval_minutes = cfg.as_ref().map(|cfg| cfg.rss_interval_minutes).unwrap_or(5);
     let rss_last_run = rss::latest_run(&state.db).await.unwrap_or(None);
@@ -126,6 +130,7 @@ rss::recent_decisions(&state.db, 500).await.unwrap_or_default()
         ("library", LogCategory::Library.label()),
         ("auth", LogCategory::Auth.label()),
         ("system", LogCategory::System.label()),
+        ("post_process", LogCategory::PostProcess.label()),
     ];
 
     let template = SystemTemplate {
@@ -133,6 +138,7 @@ rss::recent_decisions(&state.db, 500).await.unwrap_or_default()
         tab,
         force_mal_fallback,
         force_kitsu_fallback,
+        auto_grab_on_add,
         debug_message: params.message,
         debug_error: params.error,
         logs,
@@ -180,10 +186,13 @@ pub async fn debug_settings_submit(
             force_kitsu_fallback: false,
             post_processing_enabled: false,
             post_processing_mode: "hardlink".to_string(),
+            auto_grab_on_add: true,
+            prefer_subs: true,
         });
 
     cfg.force_mal_fallback = form.force_mal_fallback.is_some();
     cfg.force_kitsu_fallback = form.force_kitsu_fallback.is_some();
+    cfg.auto_grab_on_add = form.auto_grab_on_add.is_some();
 
     let result = config::save_config(&state.db, &cfg).await;
     let (message, error) = match result {
@@ -207,6 +216,7 @@ pub async fn debug_settings_submit(
         tab: "debug".to_string(),
         force_mal_fallback: cfg.force_mal_fallback,
         force_kitsu_fallback: cfg.force_kitsu_fallback,
+        auto_grab_on_add: cfg.auto_grab_on_add,
         debug_message: message,
         debug_error: error,
         logs: Vec::new(),
@@ -227,6 +237,7 @@ pub async fn debug_settings_submit(
             ("library", LogCategory::Library.label()),
             ("auth", LogCategory::Auth.label()),
             ("system", LogCategory::System.label()),
+            ("post_process", LogCategory::PostProcess.label()),
         ],
         rss_enabled: cfg.rss_enabled,
         rss_interval_minutes: cfg.rss_interval_minutes,

@@ -76,6 +76,11 @@ async fn build_opts(state: &AppState, query: String, category: String, filter: S
         .map(|c| c.preferred_resolution.clone())
         .unwrap_or_else(|| "1080".to_string());
 
+    let prefer_subs = config
+        .as_ref()
+        .map(|c| c.prefer_subs)
+        .unwrap_or(true);
+
     nyaa::SearchOptions {
         query,
         category: if category.is_empty() { "1_0".to_string() } else { category },
@@ -83,6 +88,7 @@ async fn build_opts(state: &AppState, query: String, category: String, filter: S
         user,
         preferred_groups,
         preferred_resolution: preferred_res,
+        prefer_subs,
     }
 }
 

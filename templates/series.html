@@ -47,12 +47,11 @@
         </div>
 
         <div class="detail-actions">
-            <button class="btn btn-primary" id="btn-search-nyaa" onclick="searchNyaa()">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-                Search Nyaa
-            </button>
-            <button class="btn btn-secondary" id="btn-auto-search" onclick="autoSearchSeries(this)">
+            <button class="btn btn-primary" id="btn-auto-search" onclick="autoSearchSeries(this)">
                 <span class="btn-label">Search Missing Episodes</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-search-batch" onclick="searchBatchReleases(this)">
+                <span class="btn-label">Search Batch Releases</span>
             </button>
             {% if is_tracked %}
                 {% if let Some(id) = db_id %}
@@ -150,9 +149,8 @@
 <!-- Episodes -->
 {% if !episodes.is_empty() || ep_total > 0 %}
 <div class="season-section">
-    <div class="season-header" onclick="toggleEpisodes()">
+    <div class="season-header">
         <div class="season-header-left">
-            <svg class="season-chevron" id="chevron-eps" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
             <h3 class="season-title">Episodes</h3>
             {% if ep_total > 0 %}
             <span class="season-badge {% if on_disk_count >= ep_total %}season-badge-complete{% else if on_disk_count > 0 %}season-badge-partial{% else %}season-badge-missing{% endif %}">
@@ -165,6 +163,23 @@
             <span class="season-size">{{ size_display }}</span>
             {% endif %}
         </div>
+        {% if is_tracked %}
+        {% if let Some(id) = db_id %}
+        <div class="season-header-actions">
+            <button class="monitor-all-btn {% if all_monitored %}is-active{% endif %}" type="button"
+                id="btn-monitor-all"
+                onclick="toggleMonitorAll({{ id }}, {{ all_monitored }})"
+                title="{% if all_monitored %}All monitored — click to unmonitor all{% else %}Click to monitor all episodes{% endif %}"
+                aria-label="Toggle monitor all episodes">
+                {% if all_monitored %}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+                {% else %}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+                {% endif %}
+            </button>
+        </div>
+        {% endif %}
+        {% endif %}
     </div>
     <div class="season-body" id="season-body-eps">
         {% if episodes.is_empty() %}
@@ -180,8 +195,7 @@
                     <th class="ep-col-monitor">Mon</th>
                     <th class="ep-col-title">Title</th>
                     <th class="ep-col-aired">Air Date</th>
-                    <th class="ep-col-quality">Status</th>
-                    <th class="ep-col-size">Size</th>
+                    <th class="ep-col-quality" style="text-align:center">Status</th>
                     <th class="ep-col-actions">Actions</th>
                 </tr>
             </thead>
@@ -200,36 +214,72 @@
                         {% endif %}
                     </td>
                     <td class="ep-col-num">{{ ep.number }}</td>
-                    <td class="ep-col-monitor">{% if ep.monitored %}<span class="tag tag-res">Yes</span>{% else %}<span class="ep-action-placeholder">—</span>{% endif %}</td>
+                    <td class="ep-col-monitor">
+                        {% if is_tracked %}
+                        {% if let Some(id) = db_id %}
+                        <button class="ep-mon-btn {% if ep.monitored %}ep-mon-yes{% else %}ep-mon-no{% endif %}" type="button"
+                            onclick="toggleEpisodeMonitor({{ id }}, {{ ep.number }}, {{ ep.monitored }}, this)"
+                            title="{% if ep.monitored %}Monitored — click to unmonitor{% else %}Not monitored — click to monitor{% endif %}">
+                            {% if ep.monitored %}Yes{% else %}No{% endif %}
+                        </button>
+                        {% endif %}
+                        {% else %}
+                        <span class="ep-action-placeholder">—</span>
+                        {% endif %}
+                    </td>
                     <td class="ep-col-title">
                         {% if !ep.title.is_empty() %}
-                        <span class="ep-title-name title-switcher">
-                            <span class="title-option" data-title-lang="english">{% if !ep.title_english.is_empty() %}{{ ep.title_english }}{% else if !ep.title_romaji.is_empty() %}{{ ep.title_romaji }}{% else if !ep.title_native.is_empty() %}{{ ep.title_native }}{% else %}{{ ep.title }}{% endif %}</span>
-                            <span class="title-option" data-title-lang="romaji">{% if !ep.title_romaji.is_empty() %}{{ ep.title_romaji }}{% else if !ep.title_english.is_empty() %}{{ ep.title_english }}{% else if !ep.title_native.is_empty() %}{{ ep.title_native }}{% else %}{{ ep.title }}{% endif %}</span>
-                            <span class="title-option" data-title-lang="native">{% if !ep.title_native.is_empty() %}{{ ep.title_native }}{% else if !ep.title_romaji.is_empty() %}{{ ep.title_romaji }}{% else if !ep.title_english.is_empty() %}{{ ep.title_english }}{% else %}{{ ep.title }}{% endif %}</span>
-                        </span>
-                        {% if !ep.filename.is_empty() %}
-                        <span class="ep-filename" title="{{ ep.filename }}">{{ ep.filename }}</span>
-                        {% endif %}
+                        <button class="ep-title-btn title-switcher" type="button"
+                            onclick="showEpisodeDetail({{ ep.number }}, this)"
+                            data-filename="{{ ep.filename }}"
+                            data-size="{{ ep.size_display }}"
+                            data-on-disk="{{ ep.on_disk }}">
+                            <span class="ep-title-name">
+                                <span class="title-option" data-title-lang="english">{% if !ep.title_english.is_empty() %}{{ ep.title_english }}{% else if !ep.title_romaji.is_empty() %}{{ ep.title_romaji }}{% else if !ep.title_native.is_empty() %}{{ ep.title_native }}{% else %}{{ ep.title }}{% endif %}</span>
+                                <span class="title-option" data-title-lang="romaji">{% if !ep.title_romaji.is_empty() %}{{ ep.title_romaji }}{% else if !ep.title_english.is_empty() %}{{ ep.title_english }}{% else if !ep.title_native.is_empty() %}{{ ep.title_native }}{% else %}{{ ep.title }}{% endif %}</span>
+                                <span class="title-option" data-title-lang="native">{% if !ep.title_native.is_empty() %}{{ ep.title_native }}{% else if !ep.title_romaji.is_empty() %}{{ ep.title_romaji }}{% else if !ep.title_english.is_empty() %}{{ ep.title_english }}{% else %}{{ ep.title }}{% endif %}</span>
+                            </span>
+                        </button>
                         {% else if !ep.filename.is_empty() %}
-                        <span class="ep-filename" title="{{ ep.filename }}">{{ ep.filename }}</span>
+                        <button class="ep-title-btn" type="button"
+                            onclick="showEpisodeDetail({{ ep.number }}, this)"
+                            data-filename="{{ ep.filename }}"
+                            data-size="{{ ep.size_display }}"
+                            data-on-disk="{{ ep.on_disk }}">
+                            <span class="ep-missing-text">Episode {{ ep.number }}</span>
+                        </button>
                         {% else %}
                         <span class="ep-missing-text">Episode {{ ep.number }}</span>
                         {% endif %}
                     </td>
                     <td class="ep-col-aired">{{ ep.aired }}</td>
-                    <td class="ep-col-quality">
-                        {% if !ep.quality.is_empty() %}
-                        <span class="tag tag-quality">{{ ep.quality }}</span>
-                        {% else if !ep.on_disk %}
+                    <td class="ep-col-quality" style="text-align:center"
+                        {% if ep.quality_state == "grabbed" %}data-original-html="<span class='tag tag-quality-grabbed'>{{ ep.quality }}</span>"{% endif %}>
+                        {% if ep.quality_state == "grabbed" %}
+                        <div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>
+                        {% else if !ep.quality.is_empty() %}
+                            {% if ep.quality_state == "failed" %}
+                            <span class="tag tag-quality-failed">{{ ep.quality }} ✗</span>
+                            {% else %}
+                            <span class="tag tag-quality">{{ ep.quality }}</span>
+                            {% endif %}
+                        {% else if ep.on_disk %}
+                        <span class="tag tag-quality">UNKNOWN</span>
+                        {% else %}
                         <span class="ep-missing-label">Missing</span>
                         {% endif %}
                     </td>
-                    <td class="ep-col-size">{{ ep.size_display }}</td>
                     <td class="ep-col-actions">
                         {% if ep.can_auto_search %}
-                        <button class="icon-btn btn-episode-search" type="button" onclick="autoSearchEpisode({{ ep.number }}, this)" title="Search episode {{ ep.number }}" aria-label="Search episode {{ ep.number }}">
-                            <span class="icon-btn-inner">⏳</span>
+                        <button class="icon-btn btn-episode-search" type="button" onclick="autoSearchEpisode({{ ep.number }}, this)" title="Auto search episode {{ ep.number }}" aria-label="Auto search episode {{ ep.number }}" style="margin-right:4px">
+                            <span class="icon-btn-inner">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                            </span>
+                        </button>
+                        <button class="icon-btn btn-episode-isearch" type="button" onclick="openInteractiveSearch({{ ep.number }}, this)" title="Interactive search episode {{ ep.number }}" aria-label="Interactive search episode {{ ep.number }}">
+                            <span class="icon-btn-inner">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="5"/><line x1="12" y1="12" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+                            </span>
                         </button>
                         {% else %}
                         <span class="ep-action-placeholder">—</span>
@@ -244,6 +294,42 @@
 </div>
 {% endif %}
 
+<!-- Episode detail popup -->
+<div class="modal-backdrop" id="ep-detail-modal" style="display:none" onclick="closeEpisodeDetail(event)">
+    <div class="modal modal-ep" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h3 id="ep-detail-title">Episode</h3>
+            <button class="btn-icon" onclick="document.getElementById('ep-detail-modal').style.display='none'">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div id="ep-detail-body" class="ep-detail-info"></div>
+        </div>
+        <div class="modal-footer" id="ep-detail-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;align-items:center">
+            <button class="btn-delete-file" id="btn-delete-file" style="display:none" onclick="deleteEpisodeFile()">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
+                Delete File
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Interactive Search Modal -->
+<div class="modal-backdrop" id="isearch-modal" style="display:none" onclick="closeInteractiveSearch(event)">
+    <div class="modal modal-ep" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h3 id="isearch-title">Interactive Search</h3>
+            <button class="btn-icon" onclick="document.getElementById('isearch-modal').style.display='none'">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body is-modal-scroll" id="isearch-body">
+            <div style="text-align:center;color:var(--text-dim);padding:32px">Searching…</div>
+        </div>
+    </div>
+</div>
+
 <div id="series-data" hidden
     data-id="{{ route_id }}"
     data-title-romaji="{{ detail.title_romaji }}"
@@ -257,6 +343,8 @@
     data-db-id="{% if let Some(id) = db_id %}{{ id }}{% endif %}"
     data-provider-id="{{ detail.id }}"
     data-mal-id="{% if let Some(id) = detail.id_mal %}{{ id }}{% endif %}"
+    data-media-root="{{ media_root }}"
+    data-folder-name="{{ folder_name }}"
 ></div>
 
 <script>
@@ -283,23 +371,334 @@ function applyTitleLanguage(lang) {
     });
 }
 
-function toggleEpisodes() {
-    const body = document.getElementById('season-body-eps');
-    const chevron = document.getElementById('chevron-eps');
-    if (body.style.display === 'none') {
-        body.style.display = '';
-        chevron.style.transform = 'rotate(0deg)';
+function toggleMonitorAll(dbId, currentlyAllMonitored) {
+    if (!dbId) return;
+    const btn = document.getElementById('btn-monitor-all');
+    const summary = document.getElementById('monitor-summary');
+    const newMode = currentlyAllMonitored ? 'none' : 'all';
+    if (btn) btn.disabled = true;
+    if (summary) summary.textContent = 'Updating…';
+    fetch('/api/library/monitoring', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ series_id: dbId, monitor_mode: newMode })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Failed');
+        const newState = newMode === 'all';
+        // Update all monitor buttons in the table
+        document.querySelectorAll('.ep-mon-btn').forEach(monBtn => {
+            monBtn.textContent = newState ? 'Yes' : 'No';
+            monBtn.className = 'ep-mon-btn ' + (newState ? 'ep-mon-yes' : 'ep-mon-no');
+            monBtn.title = newState ? 'Monitored — click to unmonitor' : 'Not monitored — click to monitor';
+        });
+        // Update the monitor-all button
+        if (btn) {
+            btn.disabled = false;
+            btn.classList.toggle('is-active', newState);
+            btn.onclick = function() { toggleMonitorAll(dbId, newState); };
+            btn.title = newState ? 'All monitored — click to unmonitor all' : 'Click to monitor all episodes';
+            btn.innerHTML = newState
+                ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>'
+                : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>';
+        }
+        if (summary) summary.textContent = `${data.monitor_mode_label || newMode} · ${data.monitored_count || 0} monitored`;
+        // Update the select dropdown
+        const select = document.getElementById('monitor-mode');
+        if (select) select.value = newMode;
+    })
+    .catch(err => {
+        if (summary) summary.textContent = err.message || 'Failed to update monitoring';
+        if (btn) btn.disabled = false;
+    });
+}
+
+// Legacy alias used in older code paths.
+function monitorAll(dbId) { toggleMonitorAll(dbId, false); }
+
+function toggleEpisodeMonitor(dbId, epNum, currentlyMonitored, btn) {
+    const newState = !currentlyMonitored;
+    btn.disabled = true;
+    fetch('/api/library/episode-monitoring', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ series_id: dbId, episode_number: epNum, monitored: newState })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Failed');
+        btn.textContent = newState ? 'Yes' : 'No';
+        btn.className = 'ep-mon-btn ' + (newState ? 'ep-mon-yes' : 'ep-mon-no');
+        btn.title = newState ? 'Monitored — click to unmonitor' : 'Not monitored — click to monitor';
+        btn.onclick = function() { toggleEpisodeMonitor(dbId, epNum, newState, btn); };
+    })
+    .catch(err => {
+        console.error('Failed to toggle episode monitoring:', err);
+    })
+    .finally(() => {
+        btn.disabled = false;
+    });
+}
+
+let _currentEpNum = null;
+
+function showEpisodeDetail(epNum, btn) {
+    const filename = btn.dataset.filename || '';
+    const size = btn.dataset.size || '';
+    const onDisk = btn.dataset.onDisk === 'true';
+    const modal = document.getElementById('ep-detail-modal');
+    const titleEl = document.getElementById('ep-detail-title');
+    const body = document.getElementById('ep-detail-body');
+    const deleteBtn = document.getElementById('btn-delete-file');
+    _currentEpNum = epNum;
+    titleEl.textContent = 'Episode ' + epNum;
+
+    // Show/hide delete button
+    if (deleteBtn) deleteBtn.style.display = onDisk ? '' : 'none';
+
+    if (onDisk && filename) {
+        const mediaRoot = document.getElementById('series-data').dataset.mediaRoot || '';
+        const folderName = document.getElementById('series-data').dataset.folderName || '';
+        const fullPath = [mediaRoot, folderName, filename].filter(Boolean).join('/');
+        body.innerHTML =
+            '<div class="ep-detail-two-col">' +
+            '<div class="ep-detail-row ep-detail-full"><span class="ep-detail-label">File</span><span class="ep-detail-value ep-detail-path">' + escHtml(fullPath) + '</span></div>' +
+            (size ? '<div class="ep-detail-row"><span class="ep-detail-label">Size</span><span class="ep-detail-value">' + escHtml(size) + '</span></div>' : '') +
+            '</div>' +
+            '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
     } else {
-        body.style.display = 'none';
-        chevron.style.transform = 'rotate(-90deg)';
+        body.innerHTML =
+            '<div class="ep-detail-row"><span class="ep-detail-label">Status</span><span class="ep-detail-value" style="color:var(--text-dim)">Not on disk</span></div>' +
+            '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
+    }
+    modal.style.display = 'flex';
+
+    // Load grab history
+    if (SD.dbId) {
+        fetch(`/api/series/${SD.id}/grab-history/${epNum}`)
+            .then(r => r.json())
+            .then(entries => renderGrabHistory(entries, epNum))
+            .catch(() => {
+                const el = document.getElementById('grab-history-body');
+                if (el) el.textContent = 'No history.';
+            });
     }
 }
 
-function searchNyaa() {
-    const title = SD.titleRomaji;
-    window.location.href = `/search?prefill=${encodeURIComponent(title)}`;
+function renderGrabHistory(entries, epNum) {
+    const el = document.getElementById('grab-history-body');
+    if (!el) return;
+    if (!entries || !entries.length) {
+        el.textContent = 'No grab history.';
+        return;
+    }
+    let html = '<table class="grab-history-table"><thead><tr><th>Quality</th><th>Release</th><th>Group</th><th>Date</th><th>State</th><th></th></tr></thead><tbody>';
+    for (const e of entries) {
+        const stateClass = e.state === 'failed' ? 'grab-state-failed' : e.state === 'removed' ? 'grab-state-removed' : 'grab-state-grabbed';
+        const canFail = e.state === 'grabbed';
+        html += `<tr>
+            <td>${escHtml(e.quality_tag)}</td>
+            <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.release_title)}">${escHtml(e.release_title)}</td>
+            <td>${escHtml(e.release_group)}</td>
+            <td style="white-space:nowrap;color:var(--text-dim)">${escHtml(e.grabbed_at)}</td>
+            <td class="${stateClass}">${escHtml(e.state)}</td>
+            <td>${canFail ? `<button class="btn-mark-failed" onclick="markEpisodeFailed(${e.id}, ${epNum}, this)">Mark Failed</button>` : ''}</td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
 }
 
+function markEpisodeFailed(historyId, epNum, btn) {
+    if (!confirm('Mark this grab as failed and re-search for the episode?')) return;
+    btn.disabled = true;
+    btn.textContent = 'Searching…';
+    const status = document.getElementById('auto-search-status');
+    fetch(`/api/series/${SD.id}/mark-failed/${epNum}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ history_id: historyId })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Failed');
+        const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
+        if (status) status.textContent = grabbed > 0 ? `Re-grabbed episode ${epNum}` : `No replacement found for episode ${epNum}`;
+        btn.textContent = grabbed > 0 ? 'Re-grabbed' : 'No result';
+        if (grabbed > 0) {
+            const first = data.grabbed[0];
+            updateEpisodeRow(epNum, 'grabbed', first.release_group);
+        }
+        // Refresh the grab history in the modal
+        if (SD.dbId) {
+            fetch(`/api/series/${SD.id}/grab-history/${epNum}`)
+                .then(r => r.json())
+                .then(entries => renderGrabHistory(entries, epNum))
+                .catch(() => {});
+        }
+    })
+    .catch(err => {
+        if (status) status.textContent = err.message || 'Failed to mark as failed';
+        btn.disabled = false;
+        btn.textContent = 'Mark Failed';
+    });
+}
+
+function deleteEpisodeFile() {
+    const epNum = _currentEpNum;
+    if (!epNum) return;
+    if (!confirm(`Delete the file for Episode ${epNum} from disk? This cannot be undone.`)) return;
+    const btn = document.getElementById('btn-delete-file');
+    if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+    const status = document.getElementById('auto-search-status');
+    fetch(`/api/series/${SD.id}/delete-file/${epNum}`, { method: 'POST', headers: {'Content-Type': 'application/json'} })
+        .then(async r => {
+            let data = {};
+            try { data = await r.json(); } catch (_) {}
+            if (!r.ok) throw new Error(data.message || 'Delete failed');
+            if (status) status.textContent = `Episode ${epNum} file deleted.`;
+            document.getElementById('ep-detail-modal').style.display = 'none';
+            updateEpisodeRow(epNum, 'deleted');
+        })
+        .catch(err => {
+            if (status) status.textContent = err.message || 'Delete failed';
+            if (btn) { btn.disabled = false; btn.textContent = 'Delete File'; }
+        });
+}
+
+function closeEpisodeDetail(e) {
+    const modal = document.getElementById('ep-detail-modal');
+    if (e && e.target !== modal) return;
+    modal.style.display = 'none';
+}
+
+function escHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+}
+
+function searchBatchReleases(btn) {
+    const status = document.getElementById('auto-search-status');
+    setBusyButton(btn, true, 'Searching…');
+    status.textContent = 'Searching for batch releases…';
+    fetch(`/api/series/${SD.id}/search-batch`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+    })
+    .then(async resp => {
+        let data = {};
+        try { data = await resp.json(); } catch (_) {}
+        if (!resp.ok) throw new Error(data.message || (resp.status === 404 ? 'No batch release found' : 'Batch search failed'));
+        const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
+        status.textContent = grabbed > 0
+            ? `Batch queued: ${data.grabbed[0].release_title}`
+            : 'No batch release found';
+        setBusyButton(btn, false);
+    })
+    .catch(err => {
+        status.textContent = err.message || 'Batch search failed';
+        setBusyButton(btn, false);
+    });
+}
+
+let _isearchEpNum = null;
+let _isearchResults = [];
+
+function openInteractiveSearch(epNum, btn) {
+    _isearchEpNum = epNum;
+    _isearchResults = [];
+    const modal = document.getElementById('isearch-modal');
+    const titleEl = document.getElementById('isearch-title');
+    const body = document.getElementById('isearch-body');
+    titleEl.textContent = `Interactive Search — Episode ${epNum}`;
+    body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">Searching…</div>';
+    modal.style.display = 'flex';
+
+    fetch(`/api/series/${SD.id}/interactive-search/${epNum}`)
+        .then(r => r.json())
+        .then(results => {
+            _isearchResults = results || [];
+            renderInteractiveResults(_isearchResults, epNum);
+        })
+        .catch(err => {
+            body.innerHTML = `<div style="text-align:center;color:var(--red);padding:32px">${escHtml(err.message || 'Search failed')}</div>`;
+        });
+}
+
+function renderInteractiveResults(results, epNum) {
+    const body = document.getElementById('isearch-body');
+    if (!body) return;
+    if (!results || !results.length) {
+        body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">No results found.</div>';
+        return;
+    }
+    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th>Group</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
+    results.forEach((r, idx) => {
+        const batchTag = r.is_batch ? '<span class="tag tag-batch" style="margin-left:4px">batch</span>' : '';
+        const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
+        const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
+        html += `<tr>
+            <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
+            <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
+            <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
+            <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
+            <td class="col-seeds"><span class="seed-count">${r.seeders}</span></td>
+            <td class="col-grab"><button class="btn-grab" data-idx="${idx}" onclick="grabInteractiveResult(${epNum}, ${idx}, this)">Grab</button></td>
+        </tr>`;
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+}
+
+function grabInteractiveResult(epNum, idx, btn) {
+    const result = _isearchResults[idx];
+    if (!result) return;
+    btn.disabled = true;
+    btn.textContent = 'Grabbing…';
+    const url = result.magnet || result.torrent || '';
+    fetch(`/api/series/${SD.id}/grab/${epNum}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            url,
+            title: result.title,
+            group: result.group,
+            resolution: result.resolution,
+            info_hash: result.info_hash
+        })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Grab failed');
+        btn.textContent = 'Sent';
+        btn.classList.add('btn-success');
+        const status = document.getElementById('auto-search-status');
+        if (status) status.textContent = `Episode ${epNum} queued: ${result.title}`;
+        // Update the episode row to show grabbed state
+        updateEpisodeRow(epNum, 'grabbed', result.group);
+        // Close the modal after a short delay
+        setTimeout(() => {
+            document.getElementById('isearch-modal').style.display = 'none';
+        }, 600);
+    })
+    .catch(err => {
+        btn.textContent = 'Error';
+        btn.classList.add('btn-error');
+        btn.disabled = false;
+    });
+}
+
+function closeInteractiveSearch(e) {
+    const modal = document.getElementById('isearch-modal');
+    if (e && e.target !== modal) return;
+    modal.style.display = 'none';
+}
 
 function setBusyButton(btn, busy, busyLabel) {
     if (!btn) return;
@@ -312,6 +711,10 @@ function setBusyButton(btn, busy, busyLabel) {
     }
 }
 
+const SEARCH_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
+const SUCCESS_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
+const ERROR_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
+
 function setEpisodeButtonState(btn, state, title) {
     if (!btn) return;
     btn.disabled = state === 'loading';
@@ -319,19 +722,19 @@ function setEpisodeButtonState(btn, state, title) {
     const inner = btn.querySelector('.icon-btn-inner');
     if (state === 'loading') {
         btn.classList.add('is-loading');
-        if (inner) inner.textContent = '⏳';
+        if (inner) inner.innerHTML = '<span class="ep-search-spinner"></span>';
         btn.title = title || 'Searching...';
     } else if (state === 'success') {
         btn.classList.add('is-success');
-        if (inner) inner.textContent = '✓';
+        if (inner) inner.innerHTML = SUCCESS_ICON_SVG;
         btn.title = title || 'Queued';
     } else if (state === 'error') {
         btn.classList.add('is-error');
-        if (inner) inner.textContent = '!';
+        if (inner) inner.innerHTML = ERROR_ICON_SVG;
         btn.title = title || 'Search failed';
         setBusyButton(btn, false);
     } else {
-        if (inner) inner.textContent = '⏳';
+        if (inner) inner.innerHTML = SEARCH_ICON_SVG;
         btn.title = title || btn.title;
         setBusyButton(btn, false);
     }
@@ -356,8 +759,7 @@ function autoSearchEpisode(episodeNumber, btn) {
         if (first) {
             setEpisodeButtonState(btn, 'success', `Queued: ${first.release_title}`);
             status.textContent = `Episode ${episodeNumber} queued${first.release_group ? ` · ${first.release_group}` : ''}`;
-            const row = btn.closest('tr');
-            if (row) row.classList.add('ep-row-queued');
+            updateEpisodeRow(episodeNumber, 'grabbed', first.release_group);
         } else {
             setEpisodeButtonState(btn, 'error', 'No matching release found');
             status.textContent = `Episode ${episodeNumber}: no matching release found`;
@@ -420,6 +822,8 @@ function setMonitoring(mode) {
     })
     .then(data => {
         if (summary) summary.textContent = `${data.monitor_mode_label || mode} · ${data.monitored_count || 0} monitored`;
+        if (select) select.disabled = false;
+        // Reload to reflect per-episode monitoring changes since they depend on server-side logic
         location.reload();
     })
     .catch(err => {
@@ -430,6 +834,7 @@ function setMonitoring(mode) {
 
 function addSeries() {
     const btn = document.getElementById('btn-track');
+    const status = document.getElementById('auto-search-status');
     btn.disabled = true;
     btn.textContent = '...';
 
@@ -455,10 +860,16 @@ function addSeries() {
         if (!r.ok) throw new Error(data.message || 'Add failed');
         return data;
     })
-    .then(() => {
+    .then(data => {
         btn.textContent = 'Added';
         btn.className = 'btn btn-success';
-        setTimeout(() => location.reload(), 400);
+        if (data.hydrating) {
+            if (status) status.textContent = 'Added to library. Auto-searching episodes…';
+            // Reload after a longer delay to allow auto-grab to start
+            setTimeout(() => location.reload(), 4000);
+        } else {
+            setTimeout(() => location.reload(), 400);
+        }
     })
     .catch(() => {
         btn.textContent = 'Error';
@@ -491,7 +902,112 @@ function removeSeries(dbId) {
         btn.className = 'btn btn-danger';
     });
 }
+function updateEpisodeRow(epNum, state, group) {
+    const rows = document.querySelectorAll('.episode-table tbody tr');
+    for (const row of rows) {
+        const numCell = row.querySelector('.ep-col-num');
+        if (!numCell || parseInt(numCell.textContent.trim()) !== epNum) continue;
+
+        if (state === 'grabbed') {
+            row.classList.add('ep-row-queued');
+            const qualityCell = row.querySelector('.ep-col-quality');
+            if (qualityCell) {
+                // Show a 0% progress bar immediately; the download poller will update it
+                if (!qualityCell.dataset.originalHtml) {
+                    qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                }
+                qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
+            }
+        } else if (state === 'deleted') {
+            row.classList.remove('ep-row-have');
+            row.classList.add('ep-row-missing');
+            const statusCell = row.querySelector('.ep-col-status');
+            if (statusCell) {
+                statusCell.innerHTML = '<span class="ep-status-icon ep-missing" title="Missing"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>';
+            }
+            const qualityCell = row.querySelector('.ep-col-quality');
+            if (qualityCell) {
+                qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+            }
+        }
+        break;
+    }
+}
+
 applyTitleLanguage(localStorage.getItem('titleLanguage') || SD.titleLanguage || 'english');
 window.addEventListener('storage', () => applyTitleLanguage(localStorage.getItem('titleLanguage') || SD.titleLanguage || 'english'));
+
+// --- Episode download progress polling ---
+let dlPollTimer = null;
+let dlPollActive = false;
+
+function formatDlSpeed(bps) {
+    if (bps <= 0) return '';
+    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    const i = Math.floor(Math.log(bps) / Math.log(1024));
+    return (bps / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+function pollDownloadProgress() {
+    if (!SD.dbId) return;
+    fetch(`/api/series/${SD.id}/download-progress`)
+        .then(r => r.ok ? r.json() : [])
+        .then(items => {
+            // Note: stale progress bars are cleaned up per-row below
+
+            if (!items || items.length === 0) {
+                if (dlPollActive) {
+                    dlPollActive = false;
+                    clearInterval(dlPollTimer);
+                    dlPollTimer = null;
+                }
+                return;
+            }
+
+            const rows = document.querySelectorAll('.episode-table tbody tr');
+            const epMap = {};
+            for (const item of items) {
+                epMap[item.episode] = item;
+            }
+
+            for (const row of rows) {
+                const numCell = row.querySelector('.ep-col-num');
+                if (!numCell) continue;
+                const ep = parseInt(numCell.textContent.trim());
+                const item = epMap[ep];
+                const qualityCell = row.querySelector('.ep-col-quality');
+                if (!qualityCell) continue;
+
+                if (!item) {
+                    // Restore original content if we previously replaced it
+                    if (qualityCell.dataset.originalHtml && qualityCell.querySelector('.dl-progress-wrap')) {
+                        qualityCell.innerHTML = qualityCell.dataset.originalHtml;
+                        delete qualityCell.dataset.originalHtml;
+                    }
+                    continue;
+                }
+
+                const pct = (item.progress * 100).toFixed(1);
+                const isComplete = item.state.includes('UP') || item.state === 'uploading';
+
+                if (!isComplete) {
+                    // Save original content so we can restore it later
+                    if (!qualityCell.dataset.originalHtml) {
+                        qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                    }
+                    // Replace the entire cell content with a progress bar
+                    qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;
+                }
+            }
+        })
+        .catch(() => {});
+}
+
+// Start polling if the series is tracked
+if (SD.dbId) {
+    pollDownloadProgress();
+    dlPollActive = true;
+    dlPollTimer = setInterval(pollDownloadProgress, 5000);
+}
 </script>
 {% endblock %}

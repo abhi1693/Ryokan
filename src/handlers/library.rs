@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
-use crate::models::{config, local_metadata, metadata_cache, monitoring, series};
+use crate::models::{config, episode_tags, local_metadata, metadata_cache, monitoring, series};
 use crate::models::log::LogCategory;
 use crate::services::{anilist, artwork, auto_search, jikan, kitsu, logger, media, metadata_sync, monitoring as monitoring_service};
 use crate::AppState;
@@ -41,6 +41,7 @@ struct SeriesTemplate {
     monitor_mode: String,
     monitor_mode_label: String,
     monitored_count: i32,
+    all_monitored: bool,
 }
 
 #[derive(Template)]
@@ -62,6 +63,7 @@ pub struct Episode {
     pub aired: String,
     pub on_disk: bool,
     pub quality: String,
+    pub quality_state: String,  // "disk", "grabbed", "failed", or ""
     pub size_display: String,
     pub filename: String,
     pub can_auto_search: bool,
@@ -122,6 +124,18 @@ pub struct SetFolderForm {
 pub struct SetMonitoringForm {
     series_id: i64,
     monitor_mode: String,
+}
+
+#[derive(Deserialize)]
+pub struct SetEpisodeMonitoringForm {
+    series_id: i64,
+    episode_number: i32,
+    monitored: bool,
+}
+
+#[derive(Deserialize)]
+pub struct MarkEpisodeFailedForm {
+    history_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -465,6 +479,7 @@ pub async fn series_detail(
         )
     };
 
+    let all_monitored = ep_total > 0 && monitored_count >= ep_total;
     let template = SeriesTemplate {
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
@@ -484,6 +499,7 @@ pub async fn series_detail(
         monitor_mode,
         monitor_mode_label,
         monitored_count,
+        all_monitored,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -565,6 +581,14 @@ async fn build_episodes(
     } else {
         std::collections::HashSet::new()
     };
+
+    let quality_tags = if let Some(id) = db_id {
+        episode_tags::get_for_series(db, id).await.unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let is_tracked = db_id.is_some();
 
     let mut episodes = Vec::new();
     let mut on_disk_count = 0i32;
@@ -721,6 +745,15 @@ async fn build_episodes(
             monitored_count += 1;
         }
 
+        // Quality display: disk file quality takes precedence; fall back to grab tag.
+        let (display_quality, quality_state) = if !quality.is_empty() {
+            (quality.clone(), "disk".to_string())
+        } else if let Some(tag) = quality_tags.get(&ep_num) {
+            (tag.quality_tag.clone(), tag.state.clone())
+        } else {
+            (String::new(), String::new())
+        };
+
         episodes.push(Episode {
             number: ep_num,
             title: ep_title,
@@ -729,10 +762,11 @@ async fn build_episodes(
             title_native: ep_title_native,
             aired: ep_aired,
             on_disk,
-            quality,
+            quality: display_quality,
+            quality_state,
             size_display,
             filename,
-            can_auto_search: !on_disk && monitored,
+            can_auto_search: is_tracked,
             monitored,
         });
     }
@@ -745,6 +779,13 @@ async fn build_episodes(
             if monitored {
                 monitored_count += 1;
             }
+            let (display_quality, quality_state) = if !f.quality.is_empty() {
+                (f.quality.clone(), "disk".to_string())
+            } else if let Some(tag) = quality_tags.get(&f.episode_number) {
+                (tag.quality_tag.clone(), tag.state.clone())
+            } else {
+                (String::new(), String::new())
+            };
             episodes.push(Episode {
                 number: f.episode_number,
                 title: String::new(),
@@ -753,10 +794,11 @@ async fn build_episodes(
                 title_native: String::new(),
                 aired: String::new(),
                 on_disk: true,
-                quality: f.quality.clone(),
+                quality: display_quality,
+                quality_state,
                 size_display: f.size_display.clone(),
                 filename: f.filename.clone(),
-                can_auto_search: false,
+                can_auto_search: is_tracked,
                 monitored,
             });
         }
@@ -1151,6 +1193,30 @@ pub async fn add_series(
 
     let monitor = monitoring_service::recompute_series_monitoring(&state.db, id).await.ok();
 
+    // Auto-grab monitored episodes after adding, if the setting is enabled.
+    let auto_grab_on_add = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.auto_grab_on_add)
+        .unwrap_or(true);
+
+    if auto_grab_on_add && state.qbit.read().await.is_some() {
+        let state_clone = state.clone();
+        let series_route_id = id;
+        tokio::spawn(async move {
+            // Small delay to let metadata hydration get started.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            match auto_search_series(
+                axum::extract::State(state_clone),
+                axum::extract::Path(series_route_id),
+            ).await {
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        });
+    }
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "id": id,
@@ -1228,6 +1294,20 @@ pub async fn set_monitoring(
     })))
 }
 
+pub async fn set_episode_monitoring(
+    State(state): State<AppState>,
+    Json(form): Json<SetEpisodeMonitoringForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    monitoring::set_episode_monitored(&state.db, form.series_id, form.episode_number, form.monitored)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "episode_number": form.episode_number,
+        "monitored": form.monitored,
+    })))
+}
+
 pub async fn list_folders(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<String>>, (axum::http::StatusCode, String)> {
@@ -1276,6 +1356,8 @@ async fn run_auto_search_targets(
             force_kitsu_fallback: false,
             post_processing_enabled: false,
             post_processing_mode: "hardlink".to_string(),
+            auto_grab_on_add: true,
+            prefer_subs: true,
         });
 
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
@@ -1328,6 +1410,18 @@ async fn run_auto_search_targets(
                                 sid,
                                 &ep_nums,
                             ).await;
+                            // Record quality tag for display in episode table.
+                            let detected_tier_for_tag = crate::services::quality::detect_tier(&result.title, &result.resolution);
+                            for ep_num in &ep_nums {
+                                let _ = episode_tags::record_grab(
+                                    &state.db,
+                                    sid,
+                                    *ep_num,
+                                    detected_tier_for_tag.label(),
+                                    &result.title,
+                                    &result.group,
+                                ).await;
+                            }
                         }
                     }
                     Err(e) => {
@@ -1401,6 +1495,8 @@ pub async fn auto_search_series(
             force_kitsu_fallback: false,
             post_processing_enabled: false,
             post_processing_mode: "hardlink".to_string(),
+            auto_grab_on_add: true,
+            prefer_subs: true,
         });
 
     let (tracked_row, provider_id, detail) = resolve_series_context(&state.db, request_id)
@@ -1462,13 +1558,8 @@ pub async fn auto_search_episode(
 
     let series_id_for_grab: Option<i64> = tracked_row.as_ref().map(|s| s.id);
 
-    if let Some(tracked) = tracked_row {
-        let monitored_eps = monitoring::get_monitored_episode_numbers(&state.db, tracked.id)
-            .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        if !monitored_eps.contains(&episode_number) {
-            return Err((axum::http::StatusCode::BAD_REQUEST, format!("Episode {} is not monitored ({})", episode_number, tracked.monitor_mode_enum().label())));
-        }
+    if let Some(_tracked) = tracked_row {
+        // Monitoring status does not block manual episode searches.
     } else if matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA") && episode_number != 1 {
         return Err((axum::http::StatusCode::BAD_REQUEST, "Single-entry media can only search episode 1".to_string()));
     }
@@ -1488,4 +1579,377 @@ pub async fn auto_search_episode(
     )
     .await?;
     Ok(Json(report))
+}
+
+/// Search batch releases only for a series (no single-episode grabs).
+pub async fn search_batch_releases(
+    State(state): State<AppState>,
+    Path(request_id): Path<i64>,
+) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let series_id_for_grab = tracked_row.as_ref().map(|s| s.id);
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or(crate::models::config::Config {
+            qbit_url: String::new(),
+            qbit_user: String::new(),
+            qbit_pass: String::new(),
+            qbit_category: String::new(),
+            qbit_download_path: String::new(),
+            jellyfin_url: String::new(),
+            jellyfin_api_key: String::new(),
+            preferred_groups: String::new(),
+            blocked_groups: String::new(),
+            preferred_resolution: "1080".to_string(),
+            quality_profile: "web_1080".to_string(),
+            quality_cutoff: "bd_1080".to_string(),
+            finished_series_quality: "prefer_bd".to_string(),
+            media_root: String::new(),
+            title_language: "english".to_string(),
+            force_mal_fallback: false,
+            rss_enabled: false,
+            rss_interval_minutes: 5,
+            force_kitsu_fallback: false,
+            post_processing_enabled: false,
+            post_processing_mode: "hardlink".to_string(),
+            auto_grab_on_add: true,
+            prefer_subs: true,
+        });
+
+    // Use auto_search::find_best_for_target with batch allowed; then grab if found.
+    let best = auto_search::find_best_for_target(
+        &detail,
+        &cfg,
+        &auto_search::SearchTarget::Single,
+        true,
+    ).await;
+
+    // We want batch-only, so filter.
+    let best = best.filter(|r| r.is_batch);
+
+    let qbit = {
+        let qbit = state.qbit.read().await;
+        qbit.as_ref()
+            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .clone()
+    };
+
+    match best {
+        None => Err((axum::http::StatusCode::NOT_FOUND, "No batch release found".to_string())),
+        Some(result) => {
+            let url = if !result.magnet.is_empty() { result.magnet.clone() } else { result.torrent.clone() };
+            if url.is_empty() {
+                return Err((axum::http::StatusCode::BAD_GATEWAY, "No magnet/torrent URL for batch release".to_string()));
+            }
+            qbit.add_torrent(&url).await
+                .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+            let tier = crate::services::quality::detect_tier(&result.title, &result.resolution);
+            logger::info(
+                &state.db,
+                LogCategory::Grab,
+                &format!("Grabbed batch: {}", result.title),
+                &format!("group={}, score={}, tier={}", result.group, result.score, tier.label()),
+            ).await;
+            if let Some(sid) = series_id_for_grab {
+                let _ = crate::models::grabbed_torrents::record_grab(
+                    &state.db, &result.info_hash, &result.title, sid, &[],
+                ).await;
+            }
+            Ok(Json(auto_search::AutoSearchReport {
+                grabbed: vec![auto_search::AutoSearchHit {
+                    target_label: "Batch".to_string(),
+                    release_title: result.title,
+                    release_group: result.group,
+                    quality_tier: tier.label().to_string(),
+                    url,
+                    score: result.score,
+                }],
+                skipped: vec![],
+                quality_profile: cfg.quality_profile,
+            }))
+        }
+    }
+}
+
+/// Interactive search: return all scored candidates for an episode without grabbing.
+pub async fn interactive_search_episode(
+    State(state): State<AppState>,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+) -> Result<Json<Vec<crate::services::nyaa::SearchResult>>, (axum::http::StatusCode, String)> {
+    let (_, _, detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or(crate::models::config::Config {
+            qbit_url: String::new(),
+            qbit_user: String::new(),
+            qbit_pass: String::new(),
+            qbit_category: String::new(),
+            qbit_download_path: String::new(),
+            jellyfin_url: String::new(),
+            jellyfin_api_key: String::new(),
+            preferred_groups: String::new(),
+            blocked_groups: String::new(),
+            preferred_resolution: "1080".to_string(),
+            quality_profile: "web_1080".to_string(),
+            quality_cutoff: "bd_1080".to_string(),
+            finished_series_quality: "prefer_bd".to_string(),
+            media_root: String::new(),
+            title_language: "english".to_string(),
+            force_mal_fallback: false,
+            rss_enabled: false,
+            rss_interval_minutes: 5,
+            force_kitsu_fallback: false,
+            post_processing_enabled: false,
+            post_processing_mode: "hardlink".to_string(),
+            auto_grab_on_add: true,
+            prefer_subs: true,
+        });
+
+    let results = auto_search::find_all_for_target(
+        &detail,
+        &cfg,
+        &auto_search::SearchTarget::Episode(episode_number),
+        false,
+    ).await;
+
+    Ok(Json(results))
+}
+
+/// Grab a specific release chosen from the interactive search.
+pub async fn grab_interactive_result(
+    State(state): State<AppState>,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let (tracked_row, _, _detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let series_id = tracked_row.as_ref().map(|s| s.id);
+    let url = body["url"].as_str().unwrap_or("").to_string();
+    let title = body["title"].as_str().unwrap_or("").to_string();
+    let group = body["group"].as_str().unwrap_or("").to_string();
+    let resolution = body["resolution"].as_str().unwrap_or("").to_string();
+    let info_hash = body["info_hash"].as_str().unwrap_or("").to_string();
+
+    if url.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "No URL provided".to_string()));
+    }
+
+    let qbit = {
+        let qbit = state.qbit.read().await;
+        qbit.as_ref()
+            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .clone()
+    };
+
+    qbit.add_torrent(&url).await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let tier = crate::services::quality::detect_tier(&title, &resolution);
+    logger::info(
+        &state.db,
+        LogCategory::Grab,
+        &format!("Interactive grab: {}", title),
+        &format!("episode={}, group={}, tier={}", episode_number, group, tier.label()),
+    ).await;
+
+    if let Some(sid) = series_id {
+        let _ = crate::models::grabbed_torrents::record_grab(
+            &state.db, &info_hash, &title, sid, &[episode_number],
+        ).await;
+        let _ = episode_tags::record_grab(
+            &state.db, sid, episode_number, tier.label(), &title, &group,
+        ).await;
+    }
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// Delete an episode file from disk.
+pub async fn delete_episode_file(
+    State(state): State<AppState>,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let json_err = |status: axum::http::StatusCode, msg: &str| {
+        (status, Json(serde_json::json!({"ok": false, "message": msg})))
+    };
+
+    let (tracked_row, _, _detail) = match resolve_series_context(&state.db, request_id).await {
+        Ok(v) => v,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_GATEWAY, &e),
+    };
+
+    let tracked = match tracked_row {
+        Some(t) => t,
+        None => return json_err(axum::http::StatusCode::BAD_REQUEST, "Series not in library"),
+    };
+
+    let cfg = match config::get_config(&state.db).await.ok().flatten() {
+        Some(c) => c,
+        None => return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "No config"),
+    };
+
+    let files = media::scan_series_folder(&cfg.media_root, &tracked.folder_name);
+    let target = files.iter().find(|f| f.episode_number == episode_number);
+
+    match target {
+        None => json_err(axum::http::StatusCode::NOT_FOUND, "Episode file not found on disk"),
+        Some(file) => {
+            let full_path = std::path::Path::new(&cfg.media_root)
+                .join(&tracked.folder_name)
+                .join(&file.filename);
+
+            if let Err(e) = std::fs::remove_file(&full_path) {
+                return json_err(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to delete file: {}", e),
+                );
+            }
+
+            // Also remove the accompanying .nfo file if it exists.
+            let nfo_path = full_path.with_extension("nfo");
+            if nfo_path.exists() {
+                let _ = std::fs::remove_file(&nfo_path);
+            }
+
+            // Clear the episode quality tag so it shows as missing again.
+            let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
+
+            logger::info(
+                &state.db,
+                LogCategory::Library,
+                &format!("Deleted episode {} file: {}", episode_number, file.filename),
+                &format!("series_id={}, path={}", tracked.id, full_path.display()),
+            ).await;
+
+            (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": file.filename})))
+        }
+    }
+}
+
+/// Get grab history for a specific episode.
+pub async fn get_episode_grab_history(
+    State(state): State<AppState>,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+) -> Result<Json<Vec<episode_tags::GrabHistoryEntry>>, (axum::http::StatusCode, String)> {
+    let (tracked_row, _, _) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let series_id = tracked_row
+        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?
+        .id;
+
+    let history = episode_tags::get_grab_history(&state.db, series_id, episode_number)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(history))
+}
+
+/// Mark a grab as failed and re-trigger auto-search for the episode.
+pub async fn mark_episode_failed(
+    State(state): State<AppState>,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+    Json(form): Json<MarkEpisodeFailedForm>,
+) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let (tracked_row, _, _) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let _ = tracked_row.ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?;
+
+    episode_tags::mark_grab_failed(&state.db, form.history_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Re-trigger auto-search for this episode.
+    let report = run_auto_search_targets(
+        &state,
+        request_id,
+        vec![auto_search::SearchTarget::Episode(episode_number)],
+        false,
+        None,
+    ).await?;
+
+    Ok(Json(report))
+}
+
+/// Returns download progress for episodes of a series that are currently downloading.
+pub async fn episode_download_progress(
+    State(state): State<AppState>,
+    Path(request_id): Path<i64>,
+) -> Result<Json<Vec<EpisodeProgress>>, (axum::http::StatusCode, String)> {
+    let (tracked_row, _, _) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let tracked = tracked_row.ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?;
+
+    let pending = crate::models::grabbed_torrents::get_all_pending(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let series_pending: Vec<_> = pending.iter().filter(|g| g.series_id == tracked.id).collect();
+    if series_pending.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let qbit = {
+        let guard = state.qbit.read().await;
+        match guard.as_ref() {
+            Some(c) => c.clone(),
+            None => return Ok(Json(Vec::new())),
+        }
+    };
+
+    let torrents = qbit.get_torrents().await.unwrap_or_default();
+    let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
+        .iter()
+        .map(|t| (t.hash.to_lowercase(), t))
+        .collect();
+
+    let mut results = Vec::new();
+    for grab in &series_pending {
+        let torrent = if !grab.hash.is_empty() {
+            by_hash.get(&grab.hash.to_lowercase()).copied()
+        } else {
+            None
+        };
+
+        let Some(t) = torrent else {
+            // Torrent not in qBittorrent — skip it so the UI clears the stale
+            // progress bar. The post-processing tick will mark old orphans as failed.
+            continue;
+        };
+
+        for ep in &grab.episode_numbers {
+            results.push(EpisodeProgress {
+                episode: *ep,
+                progress: t.progress,
+                speed: t.dlspeed,
+                state: t.state.clone(),
+            });
+        }
+    }
+
+    Ok(Json(results))
+}
+
+#[derive(Serialize)]
+pub struct EpisodeProgress {
+    pub episode: i32,
+    pub progress: f64,
+    pub speed: i64,
+    pub state: String,
 }

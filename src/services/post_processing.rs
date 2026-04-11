@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use crate::models::log::LogCategory;
-use crate::models::{artwork_cache, config, grabbed_torrents, local_metadata, series};
+use crate::models::{artwork_cache, config, episode_tags, grabbed_torrents, local_metadata, series};
 use crate::services::{logger, media, nfo};
 use crate::AppState;
 
@@ -23,6 +23,35 @@ fn is_complete(state: &str) -> bool {
             | "seeding"
             | "stoppedUP"
     )
+}
+
+/// States that indicate a torrent has failed or has errors.
+fn is_errored(state: &str) -> bool {
+    matches!(state, "error" | "missingFiles")
+}
+
+/// Check if a grab is older than `max_age_secs` seconds.
+fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
+    // grabbed_at is SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // Parse year, month, day, hour, min, sec from the string
+    let parts: Vec<&str> = grabbed_at.split(|c: char| !c.is_ascii_digit()).collect();
+    let nums: Vec<i64> = parts.iter().filter_map(|s| s.parse().ok()).collect();
+    if nums.len() < 5 {
+        return false;
+    }
+    let (year, month, day, hour, min) = (nums[0], nums[1], nums[2], nums[3], nums[4]);
+    let sec = if nums.len() > 5 { nums[5] } else { 0 };
+    // Rough UTC timestamp (good enough for a 5-minute check)
+    let days_since_epoch = (year - 1970) * 365 + (year - 1969) / 4
+        + [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][(month - 1).max(0).min(11) as usize] as i64
+        + (day - 1);
+    let grab_ts = days_since_epoch * 86400 + hour * 3600 + min * 60 + sec;
+    now - grab_ts > max_age_secs
 }
 
 fn is_video_file(name: &str) -> bool {
@@ -330,33 +359,65 @@ pub async fn run_once(state: &AppState) {
         }
     };
 
-    // Build lookup maps for completed torrents.
-    let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    // Build lookup maps by hash and name for all torrents.
+    let all_by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
         .iter()
-        .filter(|t| is_complete(&t.state))
         .map(|t| (t.hash.to_lowercase(), t))
         .collect();
 
-    let by_name: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    let all_by_name: HashMap<String, &crate::services::qbit::Torrent> = torrents
         .iter()
-        .filter(|t| is_complete(&t.state))
         .map(|t| (t.name.to_lowercase(), t))
         .collect();
 
     let mut any_imported = false;
 
     for grab in &pending {
-        // Match grab to a completed qBit torrent.
+        // Match grab to a qBit torrent.
         let matched = if !grab.hash.is_empty() {
-            by_hash.get(&grab.hash.to_lowercase()).copied()
+            all_by_hash.get(&grab.hash.to_lowercase()).copied()
         } else {
-            // Fuzzy name match as fallback for grabs without a recorded hash.
-            by_name.get(&grab.torrent_name.to_lowercase()).copied()
+            all_by_name.get(&grab.torrent_name.to_lowercase()).copied()
         };
 
         let Some(torrent) = matched else {
+            // Torrent not found in qBittorrent. If the grab is old enough
+            // (> 5 minutes), the user likely deleted it — mark as removed.
+            if grab_is_stale(&grab.grabbed_at, 300) {
+                logger::warn(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!("Torrent removed from qBittorrent: '{}'", grab.torrent_name),
+                    "Marking as removed (not found in client)",
+                )
+                .await;
+                let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
+                let _ = episode_tags::clear_tags_for_removal(
+                    &state.db,
+                    grab.series_id,
+                    &grab.episode_numbers,
+                )
+                .await;
+            }
             continue;
         };
+
+        // Detect failed/error torrents and mark them.
+        if is_errored(&torrent.state) {
+            logger::warn(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!("Torrent in error state: '{}'", grab.torrent_name),
+                &format!("qbit_state={}", torrent.state),
+            )
+            .await;
+            let _ = grabbed_torrents::mark_failed(&state.db, grab.id).await;
+            continue;
+        }
+
+        if !is_complete(&torrent.state) {
+            continue;
+        }
 
         match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
             Ok(true) => {

@@ -40,7 +40,7 @@ pub fn scan_series_folder(media_root: &str, folder_name: &str) -> Vec<EpisodeFil
     }
 
     let mut files = Vec::new();
-    scan_dir_recursive(&series_path, &mut files);
+    scan_dir_recursive(&series_path, &series_path, &mut files);
 
     // Sort by season then episode number.
     files.sort_by(|a, b| {
@@ -78,7 +78,7 @@ pub fn list_media_folders(media_root: &str) -> Vec<String> {
     folders
 }
 
-fn scan_dir_recursive(dir: &Path, files: &mut Vec<EpisodeFile>) {
+fn scan_dir_recursive(dir: &Path, series_root: &Path, files: &mut Vec<EpisodeFile>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -87,9 +87,9 @@ fn scan_dir_recursive(dir: &Path, files: &mut Vec<EpisodeFile>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            scan_dir_recursive(&path, files);
+            scan_dir_recursive(&path, series_root, files);
         } else if is_video_file(&path) {
-            if let Some(ep) = parse_episode_file(&path) {
+            if let Some(ep) = parse_episode_file(&path, series_root) {
                 files.push(ep);
             }
         }
@@ -106,9 +106,9 @@ fn is_video_file(path: &Path) -> bool {
     }
 }
 
-fn parse_episode_file(path: &Path) -> Option<EpisodeFile> {
-    let filename = path.file_name()?.to_str()?.to_string();
-    let lower = filename.to_lowercase();
+fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
+    let basename = path.file_name()?.to_str()?.to_string();
+    let lower = basename.to_lowercase();
 
     let (season, episode) = parse_episode_number(&lower)?;
 
@@ -116,6 +116,14 @@ fn parse_episode_file(path: &Path) -> Option<EpisodeFile> {
 
     let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let size_display = format_size(size_bytes);
+
+    // Store relative path from series root so delete handler can reconstruct full path.
+    let filename = path
+        .strip_prefix(series_root)
+        .ok()
+        .and_then(|p| p.to_str())
+        .unwrap_or(&basename)
+        .to_string();
 
     Some(EpisodeFile {
         filename,

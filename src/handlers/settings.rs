@@ -44,6 +44,7 @@ pub struct SettingsForm {
     rss_interval_minutes: i32,
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
+    prefer_subs: String,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +84,8 @@ fn default_config() -> config::Config {
         force_kitsu_fallback: false,
         post_processing_enabled: false,
         post_processing_mode: "hardlink".to_string(),
+        auto_grab_on_add: true,
+        prefer_subs: true,
     }
 }
 
@@ -177,6 +180,8 @@ pub async fn settings_submit(
             "move" | "copy" | "hardlink" => form.post_processing_mode,
             _ => "hardlink".to_string(),
         },
+        auto_grab_on_add: existing_cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true),
+        prefer_subs: form.prefer_subs == "1",
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());
@@ -195,66 +200,62 @@ pub async fn settings_submit(
 
     logger::info(&state.db, LogCategory::System, "Settings saved", "").await;
     let mut notices: Vec<String> = vec!["Settings saved.".to_string()];
-    let mut qbit_ok = false;
 
-    if !cfg.qbit_url.is_empty() {
-        let client = QbitClient::new(&cfg.qbit_url, &cfg.qbit_user, &cfg.qbit_pass, &cfg.qbit_category);
-        match client.test_connection().await {
-            Ok(version) => {
-                logger::info(&state.db, LogCategory::QBit, &format!("Connected to qBittorrent {}", version), &cfg.qbit_url).await;
-                notices.push(format!("qBittorrent connected ({})", version));
-                *state.qbit.write().await = Some(client);
-                qbit_ok = true;
+    if active_tab == "integrations" {
+        if !cfg.qbit_url.is_empty() {
+            let client = QbitClient::new(&cfg.qbit_url, &cfg.qbit_user, &cfg.qbit_pass, &cfg.qbit_category);
+            match client.test_connection().await {
+                Ok(version) => {
+                    logger::info(&state.db, LogCategory::QBit, &format!("Connected to qBittorrent {}", version), &cfg.qbit_url).await;
+                    notices.push(format!("qBittorrent connected ({}).", version));
+                    *state.qbit.write().await = Some(client);
+                }
+                Err(e) => {
+                    logger::error(&state.db, LogCategory::QBit, "Connection failed", &e).await;
+                    *state.qbit.write().await = None;
+                    notices.push(format!("qBittorrent connection failed: {}.", e));
+                }
             }
-            Err(e) => {
-                logger::error(&state.db, LogCategory::QBit, "Connection failed", &e).await;
-                *state.qbit.write().await = None;
-                notices.push(format!("qBit connection failed: {}", e));
-            }
+        } else {
+            *state.qbit.write().await = None;
         }
-    } else {
-        *state.qbit.write().await = None;
-    }
 
-    if !cfg.jellyfin_url.is_empty() && !cfg.jellyfin_api_key.is_empty() {
-        let client = JellyfinClient::new(
-            &cfg.jellyfin_url,
-            &cfg.jellyfin_api_key,
-        );
-        match client.test_connection().await {
-            Ok(info) => {
-                let label = if info.server_name.trim().is_empty() {
-                    format!("Jellyfin {}", info.version)
-                } else {
-                    format!("Jellyfin {} ({})", info.server_name, info.version)
-                };
-                logger::info(&state.db, LogCategory::Jellyfin, &format!("{} connected", label), &cfg.jellyfin_url).await;
-                notices.push(format!("{} connected", label));
-                *state.jellyfin.write().await = Some(client);
+        if !cfg.jellyfin_url.is_empty() && !cfg.jellyfin_api_key.is_empty() {
+            let client = JellyfinClient::new(
+                &cfg.jellyfin_url,
+                &cfg.jellyfin_api_key,
+            );
+            match client.test_connection().await {
+                Ok(info) => {
+                    let label = if info.server_name.trim().is_empty() {
+                        format!("Jellyfin ({})", info.version)
+                    } else {
+                        format!("Jellyfin {} ({}) connected.", info.server_name, info.version)
+                    };
+                    logger::info(&state.db, LogCategory::Jellyfin, &format!("{} connected", label), &cfg.jellyfin_url).await;
+                    notices.push(label);
+                    *state.jellyfin.write().await = Some(client);
+                }
+                Err(e) => {
+                    logger::error(&state.db, LogCategory::Jellyfin, "Connection failed", &e).await;
+                    *state.jellyfin.write().await = None;
+                    notices.push(format!("Jellyfin connection failed: {}.", e));
+                }
             }
-            Err(e) => {
-                logger::error(&state.db, LogCategory::Jellyfin, "Connection failed", &e).await;
-                *state.jellyfin.write().await = None;
-                notices.push(format!("Jellyfin connection failed: {}", e));
-            }
+        } else {
+            *state.jellyfin.write().await = None;
         }
-    } else {
-        *state.jellyfin.write().await = None;
-    }
 
-    if !cfg.media_root.is_empty() && !std::path::Path::new(&cfg.media_root).is_dir() {
-        notices.push(format!("Warning: media root '{}' is not accessible.", cfg.media_root));
-    }
-
-    if qbit_ok && state.jellyfin.read().await.is_some() {
-        notices.push("Sonarr-style parity is not complete yet, but the Jellyfin connector foundation is now in place.".to_string());
+        if !cfg.media_root.is_empty() && !std::path::Path::new(&cfg.media_root).is_dir() {
+            notices.push(format!("Warning: media root '{}' is not accessible.", cfg.media_root));
+        }
     }
 
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
         config: cfg,
-        message: Some(notices.join(" • ")),
+        message: Some(notices.join("<br>")),
         error: None,
     };
     Html(template.render().unwrap_or_default())

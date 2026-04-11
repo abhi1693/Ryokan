@@ -110,6 +110,25 @@ pub async fn get_series_states(
         .collect())
 }
 
+pub async fn set_episode_monitored(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+    monitored: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO episode_monitor_state (series_id, episode_number, monitored)
+           VALUES (?, ?, ?)
+           ON CONFLICT(series_id, episode_number) DO UPDATE SET monitored = excluded.monitored"#,
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .bind(if monitored { 1i64 } else { 0i64 })
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn get_monitored_episode_numbers(
     db: &SqlitePool,
     series_id: i64,

@@ -216,7 +216,7 @@ fieldset legend {
 
 .btn-grab:hover { border-color: var(--accent); color: var(--accent); }
 .btn-grab:disabled { opacity: 0.6; cursor: default; }
-.btn-grab.btn-success { border-color: var(--green); color: var(--green); }
+.btn-grab.btn-success { border-color: var(--green); color: var(--green); background: var(--bg-elevated); }
 .btn-grab.btn-error { border-color: var(--red); color: var(--red); }
 
 /* --- Alerts --- */
@@ -789,21 +789,13 @@ fieldset legend {
 .tag-status-releasing,
 .tag-status-not_yet_released,
 .tag-status-currently_airing,
-.tag-status-not_yet_aired {
-    background: var(--mauve-bg);
-    color: var(--mauve);
-}
-
+.tag-status-not_yet_aired,
 .tag-status-finished,
-.tag-status-finished_airing {
-    background: var(--bg-elevated);
-    color: var(--text-dim);
-}
-
+.tag-status-finished_airing,
 .tag-status-cancelled,
 .tag-status-hiatus {
-    background: rgba(211, 125, 125, 0.12);
-    color: var(--red);
+    background: var(--bg-elevated);
+    color: var(--text-dim);
 }
 
 .detail-genres {
@@ -1146,13 +1138,7 @@ fieldset legend {
     align-items: center;
     justify-content: space-between;
     padding: 14px 18px;
-    cursor: pointer;
-    user-select: none;
     transition: background 0.1s;
-}
-
-.season-header:hover {
-    background: var(--bg-elevated);
 }
 
 .season-header-left {
@@ -1261,7 +1247,7 @@ fieldset legend {
     color: var(--text-dim);
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
-    background: var(--bg);
+    background: var(--bg-card);
 }
 
 .episode-table tbody tr {
@@ -1286,7 +1272,7 @@ fieldset legend {
 .ep-col-num { width: 48px; font-family: var(--font-mono); color: var(--text-dim); text-align: center; }
 .ep-col-title { }
 .ep-col-aired { width: 100px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
-.ep-col-quality { width: 120px; text-align: right; }
+.ep-col-quality { width: 140px; text-align: center; }
 .ep-col-size { width: 80px; text-align: right; font-family: var(--font-mono); color: var(--text-dim); font-size: 12px; }
 
 .ep-status-icon { display: flex; align-items: center; justify-content: center; }
@@ -1336,13 +1322,13 @@ fieldset legend {
 
 .ep-missing-label {
     font-size: 11px;
-    color: var(--red);
+    color: var(--accent);
     opacity: 0.6;
 }
 
 .tag-quality {
-    background: rgba(125, 174, 211, 0.15);
-    color: var(--blue);
+    background: var(--mauve-bg);
+    color: var(--accent);
     font-size: 10px;
     padding: 2px 8px;
 }
@@ -1707,7 +1693,7 @@ fieldset legend {
 }
 
 .icon-btn.is-loading .icon-btn-inner {
-    animation: spin 0.85s linear infinite;
+    /* spinner is handled by ep-search-spinner child element */
 }
 
 .icon-btn.is-success {
@@ -1942,6 +1928,7 @@ fieldset legend {
     vertical-align: top;
     overflow: hidden;
     text-overflow: ellipsis;
+    background: var(--bg-card);
 }
 
 .log-col-time { width: 160px; white-space: nowrap; color: var(--text-dim); font-size: 12px; }
@@ -2071,6 +2058,10 @@ fieldset legend {
     padding: 10px 12px;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
+}
+
+.rss-table td {
+    background: var(--bg-card);
 }
 
 .rss-table th {
@@ -2215,4 +2206,405 @@ fieldset legend {
 
 .error-actions .btn-secondary:hover {
     background: var(--bg-hover);
+}
+
+/* --- Episode monitoring toggle buttons --- */
+.ep-mon-btn {
+    padding: 3px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.ep-mon-btn.ep-mon-yes {
+    border-color: rgba(125, 211, 147, 0.35);
+    color: var(--green);
+    background: rgba(125, 211, 147, 0.08);
+}
+
+.ep-mon-btn.ep-mon-no {
+    border-color: var(--border);
+    color: var(--text-dim);
+}
+
+.ep-mon-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.ep-mon-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* --- Episode title button --- */
+.ep-title-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+    display: block;
+    width: 100%;
+}
+
+.ep-title-btn .ep-title-name {
+    color: var(--text-bright);
+    text-decoration: none;
+    transition: color 0.15s;
+}
+
+.ep-title-btn:hover .ep-title-name {
+    color: var(--accent);
+}
+
+/* --- Circle loading spinner for episode search --- */
+.ep-search-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(125, 174, 211, 0.25);
+    border-top-color: var(--blue);
+    border-radius: 50%;
+    animation: spin-ring 0.7s linear infinite;
+}
+
+@keyframes spin-ring {
+    to { transform: rotate(360deg); }
+}
+
+/* --- Season header layout update --- */
+.season-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-right: 4px;
+}
+
+/* --- Episode detail popup --- */
+.modal-sm {
+    max-width: 480px;
+    width: 100%;
+}
+
+.modal-ep {
+    max-width: 860px;
+    width: 100%;
+}
+
+.ep-detail-info {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ep-detail-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.ep-detail-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+}
+
+.ep-detail-value {
+    font-size: 13px;
+    color: var(--text);
+}
+
+.ep-detail-path {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    word-break: break-all;
+    color: var(--text-bright);
+}
+
+/* --- Debug action rows --- */
+.debug-actions-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.debug-action-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.debug-action-result {
+    font-size: 13px;
+}
+
+/* --- Monitor option list (add series modal) --- */
+.monitor-option-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.monitor-option-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, background 0.15s;
+    width: 100%;
+}
+
+.monitor-option-btn.active {
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.08);
+}
+
+.monitor-option-btn:hover:not(.active) {
+    border-color: var(--border-accent);
+    background: var(--bg-card);
+}
+
+.monitor-option-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-bright);
+}
+
+.monitor-option-desc {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+/* ep-col-monitor fixed width */
+.ep-col-monitor { width: 60px; text-align: center; }
+
+/* --- Monitor All toggle button --- */
+.monitor-all-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.monitor-all-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.monitor-all-btn.is-active {
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.15);
+    color: var(--accent);
+}
+
+/* --- Episode actions column (wider for 2 buttons) --- */
+.ep-col-actions {
+    width: 84px;
+    text-align: right;
+    white-space: nowrap;
+}
+
+/* --- Quality tag states --- */
+.tag-quality-grabbed {
+    background: var(--mauve-bg);
+    color: var(--accent);
+    font-size: 10px;
+    padding: 2px 8px;
+}
+
+.tag-quality-failed {
+    background: var(--mauve-bg);
+    color: var(--accent);
+    font-size: 10px;
+    padding: 2px 8px;
+}
+
+/* --- Episode detail popup (wider) --- */
+.ep-detail-two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.ep-detail-full {
+    grid-column: 1 / -1;
+}
+
+/* --- Grab history table --- */
+.grab-history-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+.grab-history-table th {
+    text-align: left;
+    padding: 5px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+}
+
+.grab-history-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(42, 42, 58, 0.3);
+    vertical-align: middle;
+}
+
+.grab-history-table tr:last-child td {
+    border-bottom: none;
+}
+
+.grab-state-grabbed { color: var(--green); font-weight: 600; }
+.grab-state-failed  { color: var(--red); font-weight: 600; }
+.grab-state-removed { color: var(--text-dim); font-weight: 600; }
+
+.btn-mark-failed {
+    font-size: 11px;
+    padding: 3px 8px;
+    background: rgba(211, 125, 125, 0.1);
+    color: var(--red);
+    border: 1px solid rgba(211, 125, 125, 0.3);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn-mark-failed:hover { background: rgba(211, 125, 125, 0.2); }
+.btn-mark-failed:disabled { opacity: 0.5; cursor: default; }
+
+/* --- Interactive search modal --- */
+.interactive-search-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.interactive-search-table th {
+    text-align: left;
+    padding: 7px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elevated);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.interactive-search-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(42, 42, 58, 0.35);
+    vertical-align: middle;
+}
+
+.interactive-search-table tr:hover td {
+    background: var(--bg-elevated);
+}
+
+.interactive-search-table .col-score { width: 55px; text-align: center; }
+.interactive-search-table .col-grab  { width: 70px; text-align: right; }
+.interactive-search-table .col-size  { width: 80px; white-space: nowrap; }
+.interactive-search-table .col-seeds { width: 50px; text-align: right; }
+
+.is-modal-scroll {
+    overflow-y: auto;
+    max-height: 480px;
+}
+
+/* --- Delete file button in ep-detail --- */
+.btn-delete-file {
+    background: rgba(211, 125, 125, 0.1);
+    color: var(--red);
+    border: 1px solid rgba(211, 125, 125, 0.3);
+    padding: 7px 14px;
+    font-size: 13px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-weight: 600;
+    transition: background 0.15s;
+}
+
+.btn-delete-file:hover { background: rgba(211, 125, 125, 0.22); }
+.btn-delete-file:disabled { opacity: 0.5; cursor: default; }
+
+/* --- Downloads page --- */
+.dl-torrent-name {
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.dl-progress-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 120px;
+}
+
+.dl-progress-bar {
+    flex: 1;
+    height: 6px;
+    background: var(--bg-elevated);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.dl-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.dl-progress-text {
+    font-size: 11px;
+    color: var(--text-dim);
+    min-width: 40px;
+    text-align: right;
+}
+
+.dl-actions {
+    white-space: nowrap;
+}
+
+.ep-dl-progress {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    margin-top: 4px;
 }

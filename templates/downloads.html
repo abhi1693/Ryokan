@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+
+{% block title %} - Downloads{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Downloads</h2>
+</div>
+
+<div class="system-tabs">
+    <a href="/downloads?tab=queue" class="system-tab {% if tab == "queue" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Queue
+    </a>
+    <a href="/downloads?tab=history" class="system-tab {% if tab == "history" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        History
+    </a>
+    <a href="/downloads?tab=blocklist" class="system-tab {% if tab == "blocklist" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+        Blocklist{% if !blocklist.is_empty() %} ({{ blocklist.len() }}){% endif %}
+    </a>
+</div>
+
+{% if tab == "queue" %}
+<div class="rss-panel">
+    <div id="queue-container">
+        <div class="logs-empty" id="queue-loading">Loading queue from qBittorrent...</div>
+    </div>
+</div>
+
+<script>
+function formatSize(bytes) {
+    if (bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+function formatSpeed(bps) {
+    if (bps <= 0) return '';
+    return formatSize(bps) + '/s';
+}
+
+function formatEta(seconds) {
+    if (seconds <= 0 || seconds >= 8640000) return '';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+}
+
+function stateLabel(state) {
+    const map = {
+        'uploading': 'Seeding',
+        'stalledUP': 'Seeding',
+        'forcedUP': 'Seeding',
+        'downloading': 'Downloading',
+        'stalledDL': 'Stalled',
+        'forcedDL': 'Downloading',
+        'pausedDL': 'Paused',
+        'pausedUP': 'Paused',
+        'queuedDL': 'Queued',
+        'queuedUP': 'Queued',
+        'checkingDL': 'Checking',
+        'checkingUP': 'Checking',
+        'error': 'Error',
+        'missingFiles': 'Missing Files',
+        'moving': 'Moving',
+        'metaDL': 'Fetching metadata',
+        'allocating': 'Allocating',
+    };
+    return map[state] || state;
+}
+
+function stateBadgeClass(state) {
+    if (['uploading', 'stalledUP', 'forcedUP', 'pausedUP'].includes(state)) return 'log-badge-info';
+    if (['downloading', 'forcedDL'].includes(state)) return 'log-badge-debug';
+    if (['pausedDL', 'queuedDL', 'queuedUP'].includes(state)) return 'log-badge-warn';
+    if (['error', 'missingFiles'].includes(state)) return 'log-badge-error';
+    if (state === 'stalledDL') return 'log-badge-warn';
+    return '';
+}
+
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+function renderQueue(torrents) {
+    const container = document.getElementById('queue-container');
+    if (!torrents || torrents.length === 0) {
+        container.innerHTML = '<div class="logs-empty">No active torrents in qBittorrent.</div>';
+        return;
+    }
+
+    // Sort: downloading first, then by progress desc
+    torrents.sort((a, b) => {
+        const aDown = a.state.includes('DL') || a.state === 'downloading' ? 0 : 1;
+        const bDown = b.state.includes('DL') || b.state === 'downloading' ? 0 : 1;
+        if (aDown !== bDown) return aDown - bDown;
+        return b.progress - a.progress;
+    });
+
+    let html = '<div class="rss-table-wrap"><table class="rss-table"><thead><tr>';
+    html += '<th>Name</th><th>Size</th><th>Progress</th><th>Speed</th><th>ETA</th><th>Status</th><th>Actions</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const t of torrents) {
+        const pct = (t.progress * 100).toFixed(1);
+        const isPaused = t.state.startsWith('paused');
+        html += `<tr data-hash="${escapeHtml(t.hash)}">`;
+        html += `<td><div class="dl-torrent-name">${escapeHtml(t.name)}</div></td>`;
+        html += `<td>${formatSize(t.size)}</td>`;
+        html += `<td><div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div></td>`;
+        html += `<td>${formatSpeed(t.dlspeed)}</td>`;
+        html += `<td>${formatEta(t.eta)}</td>`;
+        html += `<td><span class="log-badge ${stateBadgeClass(t.state)}">${stateLabel(t.state)}</span></td>`;
+        html += `<td class="dl-actions">`;
+        if (isPaused) {
+            html += `<button class="btn btn-ghost btn-sm" onclick="resumeTorrent('${escapeHtml(t.hash)}')" title="Resume"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>`;
+        } else {
+            html += `<button class="btn btn-ghost btn-sm" onclick="pauseTorrent('${escapeHtml(t.hash)}')" title="Pause"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>`;
+        }
+        html += `<button class="btn btn-ghost btn-sm" onclick="deleteTorrent('${escapeHtml(t.hash)}')" title="Remove"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>`;
+        html += `</td></tr>`;
+    }
+
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+}
+
+function loadQueue() {
+    fetch('/api/torrents')
+        .then(r => {
+            if (!r.ok) throw new Error('Failed to load queue');
+            return r.json();
+        })
+        .then(data => renderQueue(data))
+        .catch(err => {
+            document.getElementById('queue-container').innerHTML =
+                '<div class="logs-empty">Could not load queue: ' + escapeHtml(err.message) + '. Is qBittorrent configured?</div>';
+        });
+}
+
+function pauseTorrent(hash) {
+    fetch('/api/downloads/pause', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hash})})
+        .then(() => setTimeout(loadQueue, 500));
+}
+
+function resumeTorrent(hash) {
+    fetch('/api/downloads/resume', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hash})})
+        .then(() => setTimeout(loadQueue, 500));
+}
+
+function deleteTorrent(hash) {
+    const deleteFiles = confirm('Also delete downloaded files?');
+    fetch('/api/downloads/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hash, delete_files: deleteFiles})})
+        .then(() => setTimeout(loadQueue, 500));
+}
+
+loadQueue();
+setInterval(loadQueue, 5000);
+</script>
+
+{% else if tab == "history" %}
+<div class="rss-panel">
+    {% if history.is_empty() %}
+    <div class="logs-empty">No download history yet.</div>
+    {% else %}
+    <div class="rss-table-controls">
+        <input type="search" id="history-filter" class="settings-input" placeholder="Filter by name or series..." oninput="filterHistory()">
+        <select id="history-state-filter" onchange="filterHistory()">
+            <option value="all">All states</option>
+            <option value="pending">Pending</option>
+            <option value="imported">Imported</option>
+            <option value="failed">Failed</option>
+            <option value="removed">Removed</option>
+        </select>
+    </div>
+    <div class="rss-table-wrap">
+        <table class="rss-table" id="history-table">
+            <thead>
+                <tr>
+                    <th>Grabbed</th>
+                    <th>Series</th>
+                    <th>Release</th>
+                    <th>Episodes</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in history %}
+                <tr data-state="{{ entry.state }}" data-text="{{ entry.series_title }} {{ entry.torrent_name }}">
+                    <td>{{ entry.grabbed_at }}</td>
+                    <td>{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
+                    <td><div class="dl-torrent-name">{{ entry.torrent_name }}</div></td>
+                    <td>{% for ep in entry.episode_numbers %}{% if !loop.first %}, {% endif %}{{ ep }}{% endfor %}</td>
+                    <td>
+                        {% if entry.state == "imported" %}
+                        <span class="log-badge log-badge-info">imported</span>
+                        {% else if entry.state == "pending" %}
+                        <span class="log-badge log-badge-debug">pending</span>
+                        {% else if entry.state == "failed" %}
+                        <span class="log-badge log-badge-error">failed</span>
+                        {% else if entry.state == "removed" %}
+                        <span class="log-badge log-badge-warn">removed</span>
+                        {% else %}
+                        <span class="log-badge">{{ entry.state }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+function filterHistory() {
+    const search = (document.getElementById('history-filter')?.value || '').toLowerCase().trim();
+    const state = document.getElementById('history-state-filter')?.value || 'all';
+    const rows = document.querySelectorAll('#history-table tbody tr');
+    rows.forEach(row => {
+        const text = (row.dataset.text || '').toLowerCase();
+        const rowState = row.dataset.state || '';
+        const matchesState = state === 'all' || rowState === state;
+        const matchesSearch = !search || text.includes(search);
+        row.style.display = (matchesState && matchesSearch) ? '' : 'none';
+    });
+}
+</script>
+
+{% else if tab == "blocklist" %}
+<div class="rss-panel">
+    {% if blocklist.is_empty() %}
+    <div class="logs-empty">No blocked downloads.</div>
+    {% else %}
+    <div class="rss-table-wrap">
+        <table class="rss-table" id="blocklist-table">
+            <thead>
+                <tr>
+                    <th>Grabbed</th>
+                    <th>Series</th>
+                    <th>Release</th>
+                    <th>Episodes</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in blocklist %}
+                <tr id="blocklist-row-{{ entry.id }}">
+                    <td>{{ entry.grabbed_at }}</td>
+                    <td>{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
+                    <td><div class="dl-torrent-name">{{ entry.torrent_name }}</div></td>
+                    <td>{% for ep in entry.episode_numbers %}{% if !loop.first %}, {% endif %}{{ ep }}{% endfor %}</td>
+                    <td>
+                        <button class="btn btn-ghost btn-sm" onclick="removeFromBlocklist({{ entry.id }})" title="Remove from blocklist">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                        </button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+function removeFromBlocklist(id) {
+    fetch('/api/downloads/blocklist/remove', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})})
+        .then(r => r.json())
+        .then(data => {
+            if (data.ok) {
+                const row = document.getElementById('blocklist-row-' + id);
+                if (row) row.remove();
+            }
+        })
+        .catch(err => console.error('Failed to remove:', err));
+}
+</script>
+{% endif %}
+{% endblock %}
