@@ -1380,12 +1380,21 @@ async fn run_auto_search_targets(
                             &format!("Grabbed: {}", result.title),
                             &format!("target={}, group={}, score={}, tier={}, batch={}", label, result.group, result.score, tier.label(), result.is_batch),
                         ).await;
-                        // Record for post-processing.
+                        // Record for post-processing and episode quality tags.
                         if let Some(sid) = series_id {
-                            let ep_nums: Vec<i32> = match &target {
+                            let mut ep_nums: Vec<i32> = match &target {
                                 auto_search::SearchTarget::Episode(n) => vec![*n],
-                                auto_search::SearchTarget::Single => vec![],
+                                auto_search::SearchTarget::Single => vec![1],
                             };
+                            // For batch releases, parse all episode numbers from
+                            // the title so every covered episode gets a grab tag.
+                            if result.is_batch {
+                                let parsed = auto_search::parse_release_numbers(&result.title);
+                                if !parsed.is_empty() {
+                                    ep_nums = parsed.into_iter().collect();
+                                    ep_nums.sort_unstable();
+                                }
+                            }
                             let _ = crate::models::grabbed_torrents::record_grab(
                                 &state.db,
                                 &result.info_hash,

@@ -3,7 +3,7 @@ use std::{cmp::Ordering, collections::{HashMap, HashSet}, sync::LazyLock};
 use regex_lite::Regex;
 
 use crate::{
-    models::{config, monitoring, rss, series},
+    models::{config, episode_tags, monitoring, rss, series},
     models::log::LogCategory,
     services::{auto_search, logger, media, monitoring as monitoring_service, quality},
     AppState,
@@ -397,6 +397,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     cand.found.series.id,
                     &ep_list,
                 ).await;
+                // Record quality tag for episode status display.
+                let tier = quality::detect_tier(&cand.item.title, &cand.item.resolution);
+                for ep_num in &ep_list {
+                    let _ = episode_tags::record_grab(
+                        &state.db,
+                        cand.found.series.id,
+                        *ep_num,
+                        tier.label(),
+                        &cand.item.title,
+                        &cand.item.group,
+                    ).await;
+                }
             }
             Err(err) => {
                 skipped += 1;
