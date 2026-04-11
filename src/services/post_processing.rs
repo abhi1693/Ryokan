@@ -33,25 +33,12 @@ fn is_errored(state: &str) -> bool {
 /// Check if a grab is older than `max_age_secs` seconds.
 fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
     // grabbed_at is SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    // Parse year, month, day, hour, min, sec from the string
-    let parts: Vec<&str> = grabbed_at.split(|c: char| !c.is_ascii_digit()).collect();
-    let nums: Vec<i64> = parts.iter().filter_map(|s| s.parse().ok()).collect();
-    if nums.len() < 5 {
+    let Some(grab_time) = chrono::NaiveDateTime::parse_from_str(grabbed_at, "%Y-%m-%d %H:%M:%S").ok() else {
         return false;
-    }
-    let (year, month, day, hour, min) = (nums[0], nums[1], nums[2], nums[3], nums[4]);
-    let sec = if nums.len() > 5 { nums[5] } else { 0 };
-    // Rough UTC timestamp (good enough for a 5-minute check)
-    let days_since_epoch = (year - 1970) * 365 + (year - 1969) / 4
-        + [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][(month - 1).max(0).min(11) as usize] as i64
-        + (day - 1);
-    let grab_ts = days_since_epoch * 86400 + hour * 3600 + min * 60 + sec;
-    now - grab_ts > max_age_secs
+    };
+    let now = chrono::Utc::now().naive_utc();
+    let elapsed = now.signed_duration_since(grab_time).num_seconds();
+    elapsed > max_age_secs
 }
 
 fn is_video_file(name: &str) -> bool {

@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use regex_lite::Regex;
 
 use crate::models::config::Config;
-use crate::services::{anilist::AnimeDetail, nyaa::{self, SearchOptions, SearchResult}, quality};
+use crate::services::{anilist::AnimeDetail, media, nyaa::{self, SearchOptions, SearchResult}, quality};
 
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
 static RE_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
@@ -387,6 +387,34 @@ pub fn build_monitored_targets(detail: &AnimeDetail, existing_episodes: &[i32], 
         .filter(|ep| !existing.contains(ep))
         .map(SearchTarget::Episode)
         .collect()
+}
+
+/// Build upgrade targets: monitored episodes that exist on disk but are below
+/// the quality cutoff. These are candidates for automatic quality upgrades.
+pub fn build_upgrade_targets(
+    disk_files: &[media::EpisodeFile],
+    monitored_episodes: &[i32],
+    cutoff_tier: quality::QualityTier,
+) -> Vec<(SearchTarget, quality::QualityTier)> {
+    let monitored: HashSet<i32> = monitored_episodes.iter().copied().collect();
+    let mut targets = Vec::new();
+    for file in disk_files {
+        if !monitored.contains(&file.episode_number) {
+            continue;
+        }
+        let existing_tier = quality::tier_from_disk_quality(&file.quality);
+        if existing_tier.rank() < cutoff_tier.rank() {
+            targets.push((
+                SearchTarget::Episode(file.episode_number),
+                existing_tier,
+            ));
+        }
+    }
+    targets.sort_by_key(|(t, _)| match t {
+        SearchTarget::Episode(n) => *n,
+        SearchTarget::Single => 0,
+    });
+    targets
 }
 
 pub fn target_label(target: &SearchTarget) -> String {
