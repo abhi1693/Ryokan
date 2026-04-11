@@ -496,7 +496,7 @@ function renderGrabHistory(entries, epNum) {
     }
     let html = '<table class="grab-history-table"><thead><tr><th>Quality</th><th>Release</th><th>Group</th><th>Date</th><th>State</th><th></th></tr></thead><tbody>';
     for (const e of entries) {
-        const stateClass = e.state === 'failed' ? 'grab-state-failed' : 'grab-state-grabbed';
+        const stateClass = e.state === 'failed' ? 'grab-state-failed' : e.state === 'removed' ? 'grab-state-removed' : 'grab-state-grabbed';
         const canFail = e.state === 'grabbed';
         html += `<tr>
             <td>${escHtml(e.quality_tag)}</td>

@@ -93,6 +93,14 @@ pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+pub async fn mark_removed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE grabbed_torrents SET state = 'removed' WHERE id = ?")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Get all grabbed torrents with series title, ordered by most recent first.
 pub async fn get_all_with_series(db: &SqlitePool, limit: i64) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
     let rows = sqlx::query(

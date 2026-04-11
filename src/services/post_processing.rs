@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use crate::models::log::LogCategory;
-use crate::models::{artwork_cache, config, grabbed_torrents, local_metadata, series};
+use crate::models::{artwork_cache, config, episode_tags, grabbed_torrents, local_metadata, series};
 use crate::services::{logger, media, nfo};
 use crate::AppState;
 
@@ -382,16 +382,22 @@ pub async fn run_once(state: &AppState) {
 
         let Some(torrent) = matched else {
             // Torrent not found in qBittorrent. If the grab is old enough
-            // (> 5 minutes), the user likely deleted it — mark as failed.
+            // (> 5 minutes), the user likely deleted it — mark as removed.
             if grab_is_stale(&grab.grabbed_at, 300) {
                 logger::warn(
                     &state.db,
                     LogCategory::PostProcess,
                     &format!("Torrent removed from qBittorrent: '{}'", grab.torrent_name),
-                    "Marking as failed (not found in client)",
+                    "Marking as removed (not found in client)",
                 )
                 .await;
-                let _ = grabbed_torrents::mark_failed(&state.db, grab.id).await;
+                let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
+                let _ = episode_tags::clear_tags_for_removal(
+                    &state.db,
+                    grab.series_id,
+                    &grab.episode_numbers,
+                )
+                .await;
             }
             continue;
         };

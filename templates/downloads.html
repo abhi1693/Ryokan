@@ -178,6 +178,7 @@ setInterval(loadQueue, 5000);
             <option value="pending">Pending</option>
             <option value="imported">Imported</option>
             <option value="failed">Failed</option>
+            <option value="removed">Removed</option>
         </select>
     </div>
     <div class="rss-table-wrap">
@@ -205,6 +206,8 @@ setInterval(loadQueue, 5000);
                         <span class="log-badge log-badge-debug">pending</span>
                         {% else if entry.state == "failed" %}
                         <span class="log-badge log-badge-error">failed</span>
+                        {% else if entry.state == "removed" %}
+                        <span class="log-badge log-badge-warn">removed</span>
                         {% else %}
                         <span class="log-badge">{{ entry.state }}</span>
                         {% endif %}

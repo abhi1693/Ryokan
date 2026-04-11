@@ -138,6 +138,36 @@ pub async fn clear_episode_tag(
     Ok(())
 }
 
+/// Clear episode quality tags and mark grab history as "removed" for all episodes
+/// associated with a grabbed torrent (identified by series_id + episode_numbers).
+pub async fn clear_tags_for_removal(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_numbers: &[i32],
+) -> Result<(), sqlx::Error> {
+    for &ep in episode_numbers {
+        // Delete the current quality tag so the episode no longer shows as grabbed.
+        sqlx::query(
+            "DELETE FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+        )
+        .bind(series_id)
+        .bind(ep)
+        .execute(db)
+        .await?;
+
+        // Mark any "grabbed" history entries for this episode as "removed".
+        sqlx::query(
+            "UPDATE episode_grab_history SET state = 'removed'
+             WHERE series_id = ? AND episode_number = ? AND state = 'grabbed'",
+        )
+        .bind(series_id)
+        .bind(ep)
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Mark a grab history entry as failed, and update the current tag state if it matches.
 pub async fn mark_grab_failed(
     db: &SqlitePool,
