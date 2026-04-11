@@ -911,7 +911,11 @@ function updateEpisodeRow(epNum, state, group) {
             row.classList.add('ep-row-queued');
             const qualityCell = row.querySelector('.ep-col-quality');
             if (qualityCell) {
-                qualityCell.innerHTML = `<span class="tag tag-quality-grabbed">Grabbed${group ? ' · ' + escHtml(group) : ''}</span>`;
+                // Show a 0% progress bar immediately; the download poller will update it
+                if (!qualityCell.dataset.originalHtml) {
+                    qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                }
+                qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
             }
         } else if (state === 'deleted') {
             row.classList.remove('ep-row-have');

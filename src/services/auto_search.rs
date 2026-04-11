@@ -53,15 +53,15 @@ pub async fn find_all_for_target(
 
     // Interactive search: allow batch results so user can see & pick them,
     // but filter by season and episode to avoid showing wrong-season results.
-    run_queries_interactive(&queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, &mut seen, &mut candidates).await;
+    run_queries_interactive(&queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
 
     if !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries_interactive(&group_queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, &mut seen, &mut candidates).await;
+        run_queries_interactive(&group_queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
     }
 
     for c in &mut candidates {
-        c.score = rescore_for_auto_search(c, config, &aliases, target, expected_season, is_finished, finished_mode, preferred_tier, cutoff_tier);
+        c.score = rescore_for_auto_search(c, config, &aliases, target, expected_season, is_finished, detail.season_year, finished_mode, preferred_tier, cutoff_tier);
     }
 
     candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
@@ -88,7 +88,7 @@ pub async fn find_best_for_target(
     let mut candidates: Vec<SearchResult> = Vec::new();
 
     // Phase 1: standard queries (alias + episode variants).
-    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, &mut seen, &mut candidates).await;
+    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
 
     // Phase 2: if no candidate from a preferred group, try group-prefixed queries.
     let has_preferred_hit = !preferred_groups.is_empty()
@@ -98,7 +98,7 @@ pub async fn find_best_for_target(
 
     if !has_preferred_hit && !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, &mut seen, &mut candidates).await;
+        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
     }
 
     // Phase 3: for finished series with BD preference, probe for BD releases.
@@ -109,7 +109,7 @@ pub async fn find_best_for_target(
 
         if !has_bd_candidate {
             let bd_queries = quality::bd_probe_queries(&aliases);
-            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, &mut seen, &mut candidates).await;
+            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
         }
     }
 
@@ -123,7 +123,7 @@ pub async fn find_best_for_target(
 
     // Rescore all candidates with quality-tier-aware scoring.
     for c in &mut candidates {
-        c.score = rescore_for_auto_search(c, config, &aliases, target, expected_season, is_finished, finished_mode, preferred_tier, cutoff_tier);
+        c.score = rescore_for_auto_search(c, config, &aliases, target, expected_season, is_finished, detail.season_year, finished_mode, preferred_tier, cutoff_tier);
     }
 
     candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
@@ -139,6 +139,8 @@ async fn run_queries(
     target: &SearchTarget,
     allow_batch: bool,
     expected_season: i32,
+    is_finished: bool,
+    season_year: Option<i32>,
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
@@ -173,6 +175,20 @@ async fn run_queries(
             if !matches_target(&result.title, aliases, target, expected_season) {
                 continue;
             }
+            // For FINISHED series, reject non-BD results uploaded 2+ years after airing
+            if is_finished {
+                if let Some(air_year) = season_year {
+                    if result.upload_timestamp > 0 {
+                        let upload_year = 1970 + (result.upload_timestamp / 31_536_000) as i32;
+                        if upload_year - air_year >= 2 {
+                            let tier = quality::detect_tier(&result.title, &result.resolution);
+                            if !tier.is_bluray() && !result.is_batch {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
             candidates.push(result);
         }
     }
@@ -189,6 +205,8 @@ async fn run_queries_interactive(
     preferred_resolution: &str,
     target: &SearchTarget,
     expected_season: i32,
+    is_finished: bool,
+    season_year: Option<i32>,
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
@@ -238,6 +256,20 @@ async fn run_queries_interactive(
                     let parsed = parse_release_numbers(&result.title);
                     if !parsed.is_empty() && !parsed.contains(target_ep) {
                         continue;
+                    }
+                }
+            }
+            // For FINISHED series, reject non-BD results uploaded 2+ years after airing
+            if is_finished {
+                if let Some(air_year) = season_year {
+                    if result.upload_timestamp > 0 {
+                        let upload_year = 1970 + (result.upload_timestamp / 31_536_000) as i32;
+                        if upload_year - air_year >= 2 {
+                            let tier = quality::detect_tier(&result.title, &result.resolution);
+                            if !tier.is_bluray() && !result.is_batch {
+                                continue;
+                            }
+                        }
                     }
                 }
             }
@@ -407,6 +439,7 @@ fn rescore_for_auto_search(
     target: &SearchTarget,
     expected_season: i32,
     is_finished: bool,
+    season_year: Option<i32>,
     finished_mode: quality::FinishedSeriesMode,
     preferred_tier: quality::QualityTier,
     cutoff_tier: quality::QualityTier,
@@ -426,9 +459,27 @@ fn rescore_for_auto_search(
     }).fold(0.0f32, f32::max);
     score += (best_overlap * 40.0) as i32;
 
-    // Season mismatch penalty
+    // Season mismatch penalty (explicit season markers like S03, "3rd Season")
     if season_mismatch(&result.title, expected_season) {
         score -= 100;
+    }
+
+    // Date-based penalty for FINISHED series: if a result was uploaded long after
+    // the series aired, it's likely for a sequel season rather than this one.
+    // Exempt BD releases since those legitimately appear years later.
+    if is_finished {
+        if let Some(air_year) = season_year {
+            let detected_tier = quality::detect_tier(&result.title, &result.resolution);
+            if result.upload_timestamp > 0 && !detected_tier.is_bluray() {
+                // Approximate the upload year from the timestamp
+                let upload_year = 1970 + (result.upload_timestamp / 31_536_000) as i32;
+                let year_gap = upload_year - air_year;
+                // If uploaded 2+ years after the series aired, it's probably a sequel
+                if year_gap >= 2 {
+                    score -= 80;
+                }
+            }
+        }
     }
 
     match target {

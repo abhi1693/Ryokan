@@ -2,6 +2,7 @@ use crate::services::nyaa::{SearchOptions, SearchResult};
 
 /// Score a search result based on multiple factors.
 /// `prefer_subs` controls whether dual audio/dub releases are penalized (default true).
+#[allow(dead_code)]
 pub fn score_result(r: &SearchResult, opts: &SearchOptions) -> i32 {
     score_result_with_sub_pref(r, opts, true)
 }
