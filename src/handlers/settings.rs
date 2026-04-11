@@ -68,7 +68,6 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
         Some("quality") => "quality".to_string(),
         Some("general") => "general".to_string(),
-        Some("connectors") => "connectors".to_string(),
         _ => "integrations".to_string(),
     }
 }
@@ -159,12 +158,12 @@ pub async fn settings_submit(
         auto_grab_on_add: existing_cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true),
         prefer_subs: form.prefer_subs == "1",
         allow_non_english: existing_cfg.as_ref().map(|c| c.allow_non_english).unwrap_or(false),
-        sonarr_enabled: if form.tab.as_deref() == Some("connectors") {
+        sonarr_enabled: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
             form.sonarr_enabled.is_some()
         } else {
             existing_cfg.as_ref().map(|c| c.sonarr_enabled).unwrap_or(false)
         },
-        sonarr_api_key: if form.tab.as_deref() == Some("connectors") {
+        sonarr_api_key: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
             form.sonarr_api_key.unwrap_or_default().trim().to_string()
         } else {
             existing_cfg.as_ref().map(|c| c.sonarr_api_key.clone()).unwrap_or_default()
