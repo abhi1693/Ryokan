@@ -395,6 +395,7 @@ pub fn build_upgrade_targets(
     disk_files: &[media::EpisodeFile],
     monitored_episodes: &[i32],
     cutoff_tier: quality::QualityTier,
+    quality_tags: &std::collections::HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> Vec<(SearchTarget, quality::QualityTier)> {
     let monitored: HashSet<i32> = monitored_episodes.iter().copied().collect();
     let mut targets = Vec::new();
@@ -402,7 +403,14 @@ pub fn build_upgrade_targets(
         if !monitored.contains(&file.episode_number) {
             continue;
         }
-        let existing_tier = quality::tier_from_disk_quality(&file.quality);
+        // Prefer the quality tag recorded at grab time (from the release title)
+        // over re-detecting from the renamed filename on disk.
+        let existing_tier = if let Some(tag) = quality_tags.get(&file.episode_number) {
+            let tier = quality::QualityTier::from_str(&tag.quality_tag);
+            if tier != quality::QualityTier::Unknown { tier } else { quality::tier_from_disk_quality(&file.quality) }
+        } else {
+            quality::tier_from_disk_quality(&file.quality)
+        };
         if existing_tier == quality::QualityTier::Unknown {
             continue;
         }

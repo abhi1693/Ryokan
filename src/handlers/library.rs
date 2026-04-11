@@ -1530,7 +1530,12 @@ pub async fn auto_search_series(
 
     // Also include upgrade targets: episodes on disk below the quality cutoff.
     let cutoff_tier = crate::services::quality::QualityTier::from_str(&cfg.quality_cutoff);
-    let upgrade_targets = auto_search::build_upgrade_targets(&existing_files, &monitored_eps, cutoff_tier);
+    let quality_tags = if let Some(ref t) = tracked {
+        episode_tags::get_for_series(&state.db, t.id).await.unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let upgrade_targets = auto_search::build_upgrade_targets(&existing_files, &monitored_eps, cutoff_tier, &quality_tags);
     // Merge upgrade targets (avoid duplicates with missing targets).
     let existing_target_eps: std::collections::HashSet<i32> = targets
         .iter()
