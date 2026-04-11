@@ -45,6 +45,8 @@ pub struct SettingsForm {
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
     prefer_subs: String,
+    sonarr_enabled: Option<String>,
+    sonarr_api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +89,8 @@ fn default_config() -> config::Config {
         auto_grab_on_add: true,
         prefer_subs: true,
         allow_non_english: false,
+        sonarr_enabled: false,
+        sonarr_api_key: String::new(),
     }
 }
 
@@ -94,6 +98,7 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
         Some("quality") => "quality".to_string(),
         Some("general") => "general".to_string(),
+        Some("connectors") => "connectors".to_string(),
         _ => "integrations".to_string(),
     }
 }
@@ -184,6 +189,16 @@ pub async fn settings_submit(
         auto_grab_on_add: existing_cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true),
         prefer_subs: form.prefer_subs == "1",
         allow_non_english: existing_cfg.as_ref().map(|c| c.allow_non_english).unwrap_or(false),
+        sonarr_enabled: if form.tab.as_deref() == Some("connectors") {
+            form.sonarr_enabled.is_some()
+        } else {
+            existing_cfg.as_ref().map(|c| c.sonarr_enabled).unwrap_or(false)
+        },
+        sonarr_api_key: if form.tab.as_deref() == Some("connectors") {
+            form.sonarr_api_key.unwrap_or_default().trim().to_string()
+        } else {
+            existing_cfg.as_ref().map(|c| c.sonarr_api_key.clone()).unwrap_or_default()
+        },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

@@ -87,10 +87,10 @@ pub async fn find_best_for_target(
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
-    let allow_non_english = config.allow_non_english;
+    let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
 
     // Phase 1: standard queries (alias + episode variants).
-    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, allow_non_english, &mut seen, &mut candidates).await;
+    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
 
     // Phase 2: if no candidate from a preferred group, try group-prefixed queries.
     let has_preferred_hit = !preferred_groups.is_empty()
@@ -100,7 +100,7 @@ pub async fn find_best_for_target(
 
     if !has_preferred_hit && !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, allow_non_english, &mut seen, &mut candidates).await;
+        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
     }
 
     // Phase 3: for finished series with BD preference, probe for BD releases.
@@ -111,7 +111,7 @@ pub async fn find_best_for_target(
 
         if !has_bd_candidate {
             let bd_queries = quality::bd_probe_queries(&aliases);
-            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, allow_non_english, &mut seen, &mut candidates).await;
+            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
         }
     }
 
@@ -143,59 +143,58 @@ async fn run_queries(
     expected_season: i32,
     is_finished: bool,
     season_year: Option<i32>,
-    allow_non_english: bool,
+    categories: &[String],
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
-    for query in queries {
-        let opts = SearchOptions {
-            query: query.clone(),
-            category: "1_0".to_string(),
-            filter: "0".to_string(),
-            user: String::new(),
-            preferred_groups: preferred_groups.to_vec(),
-            preferred_resolution: preferred_resolution.to_string(),
-            prefer_subs: true,
-        };
-
-        let resp = match nyaa::search(&opts, 1).await {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        for result in resp.results {
-            let dedupe_key = if !result.info_hash.is_empty() {
-                result.info_hash.clone()
-            } else {
-                result.title.to_lowercase()
+    for category in categories {
+        for query in queries {
+            let opts = SearchOptions {
+                query: query.clone(),
+                category: category.clone(),
+                filter: "0".to_string(),
+                user: String::new(),
+                preferred_groups: preferred_groups.to_vec(),
+                preferred_resolution: preferred_resolution.to_string(),
+                prefer_subs: true,
             };
-            if !seen.insert(dedupe_key) {
-                continue;
-            }
-            if !allow_batch && result.is_batch {
-                continue;
-            }
-            if !allow_non_english && quality::is_non_english_release(&result.title) {
-                continue;
-            }
-            if !matches_target(&result.title, aliases, target, expected_season) {
-                continue;
-            }
-            // For FINISHED series, reject non-BD results uploaded 2+ years after airing
-            if is_finished {
-                if let Some(air_year) = season_year {
-                    if result.upload_timestamp > 0 {
-                        let upload_year = 1970 + (result.upload_timestamp / 31_536_000) as i32;
-                        if upload_year - air_year >= 2 {
-                            let tier = quality::detect_tier(&result.title, &result.resolution);
-                            if !tier.is_bluray() && !result.is_batch {
-                                continue;
+
+            let resp = match nyaa::search(&opts, 1).await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            for result in resp.results {
+                let dedupe_key = if !result.info_hash.is_empty() {
+                    result.info_hash.clone()
+                } else {
+                    result.title.to_lowercase()
+                };
+                if !seen.insert(dedupe_key) {
+                    continue;
+                }
+                if !allow_batch && result.is_batch {
+                    continue;
+                }
+                if !matches_target(&result.title, aliases, target, expected_season) {
+                    continue;
+                }
+                // For FINISHED series, reject non-BD results uploaded 2+ years after airing
+                if is_finished {
+                    if let Some(air_year) = season_year {
+                        if result.upload_timestamp > 0 {
+                            let upload_year = 1970 + (result.upload_timestamp / 31_536_000) as i32;
+                            if upload_year - air_year >= 2 {
+                                let tier = quality::detect_tier(&result.title, &result.resolution);
+                                if !tier.is_bluray() && !result.is_batch {
+                                    continue;
+                                }
                             }
                         }
                     }
                 }
+                candidates.push(result);
             }
-            candidates.push(result);
         }
     }
 }

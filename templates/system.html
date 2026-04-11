@@ -367,7 +367,7 @@ function runRssSync(btn) {
                     <input type="checkbox" name="allow_non_english" id="allow_non_english" {% if allow_non_english %}checked{% endif %}>
                     <span>Allow non-English releases in auto grabs</span>
                 </label>
-                <span class="form-hint">When disabled (default), releases with CJK characters (Chinese, Japanese, Korean) in the title are rejected from auto-search and RSS grabs. Enable to allow all languages. Interactive search is not affected.</span>
+                <span class="form-hint">When disabled (default), auto-search and RSS use Nyaa's English-translated category. Enable to search all anime categories instead. Interactive search always searches all categories.</span>
             </div>
             <div class="debug-actions-group">
                 <div class="debug-action-row">

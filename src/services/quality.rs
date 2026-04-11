@@ -261,27 +261,18 @@ pub fn parse_group_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Check if a release title appears to be non-English based on CJK characters.
-/// Looks at the portion outside brackets (the main title text) — group names
-/// inside brackets like [喵萌奶茶屋&LoliHouse] will also trigger this since
-/// they indicate a non-English release.
-pub fn is_non_english_release(title: &str) -> bool {
-    for ch in title.chars() {
-        if is_cjk(ch) {
-            return true;
-        }
+/// Return the Nyaa search categories for a given AniList format.
+/// MUSIC → Anime Music Video (1_1) + Audio (2_0).
+/// Everything else → a single category determined by `allow_non_english`:
+///   false → English-translated (1_2), true → Anime All (1_0).
+pub fn nyaa_categories_for_format(format: &str, allow_non_english: bool) -> Vec<String> {
+    if format == "MUSIC" {
+        vec!["1_1".to_string(), "2_0".to_string()]
+    } else if allow_non_english {
+        vec!["1_0".to_string()]
+    } else {
+        vec!["1_2".to_string()]
     }
-    false
-}
-
-fn is_cjk(ch: char) -> bool {
-    matches!(ch as u32,
-        0x2E80..=0x9FFF   // CJK radicals, kangxi, ideographs
-        | 0xAC00..=0xD7AF // Hangul syllables
-        | 0xF900..=0xFAFF // CJK compat ideographs
-        | 0xFF01..=0xFF60 // Fullwidth forms
-        | 0x20000..=0x2FA1F // CJK extension B+
-    )
 }
 
 /// Build Nyaa search queries to probe for BD releases of a series.

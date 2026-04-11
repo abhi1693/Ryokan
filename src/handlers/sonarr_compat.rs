@@ -1,0 +1,834 @@
+//! Sonarr v3 API compatibility layer for Seerr integration.
+//!
+//! Implements the subset of Sonarr's API that Seerr calls, translating
+//! requests into Ryokan's internal data model.
+
+use axum::{
+    extract::{Path, Query, State},
+    http::{Request, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+use crate::models::{config, monitoring, series};
+use crate::services::{anibridge, anilist, logger, media, monitoring as monitoring_service};
+use crate::models::log::LogCategory;
+use crate::AppState;
+
+// ── Authentication middleware ──────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ApiKeyParam {
+    apikey: Option<String>,
+}
+
+/// Middleware that validates the `?apikey=` query parameter against the
+/// configured Sonarr API key. Returns 401 if missing/invalid or if the
+/// Sonarr compat layer is disabled.
+pub async fn require_api_key(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let cfg = match config::get_config(&state.db).await {
+        Ok(Some(c)) => c,
+        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    if !cfg.sonarr_enabled || cfg.sonarr_api_key.is_empty() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Sonarr API compatibility layer is disabled").into_response();
+    }
+
+    let query_str = req.uri().query().unwrap_or("");
+    let params: ApiKeyParam = query_str
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next()?;
+            let val = parts.next()?;
+            if key == "apikey" { Some(ApiKeyParam { apikey: Some(val.to_string()) }) } else { None }
+        })
+        .next()
+        .unwrap_or(ApiKeyParam { apikey: None });
+
+    match params.apikey {
+        Some(key) if key == cfg.sonarr_api_key => next.run(req).await,
+        _ => (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response(),
+    }
+}
+
+// ── Sonarr-compatible types ────────────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SonarrSeries {
+    pub id: i64,
+    pub title: String,
+    pub sort_title: String,
+    pub status: String,
+    pub overview: String,
+    pub network: String,
+    pub air_time: String,
+    pub images: Vec<SonarrImage>,
+    pub remote_poster: String,
+    pub seasons: Vec<SonarrSeason>,
+    pub year: i32,
+    pub path: String,
+    pub profile_id: i32,
+    pub language_profile_id: i32,
+    pub season_folder: bool,
+    pub monitored: bool,
+    pub use_scene_numbering: bool,
+    pub runtime: i32,
+    pub tvdb_id: i64,
+    pub tv_rage_id: i64,
+    pub tv_maze_id: i64,
+    pub first_aired: String,
+    pub series_type: String,
+    pub clean_title: String,
+    pub imdb_id: String,
+    pub title_slug: String,
+    pub certification: String,
+    pub genres: Vec<String>,
+    pub tags: Vec<i32>,
+    pub added: String,
+    pub ratings: SonarrRatings,
+    pub quality_profile_id: i32,
+    pub root_folder_path: String,
+    pub statistics: SonarrStatistics,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SonarrImage {
+    pub cover_type: String,
+    pub url: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SonarrSeason {
+    pub season_number: i32,
+    pub monitored: bool,
+    pub statistics: SonarrSeasonStats,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SonarrSeasonStats {
+    pub episode_file_count: i32,
+    pub episode_count: i32,
+    pub total_episode_count: i32,
+    pub size_on_disk: i64,
+    pub percent_of_episodes: f64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SonarrRatings {
+    pub votes: i32,
+    pub value: f64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SonarrStatistics {
+    pub season_count: i32,
+    pub episode_file_count: i32,
+    pub episode_count: i32,
+    pub total_episode_count: i32,
+    pub size_on_disk: i64,
+    pub percent_of_episodes: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityProfile {
+    id: i32,
+    name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootFolder {
+    id: i32,
+    path: String,
+    free_space: i64,
+    total_space: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageProfile {
+    id: i32,
+    name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    id: i32,
+    label: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemStatus {
+    version: String,
+    url_base: String,
+    app_name: String,
+}
+
+// ── Request types ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SeriesLookupQuery {
+    term: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct AddSeriesBody {
+    pub tvdb_id: Option<i64>,
+    pub title: Option<String>,
+    pub quality_profile_id: Option<i32>,
+    pub language_profile_id: Option<i32>,
+    pub seasons: Option<Vec<SeasonInput>>,
+    pub tags: Option<Vec<i32>>,
+    pub season_folder: Option<bool>,
+    pub monitored: Option<bool>,
+    pub root_folder_path: Option<String>,
+    pub series_type: Option<String>,
+    pub add_options: Option<AddOptions>,
+    // Extra fields Seerr may send — we preserve them on passthrough.
+    pub title_slug: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SeasonInput {
+    pub season_number: i32,
+    pub monitored: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct AddOptions {
+    pub ignore_episodes_with_files: Option<bool>,
+    pub search_for_missing_episodes: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct UpdateSeriesBody {
+    pub id: i64,
+    pub monitored: Option<bool>,
+    pub seasons: Option<Vec<SeasonInput>>,
+    pub tags: Option<Vec<i32>>,
+    // Accept and ignore all other fields Seerr passes through.
+    #[serde(flatten)]
+    _extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+pub struct CommandBody {
+    pub name: Option<String>,
+    #[serde(rename = "seriesId")]
+    pub series_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct TagBody {
+    pub label: Option<String>,
+}
+
+// ── Handlers ───────────────────────────────────────────────────────────────
+
+/// GET /api/v3/system/status
+pub async fn system_status() -> Json<SystemStatus> {
+    Json(SystemStatus {
+        version: "3.0.0".to_string(),
+        url_base: String::new(),
+        app_name: "Ryokan".to_string(),
+    })
+}
+
+/// GET /api/v3/qualityprofile
+pub async fn quality_profiles() -> Json<Vec<QualityProfile>> {
+    Json(vec![QualityProfile {
+        id: 1,
+        name: "Default".to_string(),
+    }])
+}
+
+/// GET /api/v3/rootfolder
+pub async fn root_folders(
+    State(state): State<AppState>,
+) -> Json<Vec<RootFolder>> {
+    let media_root = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.media_root)
+        .unwrap_or_default();
+
+    let path = if media_root.is_empty() { "/media".to_string() } else { media_root };
+
+    Json(vec![RootFolder {
+        id: 1,
+        path,
+        free_space: 0,
+        total_space: 0,
+    }])
+}
+
+/// GET /api/v3/languageprofile
+pub async fn language_profiles() -> Json<Vec<LanguageProfile>> {
+    Json(vec![LanguageProfile {
+        id: 1,
+        name: "English".to_string(),
+    }])
+}
+
+/// GET /api/v3/tag
+pub async fn list_tags() -> Json<Vec<Tag>> {
+    Json(vec![])
+}
+
+/// POST /api/v3/tag
+pub async fn create_tag(
+    Json(body): Json<TagBody>,
+) -> Json<Tag> {
+    Json(Tag {
+        id: 1,
+        label: body.label.unwrap_or_default(),
+    })
+}
+
+/// GET /api/v3/series/lookup?term=...
+///
+/// Seerr sends either `term=tvdb:12345` for TVDB ID lookup or `term=Title` for title search.
+/// Since Seerr uses TMDB internally, the "tvdb" ID it sends is actually the TMDB ID for anime.
+pub async fn series_lookup(
+    State(state): State<AppState>,
+    Query(params): Query<SeriesLookupQuery>,
+) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_else(|| default_config());
+
+    if let Some(tmdb_id_str) = params.term.strip_prefix("tvdb:") {
+        // TVDB/TMDB ID lookup — use anibridge mappings.
+        let tmdb_id: i64 = tmdb_id_str
+            .trim()
+            .parse()
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid ID".to_string()))?;
+
+        return lookup_by_tmdb_id(&state, &cfg, tmdb_id).await;
+    }
+
+    // Title search — search AniList and return results in Sonarr format.
+    let results = anilist::search_anime(&params.term)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+
+    let mut sonarr_results = Vec::new();
+    for r in results {
+        let db_series = series::get_by_anilist_id(&state.db, r.id)
+            .await
+            .ok()
+            .flatten();
+
+        let tmdb_id = anibridge::lookup_tmdb_by_anilist(r.id).await.unwrap_or(0);
+        let title = if !r.title_english.is_empty() { &r.title_english } else { &r.title_romaji };
+
+        sonarr_results.push(build_sonarr_series_from_search(
+            &r,
+            title,
+            tmdb_id,
+            db_series.as_ref(),
+            &cfg,
+        ));
+    }
+
+    Ok(Json(sonarr_results))
+}
+
+/// GET /api/v3/series — list all tracked series.
+pub async fn list_series(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_else(|| default_config());
+
+    let tracked = series::get_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut results = Vec::new();
+    for s in &tracked {
+        let tmdb_id = anibridge::lookup_tmdb_by_anilist(s.anilist_id).await.unwrap_or(0);
+        results.push(build_sonarr_series_from_tracked(s, tmdb_id, &cfg));
+    }
+
+    Ok(Json(results))
+}
+
+/// GET /api/v3/series/{id} — get a single tracked series by Ryokan's internal ID.
+pub async fn get_series(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_else(|| default_config());
+
+    let s = series::get_by_id(&state.db, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Series not found".to_string()))?;
+
+    let tmdb_id = anibridge::lookup_tmdb_by_anilist(s.anilist_id).await.unwrap_or(0);
+    Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
+}
+
+/// POST /api/v3/series — add a new series.
+///
+/// Seerr sends tvdbId (which is the TMDB ID for anime). We map it to AniList,
+/// add the series to Ryokan's library, and return the Sonarr-format response.
+pub async fn add_series(
+    State(state): State<AppState>,
+    Json(body): Json<AddSeriesBody>,
+) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
+    let tmdb_id = body.tvdb_id.unwrap_or(0);
+
+    // Resolve TMDB → AniList ID.
+    anibridge::ensure_loaded().await;
+    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
+    let anilist_id = anime_ids
+        .first()
+        .and_then(|a| a.anilist_id)
+        .ok_or((StatusCode::BAD_REQUEST, format!("No AniList mapping found for TMDB ID {}", tmdb_id)))?;
+
+    // Fetch full detail from AniList.
+    let detail = anilist::get_anime_detail(anilist_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+
+    let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+
+    // Add to Ryokan's library.
+    let (id, _created) = series::upsert(
+        &state.db,
+        detail.id,
+        detail.id_mal,
+        title,
+        &detail.title_romaji,
+        &detail.title_english,
+        &detail.title_native,
+        &detail.cover_url,
+        &detail.format,
+        &detail.status,
+        detail.episodes,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Set monitoring based on what Seerr requested.
+    let monitor_mode = if body.monitored.unwrap_or(true) {
+        monitoring::MonitorMode::All
+    } else {
+        monitoring::MonitorMode::None
+    };
+    let _ = monitoring_service::apply_monitor_mode(&state.db, id, monitor_mode).await;
+
+    // If Seerr requested season-level monitoring, apply it.
+    if let Some(ref seasons) = body.seasons {
+        for season in seasons {
+            // Ryokan doesn't have seasons — map season monitoring to episode monitoring.
+            // For anime, season 1 = all episodes.
+            if season.season_number <= 1 && !season.monitored {
+                let _ = monitoring_service::apply_monitor_mode(
+                    &state.db, id, monitoring::MonitorMode::None,
+                ).await;
+            }
+        }
+    }
+
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!("Added via Seerr: {}", title),
+        &format!("tmdb_id={}, anilist_id={}, id={}", tmdb_id, anilist_id, id),
+    ).await;
+
+    // Auto-search if requested.
+    if body.add_options
+        .as_ref()
+        .and_then(|o| o.search_for_missing_episodes)
+        .unwrap_or(false)
+    {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let _ = super::library::auto_search_series(
+                axum::extract::State(state_clone),
+                axum::extract::Path(id),
+            ).await;
+        });
+    }
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| default_config());
+
+    let s = series::get_by_id(&state.db, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Series not found after insert".to_string()))?;
+
+    Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
+}
+
+/// PUT /api/v3/series — update an existing series.
+pub async fn update_series(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateSeriesBody>,
+) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
+    let s = series::get_by_id(&state.db, body.id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Series not found".to_string()))?;
+
+    // Update monitoring.
+    if let Some(monitored) = body.monitored {
+        let mode = if monitored {
+            monitoring::MonitorMode::All
+        } else {
+            monitoring::MonitorMode::None
+        };
+        let _ = monitoring_service::apply_monitor_mode(&state.db, s.id, mode).await;
+    }
+
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!("Updated via Seerr: {}", s.title),
+        &format!("id={}, monitored={:?}", s.id, body.monitored),
+    ).await;
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| default_config());
+
+    let tmdb_id = anibridge::lookup_tmdb_by_anilist(s.anilist_id).await.unwrap_or(0);
+    Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
+}
+
+/// POST /api/v3/command — execute a command. Seerr sends SeriesSearch.
+pub async fn execute_command(
+    State(state): State<AppState>,
+    Json(body): Json<CommandBody>,
+) -> Json<serde_json::Value> {
+    let name = body.name.unwrap_or_default();
+
+    if name == "SeriesSearch" {
+        if let Some(series_id) = body.series_id {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                let _ = super::library::auto_search_series(
+                    axum::extract::State(state_clone),
+                    axum::extract::Path(series_id),
+                ).await;
+            });
+        }
+    }
+
+    Json(serde_json::json!({
+        "id": 1,
+        "name": name,
+        "commandName": name,
+        "status": "queued",
+        "queued": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+async fn lookup_by_tmdb_id(
+    state: &AppState,
+    cfg: &config::Config,
+    tmdb_id: i64,
+) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
+    anibridge::ensure_loaded().await;
+    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
+
+    if anime_ids.is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    let mut results = Vec::new();
+    for ids in &anime_ids {
+        let anilist_id = match ids.anilist_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        // Check if already in library.
+        let db_series = series::get_by_anilist_id(&state.db, anilist_id)
+            .await
+            .ok()
+            .flatten();
+
+        // Fetch detail from AniList.
+        let detail = match anilist::get_anime_detail(anilist_id).await {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+
+        let search_result = anilist::AnimeEntry {
+            id: detail.id,
+            id_mal: detail.id_mal,
+            title_romaji: detail.title_romaji.clone(),
+            title_english: detail.title_english.clone(),
+            title_native: detail.title_native.clone(),
+            cover_url: detail.cover_url.clone(),
+            format: detail.format.clone(),
+            status: detail.status.clone(),
+            status_display: String::new(),
+            episodes: detail.episodes,
+            source: "anilist".to_string(),
+        };
+
+        results.push(build_sonarr_series_from_search(
+            &search_result,
+            title,
+            tmdb_id,
+            db_series.as_ref(),
+            cfg,
+        ));
+    }
+
+    Ok(Json(results))
+}
+
+fn build_sonarr_series_from_search(
+    r: &anilist::AnimeEntry,
+    title: &str,
+    tmdb_id: i64,
+    db_series: Option<&series::Series>,
+    cfg: &config::Config,
+) -> SonarrSeries {
+    let total_eps = r.episodes.unwrap_or(0).max(0);
+    let is_in_library = db_series.is_some();
+    let internal_id = db_series.map(|s| s.id).unwrap_or(0);
+
+    let folder_name = db_series
+        .map(|s| s.folder_name.clone())
+        .unwrap_or_else(|| media::sanitize_folder_name(title));
+
+    let disk_files = if is_in_library {
+        media::scan_series_folder(&cfg.media_root, &folder_name)
+    } else {
+        Vec::new()
+    };
+    let on_disk = disk_files.len() as i32;
+
+    let path = if cfg.media_root.is_empty() {
+        format!("/media/{}", folder_name)
+    } else {
+        format!("{}/{}", cfg.media_root, folder_name)
+    };
+
+    let monitored = db_series
+        .map(|s| s.monitor_mode_enum() != monitoring::MonitorMode::None)
+        .unwrap_or(true);
+
+    SonarrSeries {
+        id: internal_id,
+        title: title.to_string(),
+        sort_title: title.to_lowercase(),
+        status: map_status(&r.status),
+        overview: String::new(),
+        network: String::new(),
+        air_time: String::new(),
+        images: vec![SonarrImage {
+            cover_type: "poster".to_string(),
+            url: r.cover_url.clone(),
+        }],
+        remote_poster: r.cover_url.clone(),
+        seasons: vec![SonarrSeason {
+            season_number: 1,
+            monitored,
+            statistics: SonarrSeasonStats {
+                episode_file_count: on_disk,
+                episode_count: total_eps,
+                total_episode_count: total_eps,
+                size_on_disk: 0,
+                percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
+            },
+        }],
+        year: 0,
+        path,
+        profile_id: 1,
+        language_profile_id: 1,
+        season_folder: true,
+        monitored,
+        use_scene_numbering: false,
+        runtime: 24,
+        tvdb_id: tmdb_id,
+        tv_rage_id: 0,
+        tv_maze_id: 0,
+        first_aired: String::new(),
+        series_type: "anime".to_string(),
+        clean_title: title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""),
+        imdb_id: String::new(),
+        title_slug: format!("ryokan-{}", r.id),
+        certification: String::new(),
+        genres: vec!["Anime".to_string()],
+        tags: vec![],
+        added: String::new(),
+        ratings: SonarrRatings { votes: 0, value: 0.0 },
+        quality_profile_id: 1,
+        root_folder_path: cfg.media_root.clone(),
+        statistics: SonarrStatistics {
+            season_count: 1,
+            episode_file_count: on_disk,
+            episode_count: total_eps,
+            total_episode_count: total_eps,
+            size_on_disk: 0,
+            percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
+        },
+    }
+}
+
+fn build_sonarr_series_from_tracked(
+    s: &series::Series,
+    tmdb_id: i64,
+    cfg: &config::Config,
+) -> SonarrSeries {
+    let total_eps = s.episodes.unwrap_or(0).max(0);
+    let disk_files = media::scan_series_folder(&cfg.media_root, &s.folder_name);
+    let on_disk = disk_files.len() as i32;
+    let monitored = s.monitor_mode_enum() != monitoring::MonitorMode::None;
+
+    let path = if cfg.media_root.is_empty() {
+        format!("/media/{}", s.folder_name)
+    } else {
+        format!("{}/{}", cfg.media_root, s.folder_name)
+    };
+
+    let title = if !s.title.is_empty() { &s.title } else { &s.title_romaji };
+
+    SonarrSeries {
+        id: s.id,
+        title: title.to_string(),
+        sort_title: title.to_lowercase(),
+        status: map_status(&s.status),
+        overview: String::new(),
+        network: String::new(),
+        air_time: String::new(),
+        images: vec![SonarrImage {
+            cover_type: "poster".to_string(),
+            url: s.cover_url.clone(),
+        }],
+        remote_poster: s.cover_url.clone(),
+        seasons: vec![SonarrSeason {
+            season_number: 1,
+            monitored,
+            statistics: SonarrSeasonStats {
+                episode_file_count: on_disk,
+                episode_count: total_eps,
+                total_episode_count: total_eps,
+                size_on_disk: 0,
+                percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
+            },
+        }],
+        year: 0,
+        path,
+        profile_id: 1,
+        language_profile_id: 1,
+        season_folder: true,
+        monitored,
+        use_scene_numbering: false,
+        runtime: 24,
+        tvdb_id: tmdb_id,
+        tv_rage_id: 0,
+        tv_maze_id: 0,
+        first_aired: String::new(),
+        series_type: "anime".to_string(),
+        clean_title: title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""),
+        imdb_id: String::new(),
+        title_slug: format!("ryokan-{}", s.anilist_id),
+        certification: String::new(),
+        genres: vec!["Anime".to_string()],
+        tags: vec![],
+        added: String::new(),
+        ratings: SonarrRatings { votes: 0, value: 0.0 },
+        quality_profile_id: 1,
+        root_folder_path: cfg.media_root.clone(),
+        statistics: SonarrStatistics {
+            season_count: 1,
+            episode_file_count: on_disk,
+            episode_count: total_eps,
+            total_episode_count: total_eps,
+            size_on_disk: 0,
+            percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
+        },
+    }
+}
+
+fn map_status(anilist_status: &str) -> String {
+    match anilist_status.to_uppercase().as_str() {
+        "RELEASING" | "NOT_YET_RELEASED" => "continuing".to_string(),
+        "FINISHED" | "FINISHED_AIRING" | "CANCELLED" => "ended".to_string(),
+        _ => "continuing".to_string(),
+    }
+}
+
+fn default_config() -> config::Config {
+    config::Config {
+        qbit_url: String::new(),
+        qbit_user: String::new(),
+        qbit_pass: String::new(),
+        qbit_category: String::new(),
+        qbit_download_path: String::new(),
+        jellyfin_url: String::new(),
+        jellyfin_api_key: String::new(),
+        preferred_groups: String::new(),
+        blocked_groups: String::new(),
+        preferred_resolution: "1080".to_string(),
+        quality_profile: "web_1080".to_string(),
+        quality_cutoff: "bd_1080".to_string(),
+        finished_series_quality: "prefer_bd".to_string(),
+        media_root: String::new(),
+        title_language: "english".to_string(),
+        force_mal_fallback: false,
+        rss_enabled: false,
+        rss_interval_minutes: 5,
+        force_kitsu_fallback: false,
+        post_processing_enabled: false,
+        post_processing_mode: "hardlink".to_string(),
+        auto_grab_on_add: true,
+        prefer_subs: true,
+        allow_non_english: false,
+        sonarr_enabled: false,
+        sonarr_api_key: String::new(),
+    }
+}

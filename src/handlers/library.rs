@@ -124,6 +124,7 @@ pub struct SetFolderForm {
 pub struct SetMonitoringForm {
     series_id: i64,
     monitor_mode: String,
+    auto_grab: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1193,30 +1194,6 @@ pub async fn add_series(
 
     let monitor = monitoring_service::recompute_series_monitoring(&state.db, id).await.ok();
 
-    // Auto-grab monitored episodes after adding, if the setting is enabled.
-    let auto_grab_on_add = config::get_config(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|c| c.auto_grab_on_add)
-        .unwrap_or(true);
-
-    if auto_grab_on_add && state.qbit.read().await.is_some() {
-        let state_clone = state.clone();
-        let series_route_id = id;
-        tokio::spawn(async move {
-            // Small delay to let metadata hydration get started.
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            match auto_search_series(
-                axum::extract::State(state_clone),
-                axum::extract::Path(series_route_id),
-            ).await {
-                Ok(_) => {}
-                Err(_) => {}
-            }
-        });
-    }
-
     Ok(Json(serde_json::json!({
         "ok": true,
         "id": id,
@@ -1274,16 +1251,43 @@ pub async fn set_monitoring(
     Json(form): Json<SetMonitoringForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let mode = monitoring::MonitorMode::from_str(&form.monitor_mode);
-    let summary = monitoring_service::apply_monitor_mode(&state.db, form.series_id, mode)
+    let series_id = form.series_id;
+    let summary = monitoring_service::apply_monitor_mode(&state.db, series_id, mode)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     logger::info(
         &state.db,
         LogCategory::Library,
-        &format!("Updated monitoring for series {}", form.series_id),
+        &format!("Updated monitoring for series {}", series_id),
         &format!("mode={}, monitored={}/{}", summary.mode.as_str(), summary.monitored_count, summary.total_count),
     ).await;
+
+    // Auto-grab monitored episodes if requested (e.g. after initial add).
+    if form.auto_grab.unwrap_or(false)
+        && mode != monitoring::MonitorMode::None
+        && summary.monitored_count > 0
+        && state.qbit.read().await.is_some()
+    {
+        let auto_grab_on_add = config::get_config(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.auto_grab_on_add)
+            .unwrap_or(true);
+
+        if auto_grab_on_add {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                // Small delay to let metadata hydration finish.
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let _ = auto_search_series(
+                    axum::extract::State(state_clone),
+                    axum::extract::Path(series_id),
+                ).await;
+            });
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -1359,6 +1363,8 @@ async fn run_auto_search_targets(
             auto_grab_on_add: true,
             prefer_subs: true,
             allow_non_english: false,
+            sonarr_enabled: false,
+            sonarr_api_key: String::new(),
         });
 
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
@@ -1499,6 +1505,8 @@ pub async fn auto_search_series(
             auto_grab_on_add: true,
             prefer_subs: true,
             allow_non_english: false,
+            sonarr_enabled: false,
+            sonarr_api_key: String::new(),
         });
 
     let (tracked_row, provider_id, detail) = resolve_series_context(&state.db, request_id)
@@ -1636,6 +1644,8 @@ pub async fn search_batch_releases(
             auto_grab_on_add: true,
             prefer_subs: true,
             allow_non_english: false,
+            sonarr_enabled: false,
+            sonarr_api_key: String::new(),
         });
 
     // Use auto_search::find_best_for_target with batch allowed; then grab if found.
@@ -1730,6 +1740,8 @@ pub async fn interactive_search_episode(
             auto_grab_on_add: true,
             prefer_subs: true,
             allow_non_english: false,
+            sonarr_enabled: false,
+            sonarr_api_key: String::new(),
         });
 
     let results = auto_search::find_all_for_target(

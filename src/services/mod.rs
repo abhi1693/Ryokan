@@ -25,3 +25,5 @@ pub mod html;
 
 pub mod nfo;
 pub mod post_processing;
+
+pub mod anibridge;

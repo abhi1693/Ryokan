@@ -18,6 +18,7 @@
     <a href="/settings?tab=integrations" class="system-tab {% if tab == "integrations" %}active{% endif %}">Connections</a>
     <a href="/settings?tab=quality" class="system-tab {% if tab == "quality" %}active{% endif %}">Quality &amp; Scoring</a>
     <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
+    <a href="/settings?tab=connectors" class="system-tab {% if tab == "connectors" %}active{% endif %}">Connectors</a>
 </div>
 
 <form method="post" action="/settings" class="settings-form">
@@ -208,10 +209,42 @@
         </fieldset>
     </div>
 
+    <div class="settings-tab-panel {% if tab == "connectors" %}active{% endif %}">
+        <fieldset>
+            <legend>Seerr (Sonarr API Compatibility)</legend>
+            <p class="form-hint" style="margin-bottom: 12px;">
+                Exposes a Sonarr-compatible API so Seerr can add and manage anime through Ryokan.
+                In Seerr, add a new Sonarr server pointing to this Ryokan instance's address with the API key below.
+            </p>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="sonarr_enabled" id="sonarr_enabled" {% if config.sonarr_enabled %}checked{% endif %}>
+                    <span>Enable Sonarr API</span>
+                </label>
+                <span class="form-hint">When enabled, Ryokan accepts Sonarr v3 API calls at <code>/api/v3/</code> authenticated with the key below.</span>
+            </div>
+            <div class="form-group">
+                <label for="sonarr_api_key">API Key</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="text" name="sonarr_api_key" id="sonarr_api_key" value="{{ config.sonarr_api_key }}" placeholder="Paste this key into Seerr's Sonarr server config" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="generateApiKey()" style="white-space:nowrap">Generate</button>
+                </div>
+                <span class="form-hint">Use this key as the API key when adding Ryokan as a Sonarr server in Seerr.</span>
+            </div>
+        </fieldset>
+    </div>
+
     <button type="submit" class="btn btn-primary">Save Settings</button>
 </form>
 
 <script>
+function generateApiKey() {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let key = '';
+    for (let i = 0; i < 32; i++) key += chars[Math.floor(Math.random() * chars.length)];
+    document.getElementById('sonarr_api_key').value = key;
+}
+
 function syncTitleLanguagePreview(lang) {
     localStorage.setItem('titleLanguage', lang);
 }

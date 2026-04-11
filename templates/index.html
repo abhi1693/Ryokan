@@ -255,7 +255,7 @@ function confirmMonitoring() {
     fetch('/api/library/monitoring', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: _pendingSeriesId, monitor_mode: _selectedMonitorMode })
+        body: JSON.stringify({ series_id: _pendingSeriesId, monitor_mode: _selectedMonitorMode, auto_grab: true })
     })
     .then(() => location.reload())
     .catch(() => location.reload());

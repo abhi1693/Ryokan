@@ -67,6 +67,8 @@ pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Res
             auto_grab_on_add: true,
             prefer_subs: true,
             allow_non_english: false,
+            sonarr_enabled: false,
+            sonarr_api_key: String::new(),
         });
 
     let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);

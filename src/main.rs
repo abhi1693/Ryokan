@@ -136,9 +136,27 @@ async fn main() {
             handlers::auth::require_auth,
         ));
 
+    // Sonarr v3 API compatibility layer for Seerr integration.
+    // Authenticated via ?apikey= query parameter, not cookies.
+    let sonarr_routes = Router::new()
+        .route("/api/v3/system/status", get(handlers::sonarr_compat::system_status))
+        .route("/api/v3/qualityprofile", get(handlers::sonarr_compat::quality_profiles))
+        .route("/api/v3/rootfolder", get(handlers::sonarr_compat::root_folders))
+        .route("/api/v3/languageprofile", get(handlers::sonarr_compat::language_profiles))
+        .route("/api/v3/tag", get(handlers::sonarr_compat::list_tags).post(handlers::sonarr_compat::create_tag))
+        .route("/api/v3/series", get(handlers::sonarr_compat::list_series).post(handlers::sonarr_compat::add_series).put(handlers::sonarr_compat::update_series))
+        .route("/api/v3/series/{id}", get(handlers::sonarr_compat::get_series))
+        .route("/api/v3/series/lookup", get(handlers::sonarr_compat::series_lookup))
+        .route("/api/v3/command", post(handlers::sonarr_compat::execute_command))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::sonarr_compat::require_api_key,
+        ));
+
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
+        .merge(sonarr_routes)
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state.clone());
 

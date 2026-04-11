@@ -6,3 +6,4 @@ pub mod settings;
 pub mod system;
 
 pub mod media;
+pub mod sonarr_compat;

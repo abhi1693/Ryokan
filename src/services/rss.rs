@@ -10,7 +10,7 @@ use crate::{
 };
 
 static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
-const NYAA_RSS_URL: &str = "https://nyaa.si/?page=rss&c=1_0&f=0";
+const NYAA_RSS_BASE: &str = "https://nyaa.si/?page=rss&f=0";
 
 // ── Pre-compiled regexes ───────────────────────────────────────────────────
 // Feed parsing
@@ -241,10 +241,13 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             auto_grab_on_add: true,
             prefer_subs: true,
             allow_non_english: false,
+            sonarr_enabled: false,
+            sonarr_api_key: String::new(),
         });
 
-    let items = fetch_feed().await?;
     let tracked = series::get_all(&state.db).await.map_err(|e| e.to_string())?;
+    let has_music_series = tracked.iter().any(|s| s.format == "MUSIC");
+    let items = fetch_feeds(cfg.allow_non_english, has_music_series).await?;
     for row in &tracked {
         let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
     }
@@ -291,13 +294,6 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if group_matches_blacklist(&item.group, &blacklist) {
             skipped += 1;
             let reason = format!("Blocked group: {} | {}", item.group, build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
-            continue;
-        }
-
-        if !cfg.allow_non_english && quality::is_non_english_release(&item.title) {
-            skipped += 1;
-            let reason = format!("Non-English release rejected | {}", build_match_diag(&item, Some(&found), 0));
             let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
             continue;
         }
@@ -1104,10 +1100,11 @@ fn build_item_key(item: &RssItem) -> String {
     format!("title:{}", item.title.to_lowercase())
 }
 
-async fn fetch_feed() -> Result<Vec<RssItem>, String> {
+async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
+    let url = format!("{}&c={}", NYAA_RSS_BASE, category);
     let client = reqwest::Client::new();
     let xml = client
-        .get(NYAA_RSS_URL)
+        .get(&url)
         .header("User-Agent", "Ryokan/0.1")
         .send()
         .await
@@ -1117,6 +1114,38 @@ async fn fetch_feed() -> Result<Vec<RssItem>, String> {
         .map_err(|e| format!("Failed to read RSS response: {}", e))?;
 
     Ok(parse_feed(&xml))
+}
+
+/// Fetch RSS items from all relevant Nyaa categories.
+/// Uses English-translated (1_2) by default; adds music categories (1_1, 2_0)
+/// if any tracked series has MUSIC format; uses All (1_0) when allow_non_english.
+async fn fetch_feeds(allow_non_english: bool, has_music_series: bool) -> Result<Vec<RssItem>, String> {
+    let mut categories = if allow_non_english {
+        vec!["1_0"]
+    } else {
+        vec!["1_2"]
+    };
+    if has_music_series {
+        if !categories.contains(&"1_1") { categories.push("1_1"); }
+        if !categories.contains(&"2_0") { categories.push("2_0"); }
+    }
+
+    let mut all_items = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+    for cat in categories {
+        let items = fetch_feed(cat).await?;
+        for item in items {
+            let key = if !item.info_hash.is_empty() {
+                item.info_hash.to_lowercase()
+            } else {
+                item.title.to_lowercase()
+            };
+            if seen_keys.insert(key) {
+                all_items.push(item);
+            }
+        }
+    }
+    Ok(all_items)
 }
 
 fn parse_feed(xml: &str) -> Vec<RssItem> {

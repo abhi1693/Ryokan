@@ -193,6 +193,8 @@ pub async fn debug_settings_submit(
             auto_grab_on_add: true,
             prefer_subs: true,
             allow_non_english: false,
+            sonarr_enabled: false,
+            sonarr_api_key: String::new(),
         });
 
     cfg.force_mal_fallback = form.force_mal_fallback.is_some();
