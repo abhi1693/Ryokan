@@ -363,7 +363,7 @@ pub async fn create_tag(
 /// GET /api/v3/series/lookup?term=...
 ///
 /// Seerr sends either `term=tvdb:12345` for TVDB ID lookup or `term=Title` for title search.
-/// Since Seerr uses TMDB internally, the "tvdb" ID it sends is actually the TMDB ID for anime.
+/// The ID in the `tvdb:` prefix is a real TVDB ID (Sonarr natively uses TVDB).
 pub async fn series_lookup(
     State(state): State<AppState>,
     Query(params): Query<SeriesLookupQuery>,
@@ -374,14 +374,14 @@ pub async fn series_lookup(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
-    if let Some(tmdb_id_str) = params.term.strip_prefix("tvdb:") {
-        // TVDB/TMDB ID lookup — use anibridge mappings.
-        let tmdb_id: i64 = tmdb_id_str
+    if let Some(tvdb_id_str) = params.term.strip_prefix("tvdb:") {
+        // TVDB ID lookup — try anibridge TVDB index first, then TMDB as fallback.
+        let tvdb_id: i64 = tvdb_id_str
             .trim()
             .parse()
             .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid ID".to_string()))?;
 
-        return lookup_by_tmdb_id(&state, &cfg, tmdb_id).await;
+        return lookup_by_external_id(&state, &cfg, tvdb_id).await;
     }
 
     // Title search — search AniList and return results in Sonarr format.
@@ -456,17 +456,20 @@ pub async fn get_series(
 
 /// POST /api/v3/series — add a new series.
 ///
-/// Seerr sends tvdbId (which is the TMDB ID for anime). We map it to AniList,
-/// add the series to Ryokan's library, and return the Sonarr-format response.
+/// Seerr sends tvdbId which is a real TVDB ID. We map it to AniList/MAL via
+/// anibridge, add the series to Ryokan's library, and return a Sonarr-format response.
 pub async fn add_series(
     State(state): State<AppState>,
     Json(body): Json<AddSeriesBody>,
 ) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
-    let tmdb_id = body.tvdb_id.unwrap_or(0);
+    let tvdb_id = body.tvdb_id.unwrap_or(0);
 
-    // Resolve TMDB → AniList/MAL IDs via anibridge.
+    // Resolve TVDB → AniList/MAL IDs via anibridge (try TVDB first, then TMDB as fallback).
     anibridge::ensure_loaded().await;
-    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
+    let mut anime_ids = anibridge::lookup_by_tvdb(tvdb_id).await;
+    if anime_ids.is_empty() {
+        anime_ids = anibridge::lookup_by_tmdb(tvdb_id).await;
+    }
 
     let detail = if let Some(ids) = anime_ids.first().filter(|a| a.anilist_id.is_some() || a.mal_id.is_some()) {
         // Anibridge has a mapping — fetch detail via AniList/Jikan.
@@ -485,15 +488,15 @@ pub async fn add_series(
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
         } else {
-            return Err((StatusCode::BAD_GATEWAY, "No AniList or MAL ID available for TMDB mapping".to_string()));
+            return Err((StatusCode::BAD_GATEWAY, "No AniList or MAL ID available for anibridge mapping".to_string()));
         }
     } else {
         // No anibridge mapping — fall back to AniList title search.
         let search_title = body.title.as_deref().unwrap_or("");
         if search_title.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, format!("No mapping for TMDB ID {} and no title provided", tmdb_id)));
+            return Err((StatusCode::BAD_REQUEST, format!("No mapping for TVDB ID {} and no title provided", tvdb_id)));
         }
-        tracing::info!("No anibridge mapping for TMDB {}; searching AniList for '{}'", tmdb_id, search_title);
+        tracing::info!("No anibridge mapping for TVDB {}; searching AniList for '{}'", tvdb_id, search_title);
 
         let results = anilist::search_anime(search_title)
             .await
@@ -557,7 +560,7 @@ pub async fn add_series(
         &state.db,
         LogCategory::Library,
         &format!("Added via Seerr: {}", title),
-        &format!("tmdb_id={}, provider_id={}, id={}", tmdb_id, detail.id, id),
+        &format!("tvdb_id={}, provider_id={}, id={}", tvdb_id, detail.id, id),
     ).await;
 
     // Auto-search if requested.
@@ -587,7 +590,7 @@ pub async fn add_series(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Series not found after insert".to_string()))?;
 
-    Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
+    Ok(Json(build_sonarr_series_from_tracked(&s, tvdb_id, &cfg)))
 }
 
 /// PUT /api/v3/series — update an existing series.
@@ -674,20 +677,25 @@ async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64
     0
 }
 
-async fn lookup_by_tmdb_id(
+/// Look up anime by external ID (TVDB or TMDB). Tries TVDB index first since
+/// Sonarr/Seerr sends real TVDB IDs, then falls back to TMDB index.
+async fn lookup_by_external_id(
     state: &AppState,
     cfg: &config::Config,
-    tmdb_id: i64,
+    tvdb_id: i64,
 ) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
     anibridge::ensure_loaded().await;
-    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
+    let mut anime_ids = anibridge::lookup_by_tvdb(tvdb_id).await;
+    if anime_ids.is_empty() {
+        anime_ids = anibridge::lookup_by_tmdb(tvdb_id).await;
+    }
 
     if anime_ids.is_empty() {
-        // Anibridge has no mapping for this TMDB ID. Return a stub entry so
+        // Anibridge has no mapping for this ID. Return a stub entry so
         // Seerr can proceed to the add step, where we'll resolve via AniList
         // title search using the title Seerr passes in the POST body.
-        tracing::warn!("No anibridge mapping for TMDB ID {}; returning stub for Seerr", tmdb_id);
-        return Ok(Json(vec![build_stub_series(tmdb_id, cfg)]));
+        tracing::warn!("No anibridge mapping for TVDB ID {}; returning stub for Seerr", tvdb_id);
+        return Ok(Json(vec![build_stub_series(tvdb_id, cfg)]));
     }
 
     let mut results = Vec::new();
@@ -740,7 +748,7 @@ async fn lookup_by_tmdb_id(
         results.push(build_sonarr_series_from_search(
             &search_result,
             title,
-            tmdb_id,
+            tvdb_id,
             db_series.as_ref(),
             cfg,
         ));
@@ -923,9 +931,9 @@ fn map_status(anilist_status: &str) -> String {
     }
 }
 
-/// Build a minimal stub SonarrSeries for TMDB IDs that anibridge can't resolve.
+/// Build a minimal stub SonarrSeries for TVDB IDs that anibridge can't resolve.
 /// This lets Seerr proceed to the add step, where we resolve via AniList title search.
-fn build_stub_series(tmdb_id: i64, cfg: &config::Config) -> SonarrSeries {
+fn build_stub_series(tvdb_id: i64, cfg: &config::Config) -> SonarrSeries {
     let path = if cfg.media_root.is_empty() {
         "/media/Unknown".to_string()
     } else {
@@ -934,8 +942,8 @@ fn build_stub_series(tmdb_id: i64, cfg: &config::Config) -> SonarrSeries {
 
     SonarrSeries {
         id: 0,
-        title: format!("TMDB:{}", tmdb_id),
-        sort_title: format!("tmdb:{}", tmdb_id),
+        title: format!("TVDB:{}", tvdb_id),
+        sort_title: format!("tvdb:{}", tvdb_id),
         status: "continuing".to_string(),
         overview: String::new(),
         network: String::new(),
@@ -961,14 +969,14 @@ fn build_stub_series(tmdb_id: i64, cfg: &config::Config) -> SonarrSeries {
         monitored: true,
         use_scene_numbering: false,
         runtime: 24,
-        tvdb_id: tmdb_id,
+        tvdb_id,
         tv_rage_id: 0,
         tv_maze_id: 0,
         first_aired: String::new(),
         series_type: "anime".to_string(),
         clean_title: String::new(),
         imdb_id: String::new(),
-        title_slug: format!("tmdb-{}", tmdb_id),
+        title_slug: format!("tvdb-{}", tvdb_id),
         certification: String::new(),
         genres: vec!["Anime".to_string()],
         tags: vec![],

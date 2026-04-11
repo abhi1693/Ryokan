@@ -292,6 +292,7 @@ async fn main() {
     let _ = models::scheduled_tasks::touch_definition(&db, "post_processing", "Post-processing", "Every 1 minute (when enabled)", false).await;
     let upgrade_enabled = models::config::get_config(&db).await.ok().flatten().map(|c| c.upgrade_search_enabled).unwrap_or(false);
     let _ = models::scheduled_tasks::touch_definition(&db, "upgrade_search", "Quality upgrade search", "Every 24 hours (when enabled)", upgrade_enabled).await;
+    let _ = models::scheduled_tasks::touch_definition(&db, "anibridge_refresh", "Anibridge mappings refresh", "Every 24 hours", true).await;
 
     // Log startup to the database.
     services::logger::info(
@@ -489,6 +490,24 @@ async fn main() {
                             "Exceeded 30-minute limit",
                         ).await;
                     }
+                }
+            }
+        });
+    }
+
+    // Background task: Anibridge mappings refresh (every 24 hours).
+    {
+        let anibridge_db = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            interval.tick().await; // skip immediate tick — initial load happens on first use
+            loop {
+                interval.tick().await;
+                let _ = models::scheduled_tasks::mark_started(&anibridge_db, "anibridge_refresh", "Refreshing anibridge mappings").await;
+                if services::anibridge::reload().await {
+                    let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "ok", "Mappings refreshed").await;
+                } else {
+                    let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "error", "Failed to download mappings").await;
                 }
             }
         });

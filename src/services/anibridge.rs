@@ -25,6 +25,8 @@ pub struct AnimeIds {
 struct MappingCache {
     /// TMDB show ID → Vec of anime IDs (one per season/entry).
     tmdb_to_anime: HashMap<i64, Vec<AnimeIds>>,
+    /// TVDB show ID → Vec of anime IDs (one per season/entry).
+    tvdb_to_anime: HashMap<i64, Vec<AnimeIds>>,
     /// AniList ID → TMDB show ID (reverse lookup).
     anilist_to_tmdb: HashMap<i64, i64>,
     /// MAL ID → TMDB show ID (reverse lookup for MAL fallback).
@@ -94,6 +96,16 @@ pub async fn lookup_by_tmdb(tmdb_id: i64) -> Vec<AnimeIds> {
         .unwrap_or_default()
 }
 
+/// Look up anime IDs by TVDB show ID. Returns all AniList/MAL entries for that show.
+pub async fn lookup_by_tvdb(tvdb_id: i64) -> Vec<AnimeIds> {
+    let cache = CACHE.read().await;
+    cache
+        .as_ref()
+        .and_then(|c| c.data.tvdb_to_anime.get(&tvdb_id))
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Look up TMDB show ID by MAL ID (for fallback when AniList is unavailable).
 pub async fn lookup_tmdb_by_mal(mal_id: i64) -> Option<i64> {
     let cache = CACHE.read().await;
@@ -143,87 +155,113 @@ async fn download_and_parse() -> Result<MappingCache, String> {
 
     let cache = build_cache(&data);
     tracing::info!(
-        "Anibridge mappings loaded: {} TMDB entries, {} AniList reverse entries",
+        "Anibridge mappings loaded: {} TMDB entries, {} TVDB entries, {} AniList reverse entries",
         cache.tmdb_to_anime.len(),
+        cache.tvdb_to_anime.len(),
         cache.anilist_to_tmdb.len(),
     );
 
     Ok(cache)
 }
 
-/// Parse the anibridge mappings JSON into our lookup tables.
+/// Parse the anibridge v3 mappings JSON into our lookup tables.
 ///
-/// The format uses source descriptors as keys:
-///   "tmdb_show:12345:s1" → { "anilist:67890": { "1-12": "1-12" } }
+/// The v3 format uses any source as a top-level key:
+///   "tmdb_show:45790:s1" → { "anilist:14719": {...}, "tvdb_show:262954:s1": {...} }
+///   "anilist:14719"       → { "tmdb_show:45790:s1": {...}, "tvdb_show:262954:s1": {...} }
 ///
-/// We extract TMDB show IDs and their corresponding AniList/MAL IDs.
+/// We scan every entry and extract TMDB/TVDB show IDs paired with their
+/// corresponding AniList/MAL IDs, regardless of which side is the source key.
 fn build_cache(data: &serde_json::Value) -> MappingCache {
     let mut tmdb_to_anime: HashMap<i64, Vec<AnimeIds>> = HashMap::new();
+    let mut tvdb_to_anime: HashMap<i64, Vec<AnimeIds>> = HashMap::new();
     let mut anilist_to_tmdb: HashMap<i64, i64> = HashMap::new();
     let mut mal_to_tmdb: HashMap<i64, i64> = HashMap::new();
 
     let obj = match data.as_object() {
         Some(o) => o,
-        None => return MappingCache { tmdb_to_anime, anilist_to_tmdb, mal_to_tmdb },
+        None => return MappingCache { tmdb_to_anime, tvdb_to_anime, anilist_to_tmdb, mal_to_tmdb },
     };
 
     for (source_key, targets) in obj {
-        // Parse source descriptor: "tmdb_show:12345" or "tmdb_show:12345:s1"
-        let tmdb_id = match parse_tmdb_show_id(source_key) {
-            Some(id) => id,
-            None => continue,
-        };
-
         let target_obj = match targets.as_object() {
             Some(o) => o,
             None => continue,
         };
 
-        // Collect AniList and MAL IDs from the targets.
+        // Collect all IDs mentioned across source key + target keys.
+        let all_keys: Vec<&str> = std::iter::once(source_key.as_str())
+            .chain(target_obj.keys().map(|k| k.as_str()))
+            .collect();
+
         let mut anilist_ids: Vec<i64> = Vec::new();
         let mut mal_ids: Vec<i64> = Vec::new();
+        let mut tmdb_ids: Vec<i64> = Vec::new();
+        let mut tvdb_ids: Vec<i64> = Vec::new();
 
-        for target_key in target_obj.keys() {
-            if let Some(id) = parse_provider_id(target_key, "anilist") {
-                anilist_ids.push(id);
-            } else if let Some(id) = parse_provider_id(target_key, "mal") {
-                mal_ids.push(id);
+        for key in &all_keys {
+            if let Some(id) = parse_provider_id(key, "anilist") {
+                if !anilist_ids.contains(&id) { anilist_ids.push(id); }
+            } else if let Some(id) = parse_provider_id(key, "mal") {
+                if !mal_ids.contains(&id) { mal_ids.push(id); }
+            } else if let Some(id) = parse_show_id(key, "tmdb_show") {
+                if !tmdb_ids.contains(&id) { tmdb_ids.push(id); }
+            } else if let Some(id) = parse_show_id(key, "tvdb_show") {
+                if !tvdb_ids.contains(&id) { tvdb_ids.push(id); }
             }
+        }
+
+        if anilist_ids.is_empty() && mal_ids.is_empty() {
+            continue;
         }
 
         // Build AnimeIds entries — pair up AniList and MAL IDs where possible.
         let max_len = anilist_ids.len().max(mal_ids.len());
-        if max_len == 0 {
-            continue;
+        let anime_entries: Vec<AnimeIds> = (0..max_len)
+            .map(|i| AnimeIds {
+                anilist_id: anilist_ids.get(i).copied(),
+                mal_id: mal_ids.get(i).copied(),
+            })
+            .collect();
+
+        // Index by each TMDB show ID found in this entry.
+        for &tmdb_id in &tmdb_ids {
+            let entry = tmdb_to_anime.entry(tmdb_id).or_default();
+            for ids in &anime_entries {
+                if let Some(al) = ids.anilist_id {
+                    if entry.iter().any(|e| e.anilist_id == Some(al)) {
+                        continue;
+                    }
+                    anilist_to_tmdb.insert(al, tmdb_id);
+                }
+                if let Some(m) = ids.mal_id {
+                    mal_to_tmdb.insert(m, tmdb_id);
+                }
+                entry.push(ids.clone());
+            }
         }
 
-        let entry = tmdb_to_anime.entry(tmdb_id).or_default();
-        for i in 0..max_len {
-            let al_id = anilist_ids.get(i).copied();
-            let mal = mal_ids.get(i).copied();
-            // Avoid duplicate entries for the same AniList ID under this TMDB show.
-            if let Some(al) = al_id {
-                if entry.iter().any(|e| e.anilist_id == Some(al)) {
-                    continue;
+        // Index by each TVDB show ID found in this entry.
+        for &tvdb_id in &tvdb_ids {
+            let entry = tvdb_to_anime.entry(tvdb_id).or_default();
+            for ids in &anime_entries {
+                if let Some(al) = ids.anilist_id {
+                    if entry.iter().any(|e| e.anilist_id == Some(al)) {
+                        continue;
+                    }
                 }
-                anilist_to_tmdb.insert(al, tmdb_id);
+                entry.push(ids.clone());
             }
-            if let Some(m) = mal {
-                mal_to_tmdb.insert(m, tmdb_id);
-            }
-            entry.push(AnimeIds {
-                anilist_id: al_id,
-                mal_id: mal,
-            });
         }
     }
 
-    MappingCache { tmdb_to_anime, anilist_to_tmdb, mal_to_tmdb }
+    MappingCache { tmdb_to_anime, tvdb_to_anime, anilist_to_tmdb, mal_to_tmdb }
 }
 
-/// Parse "tmdb_show:12345" or "tmdb_show:12345:s1" → Some(12345)
-fn parse_tmdb_show_id(key: &str) -> Option<i64> {
-    let rest = key.strip_prefix("tmdb_show:")?;
+/// Parse "tmdb_show:12345:s1" or "tvdb_show:262954:s6" → Some(12345) / Some(262954)
+/// given the matching prefix ("tmdb_show" or "tvdb_show").
+fn parse_show_id(key: &str, prefix: &str) -> Option<i64> {
+    let rest = key.strip_prefix(prefix)?.strip_prefix(':')?;
     // The ID is the next segment before an optional ":sN" scope.
     let id_str = rest.split(':').next()?;
     id_str.parse().ok()
