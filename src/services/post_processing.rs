@@ -423,6 +423,13 @@ pub async fn run_once(state: &AppState) {
             Ok(true) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
+                // Update episode quality tags from "grabbed" to "completed" so the UI
+                // shows the quality label instead of a stale progress bar on revisit.
+                let _ = episode_tags::mark_completed(
+                    &state.db,
+                    grab.series_id,
+                    &grab.episode_numbers,
+                ).await;
             }
             Ok(false) => {
                 // Torrent complete but no video files yet — leave as pending.

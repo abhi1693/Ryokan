@@ -257,6 +257,8 @@
                         {% if ep.quality_state == "grabbed" %}data-original-html="<span class='tag tag-quality-grabbed'>{{ ep.quality }}</span>"{% endif %}>
                         {% if ep.quality_state == "grabbed" %}
                         <div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>
+                        {% else if ep.quality_state == "completed" %}
+                        <span class="tag tag-quality">{{ ep.quality }}</span>
                         {% else if !ep.quality.is_empty() %}
                             {% if ep.quality_state == "failed" %}
                             <span class="tag tag-quality-failed">{{ ep.quality }} ✗</span>

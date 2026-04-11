@@ -1322,7 +1322,7 @@ fieldset legend {
 
 .ep-missing-label {
     font-size: 11px;
-    color: var(--accent);
+    color: var(--red);
     opacity: 0.6;
 }
 

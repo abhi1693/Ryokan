@@ -87,8 +87,10 @@ pub async fn find_best_for_target(
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
+    let allow_non_english = config.allow_non_english;
+
     // Phase 1: standard queries (alias + episode variants).
-    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
+    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, allow_non_english, &mut seen, &mut candidates).await;
 
     // Phase 2: if no candidate from a preferred group, try group-prefixed queries.
     let has_preferred_hit = !preferred_groups.is_empty()
@@ -98,7 +100,7 @@ pub async fn find_best_for_target(
 
     if !has_preferred_hit && !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
+        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, allow_non_english, &mut seen, &mut candidates).await;
     }
 
     // Phase 3: for finished series with BD preference, probe for BD releases.
@@ -109,7 +111,7 @@ pub async fn find_best_for_target(
 
         if !has_bd_candidate {
             let bd_queries = quality::bd_probe_queries(&aliases);
-            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
+            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, allow_non_english, &mut seen, &mut candidates).await;
         }
     }
 
@@ -141,6 +143,7 @@ async fn run_queries(
     expected_season: i32,
     is_finished: bool,
     season_year: Option<i32>,
+    allow_non_english: bool,
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
@@ -170,6 +173,9 @@ async fn run_queries(
                 continue;
             }
             if !allow_batch && result.is_batch {
+                continue;
+            }
+            if !allow_non_english && quality::is_non_english_release(&result.title) {
                 continue;
             }
             if !matches_target(&result.title, aliases, target, expected_season) {

@@ -122,6 +122,26 @@ pub async fn get_grab_history(
         .collect())
 }
 
+/// Mark episode quality tags as "completed" for the given episodes of a series.
+/// Called by post-processing after a torrent is successfully imported.
+pub async fn mark_completed(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_numbers: &[i32],
+) -> Result<(), sqlx::Error> {
+    for &ep in episode_numbers {
+        sqlx::query(
+            "UPDATE episode_quality_tags SET state = 'completed', updated_at = CURRENT_TIMESTAMP
+             WHERE series_id = ? AND episode_number = ? AND state = 'grabbed'",
+        )
+        .bind(series_id)
+        .bind(ep)
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Clear the current quality tag for an episode (e.g. after file deletion).
 pub async fn clear_episode_tag(
     db: &SqlitePool,

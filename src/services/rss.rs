@@ -240,6 +240,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
             prefer_subs: true,
+            allow_non_english: false,
         });
 
     let items = fetch_feed().await?;
@@ -290,6 +291,13 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if group_matches_blacklist(&item.group, &blacklist) {
             skipped += 1;
             let reason = format!("Blocked group: {} | {}", item.group, build_match_diag(&item, Some(&found), 0));
+            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            continue;
+        }
+
+        if !cfg.allow_non_english && quality::is_non_english_release(&item.title) {
+            skipped += 1;
+            let reason = format!("Non-English release rejected | {}", build_match_diag(&item, Some(&found), 0));
             let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
             continue;
         }

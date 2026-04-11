@@ -261,6 +261,29 @@ pub fn parse_group_list(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Check if a release title appears to be non-English based on CJK characters.
+/// Looks at the portion outside brackets (the main title text) — group names
+/// inside brackets like [喵萌奶茶屋&LoliHouse] will also trigger this since
+/// they indicate a non-English release.
+pub fn is_non_english_release(title: &str) -> bool {
+    for ch in title.chars() {
+        if is_cjk(ch) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32,
+        0x2E80..=0x9FFF   // CJK radicals, kangxi, ideographs
+        | 0xAC00..=0xD7AF // Hangul syllables
+        | 0xF900..=0xFAFF // CJK compat ideographs
+        | 0xFF01..=0xFF60 // Fullwidth forms
+        | 0x20000..=0x2FA1F // CJK extension B+
+    )
+}
+
 /// Build Nyaa search queries to probe for BD releases of a series.
 pub fn bd_probe_queries(aliases: &[String]) -> Vec<String> {
     let mut queries = Vec::new();

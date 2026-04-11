@@ -18,6 +18,7 @@ struct SystemTemplate {
     force_mal_fallback: bool,
     force_kitsu_fallback: bool,
     auto_grab_on_add: bool,
+    allow_non_english: bool,
     debug_message: Option<String>,
     debug_error: Option<String>,
     logs: Vec<log::LogEntry>,
@@ -48,6 +49,7 @@ pub struct DebugSettingsForm {
     force_mal_fallback: Option<String>,
     force_kitsu_fallback: Option<String>,
     auto_grab_on_add: Option<String>,
+    allow_non_english: Option<String>,
 }
 
 fn normalize_system_tab(tab: Option<String>) -> String {
@@ -104,6 +106,7 @@ pub async fn system_page(
     let force_mal_fallback = cfg.as_ref().map(|cfg| cfg.force_mal_fallback).unwrap_or(false);
     let force_kitsu_fallback = cfg.as_ref().map(|cfg| cfg.force_kitsu_fallback).unwrap_or(false);
     let auto_grab_on_add = cfg.as_ref().map(|cfg| cfg.auto_grab_on_add).unwrap_or(true);
+    let allow_non_english = cfg.as_ref().map(|cfg| cfg.allow_non_english).unwrap_or(false);
     let rss_enabled = cfg.as_ref().map(|cfg| cfg.rss_enabled).unwrap_or(false);
     let rss_interval_minutes = cfg.as_ref().map(|cfg| cfg.rss_interval_minutes).unwrap_or(5);
     let rss_last_run = rss::latest_run(&state.db).await.unwrap_or(None);
@@ -139,6 +142,7 @@ rss::recent_decisions(&state.db, 500).await.unwrap_or_default()
         force_mal_fallback,
         force_kitsu_fallback,
         auto_grab_on_add,
+        allow_non_english,
         debug_message: params.message,
         debug_error: params.error,
         logs,
@@ -188,10 +192,12 @@ pub async fn debug_settings_submit(
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
             prefer_subs: true,
+            allow_non_english: false,
         });
 
     cfg.force_mal_fallback = form.force_mal_fallback.is_some();
     cfg.force_kitsu_fallback = form.force_kitsu_fallback.is_some();
+    cfg.allow_non_english = form.allow_non_english.is_some();
     cfg.auto_grab_on_add = form.auto_grab_on_add.is_some();
 
     let result = config::save_config(&state.db, &cfg).await;
@@ -217,6 +223,7 @@ pub async fn debug_settings_submit(
         force_mal_fallback: cfg.force_mal_fallback,
         force_kitsu_fallback: cfg.force_kitsu_fallback,
         auto_grab_on_add: cfg.auto_grab_on_add,
+        allow_non_english: cfg.allow_non_english,
         debug_message: message,
         debug_error: error,
         logs: Vec::new(),

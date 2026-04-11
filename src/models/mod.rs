@@ -672,6 +672,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // allow_non_english: when false (default), reject releases with CJK characters from auto grabs.
+    sqlx::query("ALTER TABLE config ADD COLUMN allow_non_english INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS scheduled_task_runs (
