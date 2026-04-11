@@ -7,8 +7,9 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 This is a work in progress. Some features are incomplete or rough around the edges, and it's not quite a full Sonarr replacement just yet.
 ## Screenshots
 
-<img width="1920" height="1080" alt="Series list" src="https://github.com/user-attachments/assets/0e557ff2-c074-453a-a49b-a5c4f3c8789e" />
-<img width="1920" height="1080" alt="Series detail" src="https://github.com/user-attachments/assets/621235cc-ea69-4b23-bac5-1a516e17e8bb" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/ab8d0588-a896-477e-b264-79d2a44fc118" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f78ae78f-08ff-49c6-801c-f92d3eb1f07d" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/0a54684f-8bb9-4083-a7d7-8760e35fcfef" />
 
 ## What it does
 
