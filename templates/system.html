@@ -362,6 +362,13 @@ function runRssSync(btn) {
                 </label>
                 <span class="form-hint">When enabled (default), Ryokan automatically searches for and grabs all monitored episodes after you add a series to the library. Disable to add series without triggering an immediate download.</span>
             </div>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="allow_non_english" id="allow_non_english" {% if allow_non_english %}checked{% endif %}>
+                    <span>Allow non-English releases in auto grabs</span>
+                </label>
+                <span class="form-hint">When disabled (default), releases with CJK characters (Chinese, Japanese, Korean) in the title are rejected from auto-search and RSS grabs. Enable to allow all languages. Interactive search is not affected.</span>
+            </div>
             <div class="debug-actions-group">
                 <div class="debug-action-row">
                     <button type="button" class="btn btn-secondary" onclick="reconcileFallbacks(this)">Reconcile fallback entries</button>

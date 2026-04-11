@@ -86,6 +86,7 @@ fn default_config() -> config::Config {
         post_processing_mode: "hardlink".to_string(),
         auto_grab_on_add: true,
         prefer_subs: true,
+        allow_non_english: false,
     }
 }
 
@@ -182,6 +183,7 @@ pub async fn settings_submit(
         },
         auto_grab_on_add: existing_cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true),
         prefer_subs: form.prefer_subs == "1",
+        allow_non_english: existing_cfg.as_ref().map(|c| c.allow_non_english).unwrap_or(false),
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

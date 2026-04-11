@@ -26,6 +26,7 @@ pub struct Config {
     pub post_processing_mode: String,
     pub auto_grab_on_add: bool,
     pub prefer_subs: bool,
+    pub allow_non_english: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -53,12 +54,13 @@ struct ConfigRow {
     post_processing_mode: String,
     auto_grab_on_add: i64,
     prefer_subs: i64,
+    allow_non_english: i64,
 }
 
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs FROM config WHERE id = 1",
+        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -87,6 +89,7 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         post_processing_mode: r.post_processing_mode,
         auto_grab_on_add: r.auto_grab_on_add != 0,
         prefer_subs: r.prefer_subs != 0,
+        allow_non_english: r.allow_non_english != 0,
     }))
 }
 
@@ -94,8 +97,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             qbit_url = excluded.qbit_url,
             qbit_user = excluded.qbit_user,
@@ -119,7 +122,8 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             post_processing_enabled = excluded.post_processing_enabled,
             post_processing_mode = excluded.post_processing_mode,
             auto_grab_on_add = excluded.auto_grab_on_add,
-            prefer_subs = excluded.prefer_subs
+            prefer_subs = excluded.prefer_subs,
+            allow_non_english = excluded.allow_non_english
         "#,
     )
     .bind(&config.qbit_url)
@@ -145,6 +149,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(&config.post_processing_mode)
     .bind(if config.auto_grab_on_add { 1_i64 } else { 0_i64 })
     .bind(if config.prefer_subs { 1_i64 } else { 0_i64 })
+    .bind(if config.allow_non_english { 1_i64 } else { 0_i64 })
     .execute(db)
     .await?;
 

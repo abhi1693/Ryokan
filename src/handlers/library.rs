@@ -1358,6 +1358,7 @@ async fn run_auto_search_targets(
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
             prefer_subs: true,
+            allow_non_english: false,
         });
 
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
@@ -1497,6 +1498,7 @@ pub async fn auto_search_series(
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
             prefer_subs: true,
+            allow_non_english: false,
         });
 
     let (tracked_row, provider_id, detail) = resolve_series_context(&state.db, request_id)
@@ -1544,7 +1546,14 @@ pub async fn auto_search_series(
         &format!("on_disk={}, monitored={}, total={:?}", existing_eps.len(), monitored_eps.len(), detail.episodes),
     ).await;
     let series_id_for_grab = tracked.as_ref().map(|s| s.id);
-    let report = run_auto_search_targets(&state, request_id, targets, true, series_id_for_grab).await?;
+    // Spawn as an independent task so the grab completes even if the client disconnects.
+    let state_clone = state.clone();
+    let handle = tokio::spawn(async move {
+        run_auto_search_targets(&state_clone, request_id, targets, true, series_id_for_grab).await
+    });
+    let report = handle.await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
+        .map_err(|e| e)?;
     Ok(Json(report))
 }
 
@@ -1570,14 +1579,21 @@ pub async fn auto_search_episode(
         &format!("Episode search: series_ref={}, episode={}", request_id, episode_number),
         "allow_batch=false",
     ).await;
-    let report = run_auto_search_targets(
-        &state,
-        request_id,
-        vec![auto_search::SearchTarget::Episode(episode_number)],
-        false,
-        series_id_for_grab,
-    )
-    .await?;
+    // Spawn as an independent task so the grab completes even if the client disconnects.
+    let state_clone = state.clone();
+    let handle = tokio::spawn(async move {
+        run_auto_search_targets(
+            &state_clone,
+            request_id,
+            vec![auto_search::SearchTarget::Episode(episode_number)],
+            false,
+            series_id_for_grab,
+        )
+        .await
+    });
+    let report = handle.await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
+        .map_err(|e| e)?;
     Ok(Json(report))
 }
 
@@ -1619,6 +1635,7 @@ pub async fn search_batch_releases(
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
             prefer_subs: true,
+            allow_non_english: false,
         });
 
     // Use auto_search::find_best_for_target with batch allowed; then grab if found.
@@ -1712,6 +1729,7 @@ pub async fn interactive_search_episode(
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
             prefer_subs: true,
+            allow_non_english: false,
         });
 
     let results = auto_search::find_all_for_target(
@@ -1867,20 +1885,29 @@ pub async fn mark_episode_failed(
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
-    let _ = tracked_row.ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?;
+    let series_id = tracked_row
+        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?
+        .id;
 
     episode_tags::mark_grab_failed(&state.db, form.history_id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Re-trigger auto-search for this episode.
-    let report = run_auto_search_targets(
-        &state,
-        request_id,
-        vec![auto_search::SearchTarget::Episode(episode_number)],
-        false,
-        None,
-    ).await?;
+    // Re-trigger auto-search for this episode in the background so it completes
+    // even if the client disconnects.
+    let state_clone = state.clone();
+    let handle = tokio::spawn(async move {
+        run_auto_search_targets(
+            &state_clone,
+            request_id,
+            vec![auto_search::SearchTarget::Episode(episode_number)],
+            false,
+            Some(series_id),
+        ).await
+    });
+    let report = handle.await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
+        .map_err(|e| e)?;
 
     Ok(Json(report))
 }
