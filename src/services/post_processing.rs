@@ -241,9 +241,75 @@ async fn import_torrent(
         let dest_video = season_dir.join(format!("{}.{}", dest_stem, ext));
         let dest_nfo = season_dir.join(format!("{}.nfo", dest_stem));
 
-        if dest_video.exists() {
-            // Already imported (e.g. re-run after partial failure). Skip.
-            continue;
+        // Check for existing files with the same episode stem (any extension).
+        // This catches upgrades even when the old and new files have different
+        // containers (e.g. .mkv -> .mp4).
+        let existing_for_ep: Vec<PathBuf> = std::fs::read_dir(&season_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s == dest_stem)
+                    .unwrap_or(false)
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e != "nfo")
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        if !existing_for_ep.is_empty() {
+            // Check if this is an upgrade replacing a previously imported file.
+            // If an older imported grab exists for this episode, this is an
+            // upgrade — remove the old file and old torrent, then import the new one.
+            let old_grabs = grabbed_torrents::find_imported_for_episode(
+                &state.db,
+                grab.series_id,
+                ep_num,
+            )
+            .await
+            .unwrap_or_default();
+
+            if old_grabs.is_empty() {
+                // No older import record — likely a re-run of the same grab. Skip.
+                continue;
+            }
+
+            // Remove old file(s) to make way for the upgrade.
+            for old_file in &existing_for_ep {
+                if let Err(e) = std::fs::remove_file(old_file) {
+                    logger::error(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!("Failed to remove old file for upgrade: {}", old_file.display()),
+                        &e.to_string(),
+                    )
+                    .await;
+                }
+            }
+            // Also remove old NFO so it gets rewritten.
+            let _ = std::fs::remove_file(&dest_nfo);
+
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!("Replacing S{:02}E{:02} of '{}' with upgraded release", season, ep_num, series.title),
+                &format!("old_grabs={}", old_grabs.len()),
+            )
+            .await;
+
+            // Clean up old torrents from qBittorrent and mark old grabs as replaced.
+            for old_grab in &old_grabs {
+                if !old_grab.hash.is_empty() {
+                    if let Some(ref qbit_client) = state.qbit.read().await.clone() {
+                        let _ = qbit_client.delete_torrent(&old_grab.hash, true).await;
+                    }
+                }
+                let _ = grabbed_torrents::mark_removed(&state.db, old_grab.id).await;
+            }
         }
 
         match do_file_op(&cfg.post_processing_mode, &src, &dest_video) {
