@@ -174,7 +174,8 @@ async fn main() {
     // Routes that don't require auth.
     let public_routes = Router::new()
         .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
-        .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit));
+        .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
+        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Routes that require auth.
     let protected_routes = Router::new()
@@ -274,7 +275,6 @@ async fn main() {
         .merge(protected_routes)
         .merge(sonarr_routes)
         .merge(radarr_routes)
-        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state.clone());
 
