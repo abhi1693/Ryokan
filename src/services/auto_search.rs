@@ -47,19 +47,21 @@ pub async fn find_all_for_target(
     let preferred_tier = quality::QualityTier::from_str(&config.quality_profile);
     let cutoff_tier = quality::QualityTier::from_str(&config.quality_cutoff);
 
+    let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
-    // Interactive search: always allow batch results so user can see & pick them
-    run_queries_interactive(&queries, &aliases, &preferred_groups, &preferred_res, &mut seen, &mut candidates).await;
+    // Interactive search: allow batch results so user can see & pick them,
+    // but filter by season and episode to avoid showing wrong-season results.
+    run_queries_interactive(&queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, &mut seen, &mut candidates).await;
 
     if !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries_interactive(&group_queries, &aliases, &preferred_groups, &preferred_res, &mut seen, &mut candidates).await;
+        run_queries_interactive(&group_queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, &mut seen, &mut candidates).await;
     }
 
     for c in &mut candidates {
-        c.score = rescore_for_auto_search(c, config, &aliases, target, is_finished, finished_mode, preferred_tier, cutoff_tier);
+        c.score = rescore_for_auto_search(c, config, &aliases, target, expected_season, is_finished, finished_mode, preferred_tier, cutoff_tier);
     }
 
     candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
@@ -81,11 +83,12 @@ pub async fn find_best_for_target(
     let preferred_tier = quality::QualityTier::from_str(&config.quality_profile);
     let cutoff_tier = quality::QualityTier::from_str(&config.quality_cutoff);
 
+    let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
     // Phase 1: standard queries (alias + episode variants).
-    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, &mut seen, &mut candidates).await;
+    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, &mut seen, &mut candidates).await;
 
     // Phase 2: if no candidate from a preferred group, try group-prefixed queries.
     let has_preferred_hit = !preferred_groups.is_empty()
@@ -95,7 +98,7 @@ pub async fn find_best_for_target(
 
     if !has_preferred_hit && !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, &mut seen, &mut candidates).await;
+        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, &mut seen, &mut candidates).await;
     }
 
     // Phase 3: for finished series with BD preference, probe for BD releases.
@@ -106,7 +109,7 @@ pub async fn find_best_for_target(
 
         if !has_bd_candidate {
             let bd_queries = quality::bd_probe_queries(&aliases);
-            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, &mut seen, &mut candidates).await;
+            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, &mut seen, &mut candidates).await;
         }
     }
 
@@ -120,7 +123,7 @@ pub async fn find_best_for_target(
 
     // Rescore all candidates with quality-tier-aware scoring.
     for c in &mut candidates {
-        c.score = rescore_for_auto_search(c, config, &aliases, target, is_finished, finished_mode, preferred_tier, cutoff_tier);
+        c.score = rescore_for_auto_search(c, config, &aliases, target, expected_season, is_finished, finished_mode, preferred_tier, cutoff_tier);
     }
 
     candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
@@ -135,6 +138,7 @@ async fn run_queries(
     preferred_resolution: &str,
     target: &SearchTarget,
     allow_batch: bool,
+    expected_season: i32,
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
@@ -166,7 +170,7 @@ async fn run_queries(
             if !allow_batch && result.is_batch {
                 continue;
             }
-            if !matches_target(&result.title, aliases, target) {
+            if !matches_target(&result.title, aliases, target, expected_season) {
                 continue;
             }
             candidates.push(result);
@@ -175,13 +179,16 @@ async fn run_queries(
 }
 
 /// Run queries for interactive search with relaxed matching.
-/// Only requires alias match — no episode number or batch filtering.
-/// The user will manually pick from results.
+/// Uses relaxed alias matching (0.5 threshold) but still filters by season
+/// and episode to avoid showing results from wrong seasons. Allows batch
+/// results so users can see and pick them.
 async fn run_queries_interactive(
     queries: &[String],
     aliases: &[String],
     preferred_groups: &[String],
     preferred_resolution: &str,
+    target: &SearchTarget,
+    expected_season: i32,
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
@@ -210,7 +217,7 @@ async fn run_queries_interactive(
             if !seen.insert(dedupe_key) {
                 continue;
             }
-            // Relaxed alias matching: only check that the title references the series
+            // Relaxed alias matching: lower threshold than auto search
             let normalized_title = normalize_title(&result.title);
             let title_tokens = token_set(&normalized_title);
             let alias_match = aliases.iter().any(|alias| {
@@ -220,6 +227,19 @@ async fn run_queries_interactive(
             });
             if !alias_match {
                 continue;
+            }
+            // Season check: reject results clearly from a different season
+            if season_mismatch(&result.title, expected_season) {
+                continue;
+            }
+            // Episode check for single-episode targets (allow batches through)
+            if let SearchTarget::Episode(target_ep) = target {
+                if !result.is_batch {
+                    let parsed = parse_release_numbers(&result.title);
+                    if !parsed.is_empty() && !parsed.contains(target_ep) {
+                        continue;
+                    }
+                }
             }
             candidates.push(result);
         }
@@ -344,7 +364,7 @@ pub fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     out
 }
 
-pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget) -> bool {
+pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, expected_season: i32) -> bool {
     let normalized_title = normalize_title(title);
     let title_tokens = token_set(&normalized_title);
 
@@ -361,6 +381,11 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget) ->
     match target {
         SearchTarget::Single => true,
         SearchTarget::Episode(target_ep) => {
+            // Season check: reject if release has an explicit season that doesn't match
+            if season_mismatch(title, expected_season) {
+                return false;
+            }
+
             let parsed = parse_release_numbers(title);
             if parsed.is_empty() {
                 return false;
@@ -380,6 +405,7 @@ fn rescore_for_auto_search(
     config: &Config,
     aliases: &[String],
     target: &SearchTarget,
+    expected_season: i32,
     is_finished: bool,
     finished_mode: quality::FinishedSeriesMode,
     preferred_tier: quality::QualityTier,
@@ -399,6 +425,11 @@ fn rescore_for_auto_search(
         }
     }).fold(0.0f32, f32::max);
     score += (best_overlap * 40.0) as i32;
+
+    // Season mismatch penalty
+    if season_mismatch(&result.title, expected_season) {
+        score -= 100;
+    }
 
     match target {
         SearchTarget::Single => {
@@ -545,4 +576,110 @@ pub fn token_overlap_ratio(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
     }
     let common = a.intersection(b).count() as f32;
     common / b.len() as f32
+}
+
+/// Infer the season number from AniList detail titles.
+/// Returns 0 if no season indicator is found (treated as season 1 during matching).
+pub fn infer_season_from_detail(detail: &AnimeDetail) -> i32 {
+    let aliases = collect_aliases(detail);
+    for alias in &aliases {
+        let s = infer_season_from_title(alias);
+        if s > 0 {
+            return s;
+        }
+    }
+    0
+}
+
+fn infer_season_from_title(title: &str) -> i32 {
+    let lower = title.to_lowercase();
+
+    // "2nd Season", "3rd Season", etc.
+    if let Ok(re) = Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season") {
+        if let Some(caps) = re.captures(&lower) {
+            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                return n;
+            }
+        }
+    }
+
+    // "Season 2", "Season 3", etc.
+    if let Ok(re) = Regex::new(r"season\s+(\d+)") {
+        if let Some(caps) = re.captures(&lower) {
+            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                return n;
+            }
+        }
+    }
+
+    // " Part 2", " Cour 2" — sometimes used as season aliases
+    if let Ok(re) = Regex::new(r"(?:part|cour)\s+(\d+)") {
+        if let Some(caps) = re.captures(&lower) {
+            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                if n >= 2 {
+                    return n;
+                }
+            }
+        }
+    }
+
+    0
+}
+
+/// Parse the season number from a release title.
+/// Returns 0 if no season indicator is found.
+pub fn parse_release_season(title: &str) -> i32 {
+    let lower = title.to_lowercase();
+
+    // S01E05, S02E03, etc.
+    if let Ok(re) = Regex::new(r"s(\d{1,2})e\d{1,4}") {
+        if let Some(caps) = re.captures(&lower) {
+            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                return n;
+            }
+        }
+    }
+
+    // Standalone "S2", "S3" (not part of resolution like "S01E01")
+    if let Ok(re) = Regex::new(r"(?:^|[\s.\[\(])s(\d{1,2})(?:[\s.\]\)\-]|$)") {
+        if let Some(caps) = re.captures(&lower) {
+            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                if n > 0 && n <= 30 {
+                    return n;
+                }
+            }
+        }
+    }
+
+    // "Season 2", "Season 3"
+    if let Ok(re) = Regex::new(r"season\s*(\d+)") {
+        if let Some(caps) = re.captures(&lower) {
+            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                return n;
+            }
+        }
+    }
+
+    // "2nd Season", "3rd Season"
+    if let Ok(re) = Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season") {
+        if let Some(caps) = re.captures(&lower) {
+            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                return n;
+            }
+        }
+    }
+
+    0
+}
+
+/// Check if a release's season conflicts with the expected season.
+/// Returns true if there is a definite mismatch.
+fn season_mismatch(release_title: &str, expected_season: i32) -> bool {
+    let release_season = parse_release_season(release_title);
+    if release_season == 0 {
+        // No season indicator in release — allow it (could be absolute numbering)
+        return false;
+    }
+    let effective_expected = if expected_season > 0 { expected_season } else { 1 };
+    release_season != effective_expected
 }

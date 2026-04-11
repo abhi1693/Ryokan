@@ -262,7 +262,9 @@
                             {% else %}
                             <span class="tag tag-quality">{{ ep.quality }}</span>
                             {% endif %}
-                        {% else if !ep.on_disk %}
+                        {% else if ep.on_disk %}
+                        <span class="tag tag-quality">UNKNOWN</span>
+                        {% else %}
                         <span class="ep-missing-label">Missing</span>
                         {% endif %}
                     </td>
@@ -275,7 +277,7 @@
                         </button>
                         <button class="icon-btn btn-episode-isearch" type="button" onclick="openInteractiveSearch({{ ep.number }}, this)" title="Interactive search episode {{ ep.number }}" aria-label="Interactive search episode {{ ep.number }}">
                             <span class="icon-btn-inner">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 2a8 8 0 100 16A8 8 0 0010 2z"/><path d="M2 22l5-5"/><path d="M10 6v8M6 10h8"/></svg>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="5"/><line x1="12" y1="12" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
                             </span>
                         </button>
                         {% else %}
@@ -946,8 +948,7 @@ function pollDownloadProgress() {
     fetch(`/api/series/${SD.id}/download-progress`)
         .then(r => r.ok ? r.json() : [])
         .then(items => {
-            // Clear previous progress indicators for episodes not in the list
-            document.querySelectorAll('.ep-dl-progress').forEach(el => el.remove());
+            // Note: stale progress bars are cleaned up per-row below
 
             if (!items || items.length === 0) {
                 if (dlPollActive) {
@@ -972,21 +973,25 @@ function pollDownloadProgress() {
                 const qualityCell = row.querySelector('.ep-col-quality');
                 if (!qualityCell) continue;
 
-                // Remove any existing progress bar
-                const existing = qualityCell.querySelector('.ep-dl-progress');
-                if (existing) existing.remove();
-
-                if (!item) continue;
+                if (!item) {
+                    // Restore original content if we previously replaced it
+                    if (qualityCell.dataset.originalHtml && qualityCell.querySelector('.dl-progress-wrap')) {
+                        qualityCell.innerHTML = qualityCell.dataset.originalHtml;
+                        delete qualityCell.dataset.originalHtml;
+                    }
+                    continue;
+                }
 
                 const pct = (item.progress * 100).toFixed(1);
-                const speed = formatDlSpeed(item.speed);
                 const isComplete = item.state.includes('UP') || item.state === 'uploading';
 
                 if (!isComplete) {
-                    const wrapper = document.createElement('div');
-                    wrapper.className = 'ep-dl-progress';
-                    wrapper.innerHTML = `<div class="dl-progress-bar" style="height:4px"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text" style="font-size:10px">${pct}%${speed ? ' · ' + speed : ''}</span>`;
-                    qualityCell.appendChild(wrapper);
+                    // Save original content so we can restore it later
+                    if (!qualityCell.dataset.originalHtml) {
+                        qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                    }
+                    // Replace the entire cell content with a progress bar
+                    qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;
                 }
             }
         })

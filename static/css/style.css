@@ -1322,13 +1322,13 @@ fieldset legend {
 
 .ep-missing-label {
     font-size: 11px;
-    color: var(--red);
+    color: var(--accent);
     opacity: 0.6;
 }
 
 .tag-quality {
-    background: rgba(125, 174, 211, 0.15);
-    color: var(--blue);
+    background: var(--mauve-bg);
+    color: var(--accent);
     font-size: 10px;
     padding: 2px 8px;
 }
@@ -2430,15 +2430,15 @@ fieldset legend {
 
 /* --- Quality tag states --- */
 .tag-quality-grabbed {
-    background: rgba(211, 176, 125, 0.15);
-    color: var(--orange);
+    background: var(--mauve-bg);
+    color: var(--accent);
     font-size: 10px;
     padding: 2px 8px;
 }
 
 .tag-quality-failed {
-    background: rgba(211, 125, 125, 0.12);
-    color: var(--red);
+    background: var(--mauve-bg);
+    color: var(--accent);
     font-size: 10px;
     padding: 2px 8px;
 }
