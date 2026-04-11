@@ -11,6 +11,7 @@ pub struct GrabHistoryEntry {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EpisodeQualityTag {
     pub quality_tag: String,
     pub release_title: String,
