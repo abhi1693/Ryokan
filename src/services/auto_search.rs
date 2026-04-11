@@ -403,6 +403,9 @@ pub fn build_upgrade_targets(
             continue;
         }
         let existing_tier = quality::tier_from_disk_quality(&file.quality);
+        if existing_tier == quality::QualityTier::Unknown {
+            continue;
+        }
         if existing_tier.rank() < cutoff_tier.rank() {
             targets.push((
                 SearchTarget::Episode(file.episode_number),

@@ -413,7 +413,7 @@ pub async fn add_movie(
             match anilist::get_anime_detail(al_id).await {
                 Ok(d) => d,
                 Err(_) if ids.mal_id.is_some() => {
-                    crate::services::jikan::get_anime_detail_cached(ids.mal_id.expect("guarded by is_some()"))
+                    crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap())
                         .await
                         .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
                 }
@@ -424,7 +424,7 @@ pub async fn add_movie(
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
         } else {
-            return Err((StatusCode::BAD_GATEWAY, format!("No AniList or MAL ID available for TMDB mapping")));
+            return Err((StatusCode::BAD_GATEWAY, "No AniList or MAL ID available for TMDB mapping".to_string()));
         }
     } else {
         // No anibridge mapping — fall back to AniList title search.
@@ -612,7 +612,7 @@ async fn lookup_by_tmdb_id(
             match anilist::get_anime_detail(al_id).await {
                 Ok(d) => d,
                 Err(_) if ids.mal_id.is_some() => {
-                    match crate::services::jikan::get_anime_detail_cached(ids.mal_id.expect("guarded by is_some()")).await {
+                    match crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap()).await {
                         Ok(d) => d,
                         Err(_) => continue,
                     }
