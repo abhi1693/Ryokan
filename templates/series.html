@@ -866,8 +866,7 @@ function addSeries() {
         btn.textContent = 'Added';
         btn.className = 'btn btn-success';
         if (data.hydrating) {
-            if (status) status.textContent = 'Added to library. Auto-searching episodes…';
-            // Reload after a longer delay to allow auto-grab to start
+            if (status) status.textContent = 'Added to library. Fetching metadata…';
             setTimeout(() => location.reload(), 4000);
         } else {
             setTimeout(() => location.reload(), 400);

@@ -672,8 +672,34 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // allow_non_english: when false (default), reject releases with CJK characters from auto grabs.
+    // allow_non_english: when false (default), auto-search/RSS uses English-translated Nyaa category.
     sqlx::query("ALTER TABLE config ADD COLUMN allow_non_english INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    // Sonarr API compatibility layer for Seerr integration.
+    sqlx::query("ALTER TABLE config ADD COLUMN sonarr_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN sonarr_api_key TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // season_year on series for Sonarr/Radarr compat year field.
+    sqlx::query("ALTER TABLE series ADD COLUMN season_year INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
+    // Radarr API compatibility layer for Seerr integration (anime movies).
+    sqlx::query("ALTER TABLE config ADD COLUMN radarr_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN radarr_api_key TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
         .ok();

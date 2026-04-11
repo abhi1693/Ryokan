@@ -45,6 +45,10 @@ pub struct SettingsForm {
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
     prefer_subs: String,
+    sonarr_enabled: Option<String>,
+    sonarr_api_key: Option<String>,
+    radarr_enabled: Option<String>,
+    radarr_api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -61,34 +65,6 @@ pub struct JellyfinTestForm {
     jellyfin_api_key: String,
 }
 
-fn default_config() -> config::Config {
-    config::Config {
-        qbit_url: String::new(),
-        qbit_user: String::new(),
-        qbit_pass: String::new(),
-        qbit_category: String::new(),
-        qbit_download_path: String::new(),
-        jellyfin_url: String::new(),
-        jellyfin_api_key: String::new(),
-        preferred_groups: String::new(),
-        blocked_groups: String::new(),
-        preferred_resolution: "1080".to_string(),
-        quality_profile: "web_1080".to_string(),
-        quality_cutoff: "bd_1080".to_string(),
-        finished_series_quality: "prefer_bd".to_string(),
-        media_root: String::new(),
-        title_language: "english".to_string(),
-        force_mal_fallback: false,
-        rss_enabled: false,
-        rss_interval_minutes: 5,
-        force_kitsu_fallback: false,
-        post_processing_enabled: false,
-        post_processing_mode: "hardlink".to_string(),
-        auto_grab_on_add: true,
-        prefer_subs: true,
-        allow_non_english: false,
-    }
-}
 
 fn normalize_settings_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
@@ -106,7 +82,7 @@ pub async fn settings_page(
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(default_config);
+        .unwrap_or_default();
 
     let template = SettingsTemplate {
         page: "settings".to_string(),
@@ -184,6 +160,26 @@ pub async fn settings_submit(
         auto_grab_on_add: existing_cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true),
         prefer_subs: form.prefer_subs == "1",
         allow_non_english: existing_cfg.as_ref().map(|c| c.allow_non_english).unwrap_or(false),
+        sonarr_enabled: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
+            form.sonarr_enabled.is_some()
+        } else {
+            existing_cfg.as_ref().map(|c| c.sonarr_enabled).unwrap_or(false)
+        },
+        sonarr_api_key: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
+            form.sonarr_api_key.unwrap_or_default().trim().to_string()
+        } else {
+            existing_cfg.as_ref().map(|c| c.sonarr_api_key.clone()).unwrap_or_default()
+        },
+        radarr_enabled: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
+            form.radarr_enabled.is_some()
+        } else {
+            existing_cfg.as_ref().map(|c| c.radarr_enabled).unwrap_or(false)
+        },
+        radarr_api_key: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
+            form.radarr_api_key.unwrap_or_default().trim().to_string()
+        } else {
+            existing_cfg.as_ref().map(|c| c.radarr_api_key.clone()).unwrap_or_default()
+        },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

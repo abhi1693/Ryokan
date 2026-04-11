@@ -5,5 +5,3 @@
 *.db-wal
 .env
 /.claude
-CLAUDE.md
-CHANGELOG.md

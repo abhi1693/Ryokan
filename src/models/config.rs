@@ -27,6 +27,45 @@ pub struct Config {
     pub auto_grab_on_add: bool,
     pub prefer_subs: bool,
     pub allow_non_english: bool,
+    pub sonarr_enabled: bool,
+    pub sonarr_api_key: String,
+    pub radarr_enabled: bool,
+    pub radarr_api_key: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            qbit_url: String::new(),
+            qbit_user: String::new(),
+            qbit_pass: String::new(),
+            qbit_category: String::new(),
+            qbit_download_path: String::new(),
+            jellyfin_url: String::new(),
+            jellyfin_api_key: String::new(),
+            preferred_groups: String::new(),
+            blocked_groups: String::new(),
+            preferred_resolution: "1080".to_string(),
+            quality_profile: "web_1080".to_string(),
+            quality_cutoff: "bd_1080".to_string(),
+            finished_series_quality: "prefer_bd".to_string(),
+            media_root: String::new(),
+            title_language: "english".to_string(),
+            force_mal_fallback: false,
+            rss_enabled: false,
+            rss_interval_minutes: 5,
+            force_kitsu_fallback: false,
+            post_processing_enabled: false,
+            post_processing_mode: "hardlink".to_string(),
+            auto_grab_on_add: true,
+            prefer_subs: true,
+            allow_non_english: false,
+            sonarr_enabled: false,
+            sonarr_api_key: String::new(),
+            radarr_enabled: false,
+            radarr_api_key: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -55,12 +94,16 @@ struct ConfigRow {
     auto_grab_on_add: i64,
     prefer_subs: i64,
     allow_non_english: i64,
+    sonarr_enabled: i64,
+    sonarr_api_key: String,
+    radarr_enabled: i64,
+    radarr_api_key: String,
 }
 
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english FROM config WHERE id = 1",
+        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -90,6 +133,10 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         auto_grab_on_add: r.auto_grab_on_add != 0,
         prefer_subs: r.prefer_subs != 0,
         allow_non_english: r.allow_non_english != 0,
+        sonarr_enabled: r.sonarr_enabled != 0,
+        sonarr_api_key: r.sonarr_api_key,
+        radarr_enabled: r.radarr_enabled != 0,
+        radarr_api_key: r.radarr_api_key,
     }))
 }
 
@@ -97,8 +144,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             qbit_url = excluded.qbit_url,
             qbit_user = excluded.qbit_user,
@@ -123,7 +170,11 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             post_processing_mode = excluded.post_processing_mode,
             auto_grab_on_add = excluded.auto_grab_on_add,
             prefer_subs = excluded.prefer_subs,
-            allow_non_english = excluded.allow_non_english
+            allow_non_english = excluded.allow_non_english,
+            sonarr_enabled = excluded.sonarr_enabled,
+            sonarr_api_key = excluded.sonarr_api_key,
+            radarr_enabled = excluded.radarr_enabled,
+            radarr_api_key = excluded.radarr_api_key
         "#,
     )
     .bind(&config.qbit_url)
@@ -150,6 +201,10 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(if config.auto_grab_on_add { 1_i64 } else { 0_i64 })
     .bind(if config.prefer_subs { 1_i64 } else { 0_i64 })
     .bind(if config.allow_non_english { 1_i64 } else { 0_i64 })
+    .bind(if config.sonarr_enabled { 1_i64 } else { 0_i64 })
+    .bind(&config.sonarr_api_key)
+    .bind(if config.radarr_enabled { 1_i64 } else { 0_i64 })
+    .bind(&config.radarr_api_key)
     .execute(db)
     .await?;
 

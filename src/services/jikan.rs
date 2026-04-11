@@ -253,6 +253,7 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
                 status,
                 status_display,
                 episodes: anime.episodes,
+                season_year: None, // Jikan search results don't include year
                 source: "mal".to_string(),
             }
         })

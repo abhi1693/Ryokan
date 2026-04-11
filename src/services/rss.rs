@@ -3,14 +3,14 @@ use std::{cmp::Ordering, collections::{HashMap, HashSet}, sync::LazyLock};
 use regex_lite::Regex;
 
 use crate::{
-    models::{config, monitoring, rss, series},
+    models::{config, episode_tags, monitoring, rss, series},
     models::log::LogCategory,
     services::{auto_search, logger, media, monitoring as monitoring_service, quality},
     AppState,
 };
 
 static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
-const NYAA_RSS_URL: &str = "https://nyaa.si/?page=rss&c=1_0&f=0";
+const NYAA_RSS_BASE: &str = "https://nyaa.si/?page=rss&f=0";
 
 // ── Pre-compiled regexes ───────────────────────────────────────────────────
 // Feed parsing
@@ -216,35 +216,11 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| e.to_string())?
-        .unwrap_or(config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-        });
+        .unwrap_or_default();
 
-    let items = fetch_feed().await?;
     let tracked = series::get_all(&state.db).await.map_err(|e| e.to_string())?;
+    let has_music_series = tracked.iter().any(|s| s.format == "MUSIC");
+    let items = fetch_feeds(cfg.allow_non_english, has_music_series).await?;
     for row in &tracked {
         let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
     }
@@ -291,13 +267,6 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if group_matches_blacklist(&item.group, &blacklist) {
             skipped += 1;
             let reason = format!("Blocked group: {} | {}", item.group, build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
-            continue;
-        }
-
-        if !cfg.allow_non_english && quality::is_non_english_release(&item.title) {
-            skipped += 1;
-            let reason = format!("Non-English release rejected | {}", build_match_diag(&item, Some(&found), 0));
             let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
             continue;
         }
@@ -428,6 +397,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     cand.found.series.id,
                     &ep_list,
                 ).await;
+                // Record quality tag for episode status display.
+                let tier = quality::detect_tier(&cand.item.title, &cand.item.resolution);
+                for ep_num in &ep_list {
+                    let _ = episode_tags::record_grab(
+                        &state.db,
+                        cand.found.series.id,
+                        *ep_num,
+                        tier.label(),
+                        &cand.item.title,
+                        &cand.item.group,
+                    ).await;
+                }
             }
             Err(err) => {
                 skipped += 1;
@@ -1104,10 +1085,11 @@ fn build_item_key(item: &RssItem) -> String {
     format!("title:{}", item.title.to_lowercase())
 }
 
-async fn fetch_feed() -> Result<Vec<RssItem>, String> {
+async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
+    let url = format!("{}&c={}", NYAA_RSS_BASE, category);
     let client = reqwest::Client::new();
     let xml = client
-        .get(NYAA_RSS_URL)
+        .get(&url)
         .header("User-Agent", "Ryokan/0.1")
         .send()
         .await
@@ -1117,6 +1099,38 @@ async fn fetch_feed() -> Result<Vec<RssItem>, String> {
         .map_err(|e| format!("Failed to read RSS response: {}", e))?;
 
     Ok(parse_feed(&xml))
+}
+
+/// Fetch RSS items from all relevant Nyaa categories.
+/// Uses English-translated (1_2) by default; adds music categories (1_1, 2_0)
+/// if any tracked series has MUSIC format; uses All (1_0) when allow_non_english.
+async fn fetch_feeds(allow_non_english: bool, has_music_series: bool) -> Result<Vec<RssItem>, String> {
+    let mut categories = if allow_non_english {
+        vec!["1_0"]
+    } else {
+        vec!["1_2"]
+    };
+    if has_music_series {
+        if !categories.contains(&"1_1") { categories.push("1_1"); }
+        if !categories.contains(&"2_0") { categories.push("2_0"); }
+    }
+
+    let mut all_items = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+    for cat in categories {
+        let items = fetch_feed(cat).await?;
+        for item in items {
+            let key = if !item.info_hash.is_empty() {
+                item.info_hash.to_lowercase()
+            } else {
+                item.title.to_lowercase()
+            };
+            if seen_keys.insert(key) {
+                all_items.push(item);
+            }
+        }
+    }
+    Ok(all_items)
 }
 
 fn parse_feed(xml: &str) -> Vec<RssItem> {

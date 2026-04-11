@@ -107,6 +107,7 @@ pub struct AddSeriesForm {
     format: String,
     status: String,
     episodes: Option<i32>,
+    season_year: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +125,7 @@ pub struct SetFolderForm {
 pub struct SetMonitoringForm {
     series_id: i64,
     monitor_mode: String,
+    auto_grab: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -203,6 +205,7 @@ async fn maybe_reconcile_mal_entry(
         &matched.format,
         &matched.status,
         matched.episodes,
+        matched.season_year,
     ).await.is_err() {
         return None;
     }
@@ -1149,6 +1152,7 @@ pub async fn add_series(
         &form.format,
         &form.status,
         form.episodes,
+        form.season_year,
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1192,30 +1196,6 @@ pub async fn add_series(
     }
 
     let monitor = monitoring_service::recompute_series_monitoring(&state.db, id).await.ok();
-
-    // Auto-grab monitored episodes after adding, if the setting is enabled.
-    let auto_grab_on_add = config::get_config(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|c| c.auto_grab_on_add)
-        .unwrap_or(true);
-
-    if auto_grab_on_add && state.qbit.read().await.is_some() {
-        let state_clone = state.clone();
-        let series_route_id = id;
-        tokio::spawn(async move {
-            // Small delay to let metadata hydration get started.
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            match auto_search_series(
-                axum::extract::State(state_clone),
-                axum::extract::Path(series_route_id),
-            ).await {
-                Ok(_) => {}
-                Err(_) => {}
-            }
-        });
-    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -1274,16 +1254,43 @@ pub async fn set_monitoring(
     Json(form): Json<SetMonitoringForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let mode = monitoring::MonitorMode::from_str(&form.monitor_mode);
-    let summary = monitoring_service::apply_monitor_mode(&state.db, form.series_id, mode)
+    let series_id = form.series_id;
+    let summary = monitoring_service::apply_monitor_mode(&state.db, series_id, mode)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     logger::info(
         &state.db,
         LogCategory::Library,
-        &format!("Updated monitoring for series {}", form.series_id),
+        &format!("Updated monitoring for series {}", series_id),
         &format!("mode={}, monitored={}/{}", summary.mode.as_str(), summary.monitored_count, summary.total_count),
     ).await;
+
+    // Auto-grab monitored episodes if requested (e.g. after initial add).
+    if form.auto_grab.unwrap_or(false)
+        && mode != monitoring::MonitorMode::None
+        && summary.monitored_count > 0
+        && state.qbit.read().await.is_some()
+    {
+        let auto_grab_on_add = config::get_config(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.auto_grab_on_add)
+            .unwrap_or(true);
+
+        if auto_grab_on_add {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                // Small delay to let metadata hydration finish.
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let _ = auto_search_series(
+                    axum::extract::State(state_clone),
+                    axum::extract::Path(series_id),
+                ).await;
+            });
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -1334,32 +1341,7 @@ async fn run_auto_search_targets(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-        });
+        .unwrap_or_default();
 
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
         .await
@@ -1398,12 +1380,21 @@ async fn run_auto_search_targets(
                             &format!("Grabbed: {}", result.title),
                             &format!("target={}, group={}, score={}, tier={}, batch={}", label, result.group, result.score, tier.label(), result.is_batch),
                         ).await;
-                        // Record for post-processing.
+                        // Record for post-processing and episode quality tags.
                         if let Some(sid) = series_id {
-                            let ep_nums: Vec<i32> = match &target {
+                            let mut ep_nums: Vec<i32> = match &target {
                                 auto_search::SearchTarget::Episode(n) => vec![*n],
-                                auto_search::SearchTarget::Single => vec![],
+                                auto_search::SearchTarget::Single => vec![1],
                             };
+                            // For batch releases, parse all episode numbers from
+                            // the title so every covered episode gets a grab tag.
+                            if result.is_batch {
+                                let parsed = auto_search::parse_release_numbers(&result.title);
+                                if !parsed.is_empty() {
+                                    ep_nums = parsed.into_iter().collect();
+                                    ep_nums.sort_unstable();
+                                }
+                            }
                             let _ = crate::models::grabbed_torrents::record_grab(
                                 &state.db,
                                 &result.info_hash,
@@ -1474,32 +1465,7 @@ pub async fn auto_search_series(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-        });
+        .unwrap_or_default();
 
     let (tracked_row, provider_id, detail) = resolve_series_context(&state.db, request_id)
         .await
@@ -1611,32 +1577,7 @@ pub async fn search_batch_releases(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-        });
+        .unwrap_or_default();
 
     // Use auto_search::find_best_for_target with batch allowed; then grab if found.
     let best = auto_search::find_best_for_target(
@@ -1705,32 +1646,7 @@ pub async fn interactive_search_episode(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-        });
+        .unwrap_or_default();
 
     let results = auto_search::find_all_for_target(
         &detail,
