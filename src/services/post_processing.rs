@@ -241,9 +241,11 @@ async fn import_torrent(
         let dest_video = season_dir.join(format!("{}.{}", dest_stem, ext));
         let dest_nfo = season_dir.join(format!("{}.nfo", dest_stem));
 
-        // Check for existing files with the same episode stem (any extension).
-        // This catches upgrades even when the old and new files have different
-        // containers (e.g. .mkv -> .mp4).
+        // Check for existing files with the same SxxExx tag (any extension).
+        // Matching by episode tag instead of full stem handles cases where the
+        // episode title changed in AniList between the original grab and the
+        // upgrade (e.g. a translated title was added later).
+        let ep_tag = format!("S{:02}E{:02}", season, ep_num);
         let existing_for_ep: Vec<PathBuf> = std::fs::read_dir(&season_dir)
             .into_iter()
             .flatten()
@@ -252,7 +254,7 @@ async fn import_torrent(
             .filter(|p| {
                 p.file_stem()
                     .and_then(|s| s.to_str())
-                    .map(|s| s == dest_stem)
+                    .map(|s| s.contains(&ep_tag))
                     .unwrap_or(false)
                     && p.extension()
                         .and_then(|e| e.to_str())
@@ -278,7 +280,7 @@ async fn import_torrent(
                 continue;
             }
 
-            // Remove old file(s) to make way for the upgrade.
+            // Remove old file(s) and their NFOs to make way for the upgrade.
             for old_file in &existing_for_ep {
                 if let Err(e) = std::fs::remove_file(old_file) {
                     logger::error(
@@ -289,9 +291,12 @@ async fn import_torrent(
                     )
                     .await;
                 }
+                // Remove corresponding NFO (old stem may differ from new dest_stem
+                // if the episode title changed between grabs).
+                if let Some(stem) = old_file.file_stem().and_then(|s| s.to_str()) {
+                    let _ = std::fs::remove_file(season_dir.join(format!("{}.nfo", stem)));
+                }
             }
-            // Also remove old NFO so it gets rewritten.
-            let _ = std::fs::remove_file(&dest_nfo);
 
             logger::info(
                 &state.db,

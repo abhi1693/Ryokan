@@ -374,17 +374,29 @@ async fn main() {
                     continue;
                 }
                 let _ = models::scheduled_tasks::mark_started(&upgrade_state.db, "upgrade_search", "Searching for quality upgrades").await;
-                match services::upgrade::run_once(&upgrade_state).await {
-                    Ok(summary) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30 * 60),
+                    services::upgrade::run_once(&upgrade_state),
+                ).await {
+                    Ok(Ok(summary)) => {
                         let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "ok", &summary.detail).await;
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", &err).await;
                         services::logger::error(
                             &upgrade_state.db,
                             models::log::LogCategory::System,
                             "Upgrade search failed",
                             &err,
+                        ).await;
+                    }
+                    Err(_) => {
+                        let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", "Timed out after 30 minutes").await;
+                        services::logger::error(
+                            &upgrade_state.db,
+                            models::log::LogCategory::System,
+                            "Upgrade search timed out",
+                            "Exceeded 30-minute limit",
                         ).await;
                     }
                 }

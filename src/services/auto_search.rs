@@ -391,18 +391,18 @@ pub fn build_monitored_targets(detail: &AnimeDetail, existing_episodes: &[i32], 
         .collect()
 }
 
-/// Build upgrade targets: monitored episodes that exist on disk but are below
+/// Build upgrade targets: candidate episodes that exist on disk but are below
 /// the quality cutoff. These are candidates for automatic quality upgrades.
 pub fn build_upgrade_targets(
     disk_files: &[media::EpisodeFile],
-    monitored_episodes: &[i32],
+    candidate_episodes: &[i32],
     cutoff_tier: quality::QualityTier,
     quality_tags: &std::collections::HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> Vec<(SearchTarget, quality::QualityTier)> {
-    let monitored: HashSet<i32> = monitored_episodes.iter().copied().collect();
+    let candidates: HashSet<i32> = candidate_episodes.iter().copied().collect();
     let mut targets = Vec::new();
     for file in disk_files {
-        if !monitored.contains(&file.episode_number) {
+        if !candidates.contains(&file.episode_number) {
             continue;
         }
         // Prefer the quality tag recorded at grab time (from the release title)
