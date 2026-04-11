@@ -1,7 +1,12 @@
 use crate::services::nyaa::{SearchOptions, SearchResult};
 
 /// Score a search result based on multiple factors.
+/// `prefer_subs` controls whether dual audio/dub releases are penalized (default true).
 pub fn score_result(r: &SearchResult, opts: &SearchOptions) -> i32 {
+    score_result_with_sub_pref(r, opts, true)
+}
+
+pub fn score_result_with_sub_pref(r: &SearchResult, opts: &SearchOptions, prefer_subs: bool) -> i32 {
     let mut score: i32 = 0;
 
     // Seeders.
@@ -28,11 +33,8 @@ pub fn score_result(r: &SearchResult, opts: &SearchOptions) -> i32 {
                 }
             }
             if let Some(idx) = matched_index {
-                // Strongly prefer explicit group matches so auto-search does not drift to another group
-                // just because it has a few more seeders.
                 score += 140 - (idx * 20);
             } else {
-                // Slight penalty when the user expressed a group preference but this result is from another group.
                 score -= 15;
             }
         } else {
@@ -72,9 +74,19 @@ pub fn score_result(r: &SearchResult, opts: &SearchOptions) -> i32 {
         score += 5;
     }
 
-    // Penalize dual audio.
-    if lower.contains("dual audio") || lower.contains("dual.audio") || lower.contains("multi") {
-        score -= 5;
+    // Dub vs Sub scoring.
+    let is_dual = lower.contains("dual audio") || lower.contains("dual.audio") || lower.contains("multi");
+    let is_dub = is_dual || lower.contains("dub") || lower.contains("dubbed") || lower.contains("english dub");
+    if prefer_subs {
+        // Penalize dub/dual audio releases when user prefers subs.
+        if is_dub {
+            score -= 15;
+        }
+    } else {
+        // Boost dub/dual audio when user prefers dubs.
+        if is_dub {
+            score += 15;
+        }
     }
 
     // Downloads popularity.

@@ -122,6 +122,22 @@ pub async fn get_grab_history(
         .collect())
 }
 
+/// Clear the current quality tag for an episode (e.g. after file deletion).
+pub async fn clear_episode_tag(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Mark a grab history entry as failed, and update the current tag state if it matches.
 pub async fn mark_grab_failed(
     db: &SqlitePool,

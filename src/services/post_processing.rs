@@ -25,6 +25,11 @@ fn is_complete(state: &str) -> bool {
     )
 }
 
+/// States that indicate a torrent has failed or has errors.
+fn is_errored(state: &str) -> bool {
+    matches!(state, "error" | "missingFiles")
+}
+
 fn is_video_file(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(
@@ -330,33 +335,47 @@ pub async fn run_once(state: &AppState) {
         }
     };
 
-    // Build lookup maps for completed torrents.
-    let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    // Build lookup maps by hash and name for all torrents.
+    let all_by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
         .iter()
-        .filter(|t| is_complete(&t.state))
         .map(|t| (t.hash.to_lowercase(), t))
         .collect();
 
-    let by_name: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    let all_by_name: HashMap<String, &crate::services::qbit::Torrent> = torrents
         .iter()
-        .filter(|t| is_complete(&t.state))
         .map(|t| (t.name.to_lowercase(), t))
         .collect();
 
     let mut any_imported = false;
 
     for grab in &pending {
-        // Match grab to a completed qBit torrent.
+        // Match grab to a qBit torrent.
         let matched = if !grab.hash.is_empty() {
-            by_hash.get(&grab.hash.to_lowercase()).copied()
+            all_by_hash.get(&grab.hash.to_lowercase()).copied()
         } else {
-            // Fuzzy name match as fallback for grabs without a recorded hash.
-            by_name.get(&grab.torrent_name.to_lowercase()).copied()
+            all_by_name.get(&grab.torrent_name.to_lowercase()).copied()
         };
 
         let Some(torrent) = matched else {
             continue;
         };
+
+        // Detect failed/error torrents and mark them.
+        if is_errored(&torrent.state) {
+            logger::warn(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!("Torrent in error state: '{}'", grab.torrent_name),
+                &format!("qbit_state={}", torrent.state),
+            )
+            .await;
+            let _ = grabbed_torrents::mark_failed(&state.db, grab.id).await;
+            continue;
+        }
+
+        if !is_complete(&torrent.state) {
+            continue;
+        }
 
         match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
             Ok(true) => {

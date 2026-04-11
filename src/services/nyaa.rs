@@ -29,6 +29,7 @@ pub struct SearchOptions {
     pub user: String,
     pub preferred_groups: Vec<String>,
     pub preferred_resolution: String,
+    pub prefer_subs: bool,
 }
 
 impl Default for SearchOptions {
@@ -40,6 +41,7 @@ impl Default for SearchOptions {
             user: String::new(),
             preferred_groups: Vec::new(),
             preferred_resolution: "1080".to_string(),
+            prefer_subs: true,
         }
     }
 }
@@ -189,7 +191,7 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
             info_hash,
         };
 
-        result.score = crate::services::scoring::score_result(&result, opts);
+        result.score = crate::services::scoring::score_result_with_sub_pref(&result, opts, opts.prefer_subs);
         results.push(result);
     }
 

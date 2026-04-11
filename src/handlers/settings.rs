@@ -44,6 +44,7 @@ pub struct SettingsForm {
     rss_interval_minutes: i32,
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
+    prefer_subs: String,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +85,7 @@ fn default_config() -> config::Config {
         post_processing_enabled: false,
         post_processing_mode: "hardlink".to_string(),
         auto_grab_on_add: true,
+        prefer_subs: true,
     }
 }
 
@@ -179,6 +181,7 @@ pub async fn settings_submit(
             _ => "hardlink".to_string(),
         },
         auto_grab_on_add: existing_cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true),
+        prefer_subs: form.prefer_subs == "1",
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

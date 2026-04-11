@@ -130,6 +130,7 @@ rss::recent_decisions(&state.db, 500).await.unwrap_or_default()
         ("library", LogCategory::Library.label()),
         ("auth", LogCategory::Auth.label()),
         ("system", LogCategory::System.label()),
+        ("post_process", LogCategory::PostProcess.label()),
     ];
 
     let template = SystemTemplate {
@@ -186,6 +187,7 @@ pub async fn debug_settings_submit(
             post_processing_enabled: false,
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
+            prefer_subs: true,
         });
 
     cfg.force_mal_fallback = form.force_mal_fallback.is_some();
@@ -235,6 +237,7 @@ pub async fn debug_settings_submit(
             ("library", LogCategory::Library.label()),
             ("auth", LogCategory::Auth.label()),
             ("system", LogCategory::System.label()),
+            ("post_process", LogCategory::PostProcess.label()),
         ],
         rss_enabled: cfg.rss_enabled,
         rss_interval_minutes: cfg.rss_interval_minutes,

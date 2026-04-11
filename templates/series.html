@@ -384,7 +384,27 @@ function toggleMonitorAll(dbId, currentlyAllMonitored) {
         let data = {};
         try { data = await r.json(); } catch (_) {}
         if (!r.ok) throw new Error(data.message || 'Failed');
-        location.reload();
+        const newState = newMode === 'all';
+        // Update all monitor buttons in the table
+        document.querySelectorAll('.ep-mon-btn').forEach(monBtn => {
+            monBtn.textContent = newState ? 'Yes' : 'No';
+            monBtn.className = 'ep-mon-btn ' + (newState ? 'ep-mon-yes' : 'ep-mon-no');
+            monBtn.title = newState ? 'Monitored — click to unmonitor' : 'Not monitored — click to monitor';
+        });
+        // Update the monitor-all button
+        if (btn) {
+            btn.disabled = false;
+            btn.classList.toggle('is-active', newState);
+            btn.onclick = function() { toggleMonitorAll(dbId, newState); };
+            btn.title = newState ? 'All monitored — click to unmonitor all' : 'Click to monitor all episodes';
+            btn.innerHTML = newState
+                ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>'
+                : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>';
+        }
+        if (summary) summary.textContent = `${data.monitor_mode_label || newMode} · ${data.monitored_count || 0} monitored`;
+        // Update the select dropdown
+        const select = document.getElementById('monitor-mode');
+        if (select) select.value = newMode;
     })
     .catch(err => {
         if (summary) summary.textContent = err.message || 'Failed to update monitoring';
@@ -506,7 +526,17 @@ function markEpisodeFailed(historyId, epNum, btn) {
         const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
         if (status) status.textContent = grabbed > 0 ? `Re-grabbed episode ${epNum}` : `No replacement found for episode ${epNum}`;
         btn.textContent = grabbed > 0 ? 'Re-grabbed' : 'No result';
-        setTimeout(() => location.reload(), 800);
+        if (grabbed > 0) {
+            const first = data.grabbed[0];
+            updateEpisodeRow(epNum, 'grabbed', first.release_group);
+        }
+        // Refresh the grab history in the modal
+        if (SD.dbId) {
+            fetch(`/api/series/${SD.id}/grab-history/${epNum}`)
+                .then(r => r.json())
+                .then(entries => renderGrabHistory(entries, epNum))
+                .catch(() => {});
+        }
     })
     .catch(err => {
         if (status) status.textContent = err.message || 'Failed to mark as failed';
@@ -529,7 +559,7 @@ function deleteEpisodeFile() {
             if (!r.ok) throw new Error(data.message || 'Delete failed');
             if (status) status.textContent = `Episode ${epNum} file deleted.`;
             document.getElementById('ep-detail-modal').style.display = 'none';
-            setTimeout(() => location.reload(), 400);
+            updateEpisodeRow(epNum, 'deleted');
         })
         .catch(err => {
             if (status) status.textContent = err.message || 'Delete failed';
@@ -647,6 +677,12 @@ function grabInteractiveResult(epNum, idx, btn) {
         btn.classList.add('btn-success');
         const status = document.getElementById('auto-search-status');
         if (status) status.textContent = `Episode ${epNum} queued: ${result.title}`;
+        // Update the episode row to show grabbed state
+        updateEpisodeRow(epNum, 'grabbed', result.group);
+        // Close the modal after a short delay
+        setTimeout(() => {
+            document.getElementById('isearch-modal').style.display = 'none';
+        }, 600);
     })
     .catch(err => {
         btn.textContent = 'Error';
@@ -720,8 +756,7 @@ function autoSearchEpisode(episodeNumber, btn) {
         if (first) {
             setEpisodeButtonState(btn, 'success', `Queued: ${first.release_title}`);
             status.textContent = `Episode ${episodeNumber} queued${first.release_group ? ` · ${first.release_group}` : ''}`;
-            const row = btn.closest('tr');
-            if (row) row.classList.add('ep-row-queued');
+            updateEpisodeRow(episodeNumber, 'grabbed', first.release_group);
         } else {
             setEpisodeButtonState(btn, 'error', 'No matching release found');
             status.textContent = `Episode ${episodeNumber}: no matching release found`;
@@ -784,6 +819,8 @@ function setMonitoring(mode) {
     })
     .then(data => {
         if (summary) summary.textContent = `${data.monitor_mode_label || mode} · ${data.monitored_count || 0} monitored`;
+        if (select) select.disabled = false;
+        // Reload to reflect per-episode monitoring changes since they depend on server-side logic
         location.reload();
     })
     .catch(err => {
@@ -794,6 +831,7 @@ function setMonitoring(mode) {
 
 function addSeries() {
     const btn = document.getElementById('btn-track');
+    const status = document.getElementById('auto-search-status');
     btn.disabled = true;
     btn.textContent = '...';
 
@@ -819,10 +857,16 @@ function addSeries() {
         if (!r.ok) throw new Error(data.message || 'Add failed');
         return data;
     })
-    .then(() => {
+    .then(data => {
         btn.textContent = 'Added';
         btn.className = 'btn btn-success';
-        setTimeout(() => location.reload(), 400);
+        if (data.hydrating) {
+            if (status) status.textContent = 'Added to library. Auto-searching episodes…';
+            // Reload after a longer delay to allow auto-grab to start
+            setTimeout(() => location.reload(), 4000);
+        } else {
+            setTimeout(() => location.reload(), 400);
+        }
     })
     .catch(() => {
         btn.textContent = 'Error';
@@ -855,7 +899,105 @@ function removeSeries(dbId) {
         btn.className = 'btn btn-danger';
     });
 }
+function updateEpisodeRow(epNum, state, group) {
+    const rows = document.querySelectorAll('.episode-table tbody tr');
+    for (const row of rows) {
+        const numCell = row.querySelector('.ep-col-num');
+        if (!numCell || parseInt(numCell.textContent.trim()) !== epNum) continue;
+
+        if (state === 'grabbed') {
+            row.classList.add('ep-row-queued');
+            const qualityCell = row.querySelector('.ep-col-quality');
+            if (qualityCell) {
+                qualityCell.innerHTML = `<span class="tag tag-quality-grabbed">Grabbed${group ? ' · ' + escHtml(group) : ''}</span>`;
+            }
+        } else if (state === 'deleted') {
+            row.classList.remove('ep-row-have');
+            row.classList.add('ep-row-missing');
+            const statusCell = row.querySelector('.ep-col-status');
+            if (statusCell) {
+                statusCell.innerHTML = '<span class="ep-status-icon ep-missing" title="Missing"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>';
+            }
+            const qualityCell = row.querySelector('.ep-col-quality');
+            if (qualityCell) {
+                qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+            }
+        }
+        break;
+    }
+}
+
 applyTitleLanguage(localStorage.getItem('titleLanguage') || SD.titleLanguage || 'english');
 window.addEventListener('storage', () => applyTitleLanguage(localStorage.getItem('titleLanguage') || SD.titleLanguage || 'english'));
+
+// --- Episode download progress polling ---
+let dlPollTimer = null;
+let dlPollActive = false;
+
+function formatDlSpeed(bps) {
+    if (bps <= 0) return '';
+    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    const i = Math.floor(Math.log(bps) / Math.log(1024));
+    return (bps / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+function pollDownloadProgress() {
+    if (!SD.dbId) return;
+    fetch(`/api/series/${SD.id}/download-progress`)
+        .then(r => r.ok ? r.json() : [])
+        .then(items => {
+            // Clear previous progress indicators for episodes not in the list
+            document.querySelectorAll('.ep-dl-progress').forEach(el => el.remove());
+
+            if (!items || items.length === 0) {
+                if (dlPollActive) {
+                    dlPollActive = false;
+                    clearInterval(dlPollTimer);
+                    dlPollTimer = null;
+                }
+                return;
+            }
+
+            const rows = document.querySelectorAll('.episode-table tbody tr');
+            const epMap = {};
+            for (const item of items) {
+                epMap[item.episode] = item;
+            }
+
+            for (const row of rows) {
+                const numCell = row.querySelector('.ep-col-num');
+                if (!numCell) continue;
+                const ep = parseInt(numCell.textContent.trim());
+                const item = epMap[ep];
+                const qualityCell = row.querySelector('.ep-col-quality');
+                if (!qualityCell) continue;
+
+                // Remove any existing progress bar
+                const existing = qualityCell.querySelector('.ep-dl-progress');
+                if (existing) existing.remove();
+
+                if (!item) continue;
+
+                const pct = (item.progress * 100).toFixed(1);
+                const speed = formatDlSpeed(item.speed);
+                const isComplete = item.state.includes('UP') || item.state === 'uploading';
+
+                if (!isComplete) {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'ep-dl-progress';
+                    wrapper.innerHTML = `<div class="dl-progress-bar" style="height:4px"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text" style="font-size:10px">${pct}%${speed ? ' · ' + speed : ''}</span>`;
+                    qualityCell.appendChild(wrapper);
+                }
+            }
+        })
+        .catch(() => {});
+}
+
+// Start polling if the series is tracked
+if (SD.dbId) {
+    pollDownloadProgress();
+    dlPollActive = true;
+    dlPollTimer = setInterval(pollDownloadProgress, 5000);
+}
 </script>
 {% endblock %}

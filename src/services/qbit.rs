@@ -174,6 +174,37 @@ impl QbitClient {
         Ok(files)
     }
 
+    /// Pause a torrent by hash.
+    pub async fn pause_torrent(&self, hash: &str) -> Result<(), String> {
+        let form = [("hashes", hash)];
+        let resp = self.do_post_form("/api/v2/torrents/pause", &form).await?;
+        if !resp.status().is_success() {
+            return Err("Failed to pause torrent".into());
+        }
+        Ok(())
+    }
+
+    /// Resume a torrent by hash.
+    pub async fn resume_torrent(&self, hash: &str) -> Result<(), String> {
+        let form = [("hashes", hash)];
+        let resp = self.do_post_form("/api/v2/torrents/resume", &form).await?;
+        if !resp.status().is_success() {
+            return Err("Failed to resume torrent".into());
+        }
+        Ok(())
+    }
+
+    /// Delete a torrent by hash (optionally delete files).
+    pub async fn delete_torrent(&self, hash: &str, delete_files: bool) -> Result<(), String> {
+        let delete_str = if delete_files { "true" } else { "false" };
+        let form = [("hashes", hash), ("deleteFiles", delete_str)];
+        let resp = self.do_post_form("/api/v2/torrents/delete", &form).await?;
+        if !resp.status().is_success() {
+            return Err("Failed to delete torrent".into());
+        }
+        Ok(())
+    }
+
     /// Test the connection by fetching the app version.
     pub async fn test_connection(&self) -> Result<String, String> {
         let resp = self.do_get("/api/v2/app/version").await?;

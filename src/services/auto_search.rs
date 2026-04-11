@@ -29,12 +29,14 @@ pub struct AutoSearchReport {
 }
 
 /// Return all scored candidates for an episode target without grabbing anything.
-/// Used by the interactive search feature.
+/// Used by the interactive search feature. More permissive than auto-search:
+/// allows batch results and uses relaxed title matching so users see a broader
+/// set of candidates to choose from.
 pub async fn find_all_for_target(
     detail: &AnimeDetail,
     config: &Config,
     target: &SearchTarget,
-    allow_batch: bool,
+    _allow_batch: bool,
 ) -> Vec<SearchResult> {
     let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
@@ -48,11 +50,12 @@ pub async fn find_all_for_target(
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
-    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, &mut seen, &mut candidates).await;
+    // Interactive search: always allow batch results so user can see & pick them
+    run_queries_interactive(&queries, &aliases, &preferred_groups, &preferred_res, &mut seen, &mut candidates).await;
 
     if !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, &mut seen, &mut candidates).await;
+        run_queries_interactive(&group_queries, &aliases, &preferred_groups, &preferred_res, &mut seen, &mut candidates).await;
     }
 
     for c in &mut candidates {
@@ -143,6 +146,7 @@ async fn run_queries(
             user: String::new(),
             preferred_groups: preferred_groups.to_vec(),
             preferred_resolution: preferred_resolution.to_string(),
+            prefer_subs: true,
         };
 
         let resp = match nyaa::search(&opts, 1).await {
@@ -163,6 +167,58 @@ async fn run_queries(
                 continue;
             }
             if !matches_target(&result.title, aliases, target) {
+                continue;
+            }
+            candidates.push(result);
+        }
+    }
+}
+
+/// Run queries for interactive search with relaxed matching.
+/// Only requires alias match — no episode number or batch filtering.
+/// The user will manually pick from results.
+async fn run_queries_interactive(
+    queries: &[String],
+    aliases: &[String],
+    preferred_groups: &[String],
+    preferred_resolution: &str,
+    seen: &mut HashSet<String>,
+    candidates: &mut Vec<SearchResult>,
+) {
+    for query in queries {
+        let opts = SearchOptions {
+            query: query.clone(),
+            category: "1_0".to_string(),
+            filter: "0".to_string(),
+            user: String::new(),
+            preferred_groups: preferred_groups.to_vec(),
+            preferred_resolution: preferred_resolution.to_string(),
+            prefer_subs: true,
+        };
+
+        let resp = match nyaa::search(&opts, 1).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        for result in resp.results {
+            let dedupe_key = if !result.info_hash.is_empty() {
+                result.info_hash.clone()
+            } else {
+                result.title.to_lowercase()
+            };
+            if !seen.insert(dedupe_key) {
+                continue;
+            }
+            // Relaxed alias matching: only check that the title references the series
+            let normalized_title = normalize_title(&result.title);
+            let title_tokens = token_set(&normalized_title);
+            let alias_match = aliases.iter().any(|alias| {
+                let normalized_alias = normalize_title(alias);
+                normalized_title.contains(&normalized_alias)
+                    || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
+            });
+            if !alias_match {
                 continue;
             }
             candidates.push(result);
@@ -306,7 +362,15 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget) ->
         SearchTarget::Single => true,
         SearchTarget::Episode(target_ep) => {
             let parsed = parse_release_numbers(title);
-            !parsed.is_empty() && parsed.contains(target_ep)
+            if parsed.is_empty() {
+                return false;
+            }
+            // If this looks like a batch (many episode numbers), reject for single-episode targets.
+            // A range of 3+ episodes means this is a batch/multi-episode release.
+            if parsed.len() > 2 {
+                return false;
+            }
+            parsed.contains(target_ep)
         }
     }
 }
@@ -380,33 +444,61 @@ fn preferred_resolution_for_profile(profile: &str) -> String {
     }
 }
 
+/// Numbers that look like episode numbers but are actually technical metadata.
+fn is_noise_number(n: i32) -> bool {
+    matches!(n, 480 | 576 | 720 | 1080 | 2160 | 264 | 265)
+        || (1900..=2100).contains(&n)
+}
+
 pub fn parse_release_numbers(title: &str) -> HashSet<i32> {
     let lower = title.to_lowercase();
     let mut numbers = HashSet::new();
 
+    // Strip bracketed content first to avoid matching metadata like [1080p] or (2024)
+    let stripped = {
+        let mut out = String::with_capacity(lower.len());
+        let mut depth = 0i32;
+        for ch in lower.chars() {
+            match ch {
+                '[' | '(' | '{' => depth += 1,
+                ']' | ')' | '}' => depth = (depth - 1).max(0),
+                _ if depth > 0 => continue,
+                _ => out.push(ch),
+            }
+        }
+        out
+    };
+
     let patterns = [
+        // S01E05 style
         r"s\d{1,2}e(\d{1,4})",
+        // E05 / Ep05 / Ep.05 style
         r"(?:^|[\s._\-])e(?:p\.?)?(\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)",
-        r"\b-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)",
+        // " - 05" style (common for fansubs)
+        r"(?:^|\s)-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)",
+        // "Episode 05"
         r"episode\s*(\d{1,4})",
-        r"\b(\d{1,4})(?:v\d+)?(?:\s*\(|$)",
     ];
 
     for pattern in patterns {
         if let Ok(re) = Regex::new(pattern) {
-            for caps in re.captures_iter(&lower) {
+            for caps in re.captures_iter(&stripped) {
                 if let Some(value) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                    numbers.insert(value);
+                    if !is_noise_number(value) {
+                        numbers.insert(value);
+                    }
                 }
             }
         }
     }
 
-    if let Ok(re) = Regex::new(r"(\d{1,4})\s*[-~]\s*(\d{1,4})") {
-        if let Some(caps) = re.captures(&lower) {
+    // Range pattern for batch detection (e.g. "01-12", "01~24")
+    // Only add range numbers, not used as the sole episode match.
+    if let Ok(re) = Regex::new(r"(?:^|[\s._\-])(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?(?:\s|\.|\[|\(|$)") {
+        if let Some(caps) = re.captures(&stripped) {
             let start = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
             let end = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
-            if start > 0 && end >= start && end - start <= 200 {
+            if start > 0 && end >= start && end - start <= 200 && !is_noise_number(start) && !is_noise_number(end) {
                 for value in start..=end {
                     numbers.insert(value);
                 }

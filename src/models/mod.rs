@@ -666,6 +666,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // prefer_subs: when true (default), penalize dual audio / dub releases in scoring.
+    sqlx::query("ALTER TABLE config ADD COLUMN prefer_subs INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS scheduled_task_runs (

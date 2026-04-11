@@ -789,21 +789,13 @@ fieldset legend {
 .tag-status-releasing,
 .tag-status-not_yet_released,
 .tag-status-currently_airing,
-.tag-status-not_yet_aired {
-    background: var(--mauve-bg);
-    color: var(--mauve);
-}
-
+.tag-status-not_yet_aired,
 .tag-status-finished,
-.tag-status-finished_airing {
-    background: var(--bg-elevated);
-    color: var(--text-dim);
-}
-
+.tag-status-finished_airing,
 .tag-status-cancelled,
 .tag-status-hiatus {
-    background: rgba(211, 125, 125, 0.12);
-    color: var(--red);
+    background: var(--bg-elevated);
+    color: var(--text-dim);
 }
 
 .detail-genres {
@@ -2068,6 +2060,10 @@ fieldset legend {
     vertical-align: top;
 }
 
+.rss-table td {
+    background: var(--bg-card);
+}
+
 .rss-table th {
     color: var(--text-dim);
     font-size: 12px;
@@ -2561,3 +2557,53 @@ fieldset legend {
 
 .btn-delete-file:hover { background: rgba(211, 125, 125, 0.22); }
 .btn-delete-file:disabled { opacity: 0.5; cursor: default; }
+
+/* --- Downloads page --- */
+.dl-torrent-name {
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.dl-progress-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 120px;
+}
+
+.dl-progress-bar {
+    flex: 1;
+    height: 6px;
+    background: var(--bg-elevated);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.dl-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.dl-progress-text {
+    font-size: 11px;
+    color: var(--text-dim);
+    min-width: 40px;
+    text-align: right;
+}
+
+.dl-actions {
+    white-space: nowrap;
+}
+
+.ep-dl-progress {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    margin-top: 4px;
+}

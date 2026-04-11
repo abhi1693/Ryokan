@@ -239,6 +239,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             post_processing_enabled: false,
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
+            prefer_subs: true,
         });
 
     let items = fetch_feed().await?;
