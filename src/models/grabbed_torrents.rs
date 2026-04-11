@@ -9,6 +9,7 @@ pub struct GrabbedTorrent {
     pub series_id: i64,
     pub episode_numbers: Vec<i32>,
     pub state: String,
+    pub grabbed_at: String,
 }
 
 /// Record a torrent grab for post-processing. Skips silently if we already
@@ -50,7 +51,7 @@ pub async fn record_grab(
 /// Get all grabs that have not yet been processed.
 pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, hash, torrent_name, series_id, episode_numbers FROM grabbed_torrents WHERE state = 'pending' ORDER BY grabbed_at ASC",
+        "SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at FROM grabbed_torrents WHERE state = 'pending' ORDER BY grabbed_at ASC",
     )
     .fetch_all(db)
     .await?;
@@ -68,6 +69,7 @@ pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sql
                 series_id: row.get("series_id"),
                 episode_numbers,
                 state: "pending".to_string(),
+                grabbed_at: row.get("grabbed_at"),
             }
         })
         .collect())

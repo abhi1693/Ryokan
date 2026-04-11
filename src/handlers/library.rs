@@ -1913,18 +1913,18 @@ pub async fn episode_download_progress(
             None
         };
 
-        let (progress, speed, state_str) = if let Some(t) = torrent {
-            (t.progress, t.dlspeed, t.state.clone())
-        } else {
-            (0.0, 0, "queued".to_string())
+        let Some(t) = torrent else {
+            // Torrent not in qBittorrent — skip it so the UI clears the stale
+            // progress bar. The post-processing tick will mark old orphans as failed.
+            continue;
         };
 
         for ep in &grab.episode_numbers {
             results.push(EpisodeProgress {
                 episode: *ep,
-                progress,
-                speed,
-                state: state_str.clone(),
+                progress: t.progress,
+                speed: t.dlspeed,
+                state: t.state.clone(),
             });
         }
     }
