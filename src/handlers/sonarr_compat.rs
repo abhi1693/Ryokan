@@ -20,14 +20,9 @@ use crate::AppState;
 
 // ── Authentication middleware ──────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct ApiKeyParam {
-    apikey: Option<String>,
-}
-
-/// Middleware that validates the `?apikey=` query parameter against the
-/// configured Sonarr API key. Returns 401 if missing/invalid or if the
-/// Sonarr compat layer is disabled.
+/// Middleware that validates the API key from the `X-Api-Key` header or
+/// `?apikey=` query parameter against the configured Sonarr API key.
+/// Returns 401 if missing/invalid or if the Sonarr compat layer is disabled.
 pub async fn require_api_key(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -42,19 +37,23 @@ pub async fn require_api_key(
         return (StatusCode::SERVICE_UNAVAILABLE, "Sonarr API compatibility layer is disabled").into_response();
     }
 
-    let query_str = req.uri().query().unwrap_or("");
-    let params: ApiKeyParam = query_str
-        .split('&')
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            let key = parts.next()?;
-            let val = parts.next()?;
-            if key == "apikey" { Some(ApiKeyParam { apikey: Some(val.to_string()) }) } else { None }
-        })
-        .next()
-        .unwrap_or(ApiKeyParam { apikey: None });
+    // Check X-Api-Key header first, then fall back to ?apikey= query param.
+    let api_key = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            let query_str = req.uri().query().unwrap_or("");
+            query_str.split('&').find_map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                let key = parts.next()?;
+                let val = parts.next()?;
+                if key == "apikey" { Some(val.to_string()) } else { None }
+            })
+        });
 
-    match params.apikey {
+    match api_key {
         Some(key) if key == cfg.sonarr_api_key => next.run(req).await,
         _ => (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response(),
     }
@@ -158,6 +157,7 @@ pub struct RootFolder {
     path: String,
     free_space: i64,
     total_space: i64,
+    unmapped_folders: Vec<()>,
 }
 
 #[derive(Serialize)]
@@ -178,7 +178,31 @@ pub struct Tag {
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatus {
     version: String,
+    build_time: String,
+    is_debug: bool,
+    is_production: bool,
+    is_admin: bool,
+    is_user_interactive: bool,
+    startup_path: String,
+    app_data: String,
+    os_name: String,
+    os_version: String,
+    is_net_core: bool,
+    is_mono: bool,
+    is_linux: bool,
+    is_osx: bool,
+    is_windows: bool,
+    is_docker: bool,
+    mode: String,
+    branch: String,
+    authentication: String,
+    sqlite_version: String,
+    migration_version: i32,
     url_base: String,
+    runtime_version: String,
+    runtime_name: String,
+    start_time: String,
+    package_update_mechanism: String,
     app_name: String,
 }
 
@@ -253,8 +277,32 @@ pub struct TagBody {
 /// GET /api/v3/system/status
 pub async fn system_status() -> Json<SystemStatus> {
     Json(SystemStatus {
-        version: "3.0.0".to_string(),
+        version: "3.0.9.1549".to_string(),
+        build_time: "2024-01-01T00:00:00Z".to_string(),
+        is_debug: false,
+        is_production: true,
+        is_admin: false,
+        is_user_interactive: false,
+        startup_path: String::new(),
+        app_data: String::new(),
+        os_name: "linux".to_string(),
+        os_version: String::new(),
+        is_net_core: true,
+        is_mono: false,
+        is_linux: true,
+        is_osx: false,
+        is_windows: false,
+        is_docker: false,
+        mode: "default".to_string(),
+        branch: "main".to_string(),
+        authentication: "none".to_string(),
+        sqlite_version: String::new(),
+        migration_version: 0,
         url_base: String::new(),
+        runtime_version: String::new(),
+        runtime_name: String::new(),
+        start_time: "2024-01-01T00:00:00Z".to_string(),
+        package_update_mechanism: "builtIn".to_string(),
         app_name: "Ryokan".to_string(),
     })
 }
@@ -285,6 +333,7 @@ pub async fn root_folders(
         path,
         free_space: 0,
         total_space: 0,
+        unmapped_folders: vec![],
     }])
 }
 
