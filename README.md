@@ -54,6 +54,34 @@ Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 
 All runtime settings are managed through the web UI under **Settings**: qBittorrent and Jellyfin connections, quality profiles and cutoffs, preferred/blocked release groups, media root path, and title language preference.
 
+## Seerr integration
+
+Ryokan exposes Sonarr and Radarr v3 API compatibility layers so [Seerr](https://github.com/seerr-team/seerr) can request anime series and movies through it.
+
+### Setup
+
+1. In Ryokan, go to **Settings -> Connections** and enable the Sonarr API and/or Radarr API. Generate an API key for each.
+
+2. In Seerr, add Ryokan as a **Sonarr** server (for anime series):
+   - **Hostname/IP**: your Ryokan host (e.g. `192.168.67.41`)
+   - **Port**: `8978`
+   - **URL Base**: leave empty
+   - **API Key**: the Sonarr API key from Ryokan's settings
+
+3. In Seerr, add Ryokan as a **Radarr** server (for anime movies):
+   - **Hostname/IP**: same as above
+   - **Port**: `8978`
+   - **URL Base**: `/radarr`
+   - **API Key**: the Radarr API key from Ryokan's settings (this is a separate key)
+
+The URL Base distinction is important: Sonarr routes live at `/api/v3/`, while Radarr routes live at `/radarr/api/v3/`. Using the wrong base will cause connection tests to fail.
+
+### Limitations
+
+- Seerr allows a maximum of two Sonarr servers and two Radarr servers (one non-4K, one 4K each). Adding Ryokan uses one slot for each.
+- Ryokan treats each AniList entry as a single season. Multi-season TMDB shows that map to multiple AniList entries will each appear as a separate series in Ryokan.
+- Some anime may not have TMDB-to-AniList mappings in the anibridge dataset. Ryokan falls back to AniList title search in those cases, which usually works but may occasionally pick the wrong entry.
+
 ## Self-hosting Jikan
 
 The public Jikan API is rate-limited to roughly 3 requests per second. If you're adding a lot of series at once or want faster metadata loading, you can run a local instance:
