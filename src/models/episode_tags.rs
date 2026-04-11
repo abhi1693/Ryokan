@@ -192,16 +192,17 @@ pub async fn clear_tags_for_removal(
 pub async fn mark_grab_failed(
     db: &SqlitePool,
     history_id: i64,
-) -> Result<(i64, i32), sqlx::Error> {
-    // Fetch series_id + episode_number before marking failed so we can return them.
+) -> Result<(i64, i32, String), sqlx::Error> {
+    // Fetch series_id, episode_number, release_title before marking failed.
     let row = sqlx::query(
-        "SELECT series_id, episode_number FROM episode_grab_history WHERE id = ?",
+        "SELECT series_id, episode_number, release_title FROM episode_grab_history WHERE id = ?",
     )
     .bind(history_id)
     .fetch_one(db)
     .await?;
     let series_id: i64 = row.get("series_id");
     let episode_number: i32 = row.get("episode_number");
+    let release_title: String = row.get("release_title");
 
     sqlx::query("UPDATE episode_grab_history SET state = 'failed' WHERE id = ?")
         .bind(history_id)
@@ -218,5 +219,5 @@ pub async fn mark_grab_failed(
     .execute(db)
     .await?;
 
-    Ok((series_id, episode_number))
+    Ok((series_id, episode_number, release_title))
 }

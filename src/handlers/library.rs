@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
-use crate::models::{config, episode_tags, local_metadata, metadata_cache, monitoring, series};
+use crate::models::{config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, monitoring, series};
 use crate::models::log::LogCategory;
 use crate::services::{anilist, artwork, auto_search, jikan, kitsu, logger, media, metadata_sync, monitoring as monitoring_service};
 use crate::AppState;
@@ -138,6 +138,8 @@ pub struct SetEpisodeMonitoringForm {
 #[derive(Deserialize)]
 pub struct MarkEpisodeFailedForm {
     history_id: i64,
+    #[serde(default)]
+    blocklist: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +169,8 @@ async fn force_kitsu_fallback_enabled(db: &SqlitePool) -> bool {
 
 async fn resolve_series_request(db: &SqlitePool, request_id: i64) -> Result<(Option<series::Series>, i64), sqlx::Error> {
     if let Some(row) = series::get_by_id(db, request_id).await? {
+        Ok((Some(row.clone()), row.anilist_id))
+    } else if let Some(row) = series::get_by_anilist_id(db, request_id).await? {
         Ok((Some(row.clone()), row.anilist_id))
     } else {
         Ok((None, request_id))
@@ -1858,9 +1862,13 @@ pub async fn mark_episode_failed(
         .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?
         .id;
 
-    episode_tags::mark_grab_failed(&state.db, form.history_id)
+    let (_sid, _ep, release_title) = episode_tags::mark_grab_failed(&state.db, form.history_id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if form.blocklist && !release_title.is_empty() {
+        let _ = grabbed_torrents::mark_failed_by_name(&state.db, series_id, &release_title).await;
+    }
 
     // Re-trigger auto-search for this episode in the background so it completes
     // even if the client disconnects.

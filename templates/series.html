@@ -516,13 +516,14 @@ function renderGrabHistory(entries, epNum) {
 
 function markEpisodeFailed(historyId, epNum, btn) {
     if (!confirm('Mark this grab as failed and re-search for the episode?')) return;
+    const addToBlocklist = confirm('Also add this release to the blocklist?');
     btn.disabled = true;
     btn.textContent = 'Searching…';
     const status = document.getElementById('auto-search-status');
     fetch(`/api/series/${SD.id}/mark-failed/${epNum}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ history_id: historyId })
+        body: JSON.stringify({ history_id: historyId, blocklist: addToBlocklist })
     })
     .then(async r => {
         let data = {};

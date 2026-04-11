@@ -172,6 +172,18 @@ pub async fn get_blocked(db: &SqlitePool) -> Result<Vec<GrabbedTorrentWithSeries
         .collect())
 }
 
+/// Mark a grabbed torrent as failed (blocklisted) by matching torrent name and series.
+pub async fn mark_failed_by_name(db: &SqlitePool, series_id: i64, torrent_name: &str) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE grabbed_torrents SET state = 'failed' WHERE series_id = ? AND torrent_name = ? AND state IN ('pending', 'imported')",
+    )
+    .bind(series_id)
+    .bind(torrent_name)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Remove a grabbed torrent record entirely.
 pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM grabbed_torrents WHERE id = ?")
