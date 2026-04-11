@@ -26,7 +26,7 @@ struct CacheEntry {
 static DETAIL_CACHE: LazyLock<RwLock<HashMap<i64, CacheEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnimeEntry {
     pub id: i64,
     pub id_mal: Option<i64>,
@@ -214,7 +214,7 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
     }))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RelatedEntry {
     pub id: i64,
     pub id_mal: Option<i64>,
@@ -231,7 +231,7 @@ pub struct RelatedEntry {
     pub media_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct StreamingEpisode {
     pub title: String,
     pub thumbnail: String,
@@ -239,7 +239,7 @@ pub struct StreamingEpisode {
     pub site: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnimeDetail {
     pub id: i64,
     pub id_mal: Option<i64>,

@@ -52,7 +52,7 @@ pub struct SettingsForm {
     upgrade_search_enabled: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct QbitTestForm {
     qbit_url: String,
     qbit_user: String,
@@ -60,7 +60,7 @@ pub struct QbitTestForm {
     qbit_category: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct JellyfinTestForm {
     jellyfin_url: String,
     jellyfin_api_key: String,
@@ -265,6 +265,18 @@ pub async fn settings_submit(
     Html(template.render().unwrap_or_default())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/qbit/test",
+    tag = "System",
+    summary = "Test qBittorrent connection",
+    description = "Test connectivity to a qBittorrent instance with the provided credentials.",
+    request_body = QbitTestForm,
+    responses(
+        (status = 200, description = "Connection successful", body = serde_json::Value),
+        (status = 502, description = "Connection failed"),
+    ),
+)]
 pub async fn qbit_test(
     Json(form): Json<QbitTestForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -281,6 +293,18 @@ pub async fn qbit_test(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/jellyfin/test",
+    tag = "System",
+    summary = "Test Jellyfin connection",
+    description = "Test connectivity to a Jellyfin instance with the provided URL and API key.",
+    request_body = JellyfinTestForm,
+    responses(
+        (status = 200, description = "Connection successful", body = serde_json::Value),
+        (status = 502, description = "Connection failed"),
+    ),
+)]
 pub async fn jellyfin_test(
     Json(form): Json<JellyfinTestForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -302,6 +326,16 @@ pub async fn jellyfin_test(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    tag = "System",
+    summary = "Health check",
+    description = "Returns connection status of qBittorrent and Jellyfin integrations.",
+    responses(
+        (status = 200, description = "Health status", body = serde_json::Value),
+    ),
+)]
 pub async fn api_health(
     State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
@@ -340,6 +374,18 @@ pub async fn api_health(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/jellyfin/refresh",
+    tag = "System",
+    summary = "Refresh Jellyfin library",
+    description = "Trigger a library scan in Jellyfin to pick up newly added media.",
+    responses(
+        (status = 200, description = "Library refresh triggered", body = serde_json::Value),
+        (status = 400, description = "Jellyfin not configured"),
+        (status = 502, description = "Refresh failed"),
+    ),
+)]
 pub async fn jellyfin_refresh(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {

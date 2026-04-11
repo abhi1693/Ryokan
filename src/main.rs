@@ -13,8 +13,97 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use services::{jellyfin::JellyfinClient, qbit::QbitClient};
+
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Ryokan API",
+        version = "0.1.0",
+        description = "Self-hosted anime PVR — search, download, and manage your anime library.",
+    ),
+    paths(
+        // Library
+        handlers::library::anilist_search,
+        handlers::library::api_series_detail,
+        handlers::library::add_series,
+        handlers::library::remove_series,
+        handlers::library::reconcile_fallbacks,
+        handlers::library::set_folder,
+        handlers::library::set_monitoring,
+        handlers::library::set_episode_monitoring,
+        handlers::library::list_folders,
+        handlers::library::auto_search_series,
+        handlers::library::auto_search_episode,
+        handlers::library::search_batch_releases,
+        handlers::library::interactive_search_episode,
+        handlers::library::grab_interactive_result,
+        handlers::library::delete_episode_file,
+        handlers::library::get_episode_grab_history,
+        handlers::library::mark_episode_failed,
+        handlers::library::episode_download_progress,
+        // Search
+        handlers::search::search_page_api,
+        handlers::search::grab_release,
+        handlers::search::get_torrents,
+        // Downloads
+        handlers::downloads::api_pause_torrent,
+        handlers::downloads::api_resume_torrent,
+        handlers::downloads::api_delete_torrent,
+        handlers::downloads::api_blocklist_remove,
+        // System
+        handlers::settings::api_health,
+        handlers::settings::qbit_test,
+        handlers::settings::jellyfin_test,
+        handlers::settings::jellyfin_refresh,
+        handlers::system::api_logs_poll,
+        handlers::system::api_logs_clear,
+        handlers::system::api_rss_sync,
+        handlers::system::api_rss_clear_history,
+        handlers::system::api_force_metadata_refresh,
+        handlers::system::api_force_cleanup,
+        handlers::system::api_force_post_processing,
+        handlers::system::api_force_upgrade_search,
+        handlers::system::api_rebuild_cached_metadata,
+        handlers::system::api_anibridge_reload,
+    ),
+    components(schemas(
+        services::anilist::AnimeEntry,
+        services::anilist::AnimeDetail,
+        services::anilist::RelatedEntry,
+        services::anilist::StreamingEpisode,
+        services::nyaa::SearchResult,
+        services::nyaa::SearchResponse,
+        services::qbit::Torrent,
+        services::auto_search::AutoSearchReport,
+        services::auto_search::AutoSearchHit,
+        models::log::LogEntry,
+        models::episode_tags::GrabHistoryEntry,
+        handlers::library::AddSeriesForm,
+        handlers::library::RemoveSeriesForm,
+        handlers::library::SetFolderForm,
+        handlers::library::SetMonitoringForm,
+        handlers::library::SetEpisodeMonitoringForm,
+        handlers::library::MarkEpisodeFailedForm,
+        handlers::library::EpisodeProgress,
+        handlers::search::GrabForm,
+        handlers::downloads::TorrentActionForm,
+        handlers::downloads::TorrentDeleteForm,
+        handlers::downloads::BlocklistRemoveForm,
+        handlers::settings::QbitTestForm,
+        handlers::settings::JellyfinTestForm,
+    )),
+    tags(
+        (name = "Library", description = "Anime library management — add, remove, search, and monitor series"),
+        (name = "Search", description = "Nyaa torrent search and grabbing"),
+        (name = "Downloads", description = "qBittorrent download management"),
+        (name = "System", description = "Health checks, logs, RSS sync, and background tasks"),
+    ),
+)]
+struct ApiDoc;
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
@@ -185,6 +274,7 @@ async fn main() {
         .merge(protected_routes)
         .merge(sonarr_routes)
         .merge(radarr_routes)
+        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state.clone());
 

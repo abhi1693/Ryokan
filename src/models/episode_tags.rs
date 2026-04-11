@@ -1,6 +1,6 @@
 use sqlx::{Row, SqlitePool};
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct GrabHistoryEntry {
     pub id: i64,
     pub quality_tag: String,

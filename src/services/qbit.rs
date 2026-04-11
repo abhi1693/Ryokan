@@ -14,7 +14,7 @@ pub struct QbitClient {
     logged_in: Arc<Mutex<bool>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct Torrent {
     pub hash: String,
     pub name: String,

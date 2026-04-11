@@ -3,7 +3,7 @@ use serde::Serialize;
 
 const NYAA_BASE: &str = "https://nyaa.si";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct SearchResult {
     pub title: String,
     pub link: String,
@@ -50,7 +50,7 @@ impl Default for SearchOptions {
 }
 
 /// Result of a paginated search.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SearchResponse {
     pub results: Vec<SearchResult>,
     pub page: i32,

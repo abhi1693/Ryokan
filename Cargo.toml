@@ -36,6 +36,10 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# API documentation
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
 # Misc
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"

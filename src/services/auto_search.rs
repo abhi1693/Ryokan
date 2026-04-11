@@ -52,7 +52,7 @@ pub enum SearchTarget {
     Episode(i32),
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct AutoSearchHit {
     pub target_label: String,
     pub release_title: String,
@@ -62,7 +62,7 @@ pub struct AutoSearchHit {
     pub score: i32,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct AutoSearchReport {
     pub grabbed: Vec<AutoSearchHit>,
     pub skipped: Vec<String>,
