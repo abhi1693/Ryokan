@@ -306,6 +306,7 @@ async fn refresh_series_metadata_inner(
             &detail.format,
             &detail.status,
             detail.episodes,
+            detail.season_year,
         )
         .await
         .map_err(|e| e.to_string())?;

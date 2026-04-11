@@ -16,6 +16,7 @@ pub struct Series {
     pub format: String,
     pub status: String,
     pub episodes: Option<i32>,
+    pub season_year: Option<i32>,
     pub folder_name: String,
     pub monitor_mode: String,
 }
@@ -39,6 +40,7 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
         format: row.get("format"),
         status: row.get("status"),
         episodes: row.get("episodes"),
+        season_year: row.try_get("season_year").ok().flatten(),
         folder_name: row.get("folder_name"),
         monitor_mode: row.try_get("monitor_mode").unwrap_or_else(|_| "future".to_string()),
     }
@@ -47,7 +49,7 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
 /// Get all tracked series, ordered by most recently added.
 pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, folder_name, monitor_mode FROM series ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -57,7 +59,7 @@ pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, folder_name, monitor_mode FROM series WHERE id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
@@ -68,7 +70,7 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx:
 
 pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, folder_name, monitor_mode FROM series WHERE anilist_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series WHERE anilist_id = ?",
     )
     .bind(anilist_id)
     .fetch_optional(db)
@@ -79,7 +81,7 @@ pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Optio
 
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, folder_name, monitor_mode FROM series WHERE mal_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series WHERE mal_id = ?",
     )
     .bind(mal_id)
     .fetch_optional(db)
@@ -101,6 +103,7 @@ pub async fn upsert(
     format: &str,
     status: &str,
     episodes: Option<i32>,
+    season_year: Option<i32>,
 ) -> Result<(i64, bool), sqlx::Error> {
     if let Some(mid) = mal_id {
         if let Some(existing) = get_by_mal_id(db, mid).await? {
@@ -117,6 +120,7 @@ pub async fn upsert(
                     format = ?,
                     status = ?,
                     episodes = ?,
+                    season_year = COALESCE(?, season_year),
                     monitor_mode = COALESCE(NULLIF(monitor_mode, ''), ?)
                 WHERE id = ?
                 "#,
@@ -131,6 +135,7 @@ pub async fn upsert(
             .bind(format)
             .bind(status)
             .bind(episodes)
+            .bind(season_year)
             .bind(default_monitor_mode(status).as_str())
             .bind(existing.id)
             .execute(db)
@@ -152,6 +157,7 @@ pub async fn upsert(
                 format = ?,
                 status = ?,
                 episodes = ?,
+                season_year = COALESCE(?, season_year),
                 monitor_mode = COALESCE(NULLIF(monitor_mode, ''), ?)
             WHERE id = ?
             "#,
@@ -165,6 +171,7 @@ pub async fn upsert(
         .bind(format)
         .bind(status)
         .bind(episodes)
+        .bind(season_year)
         .bind(default_monitor_mode(status).as_str())
         .bind(existing.id)
         .execute(db)
@@ -186,8 +193,8 @@ pub async fn upsert(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO series (anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, folder_name, monitor_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO series (anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(anilist_id)
@@ -200,6 +207,7 @@ pub async fn upsert(
     .bind(format)
     .bind(status)
     .bind(episodes)
+    .bind(season_year)
     .bind(&folder)
     .bind(default_monitor_mode(status).as_str())
     .execute(db)
@@ -251,6 +259,7 @@ pub async fn refresh_core_metadata(
     format: &str,
     status: &str,
     episodes: Option<i32>,
+    season_year: Option<i32>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -264,7 +273,8 @@ pub async fn refresh_core_metadata(
             cover_url = ?,
             format = ?,
             status = ?,
-            episodes = ?
+            episodes = ?,
+            season_year = COALESCE(?, season_year)
         WHERE id = ?
         "#,
     )
@@ -278,6 +288,7 @@ pub async fn refresh_core_metadata(
     .bind(format)
     .bind(status)
     .bind(episodes)
+    .bind(season_year)
     .bind(id)
     .execute(db)
     .await?;
@@ -286,7 +297,7 @@ pub async fn refresh_core_metadata(
 
 pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, folder_name, monitor_mode FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;

@@ -688,6 +688,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // season_year on series for Sonarr/Radarr compat year field.
+    sqlx::query("ALTER TABLE series ADD COLUMN season_year INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
     // Radarr API compatibility layer for Seerr integration (anime movies).
     sqlx::query("ALTER TABLE config ADD COLUMN radarr_enabled INTEGER NOT NULL DEFAULT 0")
         .execute(db)

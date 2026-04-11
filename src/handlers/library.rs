@@ -107,6 +107,7 @@ pub struct AddSeriesForm {
     format: String,
     status: String,
     episodes: Option<i32>,
+    season_year: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -204,6 +205,7 @@ async fn maybe_reconcile_mal_entry(
         &matched.format,
         &matched.status,
         matched.episodes,
+        matched.season_year,
     ).await.is_err() {
         return None;
     }
@@ -1150,6 +1152,7 @@ pub async fn add_series(
         &form.format,
         &form.status,
         form.episodes,
+        form.season_year,
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

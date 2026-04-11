@@ -368,6 +368,7 @@ pub async fn series_lookup(
     State(state): State<AppState>,
     Query(params): Query<SeriesLookupQuery>,
 ) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
+    anibridge::ensure_loaded().await;
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -519,6 +520,7 @@ pub async fn add_series(
         &detail.format,
         &detail.status,
         detail.episodes,
+        detail.season_year,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -877,7 +879,7 @@ fn build_sonarr_series_from_tracked(
                 percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
             },
         }],
-        year: 0,
+        year: s.season_year.unwrap_or(0),
         path,
         profile_id: 1,
         language_profile_id: 1,

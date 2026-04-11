@@ -256,7 +256,7 @@ pub async fn system_status() -> Json<RadarrSystemStatus> {
         authentication: "none".to_string(),
         sqlite_version: String::new(),
         migration_version: 0,
-        url_base: String::new(),
+        url_base: "/radarr".to_string(),
         runtime_version: String::new(),
         runtime_name: String::new(),
         start_time: "2024-01-01T00:00:00Z".to_string(),
@@ -317,6 +317,7 @@ pub async fn movie_lookup(
     State(state): State<AppState>,
     Query(params): Query<MovieLookupQuery>,
 ) -> Result<Json<Vec<RadarrMovie>>, (StatusCode, String)> {
+    anibridge::ensure_loaded().await;
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -457,6 +458,7 @@ pub async fn add_movie(
         &detail.format,
         &detail.status,
         detail.episodes,
+        detail.season_year,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -749,7 +751,7 @@ fn build_radarr_movie_from_tracked(
             remote_url: s.cover_url.clone(),
         }],
         remote_poster: s.cover_url.clone(),
-        year: 0,
+        year: s.season_year.unwrap_or(0),
         path,
         quality_profile_id: 1,
         monitored,
