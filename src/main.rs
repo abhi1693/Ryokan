@@ -200,7 +200,8 @@ async fn main() {
     let _ = models::scheduled_tasks::touch_definition(&db, "metadata_refresh", "Metadata refresh", "Every 12 hours", true).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "cleanup", "Cleanup", "Every 1 hour", true).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "post_processing", "Post-processing", "Every 1 minute (when enabled)", false).await;
-    let _ = models::scheduled_tasks::touch_definition(&db, "upgrade_search", "Quality upgrade search", "Every 24 hours", true).await;
+    let upgrade_enabled = models::config::get_config(&db).await.ok().flatten().map(|c| c.upgrade_search_enabled).unwrap_or(false);
+    let _ = models::scheduled_tasks::touch_definition(&db, "upgrade_search", "Quality upgrade search", "Every 24 hours (when enabled)", upgrade_enabled).await;
 
     // Log startup to the database.
     services::logger::info(
@@ -349,13 +350,29 @@ async fn main() {
         });
     }
 
-    // Background task: quality upgrade search every 24 hours.
+    // Background task: quality upgrade search every 24 hours (when enabled).
     {
         let upgrade_state = state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
             loop {
                 interval.tick().await;
+                let enabled = models::config::get_config(&upgrade_state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|c| c.upgrade_search_enabled)
+                    .unwrap_or(false);
+                let _ = models::scheduled_tasks::touch_definition(
+                    &upgrade_state.db,
+                    "upgrade_search",
+                    "Quality upgrade search",
+                    "Every 24 hours (when enabled)",
+                    enabled,
+                ).await;
+                if !enabled {
+                    continue;
+                }
                 let _ = models::scheduled_tasks::mark_started(&upgrade_state.db, "upgrade_search", "Searching for quality upgrades").await;
                 match services::upgrade::run_once(&upgrade_state).await {
                     Ok(summary) => {

@@ -49,6 +49,7 @@ pub struct SettingsForm {
     sonarr_api_key: Option<String>,
     radarr_enabled: Option<String>,
     radarr_api_key: Option<String>,
+    upgrade_search_enabled: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +180,11 @@ pub async fn settings_submit(
             form.radarr_api_key.unwrap_or_default().trim().to_string()
         } else {
             existing_cfg.as_ref().map(|c| c.radarr_api_key.clone()).unwrap_or_default()
+        },
+        upgrade_search_enabled: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
+            form.upgrade_search_enabled.is_some()
+        } else {
+            existing_cfg.as_ref().map(|c| c.upgrade_search_enabled).unwrap_or(false)
         },
     };
 

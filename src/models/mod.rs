@@ -703,6 +703,10 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN upgrade_search_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
 
     sqlx::query(
         r#"

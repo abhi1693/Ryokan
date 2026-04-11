@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::models::log::LogCategory;
-use crate::models::{config, episode_tags, metadata_cache, monitoring, series};
+use crate::models::{config, episode_tags, metadata_cache, series};
 use crate::services::{auto_search, logger, media, quality};
 use crate::AppState;
 
@@ -72,27 +72,17 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             continue;
         }
 
-        let monitored_eps = monitoring::get_monitored_episode_numbers(&state.db, row.id)
-            .await
-            .unwrap_or_default();
-        if monitored_eps.is_empty() {
-            continue;
-        }
-
         let quality_tags = episode_tags::get_for_series(&state.db, row.id)
             .await
             .unwrap_or_default();
 
-        // Only consider episodes that are actually on disk — skip missing ones.
-        let on_disk_eps: HashSet<i32> = disk_files.iter().map(|f| f.episode_number).collect();
-        let monitored_on_disk: Vec<i32> = monitored_eps
-            .iter()
-            .copied()
-            .filter(|ep| on_disk_eps.contains(ep))
-            .collect();
+        // Check all on-disk episodes for upgrades. The monitoring system governs
+        // what to *acquire* (missing/future), not what to *upgrade*, so we use
+        // disk presence directly rather than monitor state.
+        let on_disk_eps: Vec<i32> = disk_files.iter().map(|f| f.episode_number).collect();
 
         let upgrade_targets =
-            auto_search::build_upgrade_targets(&disk_files, &monitored_on_disk, cutoff_tier, &quality_tags);
+            auto_search::build_upgrade_targets(&disk_files, &on_disk_eps, cutoff_tier, &quality_tags);
         if upgrade_targets.is_empty() {
             continue;
         }
