@@ -322,7 +322,7 @@ pub async fn series_lookup(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or_else(|| default_config());
+        .unwrap_or_default();
 
     if let Some(tmdb_id_str) = params.term.strip_prefix("tvdb:") {
         // TVDB/TMDB ID lookup — use anibridge mappings.
@@ -346,7 +346,7 @@ pub async fn series_lookup(
             .ok()
             .flatten();
 
-        let tmdb_id = anibridge::lookup_tmdb_by_anilist(r.id).await.unwrap_or(0);
+        let tmdb_id = resolve_tmdb_id(r.id, r.id_mal).await;
         let title = if !r.title_english.is_empty() { &r.title_english } else { &r.title_romaji };
 
         sonarr_results.push(build_sonarr_series_from_search(
@@ -365,10 +365,11 @@ pub async fn series_lookup(
 pub async fn list_series(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
+    anibridge::ensure_loaded().await;
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or_else(|| default_config());
+        .unwrap_or_default();
 
     let tracked = series::get_all(&state.db)
         .await
@@ -376,7 +377,7 @@ pub async fn list_series(
 
     let mut results = Vec::new();
     for s in &tracked {
-        let tmdb_id = anibridge::lookup_tmdb_by_anilist(s.anilist_id).await.unwrap_or(0);
+        let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
         results.push(build_sonarr_series_from_tracked(s, tmdb_id, &cfg));
     }
 
@@ -388,17 +389,18 @@ pub async fn get_series(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
+    anibridge::ensure_loaded().await;
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or_else(|| default_config());
+        .unwrap_or_default();
 
     let s = series::get_by_id(&state.db, id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Series not found".to_string()))?;
 
-    let tmdb_id = anibridge::lookup_tmdb_by_anilist(s.anilist_id).await.unwrap_or(0);
+    let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
     Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
 }
 
@@ -412,18 +414,32 @@ pub async fn add_series(
 ) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
     let tmdb_id = body.tvdb_id.unwrap_or(0);
 
-    // Resolve TMDB → AniList ID.
+    // Resolve TMDB → AniList/MAL IDs.
     anibridge::ensure_loaded().await;
     let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
-    let anilist_id = anime_ids
+    let ids = anime_ids
         .first()
-        .and_then(|a| a.anilist_id)
-        .ok_or((StatusCode::BAD_REQUEST, format!("No AniList mapping found for TMDB ID {}", tmdb_id)))?;
+        .filter(|a| a.anilist_id.is_some() || a.mal_id.is_some())
+        .ok_or((StatusCode::BAD_REQUEST, format!("No mapping found for TMDB ID {}", tmdb_id)))?;
 
-    // Fetch full detail from AniList.
-    let detail = anilist::get_anime_detail(anilist_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    // Fetch detail: try AniList first, fall back to MAL/Jikan.
+    let detail = if let Some(al_id) = ids.anilist_id {
+        match anilist::get_anime_detail(al_id).await {
+            Ok(d) => d,
+            Err(_) if ids.mal_id.is_some() => {
+                crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap())
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+            }
+            Err(e) => return Err((StatusCode::BAD_GATEWAY, e)),
+        }
+    } else if let Some(mal_id) = ids.mal_id {
+        crate::services::jikan::get_anime_detail_cached(mal_id)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    } else {
+        return Err((StatusCode::BAD_REQUEST, format!("No usable ID for TMDB ID {}", tmdb_id)));
+    };
 
     let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
 
@@ -453,10 +469,15 @@ pub async fn add_series(
     let _ = monitoring_service::apply_monitor_mode(&state.db, id, monitor_mode).await;
 
     // If Seerr requested season-level monitoring, apply it.
+    // NOTE: Ryokan treats each AniList entry as a single season.  When Seerr
+    // maps a multi-season TMDB show, each AniList entry becomes a separate
+    // Ryokan series (season 1).  Seerr may send season_number > 1 for
+    // subsequent AniList entries, but from Ryokan's perspective they are all
+    // season 1.  We only act on the season_number <= 1 case here; a future
+    // improvement could use the anibridge mappings to fan out monitoring
+    // across all related AniList entries for a single TMDB show.
     if let Some(ref seasons) = body.seasons {
         for season in seasons {
-            // Ryokan doesn't have seasons — map season monitoring to episode monitoring.
-            // For anime, season 1 = all episodes.
             if season.season_number <= 1 && !season.monitored {
                 let _ = monitoring_service::apply_monitor_mode(
                     &state.db, id, monitoring::MonitorMode::None,
@@ -469,7 +490,7 @@ pub async fn add_series(
         &state.db,
         LogCategory::Library,
         &format!("Added via Seerr: {}", title),
-        &format!("tmdb_id={}, anilist_id={}, id={}", tmdb_id, anilist_id, id),
+        &format!("tmdb_id={}, provider_id={}, id={}", tmdb_id, detail.id, id),
     ).await;
 
     // Auto-search if requested.
@@ -492,7 +513,7 @@ pub async fn add_series(
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(|| default_config());
+        .unwrap_or_default();
 
     let s = series::get_by_id(&state.db, id)
         .await
@@ -507,6 +528,7 @@ pub async fn update_series(
     State(state): State<AppState>,
     Json(body): Json<UpdateSeriesBody>,
 ) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
+    anibridge::ensure_loaded().await;
     let s = series::get_by_id(&state.db, body.id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -533,9 +555,9 @@ pub async fn update_series(
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(|| default_config());
+        .unwrap_or_default();
 
-    let tmdb_id = anibridge::lookup_tmdb_by_anilist(s.anilist_id).await.unwrap_or(0);
+    let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
     Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
 }
 
@@ -569,6 +591,22 @@ pub async fn execute_command(
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/// Resolve TMDB ID from either AniList ID or MAL ID.
+/// Tries AniList first, then MAL as fallback.
+async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64 {
+    if let Some(tmdb) = anibridge::lookup_tmdb_by_anilist(anilist_id).await {
+        return tmdb;
+    }
+    if let Some(mid) = mal_id.into() {
+        if mid > 0 {
+            if let Some(tmdb) = anibridge::lookup_tmdb_by_mal(mid).await {
+                return tmdb;
+            }
+        }
+    }
+    0
+}
+
 async fn lookup_by_tmdb_id(
     state: &AppState,
     cfg: &config::Config,
@@ -583,21 +621,32 @@ async fn lookup_by_tmdb_id(
 
     let mut results = Vec::new();
     for ids in &anime_ids {
-        let anilist_id = match ids.anilist_id {
-            Some(id) => id,
-            None => continue,
+        // Try AniList first, fall back to MAL/Jikan if unavailable.
+        let detail = if let Some(al_id) = ids.anilist_id {
+            match anilist::get_anime_detail(al_id).await {
+                Ok(d) => d,
+                Err(_) if ids.mal_id.is_some() => {
+                    match crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap()).await {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => continue,
+            }
+        } else if let Some(mal_id) = ids.mal_id {
+            match crate::services::jikan::get_anime_detail_cached(mal_id).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            }
+        } else {
+            continue;
         };
 
         // Check if already in library.
-        let db_series = series::get_by_anilist_id(&state.db, anilist_id)
-            .await
-            .ok()
-            .flatten();
-
-        // Fetch detail from AniList.
-        let detail = match anilist::get_anime_detail(anilist_id).await {
-            Ok(d) => d,
-            Err(_) => continue,
+        let db_series = if detail.id > 0 {
+            series::get_by_anilist_id(&state.db, detail.id).await.ok().flatten()
+        } else {
+            None
         };
 
         let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
@@ -613,7 +662,8 @@ async fn lookup_by_tmdb_id(
             status: detail.status.clone(),
             status_display: String::new(),
             episodes: detail.episodes,
-            source: "anilist".to_string(),
+            season_year: detail.season_year,
+            source: if detail.id > 0 { "anilist" } else { "mal" }.to_string(),
         };
 
         results.push(build_sonarr_series_from_search(
@@ -684,7 +734,7 @@ fn build_sonarr_series_from_search(
                 percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
             },
         }],
-        year: 0,
+        year: r.season_year.unwrap_or(0),
         path,
         profile_id: 1,
         language_profile_id: 1,
@@ -802,33 +852,3 @@ fn map_status(anilist_status: &str) -> String {
     }
 }
 
-fn default_config() -> config::Config {
-    config::Config {
-        qbit_url: String::new(),
-        qbit_user: String::new(),
-        qbit_pass: String::new(),
-        qbit_category: String::new(),
-        qbit_download_path: String::new(),
-        jellyfin_url: String::new(),
-        jellyfin_api_key: String::new(),
-        preferred_groups: String::new(),
-        blocked_groups: String::new(),
-        preferred_resolution: "1080".to_string(),
-        quality_profile: "web_1080".to_string(),
-        quality_cutoff: "bd_1080".to_string(),
-        finished_series_quality: "prefer_bd".to_string(),
-        media_root: String::new(),
-        title_language: "english".to_string(),
-        force_mal_fallback: false,
-        rss_enabled: false,
-        rss_interval_minutes: 5,
-        force_kitsu_fallback: false,
-        post_processing_enabled: false,
-        post_processing_mode: "hardlink".to_string(),
-        auto_grab_on_add: true,
-        prefer_subs: true,
-        allow_non_english: false,
-        sonarr_enabled: false,
-        sonarr_api_key: String::new(),
-    }
-}

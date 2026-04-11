@@ -306,6 +306,21 @@ pub async fn api_rebuild_cached_metadata(
     })))
 }
 
+pub async fn api_anibridge_reload(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    logger::info(&state.db, LogCategory::System, "Anibridge mappings reload requested", "").await;
+
+    if crate::services::anibridge::reload().await {
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "message": "Anibridge mappings reloaded successfully",
+        })))
+    } else {
+        Err((axum::http::StatusCode::BAD_GATEWAY, "Failed to reload anibridge mappings".to_string()))
+    }
+}
+
 pub async fn api_logs_clear(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {

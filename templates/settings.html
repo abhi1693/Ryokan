@@ -240,8 +240,10 @@
 <script>
 function generateApiKey() {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    const buf = new Uint8Array(32);
+    crypto.getRandomValues(buf);
     let key = '';
-    for (let i = 0; i < 32; i++) key += chars[Math.floor(Math.random() * chars.length)];
+    for (let i = 0; i < 32; i++) key += chars[buf[i] % chars.length];
     document.getElementById('sonarr_api_key').value = key;
 }
 

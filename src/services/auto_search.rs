@@ -1,9 +1,50 @@
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use regex_lite::Regex;
 
 use crate::models::config::Config;
 use crate::services::{anilist::AnimeDetail, nyaa::{self, SearchOptions, SearchResult}, quality};
+
+// ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
+static RE_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
+    // S01E05 style
+    Regex::new(r"s\d{1,2}e(\d{1,4})").unwrap(),
+    // E05 / Ep05 / Ep.05 style
+    Regex::new(r"(?:^|[\s._\-])e(?:p\.?)?(\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)").unwrap(),
+    // " - 05" style (common for fansubs)
+    Regex::new(r"(?:^|\s)-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
+    // "Episode 05"
+    Regex::new(r"episode\s*(\d{1,4})").unwrap(),
+]);
+static RE_RANGE: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"(?:^|[\s._\-])(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap()
+);
+
+// ── Pre-compiled regexes for infer_season_from_title ───────────────────────
+static RE_NTH_SEASON: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap()
+);
+static RE_SEASON_N: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"season\s+(\d+)").unwrap()
+);
+static RE_PART_COUR: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"(?:part|cour)\s+(\d+)").unwrap()
+);
+
+// ── Pre-compiled regexes for parse_release_season ──────────────────────────
+static RE_SXXEXX: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"s(\d{1,2})e\d{1,4}").unwrap()
+);
+static RE_STANDALONE_S: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"(?:^|[\s.\[\(])s(\d{1,2})(?:[\s.\]\)\-]|$)").unwrap()
+);
+static RE_RELEASE_SEASON_N: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"season\s*(\d+)").unwrap()
+);
+static RE_RELEASE_NTH_SEASON: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap()
+);
 
 #[derive(Debug, Clone)]
 pub enum SearchTarget {
@@ -556,24 +597,11 @@ pub fn parse_release_numbers(title: &str) -> HashSet<i32> {
         out
     };
 
-    let patterns = [
-        // S01E05 style
-        r"s\d{1,2}e(\d{1,4})",
-        // E05 / Ep05 / Ep.05 style
-        r"(?:^|[\s._\-])e(?:p\.?)?(\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)",
-        // " - 05" style (common for fansubs)
-        r"(?:^|\s)-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)",
-        // "Episode 05"
-        r"episode\s*(\d{1,4})",
-    ];
-
-    for pattern in patterns {
-        if let Ok(re) = Regex::new(pattern) {
-            for caps in re.captures_iter(&stripped) {
-                if let Some(value) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                    if !is_noise_number(value) {
-                        numbers.insert(value);
-                    }
+    for re in RE_EPISODE_PATTERNS.iter() {
+        for caps in re.captures_iter(&stripped) {
+            if let Some(value) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                if !is_noise_number(value) {
+                    numbers.insert(value);
                 }
             }
         }
@@ -581,14 +609,12 @@ pub fn parse_release_numbers(title: &str) -> HashSet<i32> {
 
     // Range pattern for batch detection (e.g. "01-12", "01~24")
     // Only add range numbers, not used as the sole episode match.
-    if let Ok(re) = Regex::new(r"(?:^|[\s._\-])(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?(?:\s|\.|\[|\(|$)") {
-        if let Some(caps) = re.captures(&stripped) {
-            let start = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
-            let end = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
-            if start > 0 && end >= start && end - start <= 200 && !is_noise_number(start) && !is_noise_number(end) {
-                for value in start..=end {
-                    numbers.insert(value);
-                }
+    if let Some(caps) = RE_RANGE.captures(&stripped) {
+        let start = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
+        let end = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
+        if start > 0 && end >= start && end - start <= 200 && !is_noise_number(start) && !is_noise_number(end) {
+            for value in start..=end {
+                numbers.insert(value);
             }
         }
     }
@@ -651,30 +677,24 @@ fn infer_season_from_title(title: &str) -> i32 {
     let lower = title.to_lowercase();
 
     // "2nd Season", "3rd Season", etc.
-    if let Ok(re) = Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season") {
-        if let Some(caps) = re.captures(&lower) {
-            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                return n;
-            }
+    if let Some(caps) = RE_NTH_SEASON.captures(&lower) {
+        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+            return n;
         }
     }
 
     // "Season 2", "Season 3", etc.
-    if let Ok(re) = Regex::new(r"season\s+(\d+)") {
-        if let Some(caps) = re.captures(&lower) {
-            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                return n;
-            }
+    if let Some(caps) = RE_SEASON_N.captures(&lower) {
+        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+            return n;
         }
     }
 
     // " Part 2", " Cour 2" — sometimes used as season aliases
-    if let Ok(re) = Regex::new(r"(?:part|cour)\s+(\d+)") {
-        if let Some(caps) = re.captures(&lower) {
-            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                if n >= 2 {
-                    return n;
-                }
+    if let Some(caps) = RE_PART_COUR.captures(&lower) {
+        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+            if n >= 2 {
+                return n;
             }
         }
     }
@@ -688,40 +708,32 @@ pub fn parse_release_season(title: &str) -> i32 {
     let lower = title.to_lowercase();
 
     // S01E05, S02E03, etc.
-    if let Ok(re) = Regex::new(r"s(\d{1,2})e\d{1,4}") {
-        if let Some(caps) = re.captures(&lower) {
-            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                return n;
-            }
+    if let Some(caps) = RE_SXXEXX.captures(&lower) {
+        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+            return n;
         }
     }
 
     // Standalone "S2", "S3" (not part of resolution like "S01E01")
-    if let Ok(re) = Regex::new(r"(?:^|[\s.\[\(])s(\d{1,2})(?:[\s.\]\)\-]|$)") {
-        if let Some(caps) = re.captures(&lower) {
-            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                if n > 0 && n <= 30 {
-                    return n;
-                }
+    if let Some(caps) = RE_STANDALONE_S.captures(&lower) {
+        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+            if n > 0 && n <= 30 {
+                return n;
             }
         }
     }
 
     // "Season 2", "Season 3"
-    if let Ok(re) = Regex::new(r"season\s*(\d+)") {
-        if let Some(caps) = re.captures(&lower) {
-            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                return n;
-            }
+    if let Some(caps) = RE_RELEASE_SEASON_N.captures(&lower) {
+        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+            return n;
         }
     }
 
     // "2nd Season", "3rd Season"
-    if let Ok(re) = Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season") {
-        if let Some(caps) = re.captures(&lower) {
-            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                return n;
-            }
+    if let Some(caps) = RE_RELEASE_NTH_SEASON.captures(&lower) {
+        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+            return n;
         }
     }
 

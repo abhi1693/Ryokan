@@ -126,6 +126,7 @@ async fn main() {
         .route("/api/rss/sync", post(handlers::system::api_rss_sync))
                 .route("/api/rss/clear-history", post(handlers::system::api_rss_clear_history))
         .route("/api/system/rebuild-anilist-cache", post(handlers::system::api_rebuild_cached_metadata))
+        .route("/api/system/reload-anibridge", post(handlers::system::api_anibridge_reload))
         .route("/help", get(handlers::system::system_page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))

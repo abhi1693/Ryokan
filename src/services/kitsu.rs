@@ -256,6 +256,7 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
             status: item.status.to_ascii_uppercase().replace(' ', "_"),
             status_display: item.status.replace('-', " "),
             episodes: item.episode_count,
+            season_year: parse_year(item.start_date.as_deref()),
             source: "kitsu".to_string(),
         });
     }

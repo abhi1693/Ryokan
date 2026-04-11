@@ -33,6 +33,7 @@ pub struct AnimeEntry {
     pub status: String,
     pub status_display: String,
     pub episodes: Option<i32>,
+    pub season_year: Option<i32>,
     pub source: String,
 }
 
@@ -129,6 +130,7 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
             status: m["status"].as_str().unwrap_or("").to_string(),
             status_display: prettify_status(m["status"].as_str().unwrap_or("")),
             episodes: m["episodes"].as_i64().map(|e| e as i32),
+            season_year: m["seasonYear"].as_i64().map(|y| y as i32),
             source: "anilist".to_string(),
         })
         .collect();
@@ -155,6 +157,7 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
                     format
                     status
                     episodes
+                    seasonYear
                 }
             }
         "#,
@@ -201,6 +204,7 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
         status: m["status"].as_str().unwrap_or("").to_string(),
         status_display: prettify_status(m["status"].as_str().unwrap_or("")),
         episodes: m["episodes"].as_i64().map(|e| e as i32),
+        season_year: m["seasonYear"].as_i64().map(|y| y as i32),
         source: "anilist".to_string(),
     }))
 }

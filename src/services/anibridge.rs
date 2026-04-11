@@ -1,12 +1,19 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 const MAPPINGS_URL: &str = "https://github.com/anibridge/anibridge-mappings/releases/latest/download/mappings.min.json";
 
 /// Cached mapping data: TMDB show ID → list of (anilist_id, mal_id) pairs.
 /// A single TMDB show may map to multiple AniList entries (e.g. multi-season).
-static CACHE: LazyLock<RwLock<Option<MappingCache>>> = LazyLock::new(|| RwLock::new(None));
+///
+/// Uses RwLock for concurrent reads + Mutex to serialize downloads (no TOCTOU race).
+static CACHE: LazyLock<RwLock<Option<CacheState>>> = LazyLock::new(|| RwLock::new(None));
+static DOWNLOAD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct CacheState {
+    data: MappingCache,
+}
 
 #[derive(Debug, Clone)]
 pub struct AnimeIds {
@@ -20,11 +27,26 @@ struct MappingCache {
     tmdb_to_anime: HashMap<i64, Vec<AnimeIds>>,
     /// AniList ID → TMDB show ID (reverse lookup).
     anilist_to_tmdb: HashMap<i64, i64>,
+    /// MAL ID → TMDB show ID (reverse lookup for MAL fallback).
+    mal_to_tmdb: HashMap<i64, i64>,
 }
 
 /// Ensure the mappings are loaded, downloading if necessary.
-/// Returns true if cache is available.
+/// Returns true if cache is available. The download mutex prevents
+/// concurrent callers from racing to download at the same time.
 pub async fn ensure_loaded() -> bool {
+    // Fast path: cache exists and is fresh.
+    {
+        let cache = CACHE.read().await;
+        if cache.is_some() {
+            return true;
+        }
+    }
+
+    // Slow path: serialize downloads so only one caller fetches.
+    let _guard = DOWNLOAD_LOCK.lock().await;
+
+    // Re-check after acquiring the lock (another caller may have populated it).
     {
         let cache = CACHE.read().await;
         if cache.is_some() {
@@ -33,13 +55,30 @@ pub async fn ensure_loaded() -> bool {
     }
 
     match download_and_parse().await {
-        Ok(cache) => {
+        Ok(data) => {
             let mut w = CACHE.write().await;
-            *w = Some(cache);
+            *w = Some(CacheState { data });
             true
         }
         Err(e) => {
             tracing::error!("Failed to load anibridge mappings: {}", e);
+            false
+        }
+    }
+}
+
+/// Force-reload the mappings cache, e.g. from an admin endpoint.
+/// Returns true if the reload succeeded.
+pub async fn reload() -> bool {
+    let _guard = DOWNLOAD_LOCK.lock().await;
+    match download_and_parse().await {
+        Ok(data) => {
+            let mut w = CACHE.write().await;
+            *w = Some(CacheState { data });
+            true
+        }
+        Err(e) => {
+            tracing::error!("Failed to reload anibridge mappings: {}", e);
             false
         }
     }
@@ -50,9 +89,18 @@ pub async fn lookup_by_tmdb(tmdb_id: i64) -> Vec<AnimeIds> {
     let cache = CACHE.read().await;
     cache
         .as_ref()
-        .and_then(|c| c.tmdb_to_anime.get(&tmdb_id))
+        .and_then(|c| c.data.tmdb_to_anime.get(&tmdb_id))
         .cloned()
         .unwrap_or_default()
+}
+
+/// Look up TMDB show ID by MAL ID (for fallback when AniList is unavailable).
+pub async fn lookup_tmdb_by_mal(mal_id: i64) -> Option<i64> {
+    let cache = CACHE.read().await;
+    cache
+        .as_ref()
+        .and_then(|c| c.data.mal_to_tmdb.get(&mal_id))
+        .copied()
 }
 
 /// Look up TMDB show ID by AniList ID.
@@ -60,7 +108,7 @@ pub async fn lookup_tmdb_by_anilist(anilist_id: i64) -> Option<i64> {
     let cache = CACHE.read().await;
     cache
         .as_ref()
-        .and_then(|c| c.anilist_to_tmdb.get(&anilist_id))
+        .and_then(|c| c.data.anilist_to_tmdb.get(&anilist_id))
         .copied()
 }
 
@@ -112,10 +160,11 @@ async fn download_and_parse() -> Result<MappingCache, String> {
 fn build_cache(data: &serde_json::Value) -> MappingCache {
     let mut tmdb_to_anime: HashMap<i64, Vec<AnimeIds>> = HashMap::new();
     let mut anilist_to_tmdb: HashMap<i64, i64> = HashMap::new();
+    let mut mal_to_tmdb: HashMap<i64, i64> = HashMap::new();
 
     let obj = match data.as_object() {
         Some(o) => o,
-        None => return MappingCache { tmdb_to_anime, anilist_to_tmdb },
+        None => return MappingCache { tmdb_to_anime, anilist_to_tmdb, mal_to_tmdb },
     };
 
     for (source_key, targets) in obj {
@@ -159,6 +208,9 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                 }
                 anilist_to_tmdb.insert(al, tmdb_id);
             }
+            if let Some(m) = mal {
+                mal_to_tmdb.insert(m, tmdb_id);
+            }
             entry.push(AnimeIds {
                 anilist_id: al_id,
                 mal_id: mal,
@@ -166,7 +218,7 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
         }
     }
 
-    MappingCache { tmdb_to_anime, anilist_to_tmdb }
+    MappingCache { tmdb_to_anime, anilist_to_tmdb, mal_to_tmdb }
 }
 
 /// Parse "tmdb_show:12345" or "tmdb_show:12345:s1" → Some(12345)
