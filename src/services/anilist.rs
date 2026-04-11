@@ -12,6 +12,11 @@ const ANILIST_API: &str = "https://graphql.anilist.co";
 /// In-memory cache TTL for anime detail responses (15 minutes).
 const DETAIL_CACHE_TTL_SECS: u64 = 15 * 60;
 
+/// Maximum number of entries in the in-memory detail cache. When exceeded,
+/// expired entries are evicted first; if still over limit the oldest entry
+/// is removed.
+const DETAIL_CACHE_MAX_ENTRIES: usize = 500;
+
 /// In-memory cache for AniList detail responses to avoid rate limiting.
 struct CacheEntry {
     detail: AnimeDetail,
@@ -316,6 +321,23 @@ pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, fo
             detail: detail.clone(),
             fetched_at: Instant::now(),
         });
+        // Evict stale/oldest entries when the cache grows too large.
+        if cache.len() > DETAIL_CACHE_MAX_ENTRIES {
+            let expired: Vec<i64> = cache
+                .iter()
+                .filter(|(_, e)| e.fetched_at.elapsed().as_secs() >= DETAIL_CACHE_TTL_SECS)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in &expired {
+                cache.remove(k);
+            }
+            // If still over limit, drop the oldest entry.
+            if cache.len() > DETAIL_CACHE_MAX_ENTRIES {
+                if let Some((&oldest_key, _)) = cache.iter().min_by_key(|(_, e)| e.fetched_at) {
+                    cache.remove(&oldest_key);
+                }
+            }
+        }
     }
 
     Ok(detail)

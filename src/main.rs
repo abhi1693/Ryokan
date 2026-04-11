@@ -121,10 +121,15 @@ async fn main() {
         .route("/settings", get(handlers::settings::settings_page).post(handlers::settings::settings_submit))
         .route("/api/qbit/test", post(handlers::settings::qbit_test))
         .route("/api/jellyfin/test", post(handlers::settings::jellyfin_test))
+        .route("/api/health", get(handlers::settings::api_health))
         .route("/api/jellyfin/refresh", post(handlers::settings::jellyfin_refresh))
         .route("/system", get(handlers::system::system_page).post(handlers::system::debug_settings_submit))
         .route("/api/rss/sync", post(handlers::system::api_rss_sync))
-                .route("/api/rss/clear-history", post(handlers::system::api_rss_clear_history))
+        .route("/api/rss/clear-history", post(handlers::system::api_rss_clear_history))
+        .route("/api/tasks/metadata-refresh", post(handlers::system::api_force_metadata_refresh))
+        .route("/api/tasks/cleanup", post(handlers::system::api_force_cleanup))
+        .route("/api/tasks/post-processing", post(handlers::system::api_force_post_processing))
+        .route("/api/tasks/upgrade-search", post(handlers::system::api_force_upgrade_search))
         .route("/api/system/rebuild-anilist-cache", post(handlers::system::api_rebuild_cached_metadata))
         .route("/api/system/reload-anibridge", post(handlers::system::api_anibridge_reload))
         .route("/help", get(handlers::system::system_page))
@@ -195,6 +200,8 @@ async fn main() {
     let _ = models::scheduled_tasks::touch_definition(&db, "metadata_refresh", "Metadata refresh", "Every 12 hours", true).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "cleanup", "Cleanup", "Every 1 hour", true).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "post_processing", "Post-processing", "Every 1 minute (when enabled)", false).await;
+    let upgrade_enabled = models::config::get_config(&db).await.ok().flatten().map(|c| c.upgrade_search_enabled).unwrap_or(false);
+    let _ = models::scheduled_tasks::touch_definition(&db, "upgrade_search", "Quality upgrade search", "Every 24 hours (when enabled)", upgrade_enabled).await;
 
     // Log startup to the database.
     services::logger::info(
@@ -339,6 +346,60 @@ async fn main() {
                 let _ = models::scheduled_tasks::mark_started(&pp_state.db, "post_processing", "Checking for completed downloads").await;
                 services::post_processing::run_once(&pp_state).await;
                 let _ = models::scheduled_tasks::mark_finished(&pp_state.db, "post_processing", "ok", "").await;
+            }
+        });
+    }
+
+    // Background task: quality upgrade search every 24 hours (when enabled).
+    {
+        let upgrade_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                interval.tick().await;
+                let enabled = models::config::get_config(&upgrade_state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|c| c.upgrade_search_enabled)
+                    .unwrap_or(false);
+                let _ = models::scheduled_tasks::touch_definition(
+                    &upgrade_state.db,
+                    "upgrade_search",
+                    "Quality upgrade search",
+                    "Every 24 hours (when enabled)",
+                    enabled,
+                ).await;
+                if !enabled {
+                    continue;
+                }
+                let _ = models::scheduled_tasks::mark_started(&upgrade_state.db, "upgrade_search", "Searching for quality upgrades").await;
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30 * 60),
+                    services::upgrade::run_once(&upgrade_state),
+                ).await {
+                    Ok(Ok(summary)) => {
+                        let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "ok", &summary.detail).await;
+                    }
+                    Ok(Err(err)) => {
+                        let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", &err).await;
+                        services::logger::error(
+                            &upgrade_state.db,
+                            models::log::LogCategory::System,
+                            "Upgrade search failed",
+                            &err,
+                        ).await;
+                    }
+                    Err(_) => {
+                        let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", "Timed out after 30 minutes").await;
+                        services::logger::error(
+                            &upgrade_state.db,
+                            models::log::LogCategory::System,
+                            "Upgrade search timed out",
+                            "Exceeded 30-minute limit",
+                        ).await;
+                    }
+                }
             }
         });
     }

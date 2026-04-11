@@ -419,10 +419,12 @@ pub async fn add_movie(
                 }
                 Err(e) => return Err((StatusCode::BAD_GATEWAY, e)),
             }
-        } else {
-            crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap())
+        } else if let Some(mal_id) = ids.mal_id {
+            crate::services::jikan::get_anime_detail_cached(mal_id)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+        } else {
+            return Err((StatusCode::BAD_GATEWAY, "No AniList or MAL ID available for TMDB mapping".to_string()));
         }
     } else {
         // No anibridge mapping — fall back to AniList title search.

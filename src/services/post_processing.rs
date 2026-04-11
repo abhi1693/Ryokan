@@ -33,25 +33,12 @@ fn is_errored(state: &str) -> bool {
 /// Check if a grab is older than `max_age_secs` seconds.
 fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
     // grabbed_at is SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    // Parse year, month, day, hour, min, sec from the string
-    let parts: Vec<&str> = grabbed_at.split(|c: char| !c.is_ascii_digit()).collect();
-    let nums: Vec<i64> = parts.iter().filter_map(|s| s.parse().ok()).collect();
-    if nums.len() < 5 {
+    let Some(grab_time) = chrono::NaiveDateTime::parse_from_str(grabbed_at, "%Y-%m-%d %H:%M:%S").ok() else {
         return false;
-    }
-    let (year, month, day, hour, min) = (nums[0], nums[1], nums[2], nums[3], nums[4]);
-    let sec = if nums.len() > 5 { nums[5] } else { 0 };
-    // Rough UTC timestamp (good enough for a 5-minute check)
-    let days_since_epoch = (year - 1970) * 365 + (year - 1969) / 4
-        + [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][(month - 1).max(0).min(11) as usize] as i64
-        + (day - 1);
-    let grab_ts = days_since_epoch * 86400 + hour * 3600 + min * 60 + sec;
-    now - grab_ts > max_age_secs
+    };
+    let now = chrono::Utc::now().naive_utc();
+    let elapsed = now.signed_duration_since(grab_time).num_seconds();
+    elapsed > max_age_secs
 }
 
 fn is_video_file(name: &str) -> bool {
@@ -254,9 +241,80 @@ async fn import_torrent(
         let dest_video = season_dir.join(format!("{}.{}", dest_stem, ext));
         let dest_nfo = season_dir.join(format!("{}.nfo", dest_stem));
 
-        if dest_video.exists() {
-            // Already imported (e.g. re-run after partial failure). Skip.
-            continue;
+        // Check for existing files with the same SxxExx tag (any extension).
+        // Matching by episode tag instead of full stem handles cases where the
+        // episode title changed in AniList between the original grab and the
+        // upgrade (e.g. a translated title was added later).
+        let ep_tag = format!("S{:02}E{:02}", season, ep_num);
+        let existing_for_ep: Vec<PathBuf> = std::fs::read_dir(&season_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.contains(&ep_tag))
+                    .unwrap_or(false)
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e != "nfo")
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        if !existing_for_ep.is_empty() {
+            // Check if this is an upgrade replacing a previously imported file.
+            // If an older imported grab exists for this episode, this is an
+            // upgrade — remove the old file and old torrent, then import the new one.
+            let old_grabs = grabbed_torrents::find_imported_for_episode(
+                &state.db,
+                grab.series_id,
+                ep_num,
+            )
+            .await
+            .unwrap_or_default();
+
+            if old_grabs.is_empty() {
+                // No older import record — likely a re-run of the same grab. Skip.
+                continue;
+            }
+
+            // Remove old file(s) and their NFOs to make way for the upgrade.
+            for old_file in &existing_for_ep {
+                if let Err(e) = std::fs::remove_file(old_file) {
+                    logger::error(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!("Failed to remove old file for upgrade: {}", old_file.display()),
+                        &e.to_string(),
+                    )
+                    .await;
+                }
+                // Remove corresponding NFO (old stem may differ from new dest_stem
+                // if the episode title changed between grabs).
+                if let Some(stem) = old_file.file_stem().and_then(|s| s.to_str()) {
+                    let _ = std::fs::remove_file(season_dir.join(format!("{}.nfo", stem)));
+                }
+            }
+
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!("Replacing S{:02}E{:02} of '{}' with upgraded release", season, ep_num, series.title),
+                &format!("old_grabs={}", old_grabs.len()),
+            )
+            .await;
+
+            // Clean up old torrents from qBittorrent and mark old grabs as replaced.
+            for old_grab in &old_grabs {
+                if !old_grab.hash.is_empty() {
+                    if let Some(ref qbit_client) = state.qbit.read().await.clone() {
+                        let _ = qbit_client.delete_torrent(&old_grab.hash, true).await;
+                    }
+                }
+                let _ = grabbed_torrents::mark_removed(&state.db, old_grab.id).await;
+            }
         }
 
         match do_file_op(&cfg.post_processing_mode, &src, &dest_video) {

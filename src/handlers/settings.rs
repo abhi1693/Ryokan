@@ -49,6 +49,7 @@ pub struct SettingsForm {
     sonarr_api_key: Option<String>,
     radarr_enabled: Option<String>,
     radarr_api_key: Option<String>,
+    upgrade_search_enabled: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +181,11 @@ pub async fn settings_submit(
         } else {
             existing_cfg.as_ref().map(|c| c.radarr_api_key.clone()).unwrap_or_default()
         },
+        upgrade_search_enabled: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
+            form.upgrade_search_enabled.is_some()
+        } else {
+            existing_cfg.as_ref().map(|c| c.upgrade_search_enabled).unwrap_or(false)
+        },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());
@@ -294,6 +300,44 @@ pub async fn jellyfin_test(
         }))),
         Err(err) => Err((axum::http::StatusCode::BAD_GATEWAY, serde_json::json!({"ok": false, "message": err}).to_string())),
     }
+}
+
+pub async fn api_health(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let qbit_status = {
+        let client = state.qbit.read().await.clone();
+        match client {
+            Some(c) => match c.test_connection().await {
+                Ok(version) => serde_json::json!({"ok": true, "message": format!("qBittorrent {}", version)}),
+                Err(e) => serde_json::json!({"ok": false, "message": e}),
+            },
+            None => serde_json::json!({"ok": false, "message": "Not configured"}),
+        }
+    };
+
+    let jellyfin_status = {
+        let client = state.jellyfin.read().await.clone();
+        match client {
+            Some(c) => match c.test_connection().await {
+                Ok(info) => {
+                    let label = if info.server_name.trim().is_empty() {
+                        format!("Jellyfin {}", info.version)
+                    } else {
+                        format!("{} ({})", info.server_name, info.version)
+                    };
+                    serde_json::json!({"ok": true, "message": label})
+                }
+                Err(e) => serde_json::json!({"ok": false, "message": e}),
+            },
+            None => serde_json::json!({"ok": false, "message": "Not configured"}),
+        }
+    };
+
+    Json(serde_json::json!({
+        "qbit": qbit_status,
+        "jellyfin": jellyfin_status,
+    }))
 }
 
 pub async fn jellyfin_refresh(

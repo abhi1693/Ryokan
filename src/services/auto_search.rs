@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use regex_lite::Regex;
 
 use crate::models::config::Config;
-use crate::services::{anilist::AnimeDetail, nyaa::{self, SearchOptions, SearchResult}, quality};
+use crate::services::{anilist::AnimeDetail, media, nyaa::{self, SearchOptions, SearchResult}, quality};
 
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
 static RE_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
@@ -114,6 +114,7 @@ pub async fn find_best_for_target(
     config: &Config,
     target: &SearchTarget,
     allow_batch: bool,
+    batch_episode_match: bool,
 ) -> Option<SearchResult> {
     let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
@@ -131,7 +132,7 @@ pub async fn find_best_for_target(
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
 
     // Phase 1: standard queries (alias + episode variants).
-    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
+    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
 
     // Phase 2: if no candidate from a preferred group, try group-prefixed queries.
     let has_preferred_hit = !preferred_groups.is_empty()
@@ -141,7 +142,7 @@ pub async fn find_best_for_target(
 
     if !has_preferred_hit && !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
+        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
     }
 
     // Phase 3: for finished series with BD preference, probe for BD releases.
@@ -152,7 +153,7 @@ pub async fn find_best_for_target(
 
         if !has_bd_candidate {
             let bd_queries = quality::bd_probe_queries(&aliases);
-            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates).await;
+            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
         }
     }
 
@@ -187,6 +188,7 @@ async fn run_queries(
     categories: &[String],
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
+    batch_episode_match: bool,
 ) {
     for category in categories {
         for query in queries {
@@ -217,7 +219,7 @@ async fn run_queries(
                 if !allow_batch && result.is_batch {
                     continue;
                 }
-                if !matches_target(&result.title, aliases, target, expected_season) {
+                if !matches_target(&result.title, aliases, target, expected_season, batch_episode_match && result.is_batch) {
                     continue;
                 }
                 // For FINISHED series, reject non-BD results uploaded 2+ years after airing
@@ -389,6 +391,45 @@ pub fn build_monitored_targets(detail: &AnimeDetail, existing_episodes: &[i32], 
         .collect()
 }
 
+/// Build upgrade targets: candidate episodes that exist on disk but are below
+/// the quality cutoff. These are candidates for automatic quality upgrades.
+pub fn build_upgrade_targets(
+    disk_files: &[media::EpisodeFile],
+    candidate_episodes: &[i32],
+    cutoff_tier: quality::QualityTier,
+    quality_tags: &std::collections::HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
+) -> Vec<(SearchTarget, quality::QualityTier)> {
+    let candidates: HashSet<i32> = candidate_episodes.iter().copied().collect();
+    let mut targets = Vec::new();
+    for file in disk_files {
+        if !candidates.contains(&file.episode_number) {
+            continue;
+        }
+        // Prefer the quality tag recorded at grab time (from the release title)
+        // over re-detecting from the renamed filename on disk.
+        let existing_tier = if let Some(tag) = quality_tags.get(&file.episode_number) {
+            let tier = quality::QualityTier::from_str(&tag.quality_tag);
+            if tier != quality::QualityTier::Unknown { tier } else { quality::tier_from_disk_quality(&file.quality) }
+        } else {
+            quality::tier_from_disk_quality(&file.quality)
+        };
+        if existing_tier == quality::QualityTier::Unknown {
+            continue;
+        }
+        if existing_tier.rank() < cutoff_tier.rank() {
+            targets.push((
+                SearchTarget::Episode(file.episode_number),
+                existing_tier,
+            ));
+        }
+    }
+    targets.sort_by_key(|(t, _)| match t {
+        SearchTarget::Episode(n) => *n,
+        SearchTarget::Single => 0,
+    });
+    targets
+}
+
 pub fn target_label(target: &SearchTarget) -> String {
     match target {
         SearchTarget::Single => "Single".to_string(),
@@ -442,7 +483,7 @@ pub fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     out
 }
 
-pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, expected_season: i32) -> bool {
+pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, expected_season: i32, allow_batch_episode: bool) -> bool {
     let normalized_title = normalize_title(title);
     let title_tokens = token_set(&normalized_title);
 
@@ -468,9 +509,11 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, ex
             if parsed.is_empty() {
                 return false;
             }
-            // If this looks like a batch (many episode numbers), reject for single-episode targets.
-            // A range of 3+ episodes means this is a batch/multi-episode release.
-            if parsed.len() > 2 {
+            // Reject releases with 3+ episode numbers (batch/multi-episode)
+            // unless the caller explicitly allows batch-to-episode matching
+            // (used for quality upgrade searches where BD season packs are the
+            // only source for higher-quality individual episodes).
+            if !allow_batch_episode && parsed.len() > 2 {
                 return false;
             }
             parsed.contains(target_ep)

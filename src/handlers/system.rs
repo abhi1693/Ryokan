@@ -7,7 +7,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::models::{config, log::{self, LogCategory}, rss, scheduled_tasks};
-use crate::services::{logger, metadata_sync, rss as rss_service};
+use crate::services::{logger, metadata_sync, post_processing, rss as rss_service, upgrade};
 use crate::AppState;
 
 #[derive(Template)]
@@ -345,6 +345,74 @@ pub async fn api_rss_clear_history(
         "ok": true,
         "message": format!("Cleared {} grab history entries. Previously grabbed episodes will be re-evaluated on next sync.", deleted),
     })))
+}
+
+pub async fn api_force_metadata_refresh(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let _ = scheduled_tasks::mark_started(&state.db, "metadata_refresh", "Manual metadata refresh started").await;
+    let (refreshed, failed) = metadata_sync::refresh_all_series_metadata(&state.db).await;
+    let status = if failed > 0 { "warn" } else { "ok" };
+    let detail = format!("refreshed={}, failed={}", refreshed, failed);
+    let _ = scheduled_tasks::mark_finished(&state.db, "metadata_refresh", status, &detail).await;
+    Ok(Json(serde_json::json!({
+        "ok": failed == 0,
+        "message": format!("Metadata refresh complete. Refreshed: {}. Failed: {}.", refreshed, failed),
+    })))
+}
+
+pub async fn api_force_cleanup(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let _ = scheduled_tasks::mark_started(&state.db, "cleanup", "Manual cleanup started").await;
+    let mut errors = Vec::new();
+    if let Err(e) = crate::models::log::cleanup(&state.db, 30).await {
+        errors.push(format!("logs: {}", e));
+    }
+    if let Err(e) = rss::cleanup_old_decisions(&state.db, 30).await {
+        errors.push(format!("rss: {}", e));
+    }
+    let status = if errors.is_empty() { "ok" } else { "warn" };
+    let detail = if errors.is_empty() { "Cleanup completed".to_string() } else { errors.join("; ") };
+    let _ = scheduled_tasks::mark_finished(&state.db, "cleanup", status, &detail).await;
+    Ok(Json(serde_json::json!({
+        "ok": errors.is_empty(),
+        "message": detail,
+    })))
+}
+
+pub async fn api_force_post_processing(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let _ = scheduled_tasks::mark_started(&state.db, "post_processing", "Manual post-processing run").await;
+    post_processing::run_once(&state).await;
+    let _ = scheduled_tasks::mark_finished(&state.db, "post_processing", "ok", "Manual run completed").await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "message": "Post-processing run completed",
+    })))
+}
+
+pub async fn api_force_upgrade_search(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let _ = scheduled_tasks::mark_started(&state.db, "upgrade_search", "Manual upgrade search started").await;
+    match upgrade::run_once(&state).await {
+        Ok(summary) => {
+            let _ = scheduled_tasks::mark_finished(&state.db, "upgrade_search", "ok", &summary.detail).await;
+            Ok(Json(serde_json::json!({
+                "ok": true,
+                "message": summary.detail,
+                "series_checked": summary.series_checked,
+                "episodes_checked": summary.episodes_checked,
+                "upgrades_grabbed": summary.upgrades_grabbed,
+            })))
+        }
+        Err(err) => {
+            let _ = scheduled_tasks::mark_finished(&state.db, "upgrade_search", "error", &err).await;
+            Err((axum::http::StatusCode::BAD_GATEWAY, err))
+        }
+    }
 }
 
 fn level_rank(level: &str) -> u8 {

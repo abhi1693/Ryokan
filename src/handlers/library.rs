@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
-use crate::models::{config, episode_tags, local_metadata, metadata_cache, monitoring, series};
+use crate::models::{config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, monitoring, series};
 use crate::models::log::LogCategory;
 use crate::services::{anilist, artwork, auto_search, jikan, kitsu, logger, media, metadata_sync, monitoring as monitoring_service};
 use crate::AppState;
@@ -138,6 +138,8 @@ pub struct SetEpisodeMonitoringForm {
 #[derive(Deserialize)]
 pub struct MarkEpisodeFailedForm {
     history_id: i64,
+    #[serde(default)]
+    blocklist: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +169,8 @@ async fn force_kitsu_fallback_enabled(db: &SqlitePool) -> bool {
 
 async fn resolve_series_request(db: &SqlitePool, request_id: i64) -> Result<(Option<series::Series>, i64), sqlx::Error> {
     if let Some(row) = series::get_by_id(db, request_id).await? {
+        Ok((Some(row.clone()), row.anilist_id))
+    } else if let Some(row) = series::get_by_anilist_id(db, request_id).await? {
         Ok((Some(row.clone()), row.anilist_id))
     } else {
         Ok((None, request_id))
@@ -1331,6 +1335,17 @@ async fn run_auto_search_targets(
     allow_batch: bool,
     series_id: Option<i64>,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
+    run_auto_search_targets_with_upgrades(state, request_id, targets, allow_batch, series_id, std::collections::HashMap::new()).await
+}
+
+async fn run_auto_search_targets_with_upgrades(
+    state: &AppState,
+    request_id: i64,
+    targets: Vec<auto_search::SearchTarget>,
+    allow_batch: bool,
+    series_id: Option<i64>,
+    upgrade_tiers: std::collections::HashMap<i32, crate::services::quality::QualityTier>,
+) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
     let qbit = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
@@ -1363,8 +1378,22 @@ async fn run_auto_search_targets(
     let mut skipped = Vec::new();
     for target in targets {
         let label = auto_search::target_label(&target);
-        match auto_search::find_best_for_target(&detail, &cfg, &target, allow_batch).await {
+        let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrade_tiers.contains_key(n));
+        match auto_search::find_best_for_target(&detail, &cfg, &target, allow_batch, is_upgrade).await {
             Some(result) => {
+                // For upgrade targets, verify the found release is actually
+                // better quality than what's already on disk.
+                if let auto_search::SearchTarget::Episode(ep_num) = &target {
+                    if let Some(existing_tier) = upgrade_tiers.get(ep_num) {
+                        let incoming_tier = crate::services::quality::detect_tier(&result.title, &result.resolution);
+                        if incoming_tier.rank() <= existing_tier.rank() {
+                            logger::debug(&state.db, LogCategory::AutoSearch, &format!("{}: skipped upgrade (incoming {} not better than existing {})", label, incoming_tier.label(), existing_tier.label()), &result.title).await;
+                            skipped.push(format!("{}: no quality upgrade available", label));
+                            continue;
+                        }
+                        logger::info(&state.db, LogCategory::AutoSearch, &format!("{}: upgrading from {} to {}", label, existing_tier.label(), incoming_tier.label()), &result.title).await;
+                    }
+                }
                 let url = if !result.magnet.is_empty() { result.magnet.clone() } else { result.torrent.clone() };
                 if url.is_empty() {
                     logger::warn(&state.db, LogCategory::AutoSearch, &format!("{}: no magnet/torrent URL", label), &result.title).await;
@@ -1494,28 +1523,62 @@ pub async fn auto_search_series(
         Vec::new()
     };
 
-    let targets = if tracked.is_some() {
+    let mut targets = if tracked.is_some() {
         auto_search::build_monitored_targets(&detail, &existing_eps, &monitored_eps)
     } else {
         auto_search::build_missing_targets(&detail, &existing_eps)
     };
+
+    // Also include upgrade targets: episodes on disk below the quality cutoff.
+    let cutoff_tier = crate::services::quality::QualityTier::from_str(&cfg.quality_cutoff);
+    let quality_tags = if let Some(ref t) = tracked {
+        episode_tags::get_for_series(&state.db, t.id).await.unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let upgrade_targets = auto_search::build_upgrade_targets(&existing_files, &monitored_eps, cutoff_tier, &quality_tags);
+    // Merge upgrade targets (avoid duplicates with missing targets).
+    let existing_target_eps: std::collections::HashSet<i32> = targets
+        .iter()
+        .filter_map(|t| match t {
+            auto_search::SearchTarget::Episode(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    for (target, _) in &upgrade_targets {
+        if let auto_search::SearchTarget::Episode(n) = target {
+            if !existing_target_eps.contains(n) {
+                targets.push(target.clone());
+            }
+        }
+    }
+
     let target_summary = if targets.len() <= 5 {
         targets.iter().map(|t| auto_search::target_label(t)).collect::<Vec<_>>().join(", ")
     } else {
         format!("{} targets", targets.len())
     };
+    let upgrade_count = upgrade_targets.len();
     let title_for_log = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
     logger::debug(
         &state.db,
         LogCategory::AutoSearch,
         &format!("Missing targets for {}: {}", title_for_log, target_summary),
-        &format!("on_disk={}, monitored={}, total={:?}", existing_eps.len(), monitored_eps.len(), detail.episodes),
+        &format!("on_disk={}, monitored={}, upgradeable={}, total={:?}", existing_eps.len(), monitored_eps.len(), upgrade_count, detail.episodes),
     ).await;
     let series_id_for_grab = tracked.as_ref().map(|s| s.id);
+    // Build a map of existing quality tiers for upgrade filtering in the search task.
+    let upgrade_tiers: std::collections::HashMap<i32, crate::services::quality::QualityTier> = upgrade_targets
+        .into_iter()
+        .filter_map(|(t, tier)| match t {
+            auto_search::SearchTarget::Episode(n) => Some((n, tier)),
+            _ => None,
+        })
+        .collect();
     // Spawn as an independent task so the grab completes even if the client disconnects.
     let state_clone = state.clone();
     let handle = tokio::spawn(async move {
-        run_auto_search_targets(&state_clone, request_id, targets, true, series_id_for_grab).await
+        run_auto_search_targets_with_upgrades(&state_clone, request_id, targets, true, series_id_for_grab, upgrade_tiers).await
     });
     let report = handle.await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
@@ -1585,6 +1648,7 @@ pub async fn search_batch_releases(
         &cfg,
         &auto_search::SearchTarget::Single,
         true,
+        false,
     ).await;
 
     // We want batch-only, so filter.
@@ -1805,9 +1869,13 @@ pub async fn mark_episode_failed(
         .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?
         .id;
 
-    episode_tags::mark_grab_failed(&state.db, form.history_id)
+    let (_sid, _ep, release_title) = episode_tags::mark_grab_failed(&state.db, form.history_id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if form.blocklist && !release_title.is_empty() {
+        let _ = grabbed_torrents::mark_failed_by_name(&state.db, series_id, &release_title).await;
+    }
 
     // Re-trigger auto-search for this episode in the background so it completes
     // even if the client disconnects.

@@ -9,11 +9,91 @@ use serde::Deserialize;
 use crate::models::grabbed_torrents;
 use crate::AppState;
 
+struct QueueTorrentView {
+    hash: String,
+    name: String,
+    size_display: String,
+    progress_pct: String,
+    speed_display: String,
+    eta_display: String,
+    state_label: String,
+    state_badge_class: String,
+    is_paused: bool,
+}
+
+fn format_size(bytes: i64) -> String {
+    if bytes <= 0 { return "0 B".to_string(); }
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let i = ((bytes as f64).ln() / 1024f64.ln()).floor() as usize;
+    let i = i.min(units.len() - 1);
+    let val = bytes as f64 / 1024f64.powi(i as i32);
+    if i == 0 { format!("{} {}", val as i64, units[i]) }
+    else { format!("{:.1} {}", val, units[i]) }
+}
+
+fn format_speed(bps: i64) -> String {
+    if bps <= 0 { return String::new(); }
+    format!("{}/s", format_size(bps))
+}
+
+fn format_eta(seconds: i64) -> String {
+    if seconds <= 0 || seconds >= 8640000 { return String::new(); }
+    let h = seconds / 3600;
+    let m = (seconds % 3600) / 60;
+    let s = seconds % 60;
+    if h > 0 { format!("{}h {}m", h, m) }
+    else if m > 0 { format!("{}m {}s", m, s) }
+    else { format!("{}s", s) }
+}
+
+fn state_label(state: &str) -> &str {
+    match state {
+        "uploading" | "stalledUP" | "forcedUP" => "Seeding",
+        "downloading" | "forcedDL" => "Downloading",
+        "stalledDL" => "Stalled",
+        "pausedDL" | "pausedUP" => "Paused",
+        "queuedDL" | "queuedUP" => "Queued",
+        "checkingDL" | "checkingUP" => "Checking",
+        "error" => "Error",
+        "missingFiles" => "Missing Files",
+        "moving" => "Moving",
+        "metaDL" => "Fetching metadata",
+        "allocating" => "Allocating",
+        _ => state,
+    }
+}
+
+fn state_badge_class(state: &str) -> &str {
+    match state {
+        "uploading" | "stalledUP" | "forcedUP" | "pausedUP" => "log-badge-info",
+        "downloading" | "forcedDL" => "log-badge-debug",
+        "pausedDL" | "queuedDL" | "queuedUP" | "stalledDL" => "log-badge-warn",
+        "error" | "missingFiles" => "log-badge-error",
+        _ => "",
+    }
+}
+
+fn torrent_to_view(t: &crate::services::qbit::Torrent) -> QueueTorrentView {
+    QueueTorrentView {
+        hash: t.hash.clone(),
+        name: t.name.clone(),
+        size_display: format_size(t.size),
+        progress_pct: format!("{:.1}", t.progress * 100.0),
+        speed_display: format_speed(t.dlspeed),
+        eta_display: format_eta(t.eta),
+        state_label: state_label(&t.state).to_string(),
+        state_badge_class: state_badge_class(&t.state).to_string(),
+        is_paused: t.state.starts_with("paused"),
+    }
+}
+
 #[derive(Template)]
 #[template(path = "downloads.html")]
 struct DownloadsTemplate {
     page: String,
     tab: String,
+    queue: Vec<QueueTorrentView>,
+    queue_error: String,
     history: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
     blocklist: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
 }
@@ -37,6 +117,28 @@ pub async fn downloads_page(
 ) -> Html<String> {
     let tab = normalize_tab(params.tab);
 
+    let (queue, queue_error) = if tab == "queue" {
+        let client = state.qbit.read().await.clone();
+        match client {
+            Some(c) => match c.get_torrents().await {
+                Ok(mut torrents) => {
+                    // Sort: downloading first, then by progress descending.
+                    torrents.sort_by(|a, b| {
+                        let a_down = if a.state.contains("DL") || a.state == "downloading" { 0 } else { 1 };
+                        let b_down = if b.state.contains("DL") || b.state == "downloading" { 0 } else { 1 };
+                        a_down.cmp(&b_down).then(b.progress.partial_cmp(&a.progress).unwrap_or(std::cmp::Ordering::Equal))
+                    });
+                    let views = torrents.iter().map(torrent_to_view).collect();
+                    (views, String::new())
+                }
+                Err(e) => (Vec::new(), format!("Could not load queue: {}", e)),
+            },
+            None => (Vec::new(), "qBittorrent is not configured.".to_string()),
+        }
+    } else {
+        (Vec::new(), String::new())
+    };
+
     let history = if tab == "history" {
         grabbed_torrents::get_all_with_series(&state.db, 500).await.unwrap_or_default()
     } else {
@@ -52,6 +154,8 @@ pub async fn downloads_page(
     let template = DownloadsTemplate {
         page: "downloads".to_string(),
         tab,
+        queue,
+        queue_error,
         history,
         blocklist,
     };

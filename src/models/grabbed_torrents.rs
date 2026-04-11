@@ -172,6 +172,55 @@ pub async fn get_blocked(db: &SqlitePool) -> Result<Vec<GrabbedTorrentWithSeries
         .collect())
 }
 
+/// Mark a grabbed torrent as failed (blocklisted) by matching torrent name and series.
+pub async fn mark_failed_by_name(db: &SqlitePool, series_id: i64, torrent_name: &str) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE grabbed_torrents SET state = 'failed' WHERE series_id = ? AND torrent_name = ? AND state IN ('pending', 'imported')",
+    )
+    .bind(series_id)
+    .bind(torrent_name)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Find previously imported grabs for a series that cover a given episode.
+/// Used by post-processing to identify old torrents to clean up during upgrades.
+pub async fn find_imported_for_episode(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
+    // episode_numbers is stored as a JSON array, so we search with json_each.
+    let rows = sqlx::query(
+        r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.grabbed_at
+           FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
+           WHERE g.series_id = ? AND je.value = ? AND g.state = 'imported'
+           ORDER BY g.grabbed_at DESC"#,
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let eps_json: String = row.get("episode_numbers");
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            GrabbedTorrent {
+                id: row.get("id"),
+                hash: row.get("hash"),
+                torrent_name: row.get("torrent_name"),
+                series_id: row.get("series_id"),
+                episode_numbers,
+                state: "imported".to_string(),
+                grabbed_at: row.get("grabbed_at"),
+            }
+        })
+        .collect())
+}
+
 /// Remove a grabbed torrent record entirely.
 pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM grabbed_torrents WHERE id = ?")

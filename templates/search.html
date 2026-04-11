@@ -22,6 +22,24 @@
     <input type="text" name="user" id="search-user" placeholder="Uploader (optional)" class="search-user">
     <button type="submit" class="btn btn-primary">Search</button>
 </form>
+<script>
+// Persist search options in localStorage
+(function() {
+    const fields = ['search-category', 'search-filter', 'search-user'];
+    const KEY = 'nyaa_search_opts';
+    const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
+    for (const id of fields) {
+        if (saved[id] !== undefined && saved[id] !== '') {
+            document.getElementById(id).value = saved[id];
+        }
+    }
+    document.getElementById('search-form').addEventListener('submit', function() {
+        const opts = {};
+        for (const id of fields) opts[id] = document.getElementById(id).value;
+        localStorage.setItem(KEY, JSON.stringify(opts));
+    });
+})();
+</script>
 
 {% if searched %}
 <div class="results-container">

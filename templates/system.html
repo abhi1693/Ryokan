@@ -313,6 +313,7 @@ function runRssSync(btn) {
                         <th>Last started</th>
                         <th>Last finished</th>
                         <th>Detail</th>
+                        <th></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -328,6 +329,7 @@ function runRssSync(btn) {
                         <td>{% if let Some(started) = task.last_started_at %}{{ started }}{% else %}—{% endif %}</td>
                         <td>{% if let Some(finished) = task.last_finished_at %}{{ finished }}{% else %}—{% endif %}</td>
                         <td class="rss-reason-cell"><div class="rss-reason-text">{{ task.last_detail }}</div></td>
+                        <td><button type="button" class="btn btn-secondary btn-sm" onclick="forceRunTask(this, '{{ task.task_key }}')">Run now</button></td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -336,6 +338,30 @@ function runRssSync(btn) {
         {% endif %}
     </fieldset>
 </div>
+<script>
+function forceRunTask(btn, taskKey) {
+    const endpoints = {
+        rss_sync: '/api/rss/sync',
+        metadata_refresh: '/api/tasks/metadata-refresh',
+        cleanup: '/api/tasks/cleanup',
+        post_processing: '/api/tasks/post-processing',
+        upgrade_search: '/api/tasks/upgrade-search',
+    };
+    const url = endpoints[taskKey];
+    if (!url) { alert('No run endpoint for task: ' + taskKey); return; }
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    fetch(url, { method: 'POST' })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })).catch(() => ({ ok: r.ok, data: null })))
+        .then(({ ok, data }) => {
+            if (data && data.message) { alert(data.message); }
+            else if (!ok) { alert('Task failed'); }
+            location.reload();
+        })
+        .catch(err => { alert('Error: ' + err.message); })
+        .finally(() => { btn.disabled = false; btn.textContent = 'Run now'; });
+}
+</script>
 {% else if tab == "debug" %}
 <div class="debug-panel">
     <form method="post" action="/system" class="settings-form">
@@ -476,12 +502,14 @@ function clearRssHistory(btn) {
                 <tr><td>Seeders &gt; 10</td><td>+20</td></tr>
                 <tr><td>Seeders &gt; 0</td><td>+10</td></tr>
                 <tr><td>Zero seeders</td><td>-10</td></tr>
-                <tr><td>Preferred release group</td><td>+25</td></tr>
+                <tr><td>Preferred release group (ordered)</td><td>+140 / +120 / +100 / ...</td></tr>
+                <tr><td>Non-preferred group</td><td>-15</td></tr>
                 <tr><td>Preferred resolution</td><td>+20</td></tr>
                 <tr><td>Batch release</td><td>+15</td></tr>
                 <tr><td>Trusted uploader</td><td>+10</td></tr>
                 <tr><td>10bit / x265 / BD source</td><td>+5</td></tr>
-                <tr><td>Dual audio / multi</td><td>-5</td></tr>
+                <tr><td>Dual audio / dub (prefer subs)</td><td>-15</td></tr>
+                <tr><td>Dual audio / dub (prefer dubs)</td><td>+15</td></tr>
                 <tr><td>Downloads &gt; 10,000</td><td>+15</td></tr>
                 <tr><td>Downloads &gt; 5,000</td><td>+10</td></tr>
                 <tr><td>Downloads &gt; 1,000</td><td>+5</td></tr>
