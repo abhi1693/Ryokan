@@ -157,10 +157,29 @@ async fn main() {
             handlers::sonarr_compat::require_api_key,
         ));
 
+    // Radarr v3 API compatibility layer for Seerr integration (anime movies).
+    // Mounted under /radarr/ prefix — Seerr uses URL Base "/radarr" to route here.
+    let radarr_routes = Router::new()
+        .route("/radarr/api/v3/system/status", get(handlers::radarr_compat::system_status))
+        .route("/radarr/api/v3/qualityprofile", get(handlers::radarr_compat::quality_profiles))
+        .route("/radarr/api/v3/qualityProfile", get(handlers::radarr_compat::quality_profiles))
+        .route("/radarr/api/v3/rootfolder", get(handlers::radarr_compat::root_folders))
+        .route("/radarr/api/v3/rootFolder", get(handlers::radarr_compat::root_folders))
+        .route("/radarr/api/v3/tag", get(handlers::radarr_compat::list_tags).post(handlers::radarr_compat::create_tag))
+        .route("/radarr/api/v3/movie", get(handlers::radarr_compat::list_movies).post(handlers::radarr_compat::add_movie).put(handlers::radarr_compat::update_movie))
+        .route("/radarr/api/v3/movie/{id}", get(handlers::radarr_compat::get_movie))
+        .route("/radarr/api/v3/movie/lookup", get(handlers::radarr_compat::movie_lookup))
+        .route("/radarr/api/v3/command", post(handlers::radarr_compat::execute_command))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::radarr_compat::require_api_key,
+        ));
+
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
         .merge(sonarr_routes)
+        .merge(radarr_routes)
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state.clone());
 

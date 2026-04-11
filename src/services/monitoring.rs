@@ -42,34 +42,7 @@ pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Res
         .await
         .ok()
         .flatten()
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-            sonarr_enabled: false,
-            sonarr_api_key: String::new(),
-        });
+        .unwrap_or_default();
 
     let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
     let existing_eps: HashSet<i32> = disk_files.iter().map(|f| f.episode_number).collect();

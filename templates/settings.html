@@ -96,6 +96,29 @@
             </div>
         </fieldset>
 
+        <fieldset>
+            <legend>Seerr (Radarr API Compatibility)</legend>
+            <p class="form-hint" style="margin-bottom: 12px;">
+                Exposes a Radarr-compatible API so Seerr can add and manage anime movies through Ryokan.
+                In Seerr, add a new Radarr server pointing to this Ryokan instance with URL Base set to <code>/radarr</code> and the API key below.
+            </p>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="radarr_enabled" id="radarr_enabled" {% if config.radarr_enabled %}checked{% endif %}>
+                    <span>Enable Radarr API</span>
+                </label>
+                <span class="form-hint">When enabled, Ryokan accepts Radarr v3 API calls at <code>/radarr/api/v3/</code> authenticated with the key below.</span>
+            </div>
+            <div class="form-group">
+                <label for="radarr_api_key">API Key</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="text" name="radarr_api_key" id="radarr_api_key" value="{{ config.radarr_api_key }}" placeholder="Paste this key into Seerr's Radarr server config" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="generateRadarrApiKey()" style="white-space:nowrap">Generate</button>
+                </div>
+                <span class="form-hint">Use this key as the API key when adding Ryokan as a Radarr server in Seerr.</span>
+            </div>
+        </fieldset>
+
     </div>
 
     <div class="settings-tab-panel {% if tab == "quality" %}active{% endif %}">
@@ -242,6 +265,15 @@ function generateApiKey() {
     let key = '';
     for (let i = 0; i < 32; i++) key += chars[buf[i] % chars.length];
     document.getElementById('sonarr_api_key').value = key;
+}
+
+function generateRadarrApiKey() {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    const buf = new Uint8Array(32);
+    crypto.getRandomValues(buf);
+    let key = '';
+    for (let i = 0; i < 32; i++) key += chars[buf[i] % chars.length];
+    document.getElementById('radarr_api_key').value = key;
 }
 
 function syncTitleLanguagePreview(lang) {

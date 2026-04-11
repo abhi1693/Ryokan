@@ -47,6 +47,8 @@ pub struct SettingsForm {
     prefer_subs: String,
     sonarr_enabled: Option<String>,
     sonarr_api_key: Option<String>,
+    radarr_enabled: Option<String>,
+    radarr_api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +169,16 @@ pub async fn settings_submit(
             form.sonarr_api_key.unwrap_or_default().trim().to_string()
         } else {
             existing_cfg.as_ref().map(|c| c.sonarr_api_key.clone()).unwrap_or_default()
+        },
+        radarr_enabled: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
+            form.radarr_enabled.is_some()
+        } else {
+            existing_cfg.as_ref().map(|c| c.radarr_enabled).unwrap_or(false)
+        },
+        radarr_api_key: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
+            form.radarr_api_key.unwrap_or_default().trim().to_string()
+        } else {
+            existing_cfg.as_ref().map(|c| c.radarr_api_key.clone()).unwrap_or_default()
         },
     };
 

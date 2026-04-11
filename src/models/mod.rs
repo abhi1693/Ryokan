@@ -688,6 +688,16 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Radarr API compatibility layer for Seerr integration (anime movies).
+    sqlx::query("ALTER TABLE config ADD COLUMN radarr_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN radarr_api_key TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS scheduled_task_runs (

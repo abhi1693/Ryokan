@@ -1338,34 +1338,7 @@ async fn run_auto_search_targets(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-            sonarr_enabled: false,
-            sonarr_api_key: String::new(),
-        });
+        .unwrap_or_default();
 
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
         .await
@@ -1480,34 +1453,7 @@ pub async fn auto_search_series(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-            sonarr_enabled: false,
-            sonarr_api_key: String::new(),
-        });
+        .unwrap_or_default();
 
     let (tracked_row, provider_id, detail) = resolve_series_context(&state.db, request_id)
         .await
@@ -1619,34 +1565,7 @@ pub async fn search_batch_releases(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-            sonarr_enabled: false,
-            sonarr_api_key: String::new(),
-        });
+        .unwrap_or_default();
 
     // Use auto_search::find_best_for_target with batch allowed; then grab if found.
     let best = auto_search::find_best_for_target(
@@ -1715,34 +1634,7 @@ pub async fn interactive_search_episode(
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or(crate::models::config::Config {
-            qbit_url: String::new(),
-            qbit_user: String::new(),
-            qbit_pass: String::new(),
-            qbit_category: String::new(),
-            qbit_download_path: String::new(),
-            jellyfin_url: String::new(),
-            jellyfin_api_key: String::new(),
-            preferred_groups: String::new(),
-            blocked_groups: String::new(),
-            preferred_resolution: "1080".to_string(),
-            quality_profile: "web_1080".to_string(),
-            quality_cutoff: "bd_1080".to_string(),
-            finished_series_quality: "prefer_bd".to_string(),
-            media_root: String::new(),
-            title_language: "english".to_string(),
-            force_mal_fallback: false,
-            rss_enabled: false,
-            rss_interval_minutes: 5,
-            force_kitsu_fallback: false,
-            post_processing_enabled: false,
-            post_processing_mode: "hardlink".to_string(),
-            auto_grab_on_add: true,
-            prefer_subs: true,
-            allow_non_english: false,
-            sonarr_enabled: false,
-            sonarr_api_key: String::new(),
-        });
+        .unwrap_or_default();
 
     let results = auto_search::find_all_for_target(
         &detail,
