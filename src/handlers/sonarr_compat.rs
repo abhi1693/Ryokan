@@ -46,9 +46,9 @@ pub async fn require_api_key(
         .or_else(|| {
             let query_str = req.uri().query().unwrap_or("");
             query_str.split('&').find_map(|pair| {
-                let mut parts = pair.splitn(2, '=');
-                let key = parts.next()?;
-                let val = parts.next()?;
+                let (key, val) = pair.split_once('=')?;
+                
+                
                 if key == "apikey" { Some(val.to_string()) } else { None }
             })
         });

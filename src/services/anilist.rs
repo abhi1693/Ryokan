@@ -297,7 +297,7 @@ pub async fn get_anime_detail(id: i64) -> Result<AnimeDetail, String> {
 
 pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, force_mal_fallback: bool) -> Result<AnimeDetail, String> {
     if id < 0 {
-        return jikan::get_anime_detail_cached((-id) as i64).await;
+        return jikan::get_anime_detail_cached(-id).await;
     }
     if force_mal_fallback {
         if let Some(mid) = mal_id_hint {

@@ -7,7 +7,6 @@ use crate::models::log::{self, LogCategory, LogLevel};
 /// Usage:
 ///   logger::info(&db, LogCategory::Nyaa, "Search completed", "Found 42 results for 'Dandadan'").await;
 ///   logger::error(&db, LogCategory::QBit, "Connection failed", &err.to_string()).await;
-
 pub async fn log(db: &SqlitePool, level: LogLevel, category: LogCategory, message: &str, detail: &str) {
     // Write to tracing (console/container log).
     match level {

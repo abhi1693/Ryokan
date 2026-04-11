@@ -400,7 +400,7 @@ pub fn build_monitored_targets(detail: &AnimeDetail, existing_episodes: &[i32], 
     }
 
     let existing: HashSet<i32> = existing_episodes.iter().copied().collect();
-    let mut monitored: Vec<i32> = monitored_episodes.iter().copied().collect();
+    let mut monitored: Vec<i32> = monitored_episodes.to_vec();
     monitored.sort_unstable();
     monitored.dedup();
 
@@ -523,8 +523,7 @@ pub fn collect_extended_aliases(detail: &AnimeDetail) -> Vec<String> {
 fn split_title_segments(title: &str) -> Vec<String> {
     // Normalize various dash types to a common delimiter for splitting.
     let normalized = title
-        .replace('–', "|")  // en dash
-        .replace('—', "|")  // em dash
+        .replace(['–', '—'], "|")  // em dash
         .replace(": ", "|") // colon+space (keep "Re:Zero" intact)
         .replace(" - ", "|");
 

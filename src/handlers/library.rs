@@ -280,11 +280,11 @@ async fn resolve_series_context(
                         "AniList detail failed for id={}; falling back to Jikan (mal_id={})",
                         provider_id, mid
                     );
-                    logger::warn(&db, LogCategory::AniList, &fallback_msg, &e).await;
+                    logger::warn(db, LogCategory::AniList, &fallback_msg, &e).await;
                     if let Some(ref tracked) = db_series {
                         if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
                             logger::info(
-                                &db,
+                                db,
                                 LogCategory::AniList,
                                 &format!("Using cached metadata for {}", tracked.title),
                                 &format!("cached_at={}", cached.cached_at),
@@ -303,7 +303,7 @@ async fn resolve_series_context(
                                     tracked.title_native.clone(),
                                 ];
                                 if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes).await {
-                                    logger::warn(&db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
+                                    logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
                                     return Ok((db_series, kitsu_detail.id, kitsu_detail));
                                 }
                             }
@@ -314,7 +314,7 @@ async fn resolve_series_context(
                     if let Some(ref tracked) = db_series {
                         if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
                             logger::info(
-                                &db,
+                                db,
                                 LogCategory::AniList,
                                 &format!("Using cached metadata for {}", tracked.title),
                                 &format!("cached_at={}", cached.cached_at),
@@ -328,7 +328,7 @@ async fn resolve_series_context(
                             tracked.title_native.clone(),
                         ];
                         if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes).await {
-                            logger::warn(&db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
+                            logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
                             return Ok((db_series, kitsu_detail.id, kitsu_detail));
                         }
                     }
@@ -467,8 +467,8 @@ pub async fn series_detail(
         detail.cover_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-cover", series_id), &detail.cover_url).await;
         detail.banner_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-banner", series_id), &detail.banner_url).await;
     } else if detail.id != 0 {
-        detail.cover_url = artwork::first_cached_url(&state.db, &vec![artwork::provider_cover_key(detail.id, detail.id_mal), format!("provider-{}-cover", detail.id)], &detail.cover_url).await;
-        detail.banner_url = artwork::first_cached_url(&state.db, &vec![artwork::provider_banner_key(detail.id, detail.id_mal), format!("provider-{}-banner", detail.id)], &detail.banner_url).await;
+        detail.cover_url = artwork::first_cached_url(&state.db, &[artwork::provider_cover_key(detail.id, detail.id_mal), format!("provider-{}-cover", detail.id)], &detail.cover_url).await;
+        detail.banner_url = artwork::first_cached_url(&state.db, &[artwork::provider_banner_key(detail.id, detail.id_mal), format!("provider-{}-banner", detail.id)], &detail.banner_url).await;
     }
 
     let relation_groups = build_relation_groups(&state.db, db_series.as_ref().map(|s| s.id), &detail).await;
@@ -512,7 +512,6 @@ pub async fn series_detail(
 }
 
 /// Build the episode list for a single series (no chain walking).
-
 fn episode_needs_kitsu_backfill<F>(ep_count: i32, mut has_jikan_title: F) -> bool
 where
     F: FnMut(i32) -> bool,
@@ -571,7 +570,7 @@ async fn build_episodes(
     let kitsu_eps: HashMap<i32, kitsu::EpisodeInfo> = if should_try_kitsu {
         kitsu::fetch_episode_titles_fallback(
             db,
-            &vec![detail.title_english.clone(), detail.title_romaji.clone(), detail.title_native.clone()],
+            &[detail.title_english.clone(), detail.title_romaji.clone(), detail.title_native.clone()],
             detail.season_year,
             detail.episodes,
         ).await
@@ -997,21 +996,17 @@ async fn build_relation_groups(
         let cover_url = if let Some(series_id) = db_id {
             artwork::first_cached_url(
                 db,
-                &vec![
-                    artwork::series_relation_cover_key(series_id, related.id, related.id_mal),
+                &[artwork::series_relation_cover_key(series_id, related.id, related.id_mal),
                     format!("series-{}-relation-{}-cover", series_id, related.id),
                     artwork::provider_cover_key(related.id, related.id_mal),
-                    format!("provider-{}-cover", related.id),
-                ],
+                    format!("provider-{}-cover", related.id)],
                 &related.cover_url,
             ).await
         } else if related.id != 0 || related.id_mal.is_some() {
             artwork::first_cached_url(
                 db,
-                &vec![
-                    artwork::provider_cover_key(related.id, related.id_mal),
-                    format!("provider-{}-cover", related.id),
-                ],
+                &[artwork::provider_cover_key(related.id, related.id_mal),
+                    format!("provider-{}-cover", related.id)],
                 &related.cover_url,
             ).await
         } else {
@@ -1674,7 +1669,7 @@ pub async fn auto_search_series(
     }
 
     let target_summary = if targets.len() <= 5 {
-        targets.iter().map(|t| auto_search::target_label(t)).collect::<Vec<_>>().join(", ")
+        targets.iter().map(auto_search::target_label).collect::<Vec<_>>().join(", ")
     } else {
         format!("{} targets", targets.len())
     };
@@ -1701,8 +1696,7 @@ pub async fn auto_search_series(
         run_auto_search_targets_with_upgrades(&state_clone, request_id, targets, true, series_id_for_grab, upgrade_tiers).await
     });
     let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
-        .map_err(|e| e)?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
     Ok(Json(report))
 }
 
@@ -1757,8 +1751,7 @@ pub async fn auto_search_episode(
         .await
     });
     let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
-        .map_err(|e| e)?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
     Ok(Json(report))
 }
 
@@ -2119,8 +2112,7 @@ pub async fn mark_episode_failed(
         ).await
     });
     let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
-        .map_err(|e| e)?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
 
     Ok(Json(report))
 }

@@ -349,7 +349,7 @@ async fn fetch_relations(mal_id: i64) -> Vec<RelatedEntry> {
     for group in body.data {
         let rel_type = group.relation.to_uppercase().replace(' ', "_");
         for entry in group.entry {
-            if entry.media_type.to_ascii_uppercase() != "ANIME" {
+            if !entry.media_type.eq_ignore_ascii_case("ANIME") {
                 continue;
             }
 
@@ -660,7 +660,7 @@ async fn fetch_from_jikan(mal_id: i64) -> HashMap<i32, EpisodeInfo> {
                 aired
             };
 
-            let number = ep.episode_id.unwrap_or(((page - 1) * 100 + idx as i32 + 1) as i32);
+            let number = ep.episode_id.unwrap_or((page - 1) * 100 + idx as i32 + 1);
             let title = ep.title.clone().unwrap_or_default();
 
             episodes.insert(
