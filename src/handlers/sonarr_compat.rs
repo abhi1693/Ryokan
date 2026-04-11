@@ -47,8 +47,6 @@ pub async fn require_api_key(
             let query_str = req.uri().query().unwrap_or("");
             query_str.split('&').find_map(|pair| {
                 let (key, val) = pair.split_once('=')?;
-                
-                
                 if key == "apikey" { Some(val.to_string()) } else { None }
             })
         });
@@ -464,7 +462,8 @@ pub async fn add_series(
 ) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
     let tvdb_id = body.tvdb_id.unwrap_or(0);
 
-    // Extract which season Seerr is requesting (the monitored one).
+    // Extract which season Seerr is requesting. Seerr marks exactly one season as
+    // monitored per request, so .max() effectively picks the single monitored season.
     let requested_season = body.seasons.as_ref().and_then(|seasons| {
         seasons.iter()
             .filter(|s| s.monitored && s.season_number > 0)
@@ -715,6 +714,9 @@ async fn lookup_by_external_id(
     }
 
     // Fetch metadata for the first entry to use as the "show-level" info.
+    // Note: for multi-season shows (e.g. JoJo), this uses season 1's AniList entry
+    // for the title and cover art. This is fine since Seerr keys on tvdb_id, not
+    // the title — but a Jikan fallback may return a part-specific title here.
     let first_ids = &season_entries[0].1;
     let show_detail = fetch_anime_detail(first_ids).await;
     let show_title = show_detail.as_ref().map(|d| {

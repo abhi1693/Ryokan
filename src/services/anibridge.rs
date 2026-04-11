@@ -325,6 +325,10 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                     if entry.iter().any(|e| e.anilist_id == Some(al)) {
                         continue;
                     }
+                } else if let Some(m) = ids.mal_id {
+                    if entry.iter().any(|e| e.mal_id == Some(m)) {
+                        continue;
+                    }
                 }
                 entry.push(ids.clone());
             }

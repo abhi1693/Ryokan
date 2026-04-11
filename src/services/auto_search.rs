@@ -523,7 +523,7 @@ pub fn collect_extended_aliases(detail: &AnimeDetail) -> Vec<String> {
 fn split_title_segments(title: &str) -> Vec<String> {
     // Normalize various dash types to a common delimiter for splitting.
     let normalized = title
-        .replace(['–', '—'], "|")  // em dash
+        .replace(['–', '—'], "|")  // en dash and em dash
         .replace(": ", "|") // colon+space (keep "Re:Zero" intact)
         .replace(" - ", "|");
 
