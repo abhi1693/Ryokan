@@ -90,12 +90,12 @@ pub struct RelationCard {
     pub episodes: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct AnilistSearchQuery {
     q: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddSeriesForm {
     anilist_id: i64,
     mal_id: Option<i64>,
@@ -110,32 +110,32 @@ pub struct AddSeriesForm {
     season_year: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct RemoveSeriesForm {
     id: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetFolderForm {
     series_id: i64,
     folder_name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetMonitoringForm {
     series_id: i64,
     monitor_mode: String,
     auto_grab: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetEpisodeMonitoringForm {
     series_id: i64,
     episode_number: i32,
     monitored: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct MarkEpisodeFailedForm {
     history_id: i64,
     #[serde(default)]
@@ -280,11 +280,11 @@ async fn resolve_series_context(
                         "AniList detail failed for id={}; falling back to Jikan (mal_id={})",
                         provider_id, mid
                     );
-                    logger::warn(&db, LogCategory::AniList, &fallback_msg, &e).await;
+                    logger::warn(db, LogCategory::AniList, &fallback_msg, &e).await;
                     if let Some(ref tracked) = db_series {
                         if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
                             logger::info(
-                                &db,
+                                db,
                                 LogCategory::AniList,
                                 &format!("Using cached metadata for {}", tracked.title),
                                 &format!("cached_at={}", cached.cached_at),
@@ -303,7 +303,7 @@ async fn resolve_series_context(
                                     tracked.title_native.clone(),
                                 ];
                                 if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes).await {
-                                    logger::warn(&db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
+                                    logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
                                     return Ok((db_series, kitsu_detail.id, kitsu_detail));
                                 }
                             }
@@ -314,7 +314,7 @@ async fn resolve_series_context(
                     if let Some(ref tracked) = db_series {
                         if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
                             logger::info(
-                                &db,
+                                db,
                                 LogCategory::AniList,
                                 &format!("Using cached metadata for {}", tracked.title),
                                 &format!("cached_at={}", cached.cached_at),
@@ -328,7 +328,7 @@ async fn resolve_series_context(
                             tracked.title_native.clone(),
                         ];
                         if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes).await {
-                            logger::warn(&db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
+                            logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
                             return Ok((db_series, kitsu_detail.id, kitsu_detail));
                         }
                     }
@@ -467,8 +467,8 @@ pub async fn series_detail(
         detail.cover_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-cover", series_id), &detail.cover_url).await;
         detail.banner_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-banner", series_id), &detail.banner_url).await;
     } else if detail.id != 0 {
-        detail.cover_url = artwork::first_cached_url(&state.db, &vec![artwork::provider_cover_key(detail.id, detail.id_mal), format!("provider-{}-cover", detail.id)], &detail.cover_url).await;
-        detail.banner_url = artwork::first_cached_url(&state.db, &vec![artwork::provider_banner_key(detail.id, detail.id_mal), format!("provider-{}-banner", detail.id)], &detail.banner_url).await;
+        detail.cover_url = artwork::first_cached_url(&state.db, &[artwork::provider_cover_key(detail.id, detail.id_mal), format!("provider-{}-cover", detail.id)], &detail.cover_url).await;
+        detail.banner_url = artwork::first_cached_url(&state.db, &[artwork::provider_banner_key(detail.id, detail.id_mal), format!("provider-{}-banner", detail.id)], &detail.banner_url).await;
     }
 
     let relation_groups = build_relation_groups(&state.db, db_series.as_ref().map(|s| s.id), &detail).await;
@@ -512,7 +512,6 @@ pub async fn series_detail(
 }
 
 /// Build the episode list for a single series (no chain walking).
-
 fn episode_needs_kitsu_backfill<F>(ep_count: i32, mut has_jikan_title: F) -> bool
 where
     F: FnMut(i32) -> bool,
@@ -571,7 +570,7 @@ async fn build_episodes(
     let kitsu_eps: HashMap<i32, kitsu::EpisodeInfo> = if should_try_kitsu {
         kitsu::fetch_episode_titles_fallback(
             db,
-            &vec![detail.title_english.clone(), detail.title_romaji.clone(), detail.title_native.clone()],
+            &[detail.title_english.clone(), detail.title_romaji.clone(), detail.title_native.clone()],
             detail.season_year,
             detail.episodes,
         ).await
@@ -997,21 +996,17 @@ async fn build_relation_groups(
         let cover_url = if let Some(series_id) = db_id {
             artwork::first_cached_url(
                 db,
-                &vec![
-                    artwork::series_relation_cover_key(series_id, related.id, related.id_mal),
+                &[artwork::series_relation_cover_key(series_id, related.id, related.id_mal),
                     format!("series-{}-relation-{}-cover", series_id, related.id),
                     artwork::provider_cover_key(related.id, related.id_mal),
-                    format!("provider-{}-cover", related.id),
-                ],
+                    format!("provider-{}-cover", related.id)],
                 &related.cover_url,
             ).await
         } else if related.id != 0 || related.id_mal.is_some() {
             artwork::first_cached_url(
                 db,
-                &vec![
-                    artwork::provider_cover_key(related.id, related.id_mal),
-                    format!("provider-{}-cover", related.id),
-                ],
+                &[artwork::provider_cover_key(related.id, related.id_mal),
+                    format!("provider-{}-cover", related.id)],
                 &related.cover_url,
             ).await
         } else {
@@ -1106,6 +1101,18 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/anilist/search",
+    tag = "Library",
+    summary = "Search AniList for anime",
+    description = "Search for anime by title. Uses AniList as primary source with MAL/Jikan and Kitsu as fallbacks.",
+    params(AnilistSearchQuery),
+    responses(
+        (status = 200, description = "Search results", body = Vec<anilist::AnimeEntry>),
+        (status = 500, description = "Search failed"),
+    ),
+)]
 pub async fn anilist_search(
     State(state): State<AppState>,
     Query(params): Query<AnilistSearchQuery>,
@@ -1130,6 +1137,20 @@ pub async fn anilist_search(
     Ok(Json(results))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/series/{anilist_id}",
+    tag = "Library",
+    summary = "Get series detail",
+    description = "Returns full metadata for a series by its AniList ID or internal database ID.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    responses(
+        (status = 200, description = "Series detail", body = anilist::AnimeDetail),
+        (status = 500, description = "Failed to fetch detail"),
+    ),
+)]
 pub async fn api_series_detail(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
@@ -1140,6 +1161,18 @@ pub async fn api_series_detail(
     Ok(Json(detail))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/library/add",
+    tag = "Library",
+    summary = "Add series to library",
+    description = "Add an anime series to the tracked library. If it already exists, updates the existing entry.",
+    request_body = AddSeriesForm,
+    responses(
+        (status = 200, description = "Series added/updated", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
 pub async fn add_series(
     State(state): State<AppState>,
     Json(form): Json<AddSeriesForm>,
@@ -1212,6 +1245,16 @@ pub async fn add_series(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/library/reconcile-fallbacks",
+    tag = "Library",
+    summary = "Reconcile fallback entries",
+    description = "Attempt to upgrade MAL/Jikan-sourced library entries to AniList IDs.",
+    responses(
+        (status = 200, description = "Reconciliation report", body = serde_json::Value),
+    ),
+)]
 pub async fn reconcile_fallbacks(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -1231,6 +1274,18 @@ pub async fn reconcile_fallbacks(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/library/remove",
+    tag = "Library",
+    summary = "Remove series from library",
+    description = "Remove a tracked series from the library by its internal database ID.",
+    request_body = RemoveSeriesForm,
+    responses(
+        (status = 200, description = "Series removed", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
 pub async fn remove_series(
     State(state): State<AppState>,
     Json(form): Json<RemoveSeriesForm>,
@@ -1242,6 +1297,18 @@ pub async fn remove_series(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/library/folder",
+    tag = "Library",
+    summary = "Set series folder name",
+    description = "Set the media library folder name for a tracked series.",
+    request_body = SetFolderForm,
+    responses(
+        (status = 200, description = "Folder updated", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
 pub async fn set_folder(
     State(state): State<AppState>,
     Json(form): Json<SetFolderForm>,
@@ -1253,6 +1320,18 @@ pub async fn set_folder(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/library/monitoring",
+    tag = "Library",
+    summary = "Set series monitoring mode",
+    description = "Update the monitoring mode (all, future, none, etc.) for a tracked series.",
+    request_body = SetMonitoringForm,
+    responses(
+        (status = 200, description = "Monitoring updated", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
 pub async fn set_monitoring(
     State(state): State<AppState>,
     Json(form): Json<SetMonitoringForm>,
@@ -1305,6 +1384,18 @@ pub async fn set_monitoring(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/library/episode-monitoring",
+    tag = "Library",
+    summary = "Set episode monitoring",
+    description = "Toggle monitoring on or off for a specific episode of a tracked series.",
+    request_body = SetEpisodeMonitoringForm,
+    responses(
+        (status = 200, description = "Episode monitoring updated", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
 pub async fn set_episode_monitoring(
     State(state): State<AppState>,
     Json(form): Json<SetEpisodeMonitoringForm>,
@@ -1319,6 +1410,16 @@ pub async fn set_episode_monitoring(
     })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/library/folders",
+    tag = "Library",
+    summary = "List media folders",
+    description = "List existing folder names under the configured media root directory.",
+    responses(
+        (status = 200, description = "Folder list", body = Vec<String>),
+    ),
+)]
 pub async fn list_folders(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<String>>, (axum::http::StatusCode, String)> {
@@ -1487,6 +1588,20 @@ async fn run_auto_search_targets_with_upgrades(
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/auto-search",
+    tag = "Library",
+    summary = "Auto-search all episodes",
+    description = "Automatically search and grab the best release for every monitored episode of a series.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    responses(
+        (status = 200, description = "Auto-search report", body = auto_search::AutoSearchReport),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
 pub async fn auto_search_series(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
@@ -1554,7 +1669,7 @@ pub async fn auto_search_series(
     }
 
     let target_summary = if targets.len() <= 5 {
-        targets.iter().map(|t| auto_search::target_label(t)).collect::<Vec<_>>().join(", ")
+        targets.iter().map(auto_search::target_label).collect::<Vec<_>>().join(", ")
     } else {
         format!("{} targets", targets.len())
     };
@@ -1581,11 +1696,26 @@ pub async fn auto_search_series(
         run_auto_search_targets_with_upgrades(&state_clone, request_id, targets, true, series_id_for_grab, upgrade_tiers).await
     });
     let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
-        .map_err(|e| e)?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
     Ok(Json(report))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/auto-search/{episode_number}",
+    tag = "Library",
+    summary = "Auto-search single episode",
+    description = "Automatically search and grab the best release for a specific episode.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number"),
+    ),
+    responses(
+        (status = 200, description = "Auto-search report", body = auto_search::AutoSearchReport),
+        (status = 400, description = "Invalid episode for media type"),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
 pub async fn auto_search_episode(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
@@ -1621,12 +1751,25 @@ pub async fn auto_search_episode(
         .await
     });
     let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
-        .map_err(|e| e)?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
     Ok(Json(report))
 }
 
 /// Search batch releases only for a series (no single-episode grabs).
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/search-batch",
+    tag = "Library",
+    summary = "Search for batch releases",
+    description = "Search for batch/complete-series torrent releases and grab the best match.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    responses(
+        (status = 200, description = "Batch search report", body = auto_search::AutoSearchReport),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
 pub async fn search_batch_releases(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
@@ -1699,6 +1842,21 @@ pub async fn search_batch_releases(
 }
 
 /// Interactive search: return all scored candidates for an episode without grabbing.
+#[utoipa::path(
+    get,
+    path = "/api/series/{anilist_id}/interactive-search/{episode_number}",
+    tag = "Library",
+    summary = "Interactive episode search",
+    description = "Search Nyaa for all available releases of a specific episode, returning scored results for manual selection.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number to search for"),
+    ),
+    responses(
+        (status = 200, description = "Search results", body = Vec<crate::services::nyaa::SearchResult>),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
 pub async fn interactive_search_episode(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
@@ -1723,6 +1881,23 @@ pub async fn interactive_search_episode(
 }
 
 /// Grab a specific release chosen from the interactive search.
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/grab/{episode_number}",
+    tag = "Library",
+    summary = "Grab a specific release",
+    description = "Send a specific torrent release (chosen from interactive search) to qBittorrent for download.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number"),
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Release grabbed", body = serde_json::Value),
+        (status = 400, description = "No URL provided or qBittorrent not configured"),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
 pub async fn grab_interactive_result(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
@@ -1774,6 +1949,22 @@ pub async fn grab_interactive_result(
 }
 
 /// Delete an episode file from disk.
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/delete-file/{episode_number}",
+    tag = "Library",
+    summary = "Delete episode file",
+    description = "Delete the on-disk media file for a specific episode.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number"),
+    ),
+    responses(
+        (status = 200, description = "File deleted", body = serde_json::Value),
+        (status = 400, description = "Series not in library or no file found"),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
 pub async fn delete_episode_file(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
@@ -1836,6 +2027,21 @@ pub async fn delete_episode_file(
 }
 
 /// Get grab history for a specific episode.
+#[utoipa::path(
+    get,
+    path = "/api/series/{anilist_id}/grab-history/{episode_number}",
+    tag = "Library",
+    summary = "Get episode grab history",
+    description = "Returns the grab history for a specific episode, including quality tags and release info.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number"),
+    ),
+    responses(
+        (status = 200, description = "Grab history entries", body = Vec<episode_tags::GrabHistoryEntry>),
+        (status = 400, description = "Series not in library"),
+    ),
+)]
 pub async fn get_episode_grab_history(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
@@ -1856,6 +2062,22 @@ pub async fn get_episode_grab_history(
 }
 
 /// Mark a grab as failed and re-trigger auto-search for the episode.
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/mark-failed/{episode_number}",
+    tag = "Library",
+    summary = "Mark episode grab as failed",
+    description = "Mark a grabbed episode as failed and optionally blocklist it, then re-search for a replacement.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number"),
+    ),
+    request_body = MarkEpisodeFailedForm,
+    responses(
+        (status = 200, description = "Re-search report", body = auto_search::AutoSearchReport),
+        (status = 400, description = "Series not in library"),
+    ),
+)]
 pub async fn mark_episode_failed(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
@@ -1890,13 +2112,26 @@ pub async fn mark_episode_failed(
         ).await
     });
     let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))?
-        .map_err(|e| e)?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
 
     Ok(Json(report))
 }
 
 /// Returns download progress for episodes of a series that are currently downloading.
+#[utoipa::path(
+    get,
+    path = "/api/series/{anilist_id}/download-progress",
+    tag = "Library",
+    summary = "Episode download progress",
+    description = "Returns download progress for all actively downloading episodes of a series.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    responses(
+        (status = 200, description = "Download progress per episode", body = Vec<EpisodeProgress>),
+        (status = 400, description = "Series not in library"),
+    ),
+)]
 pub async fn episode_download_progress(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
@@ -1957,7 +2192,7 @@ pub async fn episode_download_progress(
     Ok(Json(results))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct EpisodeProgress {
     pub episode: i32,
     pub progress: f64,

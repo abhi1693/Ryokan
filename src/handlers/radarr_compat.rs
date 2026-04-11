@@ -406,7 +406,7 @@ pub async fn add_movie(
     let tmdb_id = body.tmdb_id.unwrap_or(0);
 
     anibridge::ensure_loaded().await;
-    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
+    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id, None).await;
 
     let detail = if let Some(ids) = anime_ids.first().filter(|a| a.anilist_id.is_some() || a.mal_id.is_some()) {
         if let Some(al_id) = ids.anilist_id {
@@ -599,7 +599,7 @@ async fn lookup_by_tmdb_id(
     tmdb_id: i64,
 ) -> Result<Json<Vec<RadarrMovie>>, (StatusCode, String)> {
     anibridge::ensure_loaded().await;
-    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
+    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id, None).await;
 
     if anime_ids.is_empty() {
         tracing::warn!("No anibridge mapping for TMDB ID {}; returning stub movie for Seerr", tmdb_id);

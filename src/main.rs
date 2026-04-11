@@ -13,8 +13,97 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use services::{jellyfin::JellyfinClient, qbit::QbitClient};
+
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Ryokan API",
+        version = "0.1.0",
+        description = "Self-hosted anime PVR — search, download, and manage your anime library.",
+    ),
+    paths(
+        // Library
+        handlers::library::anilist_search,
+        handlers::library::api_series_detail,
+        handlers::library::add_series,
+        handlers::library::remove_series,
+        handlers::library::reconcile_fallbacks,
+        handlers::library::set_folder,
+        handlers::library::set_monitoring,
+        handlers::library::set_episode_monitoring,
+        handlers::library::list_folders,
+        handlers::library::auto_search_series,
+        handlers::library::auto_search_episode,
+        handlers::library::search_batch_releases,
+        handlers::library::interactive_search_episode,
+        handlers::library::grab_interactive_result,
+        handlers::library::delete_episode_file,
+        handlers::library::get_episode_grab_history,
+        handlers::library::mark_episode_failed,
+        handlers::library::episode_download_progress,
+        // Search
+        handlers::search::search_page_api,
+        handlers::search::grab_release,
+        handlers::search::get_torrents,
+        // Downloads
+        handlers::downloads::api_pause_torrent,
+        handlers::downloads::api_resume_torrent,
+        handlers::downloads::api_delete_torrent,
+        handlers::downloads::api_blocklist_remove,
+        // System
+        handlers::settings::api_health,
+        handlers::settings::qbit_test,
+        handlers::settings::jellyfin_test,
+        handlers::settings::jellyfin_refresh,
+        handlers::system::api_logs_poll,
+        handlers::system::api_logs_clear,
+        handlers::system::api_rss_sync,
+        handlers::system::api_rss_clear_history,
+        handlers::system::api_force_metadata_refresh,
+        handlers::system::api_force_cleanup,
+        handlers::system::api_force_post_processing,
+        handlers::system::api_force_upgrade_search,
+        handlers::system::api_rebuild_cached_metadata,
+        handlers::system::api_anibridge_reload,
+    ),
+    components(schemas(
+        services::anilist::AnimeEntry,
+        services::anilist::AnimeDetail,
+        services::anilist::RelatedEntry,
+        services::anilist::StreamingEpisode,
+        services::nyaa::SearchResult,
+        services::nyaa::SearchResponse,
+        services::qbit::Torrent,
+        services::auto_search::AutoSearchReport,
+        services::auto_search::AutoSearchHit,
+        models::log::LogEntry,
+        models::episode_tags::GrabHistoryEntry,
+        handlers::library::AddSeriesForm,
+        handlers::library::RemoveSeriesForm,
+        handlers::library::SetFolderForm,
+        handlers::library::SetMonitoringForm,
+        handlers::library::SetEpisodeMonitoringForm,
+        handlers::library::MarkEpisodeFailedForm,
+        handlers::library::EpisodeProgress,
+        handlers::search::GrabForm,
+        handlers::downloads::TorrentActionForm,
+        handlers::downloads::TorrentDeleteForm,
+        handlers::downloads::BlocklistRemoveForm,
+        handlers::settings::QbitTestForm,
+        handlers::settings::JellyfinTestForm,
+    )),
+    tags(
+        (name = "Library", description = "Anime library management — add, remove, search, and monitor series"),
+        (name = "Search", description = "Nyaa torrent search and grabbing"),
+        (name = "Downloads", description = "qBittorrent download management"),
+        (name = "System", description = "Health checks, logs, RSS sync, and background tasks"),
+    ),
+)]
+struct ApiDoc;
 
 /// Shared application state available to all handlers.
 #[derive(Clone)]
@@ -85,7 +174,8 @@ async fn main() {
     // Routes that don't require auth.
     let public_routes = Router::new()
         .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
-        .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit));
+        .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
+        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Routes that require auth.
     let protected_routes = Router::new()
@@ -202,6 +292,10 @@ async fn main() {
     let _ = models::scheduled_tasks::touch_definition(&db, "post_processing", "Post-processing", "Every 1 minute (when enabled)", false).await;
     let upgrade_enabled = models::config::get_config(&db).await.ok().flatten().map(|c| c.upgrade_search_enabled).unwrap_or(false);
     let _ = models::scheduled_tasks::touch_definition(&db, "upgrade_search", "Quality upgrade search", "Every 24 hours (when enabled)", upgrade_enabled).await;
+    let _ = models::scheduled_tasks::touch_definition(&db, "anibridge_refresh", "Anibridge mappings refresh", "Every 24 hours", true).await;
+
+    // Pre-load anibridge mappings so the first Seerr request doesn't block on download.
+    tokio::spawn(async { services::anibridge::ensure_loaded().await; });
 
     // Log startup to the database.
     services::logger::info(
@@ -399,6 +493,24 @@ async fn main() {
                             "Exceeded 30-minute limit",
                         ).await;
                     }
+                }
+            }
+        });
+    }
+
+    // Background task: Anibridge mappings refresh (every 24 hours).
+    {
+        let anibridge_db = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            interval.tick().await; // skip immediate tick — initial load happens on first use
+            loop {
+                interval.tick().await;
+                let _ = models::scheduled_tasks::mark_started(&anibridge_db, "anibridge_refresh", "Refreshing anibridge mappings").await;
+                if services::anibridge::reload().await {
+                    let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "ok", "Mappings refreshed").await;
+                } else {
+                    let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "error", "Failed to download mappings").await;
                 }
             }
         });

@@ -26,7 +26,7 @@ struct CacheEntry {
 static DETAIL_CACHE: LazyLock<RwLock<HashMap<i64, CacheEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnimeEntry {
     pub id: i64,
     pub id_mal: Option<i64>,
@@ -214,7 +214,7 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
     }))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RelatedEntry {
     pub id: i64,
     pub id_mal: Option<i64>,
@@ -231,7 +231,7 @@ pub struct RelatedEntry {
     pub media_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct StreamingEpisode {
     pub title: String,
     pub thumbnail: String,
@@ -239,7 +239,7 @@ pub struct StreamingEpisode {
     pub site: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnimeDetail {
     pub id: i64,
     pub id_mal: Option<i64>,
@@ -263,6 +263,7 @@ pub struct AnimeDetail {
     pub score_class: String,
     pub next_airing_episode: Option<i32>,
     pub next_airing_at: Option<i64>,
+    pub synonyms: Vec<String>,
     pub streaming_episodes: Vec<StreamingEpisode>,
     pub relations: Vec<RelatedEntry>,
 }
@@ -296,7 +297,7 @@ pub async fn get_anime_detail(id: i64) -> Result<AnimeDetail, String> {
 
 pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, force_mal_fallback: bool) -> Result<AnimeDetail, String> {
     if id < 0 {
-        return jikan::get_anime_detail_cached((-id) as i64).await;
+        return jikan::get_anime_detail_cached(-id).await;
     }
     if force_mal_fallback {
         if let Some(mid) = mal_id_hint {
@@ -351,6 +352,7 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
                     id
                     idMal
                     title { romaji english native }
+                    synonyms
                     coverImage { large extraLarge }
                     bannerImage
                     format
@@ -493,6 +495,10 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         status_display: prettify_status(m["status"].as_str().unwrap_or("")),
         next_airing_episode: m["nextAiringEpisode"]["episode"].as_i64().map(|e| e as i32),
         next_airing_at: m["nextAiringEpisode"]["airingAt"].as_i64(),
+        synonyms: m["synonyms"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|v| v.to_string())).collect())
+            .unwrap_or_default(),
         streaming_episodes,
         relations,
     })

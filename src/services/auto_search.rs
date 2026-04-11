@@ -52,7 +52,7 @@ pub enum SearchTarget {
     Episode(i32),
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct AutoSearchHit {
     pub target_label: String,
     pub release_title: String,
@@ -62,7 +62,7 @@ pub struct AutoSearchHit {
     pub score: i32,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct AutoSearchReport {
     pub grabbed: Vec<AutoSearchHit>,
     pub skipped: Vec<String>,
@@ -95,6 +95,16 @@ pub async fn find_all_for_target(
     // Interactive search: allow batch results so user can see & pick them,
     // but filter by season and episode to avoid showing wrong-season results.
     run_queries_interactive(&queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
+
+    // Try extended aliases if primary queries found nothing.
+    if candidates.is_empty() {
+        let extended = collect_extended_aliases(detail);
+        if !extended.is_empty() {
+            let ext_queries = build_queries_from_aliases(&extended, target);
+            let all_aliases = [aliases.clone(), extended].concat();
+            run_queries_interactive(&ext_queries, &all_aliases, &preferred_groups, &preferred_res, target, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
+        }
+    }
 
     if !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
@@ -131,8 +141,18 @@ pub async fn find_best_for_target(
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
 
-    // Phase 1: standard queries (alias + episode variants).
+    // Phase 1: standard queries (primary aliases + episode variants).
     run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
+
+    // Phase 1.5: if no candidates, try extended aliases (synonyms + decomposed sub-phrases).
+    if candidates.is_empty() {
+        let extended = collect_extended_aliases(detail);
+        if !extended.is_empty() {
+            let ext_queries = build_queries_from_aliases(&extended, target);
+            let all_aliases = [aliases.clone(), extended].concat();
+            run_queries(&ext_queries, &all_aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
+        }
+    }
 
     // Phase 2: if no candidate from a preferred group, try group-prefixed queries.
     let has_preferred_hit = !preferred_groups.is_empty()
@@ -380,7 +400,7 @@ pub fn build_monitored_targets(detail: &AnimeDetail, existing_episodes: &[i32], 
     }
 
     let existing: HashSet<i32> = existing_episodes.iter().copied().collect();
-    let mut monitored: Vec<i32> = monitored_episodes.iter().copied().collect();
+    let mut monitored: Vec<i32> = monitored_episodes.to_vec();
     monitored.sort_unstable();
     monitored.dedup();
 
@@ -438,7 +458,10 @@ pub fn target_label(target: &SearchTarget) -> String {
 }
 
 fn build_queries(detail: &AnimeDetail, target: &SearchTarget) -> Vec<String> {
-    let aliases = collect_aliases(detail);
+    build_queries_from_aliases(&collect_aliases(detail), target)
+}
+
+fn build_queries_from_aliases(aliases: &[String], target: &SearchTarget) -> Vec<String> {
     let mut queries = Vec::new();
 
     for alias in aliases {
@@ -459,12 +482,75 @@ fn build_queries(detail: &AnimeDetail, target: &SearchTarget) -> Vec<String> {
     dedupe_strings(queries)
 }
 
+/// Primary aliases: romaji, english, native titles only.
 pub fn collect_aliases(detail: &AnimeDetail) -> Vec<String> {
     dedupe_strings(vec![
         detail.title_romaji.clone(),
         detail.title_english.clone(),
         detail.title_native.clone(),
     ])
+}
+
+/// Extended aliases: synonyms + decomposed sub-phrases from compound titles.
+/// Only used as a fallback when primary aliases don't find results.
+pub fn collect_extended_aliases(detail: &AnimeDetail) -> Vec<String> {
+    let primary = collect_aliases(detail);
+    let mut extra = Vec::new();
+
+    // Add AniList synonyms.
+    extra.extend(detail.synonyms.iter().cloned());
+
+    // Decompose all titles (primary + synonyms) into sub-phrases.
+    // Nyaa releases often use just the subtitle portion
+    // (e.g. "Steel Ball Run" from "JoJo's Bizarre Adventure: Part 7–Steel Ball Run").
+    let all_titles: Vec<String> = primary.iter().chain(extra.iter()).cloned().collect();
+    for title in &all_titles {
+        for segment in split_title_segments(title) {
+            extra.push(segment);
+        }
+    }
+
+    // Return only the NEW aliases (not already in primary).
+    let primary_lower: HashSet<String> = primary.iter().map(|s| s.to_lowercase()).collect();
+    dedupe_strings(extra)
+        .into_iter()
+        .filter(|s| !primary_lower.contains(&s.to_lowercase()))
+        .collect()
+}
+
+/// Split a compound title on common delimiters and return meaningful segments.
+/// Filters out segments that are too short to be useful search terms.
+fn split_title_segments(title: &str) -> Vec<String> {
+    // Normalize various dash types to a common delimiter for splitting.
+    let normalized = title
+        .replace(['–', '—'], "|")  // en dash and em dash
+        .replace(": ", "|") // colon+space (keep "Re:Zero" intact)
+        .replace(" - ", "|");
+
+    let mut segments = Vec::new();
+    for part in normalized.split('|') {
+        let trimmed = part.trim();
+        // Skip segments that are too short or just "Part N" / "Season N".
+        if trimmed.len() < 5 {
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case(title.trim()) {
+            continue;
+        }
+        // Skip pure numbering like "Part 7", "Season 2", "2nd Season".
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("part ") && lower.len() < 10 {
+            continue;
+        }
+        if lower.starts_with("season ") && lower.len() < 12 {
+            continue;
+        }
+        if lower.ends_with(" season") && lower.len() < 14 {
+            continue;
+        }
+        segments.push(trimmed.to_string());
+    }
+    segments
 }
 
 pub fn dedupe_strings(values: Vec<String>) -> Vec<String> {

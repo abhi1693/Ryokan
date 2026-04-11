@@ -31,7 +31,7 @@ pub struct SearchForm {
     user: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct PageQuery {
     query: String,
     #[serde(default)]
@@ -48,7 +48,7 @@ fn default_page() -> i32 {
     1
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct GrabForm {
     url: String,
 }
@@ -131,6 +131,18 @@ pub async fn search_submit(
 }
 
 /// JSON API endpoint for loading additional pages.
+#[utoipa::path(
+    get,
+    path = "/api/search/page",
+    tag = "Search",
+    summary = "Search Nyaa torrents",
+    description = "Search Nyaa.si for anime torrents with pagination and filtering options.",
+    params(PageQuery),
+    responses(
+        (status = 200, description = "Paginated search results", body = nyaa::SearchResponse),
+        (status = 500, description = "Search failed"),
+    ),
+)]
 pub async fn search_page_api(
     State(state): State<AppState>,
     Query(params): Query<PageQuery>,
@@ -144,6 +156,19 @@ pub async fn search_page_api(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/grab",
+    tag = "Search",
+    summary = "Grab a torrent",
+    description = "Send a torrent URL to qBittorrent for download.",
+    request_body = GrabForm,
+    responses(
+        (status = 200, description = "Torrent added", body = serde_json::Value),
+        (status = 400, description = "qBittorrent not configured"),
+        (status = 500, description = "Failed to add torrent"),
+    ),
+)]
 pub async fn grab_release(
     State(state): State<AppState>,
     Json(form): Json<GrabForm>,
@@ -173,6 +198,17 @@ pub async fn grab_release(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/torrents",
+    tag = "Downloads",
+    summary = "List active torrents",
+    description = "Returns all torrents currently in qBittorrent's queue.",
+    responses(
+        (status = 200, description = "Torrent list", body = Vec<crate::services::qbit::Torrent>),
+        (status = 400, description = "qBittorrent not configured"),
+    ),
+)]
 pub async fn get_torrents(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<crate::services::qbit::Torrent>>, (axum::http::StatusCode, String)> {

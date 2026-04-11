@@ -74,7 +74,7 @@ pub fn list_media_folders(media_root: &str) -> Vec<String> {
             }
         }
     }
-    folders.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    folders.sort_by_key(|a| a.to_lowercase());
     folders
 }
 
@@ -137,10 +137,10 @@ fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
 
 /// Parse episode (and optionally season) number from a filename.
 /// Handles patterns like:
-///   S01E05, S1E5, s01e05
-///   - 05 (v2), - 05v2, [group] Title - 05 [1080p]
-///   E05, EP05, Ep.05
-///   Episode 05
+/// - `S01E05`, `S1E5`, `s01e05`
+/// - `- 05 (v2)`, `- 05v2`, `[group] Title - 05 [1080p]`
+/// - `E05`, `EP05`, `Ep.05`
+/// - `Episode 05`
 pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // SxxExx pattern — most reliable.
     let re_sxex = Regex::new(r"s(\d{1,2})e(\d{1,4})").unwrap();

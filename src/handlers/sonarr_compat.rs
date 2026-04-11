@@ -46,9 +46,7 @@ pub async fn require_api_key(
         .or_else(|| {
             let query_str = req.uri().query().unwrap_or("");
             query_str.split('&').find_map(|pair| {
-                let mut parts = pair.splitn(2, '=');
-                let key = parts.next()?;
-                let val = parts.next()?;
+                let (key, val) = pair.split_once('=')?;
                 if key == "apikey" { Some(val.to_string()) } else { None }
             })
         });
@@ -232,7 +230,7 @@ pub struct AddSeriesBody {
     pub title_slug: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SeasonInput {
     pub season_number: i32,
@@ -363,7 +361,7 @@ pub async fn create_tag(
 /// GET /api/v3/series/lookup?term=...
 ///
 /// Seerr sends either `term=tvdb:12345` for TVDB ID lookup or `term=Title` for title search.
-/// Since Seerr uses TMDB internally, the "tvdb" ID it sends is actually the TMDB ID for anime.
+/// The ID in the `tvdb:` prefix is a real TVDB ID (Sonarr natively uses TVDB).
 pub async fn series_lookup(
     State(state): State<AppState>,
     Query(params): Query<SeriesLookupQuery>,
@@ -374,14 +372,14 @@ pub async fn series_lookup(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
-    if let Some(tmdb_id_str) = params.term.strip_prefix("tvdb:") {
-        // TVDB/TMDB ID lookup — use anibridge mappings.
-        let tmdb_id: i64 = tmdb_id_str
+    if let Some(tvdb_id_str) = params.term.strip_prefix("tvdb:") {
+        // TVDB ID lookup — try anibridge TVDB index first, then TMDB as fallback.
+        let tvdb_id: i64 = tvdb_id_str
             .trim()
             .parse()
             .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid ID".to_string()))?;
 
-        return lookup_by_tmdb_id(&state, &cfg, tmdb_id).await;
+        return lookup_by_external_id(&state, &cfg, tvdb_id).await;
     }
 
     // Title search — search AniList and return results in Sonarr format.
@@ -456,17 +454,39 @@ pub async fn get_series(
 
 /// POST /api/v3/series — add a new series.
 ///
-/// Seerr sends tvdbId (which is the TMDB ID for anime). We map it to AniList,
-/// add the series to Ryokan's library, and return the Sonarr-format response.
+/// Seerr sends tvdbId which is a real TVDB ID. We map it to AniList/MAL via
+/// anibridge, add the series to Ryokan's library, and return a Sonarr-format response.
 pub async fn add_series(
     State(state): State<AppState>,
     Json(body): Json<AddSeriesBody>,
 ) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
-    let tmdb_id = body.tvdb_id.unwrap_or(0);
+    let tvdb_id = body.tvdb_id.unwrap_or(0);
 
-    // Resolve TMDB → AniList/MAL IDs via anibridge.
+    // Extract which season Seerr is requesting. Seerr marks exactly one season as
+    // monitored per request, so .max() effectively picks the single monitored season.
+    let requested_season = body.seasons.as_ref().and_then(|seasons| {
+        seasons.iter()
+            .filter(|s| s.monitored && s.season_number > 0)
+            .map(|s| s.season_number)
+            .max()
+    });
+
+    tracing::info!(
+        "Seerr add_series: tvdb_id={}, title={:?}, requested_season={:?}, seasons={:?}",
+        tvdb_id, body.title, requested_season, body.seasons,
+    );
+
+    // Resolve TVDB + season → AniList/MAL IDs via anibridge.
     anibridge::ensure_loaded().await;
-    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
+    let mut anime_ids = anibridge::lookup_by_tvdb(tvdb_id, requested_season).await;
+    if anime_ids.is_empty() {
+        anime_ids = anibridge::lookup_by_tmdb(tvdb_id, requested_season).await;
+    }
+
+    tracing::info!(
+        "Anibridge resolved TVDB {} season {:?} → {} entries: {:?}",
+        tvdb_id, requested_season, anime_ids.len(), anime_ids,
+    );
 
     let detail = if let Some(ids) = anime_ids.first().filter(|a| a.anilist_id.is_some() || a.mal_id.is_some()) {
         // Anibridge has a mapping — fetch detail via AniList/Jikan.
@@ -485,15 +505,15 @@ pub async fn add_series(
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
         } else {
-            return Err((StatusCode::BAD_GATEWAY, "No AniList or MAL ID available for TMDB mapping".to_string()));
+            return Err((StatusCode::BAD_GATEWAY, "No AniList or MAL ID available for anibridge mapping".to_string()));
         }
     } else {
         // No anibridge mapping — fall back to AniList title search.
         let search_title = body.title.as_deref().unwrap_or("");
         if search_title.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, format!("No mapping for TMDB ID {} and no title provided", tmdb_id)));
+            return Err((StatusCode::BAD_REQUEST, format!("No mapping for TVDB ID {} and no title provided", tvdb_id)));
         }
-        tracing::info!("No anibridge mapping for TMDB {}; searching AniList for '{}'", tmdb_id, search_title);
+        tracing::info!("No anibridge mapping for TVDB {}; searching AniList for '{}'", tvdb_id, search_title);
 
         let results = anilist::search_anime(search_title)
             .await
@@ -528,36 +548,32 @@ pub async fn add_series(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Set monitoring based on what Seerr requested.
-    let monitor_mode = if body.monitored.unwrap_or(true) {
+    // For multi-season TVDB shows, check whether the specific season we resolved
+    // is monitored. For single-season shows, use the series-level flag.
+    let should_monitor = if let Some(ref seasons) = body.seasons {
+        if let Some(req_s) = requested_season {
+            // Multi-season: monitor if the requested season is monitored.
+            seasons.iter().any(|s| s.season_number == req_s && s.monitored)
+        } else {
+            // No specific season requested — use series-level flag.
+            body.monitored.unwrap_or(true)
+        }
+    } else {
+        body.monitored.unwrap_or(true)
+    };
+
+    let monitor_mode = if should_monitor {
         monitoring::MonitorMode::All
     } else {
         monitoring::MonitorMode::None
     };
     let _ = monitoring_service::apply_monitor_mode(&state.db, id, monitor_mode).await;
 
-    // If Seerr requested season-level monitoring, apply it.
-    // NOTE: Ryokan treats each AniList entry as a single season.  When Seerr
-    // maps a multi-season TMDB show, each AniList entry becomes a separate
-    // Ryokan series (season 1).  Seerr may send season_number > 1 for
-    // subsequent AniList entries, but from Ryokan's perspective they are all
-    // season 1.  We only act on the season_number <= 1 case here; a future
-    // improvement could use the anibridge mappings to fan out monitoring
-    // across all related AniList entries for a single TMDB show.
-    if let Some(ref seasons) = body.seasons {
-        for season in seasons {
-            if season.season_number <= 1 && !season.monitored {
-                let _ = monitoring_service::apply_monitor_mode(
-                    &state.db, id, monitoring::MonitorMode::None,
-                ).await;
-            }
-        }
-    }
-
     logger::info(
         &state.db,
         LogCategory::Library,
         &format!("Added via Seerr: {}", title),
-        &format!("tmdb_id={}, provider_id={}, id={}", tmdb_id, detail.id, id),
+        &format!("tvdb_id={}, provider_id={}, id={}", tvdb_id, detail.id, id),
     ).await;
 
     // Auto-search if requested.
@@ -587,7 +603,7 @@ pub async fn add_series(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Series not found after insert".to_string()))?;
 
-    Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
+    Ok(Json(build_sonarr_series_from_tracked(&s, tvdb_id, &cfg)))
 }
 
 /// PUT /api/v3/series — update an existing series.
@@ -674,79 +690,137 @@ async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64
     0
 }
 
-async fn lookup_by_tmdb_id(
-    state: &AppState,
+/// Look up anime by external ID (TVDB or TMDB). Tries TVDB index first since
+/// Sonarr/Seerr sends real TVDB IDs, then falls back to TMDB index.
+///
+/// Returns a SINGLE series with multiple seasons (one per AniList entry) when
+/// the TVDB ID maps to multiple anibridge seasons. This matches how real Sonarr
+/// returns multi-season shows, allowing Seerr to request specific seasons.
+async fn lookup_by_external_id(
+    _state: &AppState,
     cfg: &config::Config,
-    tmdb_id: i64,
+    tvdb_id: i64,
 ) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
     anibridge::ensure_loaded().await;
-    let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
 
-    if anime_ids.is_empty() {
-        // Anibridge has no mapping for this TMDB ID. Return a stub entry so
-        // Seerr can proceed to the add step, where we'll resolve via AniList
-        // title search using the title Seerr passes in the POST body.
-        tracing::warn!("No anibridge mapping for TMDB ID {}; returning stub for Seerr", tmdb_id);
-        return Ok(Json(vec![build_stub_series(tmdb_id, cfg)]));
+    let mut season_entries = anibridge::lookup_tvdb_seasons(tvdb_id).await;
+    if season_entries.is_empty() {
+        season_entries = anibridge::lookup_tmdb_seasons(tvdb_id).await;
     }
 
-    let mut results = Vec::new();
-    for ids in &anime_ids {
-        // Try AniList first, fall back to MAL/Jikan if unavailable.
-        let detail = if let Some(al_id) = ids.anilist_id {
-            match anilist::get_anime_detail(al_id).await {
-                Ok(d) => d,
-                Err(_) if ids.mal_id.is_some() => {
-                    match crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap()).await {
-                        Ok(d) => d,
-                        Err(_) => continue,
-                    }
-                }
-                Err(_) => continue,
-            }
-        } else if let Some(mal_id) = ids.mal_id {
-            match crate::services::jikan::get_anime_detail_cached(mal_id).await {
-                Ok(d) => d,
-                Err(_) => continue,
-            }
-        } else {
+    if season_entries.is_empty() {
+        tracing::warn!("No anibridge mapping for TVDB ID {}; returning stub for Seerr", tvdb_id);
+        return Ok(Json(vec![build_stub_series(tvdb_id, cfg)]));
+    }
+
+    // Fetch metadata for the first entry to use as the "show-level" info.
+    // Note: for multi-season shows (e.g. JoJo), this uses season 1's AniList entry
+    // for the title and cover art. This is fine since Seerr keys on tvdb_id, not
+    // the title — but a Jikan fallback may return a part-specific title here.
+    let first_ids = &season_entries[0].1;
+    let show_detail = fetch_anime_detail(first_ids).await;
+    let show_title = show_detail.as_ref().map(|d| {
+        if !d.title_english.is_empty() { d.title_english.clone() } else { d.title_romaji.clone() }
+    }).unwrap_or_else(|| format!("TVDB:{}", tvdb_id));
+    let show_cover = show_detail.as_ref().map(|d| d.cover_url.clone()).unwrap_or_default();
+
+    // Build a seasons array — one season per anibridge entry.
+    let mut seasons = Vec::new();
+    for (season_num, _ids) in &season_entries {
+        let sn = if *season_num == 0 { 1 } else { *season_num };
+        if seasons.iter().any(|s: &SonarrSeason| s.season_number == sn) {
             continue;
-        };
-
-        // Check if already in library.
-        let db_series = if detail.id > 0 {
-            series::get_by_anilist_id(&state.db, detail.id).await.ok().flatten()
-        } else {
-            None
-        };
-
-        let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
-
-        let search_result = anilist::AnimeEntry {
-            id: detail.id,
-            id_mal: detail.id_mal,
-            title_romaji: detail.title_romaji.clone(),
-            title_english: detail.title_english.clone(),
-            title_native: detail.title_native.clone(),
-            cover_url: detail.cover_url.clone(),
-            format: detail.format.clone(),
-            status: detail.status.clone(),
-            status_display: String::new(),
-            episodes: detail.episodes,
-            season_year: detail.season_year,
-            source: if detail.id > 0 { "anilist" } else { "mal" }.to_string(),
-        };
-
-        results.push(build_sonarr_series_from_search(
-            &search_result,
-            title,
-            tmdb_id,
-            db_series.as_ref(),
-            cfg,
-        ));
+        }
+        seasons.push(SonarrSeason {
+            season_number: sn,
+            monitored: false,
+            statistics: SonarrSeasonStats {
+                episode_file_count: 0,
+                episode_count: 0,
+                total_episode_count: 0,
+                size_on_disk: 0,
+                percent_of_episodes: 0.0,
+            },
+        });
     }
 
-    Ok(Json(results))
+    let season_count = seasons.len() as i32;
+    let year = show_detail.as_ref().and_then(|d| d.season_year).unwrap_or(0);
+
+    let path = if cfg.media_root.is_empty() {
+        format!("/media/{}", media::sanitize_folder_name(&show_title))
+    } else {
+        format!("{}/{}", cfg.media_root, media::sanitize_folder_name(&show_title))
+    };
+
+    let result = SonarrSeries {
+        id: 0,
+        title: show_title.clone(),
+        sort_title: show_title.to_lowercase(),
+        status: show_detail.as_ref().map(|d| map_status(&d.status)).unwrap_or_else(|| "continuing".to_string()),
+        overview: String::new(),
+        network: String::new(),
+        air_time: String::new(),
+        images: vec![SonarrImage {
+            cover_type: "poster".to_string(),
+            url: show_cover.clone(),
+        }],
+        remote_poster: show_cover,
+        seasons,
+        year,
+        path,
+        profile_id: 1,
+        language_profile_id: 1,
+        season_folder: true,
+        monitored: false,
+        use_scene_numbering: false,
+        runtime: 24,
+        tvdb_id,
+        tv_rage_id: 0,
+        tv_maze_id: 0,
+        first_aired: String::new(),
+        series_type: "anime".to_string(),
+        clean_title: show_title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""),
+        imdb_id: String::new(),
+        title_slug: format!("ryokan-tvdb-{}", tvdb_id),
+        certification: String::new(),
+        genres: vec!["Anime".to_string()],
+        tags: vec![],
+        added: String::new(),
+        ratings: SonarrRatings { votes: 0, value: 0.0 },
+        quality_profile_id: 1,
+        root_folder_path: cfg.media_root.clone(),
+        statistics: SonarrStatistics {
+            season_count,
+            episode_file_count: 0,
+            episode_count: 0,
+            total_episode_count: 0,
+            size_on_disk: 0,
+            percent_of_episodes: 0.0,
+        },
+    };
+
+    tracing::info!(
+        "series_lookup TVDB {}: returning 1 series with {} seasons",
+        tvdb_id, season_count,
+    );
+
+    Ok(Json(vec![result]))
+}
+
+/// Fetch anime detail from AniList or Jikan, returning None on failure.
+async fn fetch_anime_detail(ids: &anibridge::AnimeIds) -> Option<anilist::AnimeDetail> {
+    if let Some(al_id) = ids.anilist_id {
+        if let Ok(d) = anilist::get_anime_detail(al_id).await {
+            return Some(d);
+        }
+    }
+    if let Some(mal_id) = ids.mal_id {
+        if let Ok(d) = crate::services::jikan::get_anime_detail_cached(mal_id).await {
+            return Some(d);
+        }
+    }
+    None
 }
 
 fn build_sonarr_series_from_search(
@@ -923,9 +997,9 @@ fn map_status(anilist_status: &str) -> String {
     }
 }
 
-/// Build a minimal stub SonarrSeries for TMDB IDs that anibridge can't resolve.
+/// Build a minimal stub SonarrSeries for TVDB IDs that anibridge can't resolve.
 /// This lets Seerr proceed to the add step, where we resolve via AniList title search.
-fn build_stub_series(tmdb_id: i64, cfg: &config::Config) -> SonarrSeries {
+fn build_stub_series(tvdb_id: i64, cfg: &config::Config) -> SonarrSeries {
     let path = if cfg.media_root.is_empty() {
         "/media/Unknown".to_string()
     } else {
@@ -934,8 +1008,8 @@ fn build_stub_series(tmdb_id: i64, cfg: &config::Config) -> SonarrSeries {
 
     SonarrSeries {
         id: 0,
-        title: format!("TMDB:{}", tmdb_id),
-        sort_title: format!("tmdb:{}", tmdb_id),
+        title: format!("TVDB:{}", tvdb_id),
+        sort_title: format!("tvdb:{}", tvdb_id),
         status: "continuing".to_string(),
         overview: String::new(),
         network: String::new(),
@@ -961,14 +1035,14 @@ fn build_stub_series(tmdb_id: i64, cfg: &config::Config) -> SonarrSeries {
         monitored: true,
         use_scene_numbering: false,
         runtime: 24,
-        tvdb_id: tmdb_id,
+        tvdb_id,
         tv_rage_id: 0,
         tv_maze_id: 0,
         first_aired: String::new(),
         series_type: "anime".to_string(),
         clean_title: String::new(),
         imdb_id: String::new(),
-        title_slug: format!("tmdb-{}", tmdb_id),
+        title_slug: format!("tvdb-{}", tvdb_id),
         certification: String::new(),
         genres: vec!["Anime".to_string()],
         tags: vec![],

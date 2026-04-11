@@ -230,13 +230,24 @@ pub async fn debug_settings_submit(
     Html(template.render().unwrap_or_default())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct LogPollQuery {
     after: Option<i64>,
     level: Option<String>,
     category: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/logs/poll",
+    tag = "System",
+    summary = "Poll log entries",
+    description = "Retrieve recent log entries, optionally filtered by level and category. Supports long-polling via the `after` parameter.",
+    params(LogPollQuery),
+    responses(
+        (status = 200, description = "Log entries", body = Vec<log::LogEntry>),
+    ),
+)]
 pub async fn api_logs_poll(
     State(state): State<AppState>,
     Query(params): Query<LogPollQuery>,
@@ -261,6 +272,16 @@ pub async fn api_logs_poll(
 
 
 
+#[utoipa::path(
+    post,
+    path = "/api/system/rebuild-anilist-cache",
+    tag = "System",
+    summary = "Rebuild metadata cache",
+    description = "Re-fetch and rebuild the cached AniList/MAL metadata for all tracked series.",
+    responses(
+        (status = 200, description = "Rebuild report", body = serde_json::Value),
+    ),
+)]
 pub async fn api_rebuild_cached_metadata(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -279,6 +300,17 @@ pub async fn api_rebuild_cached_metadata(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/system/reload-anibridge",
+    tag = "System",
+    summary = "Reload Anibridge mappings",
+    description = "Re-download the AniList-to-MAL ID mapping table from Anibridge.",
+    responses(
+        (status = 200, description = "Mappings reloaded", body = serde_json::Value),
+        (status = 502, description = "Reload failed"),
+    ),
+)]
 pub async fn api_anibridge_reload(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -294,6 +326,17 @@ pub async fn api_anibridge_reload(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/logs/clear",
+    tag = "System",
+    summary = "Clear all logs",
+    description = "Delete all log entries from the database.",
+    responses(
+        (status = 200, description = "Logs cleared", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
 pub async fn api_logs_clear(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -306,6 +349,17 @@ pub async fn api_logs_clear(
 }
 
 
+#[utoipa::path(
+    post,
+    path = "/api/rss/sync",
+    tag = "System",
+    summary = "Trigger RSS sync",
+    description = "Manually trigger an RSS feed sync to check for new episodes.",
+    responses(
+        (status = 200, description = "Sync completed", body = serde_json::Value),
+        (status = 500, description = "Sync failed"),
+    ),
+)]
 pub async fn api_rss_sync(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -329,6 +383,17 @@ pub async fn api_rss_sync(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/rss/clear-history",
+    tag = "System",
+    summary = "Clear RSS grab history",
+    description = "Clear the RSS grab history so previously grabbed episodes are re-evaluated on the next sync.",
+    responses(
+        (status = 200, description = "History cleared", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
 pub async fn api_rss_clear_history(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -347,6 +412,16 @@ pub async fn api_rss_clear_history(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/tasks/metadata-refresh",
+    tag = "System",
+    summary = "Trigger metadata refresh",
+    description = "Manually trigger a metadata refresh for all tracked series.",
+    responses(
+        (status = 200, description = "Refresh report", body = serde_json::Value),
+    ),
+)]
 pub async fn api_force_metadata_refresh(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -361,6 +436,16 @@ pub async fn api_force_metadata_refresh(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/tasks/cleanup",
+    tag = "System",
+    summary = "Trigger cleanup",
+    description = "Manually trigger cleanup of old log entries and RSS decisions (older than 30 days).",
+    responses(
+        (status = 200, description = "Cleanup report", body = serde_json::Value),
+    ),
+)]
 pub async fn api_force_cleanup(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -381,6 +466,16 @@ pub async fn api_force_cleanup(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/tasks/post-processing",
+    tag = "System",
+    summary = "Trigger post-processing",
+    description = "Manually trigger post-processing to move/rename completed downloads into the media library.",
+    responses(
+        (status = 200, description = "Post-processing completed", body = serde_json::Value),
+    ),
+)]
 pub async fn api_force_post_processing(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -393,6 +488,17 @@ pub async fn api_force_post_processing(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/tasks/upgrade-search",
+    tag = "System",
+    summary = "Trigger quality upgrade search",
+    description = "Manually trigger a search for quality upgrades across all monitored episodes.",
+    responses(
+        (status = 200, description = "Upgrade search report", body = serde_json::Value),
+        (status = 500, description = "Search failed"),
+    ),
+)]
 pub async fn api_force_upgrade_search(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {

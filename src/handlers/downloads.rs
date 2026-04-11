@@ -162,23 +162,35 @@ pub async fn downloads_page(
     Html(template.render().unwrap_or_default())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct TorrentActionForm {
     hash: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct TorrentDeleteForm {
     hash: String,
     #[serde(default)]
     delete_files: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct BlocklistRemoveForm {
     id: i64,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/downloads/pause",
+    tag = "Downloads",
+    summary = "Pause a torrent",
+    description = "Pause an active torrent download in qBittorrent.",
+    request_body = TorrentActionForm,
+    responses(
+        (status = 200, description = "Torrent paused", body = serde_json::Value),
+        (status = 400, description = "qBittorrent not configured"),
+    ),
+)]
 pub async fn api_pause_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentActionForm>,
@@ -193,6 +205,18 @@ pub async fn api_pause_torrent(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/downloads/resume",
+    tag = "Downloads",
+    summary = "Resume a torrent",
+    description = "Resume a paused torrent download in qBittorrent.",
+    request_body = TorrentActionForm,
+    responses(
+        (status = 200, description = "Torrent resumed", body = serde_json::Value),
+        (status = 400, description = "qBittorrent not configured"),
+    ),
+)]
 pub async fn api_resume_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentActionForm>,
@@ -207,6 +231,18 @@ pub async fn api_resume_torrent(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/downloads/delete",
+    tag = "Downloads",
+    summary = "Delete a torrent",
+    description = "Remove a torrent from qBittorrent. Optionally delete downloaded files.",
+    request_body = TorrentDeleteForm,
+    responses(
+        (status = 200, description = "Torrent deleted", body = serde_json::Value),
+        (status = 400, description = "qBittorrent not configured"),
+    ),
+)]
 pub async fn api_delete_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentDeleteForm>,
@@ -221,6 +257,18 @@ pub async fn api_delete_torrent(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/downloads/blocklist/remove",
+    tag = "Downloads",
+    summary = "Remove from blocklist",
+    description = "Remove a grabbed torrent entry from the blocklist by its database ID.",
+    request_body = BlocklistRemoveForm,
+    responses(
+        (status = 200, description = "Entry removed", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
 pub async fn api_blocklist_remove(
     State(state): State<AppState>,
     Json(form): Json<BlocklistRemoveForm>,

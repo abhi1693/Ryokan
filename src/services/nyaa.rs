@@ -3,7 +3,7 @@ use serde::Serialize;
 
 const NYAA_BASE: &str = "https://nyaa.si";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct SearchResult {
     pub title: String,
     pub link: String,
@@ -50,7 +50,7 @@ impl Default for SearchOptions {
 }
 
 /// Result of a paginated search.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SearchResponse {
     pub results: Vec<SearchResult>,
     pub page: i32,
@@ -287,7 +287,7 @@ fn parse_date_text(text: &str) -> i64 {
     // Try "YYYY-MM-DD HH:MM" format — extract just the year for a rough timestamp.
     if trimmed.len() >= 10 {
         if let Ok(year) = trimmed[..4].parse::<i64>() {
-            if year >= 2000 && year <= 2100 {
+            if (2000..=2100).contains(&year) {
                 // Approximate: seconds since epoch for Jan 1 of that year.
                 // Good enough for year-level comparisons.
                 let month: i64 = trimmed.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(1);

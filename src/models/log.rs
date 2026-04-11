@@ -113,7 +113,7 @@ impl LogCategory {
 }
 
 /// A single log entry as stored in the database.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct LogEntry {
     pub id: i64,
     pub timestamp: String,

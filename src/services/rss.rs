@@ -1041,7 +1041,7 @@ fn resolve_episode_numbers(
 
 fn ordinal_suffix(value: i32) -> String {
     let suffix = match value % 100 {
-        11 | 12 | 13 => "th",
+        11..=13 => "th",
         _ => match value % 10 {
             1 => "st",
             2 => "nd",
