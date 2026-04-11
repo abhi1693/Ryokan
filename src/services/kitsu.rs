@@ -336,6 +336,7 @@ fn to_anime_detail(item: Candidate) -> AnimeDetail {
         score_class,
         next_airing_episode: None,
         next_airing_at: None,
+        synonyms: Vec::new(),
         streaming_episodes: Vec::new(),
         relations: Vec::new(),
     }

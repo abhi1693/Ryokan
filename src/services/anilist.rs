@@ -263,6 +263,7 @@ pub struct AnimeDetail {
     pub score_class: String,
     pub next_airing_episode: Option<i32>,
     pub next_airing_at: Option<i64>,
+    pub synonyms: Vec<String>,
     pub streaming_episodes: Vec<StreamingEpisode>,
     pub relations: Vec<RelatedEntry>,
 }
@@ -351,6 +352,7 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
                     id
                     idMal
                     title { romaji english native }
+                    synonyms
                     coverImage { large extraLarge }
                     bannerImage
                     format
@@ -493,6 +495,10 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         status_display: prettify_status(m["status"].as_str().unwrap_or("")),
         next_airing_episode: m["nextAiringEpisode"]["episode"].as_i64().map(|e| e as i32),
         next_airing_at: m["nextAiringEpisode"]["airingAt"].as_i64(),
+        synonyms: m["synonyms"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|v| v.to_string())).collect())
+            .unwrap_or_default(),
         streaming_episodes,
         relations,
     })

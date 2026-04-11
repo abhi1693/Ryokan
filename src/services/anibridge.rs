@@ -23,10 +23,10 @@ pub struct AnimeIds {
 
 #[derive(Debug)]
 struct MappingCache {
-    /// TMDB show ID → Vec of anime IDs (one per season/entry).
-    tmdb_to_anime: HashMap<i64, Vec<AnimeIds>>,
-    /// TVDB show ID → Vec of anime IDs (one per season/entry).
-    tvdb_to_anime: HashMap<i64, Vec<AnimeIds>>,
+    /// (TMDB show ID, season) → Vec of anime IDs. Season 0 = unscoped.
+    tmdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>>,
+    /// (TVDB show ID, season) → Vec of anime IDs. Season 0 = unscoped.
+    tvdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>>,
     /// AniList ID → TMDB show ID (reverse lookup).
     anilist_to_tmdb: HashMap<i64, i64>,
     /// MAL ID → TMDB show ID (reverse lookup for MAL fallback).
@@ -86,24 +86,100 @@ pub async fn reload() -> bool {
     }
 }
 
-/// Look up anime IDs by TMDB show ID. Returns all AniList/MAL entries for that show.
-pub async fn lookup_by_tmdb(tmdb_id: i64) -> Vec<AnimeIds> {
+/// Look up anime IDs by TMDB show ID and optional season.
+/// If a season is given, returns only entries for that season.
+/// Otherwise returns all entries across all seasons.
+pub async fn lookup_by_tmdb(tmdb_id: i64, season: Option<i32>) -> Vec<AnimeIds> {
     let cache = CACHE.read().await;
-    cache
-        .as_ref()
-        .and_then(|c| c.data.tmdb_to_anime.get(&tmdb_id))
-        .cloned()
-        .unwrap_or_default()
+    let c = match cache.as_ref() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    lookup_show(&c.data.tmdb_to_anime, tmdb_id, season)
 }
 
-/// Look up anime IDs by TVDB show ID. Returns all AniList/MAL entries for that show.
-pub async fn lookup_by_tvdb(tvdb_id: i64) -> Vec<AnimeIds> {
+/// Look up anime IDs by TVDB show ID and optional season.
+/// If a season is given, returns only entries for that season.
+/// Otherwise returns all entries across all seasons.
+pub async fn lookup_by_tvdb(tvdb_id: i64, season: Option<i32>) -> Vec<AnimeIds> {
     let cache = CACHE.read().await;
-    cache
-        .as_ref()
-        .and_then(|c| c.data.tvdb_to_anime.get(&tvdb_id))
-        .cloned()
-        .unwrap_or_default()
+    let c = match cache.as_ref() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    lookup_show(&c.data.tvdb_to_anime, tvdb_id, season)
+}
+
+/// Search a season-keyed show map. If a specific season is requested, return
+/// only that season's entries. Otherwise collect all seasons for the show.
+fn lookup_show(
+    map: &HashMap<(i64, i32), Vec<AnimeIds>>,
+    show_id: i64,
+    season: Option<i32>,
+) -> Vec<AnimeIds> {
+    if let Some(s) = season {
+        // Try exact season first, fall back to unscoped (season 0).
+        if let Some(v) = map.get(&(show_id, s)) {
+            return v.clone();
+        }
+        if let Some(v) = map.get(&(show_id, 0)) {
+            return v.clone();
+        }
+        return Vec::new();
+    }
+    // No season requested — collect all entries for this show across all seasons.
+    let mut result = Vec::new();
+    for ((id, _), entries) in map {
+        if *id == show_id {
+            for e in entries {
+                if let Some(al) = e.anilist_id {
+                    if result.iter().any(|r: &AnimeIds| r.anilist_id == Some(al)) {
+                        continue;
+                    }
+                }
+                result.push(e.clone());
+            }
+        }
+    }
+    result
+}
+
+/// Look up all season→anime mappings for a TVDB show. Returns a sorted
+/// vec of (season_number, AnimeIds) pairs. Used by series_lookup to build
+/// a multi-season Sonarr response.
+pub async fn lookup_tvdb_seasons(tvdb_id: i64) -> Vec<(i32, AnimeIds)> {
+    let cache = CACHE.read().await;
+    let c = match cache.as_ref() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    lookup_show_seasons(&c.data.tvdb_to_anime, tvdb_id)
+}
+
+/// Same as lookup_tvdb_seasons but for TMDB.
+pub async fn lookup_tmdb_seasons(tmdb_id: i64) -> Vec<(i32, AnimeIds)> {
+    let cache = CACHE.read().await;
+    let c = match cache.as_ref() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    lookup_show_seasons(&c.data.tmdb_to_anime, tmdb_id)
+}
+
+fn lookup_show_seasons(
+    map: &HashMap<(i64, i32), Vec<AnimeIds>>,
+    show_id: i64,
+) -> Vec<(i32, AnimeIds)> {
+    let mut result = Vec::new();
+    for (&(id, season), entries) in map {
+        if id == show_id {
+            for e in entries {
+                result.push((season, e.clone()));
+            }
+        }
+    }
+    result.sort_by_key(|(s, _)| *s);
+    result
 }
 
 /// Look up TMDB show ID by MAL ID (for fallback when AniList is unavailable).
@@ -173,8 +249,8 @@ async fn download_and_parse() -> Result<MappingCache, String> {
 /// We scan every entry and extract TMDB/TVDB show IDs paired with their
 /// corresponding AniList/MAL IDs, regardless of which side is the source key.
 fn build_cache(data: &serde_json::Value) -> MappingCache {
-    let mut tmdb_to_anime: HashMap<i64, Vec<AnimeIds>> = HashMap::new();
-    let mut tvdb_to_anime: HashMap<i64, Vec<AnimeIds>> = HashMap::new();
+    let mut tmdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>> = HashMap::new();
+    let mut tvdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>> = HashMap::new();
     let mut anilist_to_tmdb: HashMap<i64, i64> = HashMap::new();
     let mut mal_to_tmdb: HashMap<i64, i64> = HashMap::new();
 
@@ -196,18 +272,18 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
 
         let mut anilist_ids: Vec<i64> = Vec::new();
         let mut mal_ids: Vec<i64> = Vec::new();
-        let mut tmdb_ids: Vec<i64> = Vec::new();
-        let mut tvdb_ids: Vec<i64> = Vec::new();
+        let mut tmdb_ids: Vec<(i64, i32)> = Vec::new();
+        let mut tvdb_ids: Vec<(i64, i32)> = Vec::new();
 
         for key in &all_keys {
             if let Some(id) = parse_provider_id(key, "anilist") {
                 if !anilist_ids.contains(&id) { anilist_ids.push(id); }
             } else if let Some(id) = parse_provider_id(key, "mal") {
                 if !mal_ids.contains(&id) { mal_ids.push(id); }
-            } else if let Some(id) = parse_show_id(key, "tmdb_show") {
-                if !tmdb_ids.contains(&id) { tmdb_ids.push(id); }
-            } else if let Some(id) = parse_show_id(key, "tvdb_show") {
-                if !tvdb_ids.contains(&id) { tvdb_ids.push(id); }
+            } else if let Some(id_season) = parse_show_id(key, "tmdb_show") {
+                if !tmdb_ids.contains(&id_season) { tmdb_ids.push(id_season); }
+            } else if let Some(id_season) = parse_show_id(key, "tvdb_show") {
+                if !tvdb_ids.contains(&id_season) { tvdb_ids.push(id_season); }
             }
         }
 
@@ -224,9 +300,9 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
             })
             .collect();
 
-        // Index by each TMDB show ID found in this entry.
-        for &tmdb_id in &tmdb_ids {
-            let entry = tmdb_to_anime.entry(tmdb_id).or_default();
+        // Index by each TMDB (show_id, season) found in this entry.
+        for &(tmdb_id, season) in &tmdb_ids {
+            let entry = tmdb_to_anime.entry((tmdb_id, season)).or_default();
             for ids in &anime_entries {
                 if let Some(al) = ids.anilist_id {
                     if entry.iter().any(|e| e.anilist_id == Some(al)) {
@@ -241,9 +317,9 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
             }
         }
 
-        // Index by each TVDB show ID found in this entry.
-        for &tvdb_id in &tvdb_ids {
-            let entry = tvdb_to_anime.entry(tvdb_id).or_default();
+        // Index by each TVDB (show_id, season) found in this entry.
+        for &(tvdb_id, season) in &tvdb_ids {
+            let entry = tvdb_to_anime.entry((tvdb_id, season)).or_default();
             for ids in &anime_entries {
                 if let Some(al) = ids.anilist_id {
                     if entry.iter().any(|e| e.anilist_id == Some(al)) {
@@ -258,13 +334,19 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
     MappingCache { tmdb_to_anime, tvdb_to_anime, anilist_to_tmdb, mal_to_tmdb }
 }
 
-/// Parse "tmdb_show:12345:s1" or "tvdb_show:262954:s6" → Some(12345) / Some(262954)
+/// Parse "tmdb_show:12345:s1" or "tvdb_show:262954:s6" → Some((12345, 1)) / Some((262954, 6))
 /// given the matching prefix ("tmdb_show" or "tvdb_show").
-fn parse_show_id(key: &str, prefix: &str) -> Option<i64> {
+/// Returns (show_id, season) where season is 0 if no `:sN` scope is present.
+fn parse_show_id(key: &str, prefix: &str) -> Option<(i64, i32)> {
     let rest = key.strip_prefix(prefix)?.strip_prefix(':')?;
-    // The ID is the next segment before an optional ":sN" scope.
-    let id_str = rest.split(':').next()?;
-    id_str.parse().ok()
+    let mut parts = rest.split(':');
+    let id: i64 = parts.next()?.parse().ok()?;
+    let season: i32 = parts
+        .next()
+        .and_then(|s| s.strip_prefix('s'))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    Some((id, season))
 }
 
 /// Parse "anilist:12345" or "mal:12345" → Some(12345) if prefix matches.

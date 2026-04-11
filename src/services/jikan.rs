@@ -451,6 +451,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
         score_class: score_class(anime.score.map(|s| s.round() as i32), true),
         next_airing_episode: next_airing.and_then(|(ep, _)| ep),
         next_airing_at: next_airing.and_then(|(_, ts)| ts),
+        synonyms: Vec::new(),
         streaming_episodes: anime
             .trailer
             .and_then(|t| t.url)

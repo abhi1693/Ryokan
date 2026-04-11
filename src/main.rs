@@ -294,6 +294,9 @@ async fn main() {
     let _ = models::scheduled_tasks::touch_definition(&db, "upgrade_search", "Quality upgrade search", "Every 24 hours (when enabled)", upgrade_enabled).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "anibridge_refresh", "Anibridge mappings refresh", "Every 24 hours", true).await;
 
+    // Pre-load anibridge mappings so the first Seerr request doesn't block on download.
+    tokio::spawn(async { services::anibridge::ensure_loaded().await; });
+
     // Log startup to the database.
     services::logger::info(
         &db,
