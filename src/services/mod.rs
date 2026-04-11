@@ -27,3 +27,4 @@ pub mod nfo;
 pub mod post_processing;
 
 pub mod anibridge;
+pub mod upgrade;
