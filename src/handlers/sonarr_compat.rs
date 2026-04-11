@@ -463,31 +463,45 @@ pub async fn add_series(
 ) -> Result<Json<SonarrSeries>, (StatusCode, String)> {
     let tmdb_id = body.tvdb_id.unwrap_or(0);
 
-    // Resolve TMDB → AniList/MAL IDs.
+    // Resolve TMDB → AniList/MAL IDs via anibridge.
     anibridge::ensure_loaded().await;
     let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
-    let ids = anime_ids
-        .first()
-        .filter(|a| a.anilist_id.is_some() || a.mal_id.is_some())
-        .ok_or((StatusCode::BAD_REQUEST, format!("No mapping found for TMDB ID {}", tmdb_id)))?;
 
-    // Fetch detail: try AniList first, fall back to MAL/Jikan.
-    let detail = if let Some(al_id) = ids.anilist_id {
-        match anilist::get_anime_detail(al_id).await {
-            Ok(d) => d,
-            Err(_) if ids.mal_id.is_some() => {
-                crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap())
-                    .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    let detail = if let Some(ids) = anime_ids.first().filter(|a| a.anilist_id.is_some() || a.mal_id.is_some()) {
+        // Anibridge has a mapping — fetch detail via AniList/Jikan.
+        if let Some(al_id) = ids.anilist_id {
+            match anilist::get_anime_detail(al_id).await {
+                Ok(d) => d,
+                Err(_) if ids.mal_id.is_some() => {
+                    crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap())
+                        .await
+                        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+                }
+                Err(e) => return Err((StatusCode::BAD_GATEWAY, e)),
             }
-            Err(e) => return Err((StatusCode::BAD_GATEWAY, e)),
+        } else {
+            crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap())
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
         }
-    } else if let Some(mal_id) = ids.mal_id {
-        crate::services::jikan::get_anime_detail_cached(mal_id)
+    } else {
+        // No anibridge mapping — fall back to AniList title search.
+        let search_title = body.title.as_deref().unwrap_or("");
+        if search_title.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, format!("No mapping for TMDB ID {} and no title provided", tmdb_id)));
+        }
+        tracing::info!("No anibridge mapping for TMDB {}; searching AniList for '{}'", tmdb_id, search_title);
+
+        let results = anilist::search_anime(search_title)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+
+        let best = results.first()
+            .ok_or((StatusCode::NOT_FOUND, format!("No AniList results for '{}'", search_title)))?;
+
+        anilist::get_anime_detail(best.id)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-    } else {
-        return Err((StatusCode::BAD_REQUEST, format!("No usable ID for TMDB ID {}", tmdb_id)));
     };
 
     let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
@@ -665,7 +679,11 @@ async fn lookup_by_tmdb_id(
     let anime_ids = anibridge::lookup_by_tmdb(tmdb_id).await;
 
     if anime_ids.is_empty() {
-        return Ok(Json(vec![]));
+        // Anibridge has no mapping for this TMDB ID. Return a stub entry so
+        // Seerr can proceed to the add step, where we'll resolve via AniList
+        // title search using the title Seerr passes in the POST body.
+        tracing::warn!("No anibridge mapping for TMDB ID {}; returning stub for Seerr", tmdb_id);
+        return Ok(Json(vec![build_stub_series(tmdb_id, cfg)]));
     }
 
     let mut results = Vec::new();
@@ -898,6 +916,70 @@ fn map_status(anilist_status: &str) -> String {
         "RELEASING" | "NOT_YET_RELEASED" => "continuing".to_string(),
         "FINISHED" | "FINISHED_AIRING" | "CANCELLED" => "ended".to_string(),
         _ => "continuing".to_string(),
+    }
+}
+
+/// Build a minimal stub SonarrSeries for TMDB IDs that anibridge can't resolve.
+/// This lets Seerr proceed to the add step, where we resolve via AniList title search.
+fn build_stub_series(tmdb_id: i64, cfg: &config::Config) -> SonarrSeries {
+    let path = if cfg.media_root.is_empty() {
+        "/media/Unknown".to_string()
+    } else {
+        format!("{}/Unknown", cfg.media_root)
+    };
+
+    SonarrSeries {
+        id: 0,
+        title: format!("TMDB:{}", tmdb_id),
+        sort_title: format!("tmdb:{}", tmdb_id),
+        status: "continuing".to_string(),
+        overview: String::new(),
+        network: String::new(),
+        air_time: String::new(),
+        images: vec![],
+        remote_poster: String::new(),
+        seasons: vec![SonarrSeason {
+            season_number: 1,
+            monitored: true,
+            statistics: SonarrSeasonStats {
+                episode_file_count: 0,
+                episode_count: 0,
+                total_episode_count: 0,
+                size_on_disk: 0,
+                percent_of_episodes: 0.0,
+            },
+        }],
+        year: 0,
+        path,
+        profile_id: 1,
+        language_profile_id: 1,
+        season_folder: true,
+        monitored: true,
+        use_scene_numbering: false,
+        runtime: 24,
+        tvdb_id: tmdb_id,
+        tv_rage_id: 0,
+        tv_maze_id: 0,
+        first_aired: String::new(),
+        series_type: "anime".to_string(),
+        clean_title: String::new(),
+        imdb_id: String::new(),
+        title_slug: format!("tmdb-{}", tmdb_id),
+        certification: String::new(),
+        genres: vec!["Anime".to_string()],
+        tags: vec![],
+        added: String::new(),
+        ratings: SonarrRatings { votes: 0, value: 0.0 },
+        quality_profile_id: 1,
+        root_folder_path: cfg.media_root.clone(),
+        statistics: SonarrStatistics {
+            season_count: 1,
+            episode_file_count: 0,
+            episode_count: 0,
+            total_episode_count: 0,
+            size_on_disk: 0,
+            percent_of_episodes: 0.0,
+        },
     }
 }
 
