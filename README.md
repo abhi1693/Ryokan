@@ -48,7 +48,7 @@ Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8978` | Bind address and port |
 | `DATABASE_URL` | `sqlite://data/ryokan.db?mode=rwc` | SQLite connection string |
-| `RUST_LOG` | `ryokan=info` | Log filter (see `tracing-subscriber` docs) |
+| `RUST_LOG` | `ryokan=info` | Log filter (see [`tracing-subscriber`](https://github.com/tokio-rs/tracing) docs) |
 | `JIKAN_API_BASE` | `https://api.jikan.moe/v4` | Override for a self-hosted Jikan instance |
 
 ## Configuration
