@@ -81,7 +81,7 @@ The URL Base distinction is important: Sonarr routes live at `/api/v3/`, while R
 
 - Seerr allows a maximum of two Sonarr servers and two Radarr servers (one non-4K, one 4K each). Adding Ryokan uses one slot for each.
 - Ryokan treats each AniList entry as a single season. Multi-season TMDB shows that map to multiple AniList entries will each appear as a separate series in Ryokan.
-- Some anime may not have TMDB-to-AniList mappings in the anibridge dataset. Ryokan falls back to AniList title search in those cases, which usually works but may occasionally pick the wrong entry.
+- Some anime may not have TMDB/TVDB-to-AniList mappings in the [anibridge](https://github.com/anibridge/anibridge-mappings) dataset. Ryokan falls back to AniList title search in those cases, which usually works for single-season shows but may pick the wrong entry on series with multiple seasons.
 
 ## Self-hosting Jikan
 
