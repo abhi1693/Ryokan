@@ -49,3 +49,105 @@ pub async fn classify_group(db: &SqlitePool, group_name: &str) -> Option<SourceE
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::source::Source;
+
+    /// Build an in-memory SQLite pool with the group table migrated and
+    /// seeded. Shared across all tests in this module.
+    async fn test_pool() -> SqlitePool {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        group_source_map::migrate(&db)
+            .await
+            .expect("migrate group_source_map");
+        db
+    }
+
+    #[tokio::test]
+    async fn known_seeded_group_emits_evidence() {
+        let db = test_pool().await;
+        // VCB-Studio is a well-known legacy BD-only encoder and is always
+        // part of the seed set.
+        let ev = classify_group(&db, "VCB-Studio")
+            .await
+            .expect("VCB-Studio should be seeded");
+        assert_eq!(ev.source, Source::BluRay);
+        assert!((ev.confidence - 0.95).abs() < f32::EPSILON);
+        assert_eq!(ev.origin, "group");
+        assert!(ev.detail.contains("VCB-Studio"));
+    }
+
+    #[tokio::test]
+    async fn unknown_group_returns_none() {
+        let db = test_pool().await;
+        assert!(
+            classify_group(&db, "definitely-not-a-real-group-12345")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_group_name_returns_none() {
+        let db = test_pool().await;
+        assert!(classify_group(&db, "").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_group_name_returns_none() {
+        let db = test_pool().await;
+        assert!(classify_group(&db, "   ").await.is_none());
+        assert!(classify_group(&db, "\t\n").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn group_name_is_trimmed_before_lookup() {
+        let db = test_pool().await;
+        // Leading/trailing whitespace from noisy parsers must not break
+        // lookups against otherwise-valid group names.
+        let ev = classify_group(&db, "  VCB-Studio  ")
+            .await
+            .expect("trimmed lookup should hit");
+        assert_eq!(ev.source, Source::BluRay);
+    }
+
+    #[tokio::test]
+    async fn lookup_is_case_insensitive() {
+        let db = test_pool().await;
+        // The table uses `COLLATE NOCASE` on the primary key, so any
+        // casing of a known group name should resolve.
+        for variant in ["vcb-studio", "VCB-STUDIO", "Vcb-Studio"] {
+            let ev = classify_group(&db, variant)
+                .await
+                .unwrap_or_else(|| panic!("case-insensitive lookup failed for {variant}"));
+            assert_eq!(ev.source, Source::BluRay);
+        }
+    }
+
+    #[tokio::test]
+    async fn user_edit_overrides_seeded_value() {
+        let db = test_pool().await;
+        // Simulate a user overriding VCB-Studio's classification (contrived
+        // example — the point is that the lookup reflects whatever is in
+        // the table, not the seed constants).
+        group_source_map::upsert_user_edit(
+            &db,
+            "VCB-Studio",
+            Source::Web,
+            0.80,
+            "unit test override",
+        )
+        .await
+        .expect("upsert user edit");
+
+        let ev = classify_group(&db, "VCB-Studio")
+            .await
+            .expect("user edit should be visible");
+        assert_eq!(ev.source, Source::Web);
+        assert!((ev.confidence - 0.80).abs() < f32::EPSILON);
+    }
+}
