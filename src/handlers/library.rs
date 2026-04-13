@@ -462,7 +462,7 @@ pub async fn series_detail(
     }
     let (episodes, on_disk_count, size_display, monitored_count) =
         build_episodes(&state.db, &detail, db_id, &folder_name, &media_root).await;
-    let ep_total = detail.episodes.unwrap_or(0);
+    let ep_total = detail.effective_episode_count();
     if let Some(series_id) = db_series.as_ref().map(|s| s.id) {
         detail.cover_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-cover", series_id), &detail.cover_url).await;
         detail.banner_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-banner", series_id), &detail.banner_url).await;
@@ -541,14 +541,7 @@ async fn build_episodes(
     folder_name: &str,
     media_root: &str,
 ) -> (Vec<Episode>, i32, String, i32) {
-    // AniList reports `episodes: null` for currently-airing series because the
-    // final count isn't known yet. Fall back to `nextAiringEpisode - 1`, which
-    // is the number of episodes that have already aired — without this the
-    // episode list would render empty for any airing show.
-    let ep_count = match detail.episodes.unwrap_or(0) {
-        0 => detail.next_airing_episode.map(|n| (n - 1).max(0)).unwrap_or(0),
-        n => n,
-    };
+    let ep_count = detail.effective_episode_count();
     let disk_files = media::scan_series_folder(media_root, folder_name);
 
     let cached_eps = if let Some(sid) = db_id {

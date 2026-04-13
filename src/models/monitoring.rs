@@ -47,23 +47,6 @@ pub struct EpisodeMonitorState {
     pub monitored: bool,
 }
 
-pub async fn ensure_series_rows(db: &SqlitePool, series_id: i64, episode_numbers: &[i32]) -> Result<(), sqlx::Error> {
-    for ep in episode_numbers {
-        sqlx::query(
-            r#"
-            INSERT INTO episode_monitor_state (series_id, episode_number, monitored)
-            VALUES (?, ?, 0)
-            ON CONFLICT(series_id, episode_number) DO NOTHING
-            "#,
-        )
-        .bind(series_id)
-        .bind(ep)
-        .execute(db)
-        .await?;
-    }
-    Ok(())
-}
-
 pub async fn replace_series_states(
     db: &SqlitePool,
     series_id: i64,

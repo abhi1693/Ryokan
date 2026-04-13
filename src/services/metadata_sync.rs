@@ -83,8 +83,14 @@ async fn build_episode_cache(
     detail: &anilist::AnimeDetail,
     force_kitsu_fallback: bool,
 ) -> Vec<local_metadata::CachedEpisodeMetadata> {
+    // Use the effective count so airing series (episodes=null on AniList)
+    // still get an episode cache built from `nextAiringEpisode - 1`. Without
+    // this, shows like One Piece end up with zero rows in
+    // `series_episode_metadata`, which in turn leaves `episode_monitor_state`
+    // empty and breaks the monitoring UI.
+    let ep_count = detail.effective_episode_count();
     let episodic_format = !matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA");
-    let should_fetch_jikan = episodic_format || detail.episodes.unwrap_or(0) > 1;
+    let should_fetch_jikan = episodic_format || ep_count > 1;
 
     let mut jikan_eps = if should_fetch_jikan {
         jikan::fetch_episode_titles_for_detail(db, detail).await
@@ -97,8 +103,8 @@ async fn build_episode_cache(
         detail.title_romaji.clone(),
         detail.title_native.clone(),
     ];
-    let should_try_kitsu = detail.episodes.unwrap_or(0) > 1
-        && (force_kitsu_fallback || episode_needs_kitsu_backfill(detail.episodes.unwrap_or(0).max(0), |ep_num| {
+    let should_try_kitsu = ep_count > 1
+        && (force_kitsu_fallback || episode_needs_kitsu_backfill(ep_count, |ep_num| {
             jikan_eps
                 .get(&ep_num)
                 .map(|info| !info.title.trim().is_empty())
@@ -106,12 +112,11 @@ async fn build_episode_cache(
         }));
 
     let kitsu_eps = if should_try_kitsu {
-        kitsu::fetch_episode_titles_fallback(db, &kitsu_titles, detail.season_year, detail.episodes).await
+        kitsu::fetch_episode_titles_fallback(db, &kitsu_titles, detail.season_year, Some(ep_count)).await
     } else {
         HashMap::new()
     };
 
-    let ep_count = detail.episodes.unwrap_or(0).max(0);
     let mut merged = Vec::new();
     for ep_num in 1..=ep_count {
         let fallback_title = if ep_count <= 1 {

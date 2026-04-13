@@ -268,6 +268,21 @@ pub struct AnimeDetail {
     pub relations: Vec<RelatedEntry>,
 }
 
+impl AnimeDetail {
+    /// Effective episode count for rendering, episode cache building, and
+    /// monitoring. AniList reports `episodes: null` for currently-airing
+    /// series because the final count isn't known yet, so we fall back to
+    /// `nextAiringEpisode - 1` (the number of episodes that have already
+    /// aired). Without this every airing show looks like it has zero
+    /// episodes, which breaks the episode list and the monitoring UI.
+    pub fn effective_episode_count(&self) -> i32 {
+        match self.episodes.unwrap_or(0) {
+            0 => self.next_airing_episode.map(|n| (n - 1).max(0)).unwrap_or(0),
+            n => n,
+        }
+    }
+}
+
 fn prettify_status(status: &str) -> String {
     status.replace('_', " ")
 }
