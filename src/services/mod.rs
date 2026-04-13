@@ -29,6 +29,8 @@ pub mod post_processing;
 pub mod anibridge;
 pub mod upgrade;
 
+pub mod seadex;
+
 // Classification pipeline (Phase 1a foundations).
 pub mod source;
 pub mod source_description;
