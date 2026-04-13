@@ -545,6 +545,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     &cand.item.title,
                     cand.found.series.id,
                     &ep_list,
+                    cand.item.is_batch,
                 ).await;
                 // Record quality tag + classification for episode status display.
                 let classification = crate::services::source::classify_release(

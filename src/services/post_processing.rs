@@ -433,6 +433,7 @@ async fn import_torrent(
                         status: &series.status,
                         season_year: series.season_year,
                     }),
+                    grab.is_batch,
                 )
                 .await;
                 if let Err(e) = episode_tags::update_classification(
@@ -846,6 +847,20 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
     // slow part; doing them here instead of under the lock lets
     // `process_completed_downloads` keep running in parallel.
     for item in pending {
+        // Library scan path works against on-disk filenames, which may
+        // or may not match any original grab record. We look up the
+        // stored `is_batch` flag by torrent_name as a best effort —
+        // matches self-healed Unknown rows back to their original grab,
+        // defaults to `false` for externally-imported files that
+        // Ryokan never grabbed. Either way, L4 gets the most accurate
+        // signal available for this file.
+        let is_batch = crate::models::grabbed_torrents::get_is_batch_by_name(
+            &state.db,
+            item.series_id,
+            &item.title,
+        )
+        .await
+        .unwrap_or(false);
         let result = source::classify_post_download(
             &state.db,
             &item.file_path,
@@ -855,6 +870,7 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                 status: &item.series_status,
                 season_year: item.series_season_year,
             }),
+            is_batch,
         )
         .await;
 

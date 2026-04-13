@@ -788,6 +788,16 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+    // is_batch on grabbed_torrents lets the post-download classifier
+    // re-run Layer 4 (temporal inference) with the original batch flag
+    // that the pre-download call used, rather than hardcoding `false`
+    // and losing the "finished 1+ year ago + batch → BluRay" signal
+    // after import.
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN is_batch INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN web_kind TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await

@@ -406,6 +406,20 @@ const CONFLICT_THRESHOLD: f32 = 0.70;
 /// Minimum total evidence mass to avoid falling back to Unknown.
 const MIN_TOTAL: f32 = 0.50;
 
+/// Per-origin saturation cap used inside rule 2 (per-source sum). Any single
+/// origin's contribution to a source's sum is clamped at this value, so a
+/// layer that fires multiple corroborating sub-signals (e.g. filename
+/// emitting both a "BDRip" keyword *and* a FLAC audio codec hit for the
+/// same source) can't alone swamp a contradicting ground-truth layer.
+///
+/// 1.3 preserves some intra-layer stacking — a title that correctly labels
+/// itself with multiple agreeing tokens is legitimately stronger evidence
+/// than a single token — while keeping the total below what an opposing
+/// strong signal plus its own origin can still outweigh. Combined with the
+/// ground-truth veto (see `aggregate` rule 5), a mislabeled filename with
+/// stacked signals no longer silently beats an ffprobe codec contradiction.
+const ORIGIN_MAX: f32 = 1.3;
+
 /// Relative priority of a classification layer's origin string when
 /// breaking ties in the aggregator. Filename (Layer 1) sits at the top
 /// because the torrent title is the primary source of truth the user
@@ -444,14 +458,27 @@ fn origin_priority(origin: &str) -> u8 {
 ///    two disagreeing strong signals (e.g. filename says WEB-DL at 0.95,
 ///    directory walk found BDMV/ at 0.95) would be silently resolved by
 ///    source rank alone, masking a conflict a human should see.
-/// 2. Otherwise, sum confidences per source across all evidence. The source
-///    with the highest total is provisionally the winner.
-/// 3. If the total evidence mass for the best source is below `MIN_TOTAL
-///    (0.50)`, classify as `Source::Unknown` with `needs_review = true`.
+/// 2. Otherwise, sum confidences per source across all evidence — but first
+///    clamp each *origin's* contribution per source at `ORIGIN_MAX`. This
+///    prevents any single layer from stacking so many corroborating
+///    sub-signals that it can't be outweighed by a contradicting
+///    ground-truth layer. The source with the highest capped total is
+///    provisionally the winner.
+/// 3. If the total evidence mass for the best source is below
+///    `MIN_TOTAL (0.50)`, classify as `Source::Unknown` with
+///    `needs_review = true`.
 /// 4. If the leader leads the runner-up by less than `MIN_LEAD (0.30)` and
 ///    at least one evidence ≥ `CONFLICT_THRESHOLD (0.70)` disagrees with the
 ///    leader, flag `needs_review = true` while still returning the best guess.
-/// 5. Otherwise: return the winner with `needs_review = false`.
+/// 5. Ground-truth veto: if any `ffprobe` or `dir` evidence at
+///    `STRONG_THRESHOLD` (≥0.90) disagrees with the winning source, force
+///    `needs_review = true` regardless of lead. Filename/description/group
+///    are *labels* applied by humans; ffprobe/dir are *measurements* of
+///    the actual bytes on disk. A strong label-vs-measurement conflict is
+///    exactly the case a human should look at, and the capped sum can
+///    otherwise let a mislabeled release with stacked intra-layer signals
+///    silently outvote the ground truth.
+/// 6. Otherwise: return the winner with `needs_review = false`.
 ///
 /// Note: this function does not set `resolution` or `is_remux`. Those come
 /// from the individual layer outputs (resolution is observed, not aggregated)
@@ -503,10 +530,19 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
         // sums can pick a leader and rule 4 can flag the conflict.
     }
 
-    // Rule 2: sum per source.
-    let mut sums: HashMap<Source, f32> = HashMap::new();
+    // Rule 2: sum per source, but cap each origin's contribution at
+    // ORIGIN_MAX first. We build a `(source, origin) -> sum` map, clamp
+    // each bucket at ORIGIN_MAX, then re-sum per source. A filename layer
+    // firing BDRip (0.95) + FLAC (0.85) = 1.80 for BluRay gets clamped to
+    // 1.30 here, leaving room for a contradicting ground-truth signal to
+    // still win or at least trip rule 4/5.
+    let mut per_origin: HashMap<(Source, &'static str), f32> = HashMap::new();
     for e in evidence {
-        *sums.entry(e.source).or_insert(0.0) += e.confidence;
+        *per_origin.entry((e.source, e.origin)).or_insert(0.0) += e.confidence;
+    }
+    let mut sums: HashMap<Source, f32> = HashMap::new();
+    for ((source, _origin), sum) in per_origin {
+        *sums.entry(source).or_insert(0.0) += sum.min(ORIGIN_MAX);
     }
 
     let mut ranked: Vec<(Source, f32)> = sums.into_iter().collect();
@@ -516,19 +552,19 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
             .then_with(|| b.0.rank().cmp(&a.0.rank()))
     });
 
-    let (leader, leader_sum) = ranked[0];
+    let (leader, evidence_mass) = ranked[0];
     let runner_sum = ranked.get(1).map(|(_, s)| *s).unwrap_or(0.0);
-    let lead = leader_sum - runner_sum;
+    let lead = evidence_mass - runner_sum;
 
     // Rule 3: total mass too weak, fall back to Unknown.
-    if leader_sum < MIN_TOTAL {
+    if evidence_mass < MIN_TOTAL {
         return ClassificationResult {
             source: Source::Unknown,
             resolution: Resolution::Unknown,
             is_remux: false,
             web_kind: WebKind::Unknown,
             is_bdmv: false,
-            confidence: leader_sum,
+            confidence: evidence_mass,
             needs_review: true,
             evidence: evidence.to_vec(),
         };
@@ -539,7 +575,22 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     let has_strong_conflict = evidence
         .iter()
         .any(|e| e.confidence >= CONFLICT_THRESHOLD && e.source != leader);
-    let needs_review = has_strong_conflict && lead < MIN_LEAD;
+    let mut needs_review = has_strong_conflict && lead < MIN_LEAD;
+
+    // Rule 5: ground-truth veto. If any ffprobe/dir observation at or
+    // above STRONG_THRESHOLD disagrees with the winner, flag for review
+    // even when the lead is clean. The cap in rule 2 lets a label layer
+    // win overall while an opposing measurement layer still carries a
+    // strong individual signal — that combination is precisely the
+    // "human should look" case.
+    let ground_truth_conflict = evidence.iter().any(|e| {
+        e.confidence >= STRONG_THRESHOLD
+            && e.source != leader
+            && (e.origin == "ffprobe" || e.origin == "dir")
+    });
+    if ground_truth_conflict {
+        needs_review = true;
+    }
 
     // If the lead is large enough, it's a clean win regardless of conflicts.
     // If the lead is small but no strong conflict, still call it a win.
@@ -549,10 +600,12 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
         is_remux: false,
         web_kind: WebKind::Unknown,
         is_bdmv: false,
-        // Normalize the confidence to a 0..1 range based on the leader's
-        // share of total evidence mass. A leader with 1.5 out of 2.0 total
-        // evidence gets 0.75; a dominant leader with 1.8 out of 2.0 gets 0.9.
-        confidence: leader_sum / (leader_sum + runner_sum).max(leader_sum),
+        // Normalize the confidence to a 0..1 share of evidence mass. A
+        // leader with 1.5 out of 2.0 total mass gets 0.75; a dominant
+        // leader with 1.8 out of 2.0 gets 0.9. NOTE: this is *not* a
+        // probability — it's a relative share of the (capped) per-source
+        // evidence mass. See the field docstring on `confidence`.
+        confidence: evidence_mass / (evidence_mass + runner_sum).max(evidence_mass),
         needs_review,
         evidence: evidence.to_vec(),
     }
@@ -664,13 +717,28 @@ pub async fn classify_release(
 
     let mut result = aggregate(&evidence);
 
-    // Layer 2 escalation: only when the cheap L1+L3+L4 pass couldn't produce
-    // a confident verdict. This keeps the 90%+ of releases that classify
-    // cleanly from filename + group alone off the rate-limited Nyaa
-    // description fetch path entirely. A "confident" result is one where
-    // the aggregator picked a non-Unknown source without flagging review.
+    // Layer 2 escalation: runs when the cheap L1+L3+L4 pass couldn't produce
+    // a confident verdict, OR when the winning source is backed *only* by
+    // filename-origin evidence while other layers emitted evidence for
+    // different sources. The second case catches "confidently mislabeled"
+    // releases that the old gate missed: a title with strong filename
+    // tokens but no corroborating group/temporal signal is the exact
+    // shape of a mislabeled release, and the description fetch is cheap
+    // enough (cached per info_hash, rate-limited process-wide) to double-
+    // check. Confident, corroborated classifications still skip the
+    // network fetch entirely, preserving the fast path for the 90%+ of
+    // releases that classify cleanly.
     if let Some(ctx) = nyaa {
-        if result.source == Source::Unknown || result.needs_review {
+        let only_filename_backs_winner = !evidence.is_empty()
+            && evidence
+                .iter()
+                .filter(|e| e.source == result.source)
+                .all(|e| e.origin == "filename")
+            && evidence.iter().any(|e| e.origin != "filename");
+        if result.source == Source::Unknown
+            || result.needs_review
+            || only_filename_backs_winner
+        {
             let extra = classify_description(db, ctx.info_hash, ctx.view_url).await;
             if !extra.is_empty() {
                 evidence.extend(extra);
@@ -729,6 +797,11 @@ pub async fn classify_release(
 ///   pass the filename itself.
 /// - `series` — optional tracked-series context for Layer 4. Skipped
 ///   when absent.
+/// - `is_batch` — whether the original grab was a batch/season pack.
+///   Callers that have a `grabbed_torrents` row should read it from
+///   `grabbed_torrents::get_is_batch_by_name`; callers classifying an
+///   externally-imported file (that Ryokan never grabbed) pass `false`
+///   because there's no batch signal to feed Layer 4 with.
 ///
 /// Resolution observed by ffprobe takes precedence over the filename
 /// parse — it's a direct measurement of the actual media, whereas L1 is
@@ -739,6 +812,7 @@ pub async fn classify_post_download(
     series_root: Option<&std::path::Path>,
     original_title: &str,
     series: Option<SeriesContext<'_>>,
+    is_batch: bool,
 ) -> ClassificationResult {
     // L1 — filename tokens.
     let filename = classify_filename(original_title);
@@ -751,15 +825,16 @@ pub async fn classify_post_download(
         }
     }
 
-    // L4 — temporal inference (when we have series context). Post-download,
-    // we don't know if the torrent was a batch or single episode anymore,
-    // so we default is_batch to false; L4's BluRay-leaning "finished + batch"
-    // rule won't fire and we'll only get the airing / recent-finale signals.
+    // L4 — temporal inference (when we have series context). Post-download
+    // now feeds back the original `is_batch` flag from `grabbed_torrents`
+    // so the "finished 1+ year ago + batch → BluRay" rule still fires on
+    // library-sweep reclassifies. Externally-imported files that Ryokan
+    // never grabbed pass `false` because there's no batch signal.
     if let Some(series_ctx) = series {
         if let Some(temporal_ev) = classify_temporal(
             series_ctx.status,
             series_ctx.season_year,
-            false,
+            is_batch,
             current_year(),
         ) {
             evidence.push(temporal_ev);
@@ -1415,6 +1490,84 @@ mod tests {
         // the winner's confidence is the per-signal confidence, not a
         // per-source sum.
         assert!((result.confidence - 0.95).abs() < 1e-4);
+        assert!(!result.needs_review);
+    }
+
+    #[test]
+    fn aggregate_origin_cap_prevents_filename_stacking_from_swamping_ffprobe() {
+        // A mislabeled release: filename emits a strong keyword +
+        // stacked audio codec evidence for BluRay, ffprobe finds a
+        // strong Web signal. Both categories have strong signals, so
+        // rule 1 falls through to rule 2. Without the per-origin cap,
+        // filename would sum to 0.95 + 0.85 = 1.80 for BluRay and
+        // outweigh Web's 0.90 by 0.90 — a clean win with no review.
+        // With ORIGIN_MAX = 1.3, filename caps to 1.30 and the
+        // ground-truth veto (rule 5) flags the ffprobe conflict.
+        let evidence = vec![
+            ev(Source::BluRay, 0.95, "filename"), // strong keyword
+            ev(Source::BluRay, 0.85, "filename"), // stacked audio codec
+            ev(Source::Web, 0.90, "ffprobe"),     // strong ground truth
+        ];
+        let result = aggregate(&evidence);
+        // BluRay still wins the sum (1.30 vs 0.90 — a 0.40 clean lead).
+        assert_eq!(result.source, Source::BluRay);
+        // But the veto fires because ffprobe's Web signal is strong.
+        assert!(
+            result.needs_review,
+            "strong ffprobe disagreement must flag review even when capped filename sum wins"
+        );
+    }
+
+    #[test]
+    fn aggregate_ground_truth_veto_fires_on_dir_disagreement() {
+        // Filename says Web strongly; directory walk found a BDMV/
+        // folder at ground truth. Rule 1 falls through (disagreeing
+        // strong signals). Rule 2: Web sums to 1.65, BluRay sums to
+        // 0.95 — Web wins by 0.70, a clean lead. But rule 5's veto
+        // fires because the disagreeing signal is from the dir layer.
+        let evidence = vec![
+            ev(Source::Web, 0.95, "filename"),
+            ev(Source::Web, 0.70, "group"),
+            ev(Source::BluRay, 0.95, "dir"),
+        ];
+        let result = aggregate(&evidence);
+        assert_eq!(result.source, Source::Web);
+        assert!(
+            result.needs_review,
+            "strong dir disagreement must flag review"
+        );
+    }
+
+    #[test]
+    fn aggregate_ground_truth_veto_does_not_fire_on_weak_disagreement() {
+        // A ground-truth layer with a sub-threshold signal (< 0.90) does
+        // not trigger the veto — only strong measurements do.
+        let evidence = vec![
+            ev(Source::BluRay, 0.85, "filename"),
+            ev(Source::BluRay, 0.70, "group"),
+            ev(Source::Web, 0.80, "ffprobe"), // below STRONG_THRESHOLD
+        ];
+        let result = aggregate(&evidence);
+        assert_eq!(result.source, Source::BluRay);
+        assert!(
+            !result.needs_review,
+            "sub-threshold ground-truth should not fire the veto"
+        );
+    }
+
+    #[test]
+    fn aggregate_origin_cap_does_not_restrict_cross_origin_corroboration() {
+        // Two different origins each emitting at 0.85 for the same
+        // source are not capped — they're different origins, so their
+        // contributions stack as normal. Verifies the cap is per-origin,
+        // not a global ceiling.
+        let evidence = vec![
+            ev(Source::BluRay, 0.85, "filename"),
+            ev(Source::BluRay, 0.85, "ffprobe"),
+            ev(Source::Web, 0.40, "temporal"),
+        ];
+        let result = aggregate(&evidence);
+        assert_eq!(result.source, Source::BluRay);
         assert!(!result.needs_review);
     }
 

@@ -10,16 +10,27 @@ pub struct GrabbedTorrent {
     pub episode_numbers: Vec<i32>,
     pub state: String,
     pub grabbed_at: String,
+    /// Whether the original Nyaa listing was marked as a batch/season
+    /// pack. Persisted at grab time so the post-download classifier can
+    /// re-run Layer 4 (temporal inference) with the same value the
+    /// pre-download pass used — otherwise the "finished 1+ year ago +
+    /// batch → BluRay" rule never fires on library-sweep reclassifies.
+    pub is_batch: bool,
 }
 
 /// Record a torrent grab for post-processing. Skips silently if we already
 /// have a pending or imported record with the same (non-empty) hash.
+///
+/// `is_batch` is the caller's view (from the Nyaa listing or search hit)
+/// of whether the release is a batch/season pack. Persisted so the
+/// post-download classifier can feed the same flag back into Layer 4.
 pub async fn record_grab(
     db: &SqlitePool,
     hash: &str,
     torrent_name: &str,
     series_id: i64,
     episode_numbers: &[i32],
+    is_batch: bool,
 ) -> Result<(), sqlx::Error> {
     let eps_json = serde_json::to_string(episode_numbers).unwrap_or_else(|_| "[]".to_string());
 
@@ -35,23 +46,50 @@ pub async fn record_grab(
         }
     }
 
+    let is_batch_i = if is_batch { 1_i64 } else { 0_i64 };
     sqlx::query(
-        "INSERT INTO grabbed_torrents (hash, torrent_name, series_id, episode_numbers, state) VALUES (?, ?, ?, ?, 'pending')",
+        "INSERT INTO grabbed_torrents (hash, torrent_name, series_id, episode_numbers, state, is_batch) VALUES (?, ?, ?, ?, 'pending', ?)",
     )
     .bind(hash)
     .bind(torrent_name)
     .bind(series_id)
     .bind(&eps_json)
+    .bind(is_batch_i)
     .execute(db)
     .await?;
 
     Ok(())
 }
 
+/// Look up the stored `is_batch` flag for a grab by its torrent name.
+/// Returns `None` when the row doesn't exist — that's the case for
+/// externally-imported library files that Ryokan never grabbed, which
+/// have no batch signal one way or the other.
+///
+/// Used by post-download reclassification: the classifier has the
+/// torrent name (via `grab.torrent_name`) but needs to know if the
+/// original grab was a batch to feed Layer 4 correctly.
+pub async fn get_is_batch_by_name(
+    db: &SqlitePool,
+    series_id: i64,
+    torrent_name: &str,
+) -> Option<bool> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT is_batch FROM grabbed_torrents WHERE series_id = ? AND torrent_name = ? ORDER BY grabbed_at DESC LIMIT 1",
+    )
+    .bind(series_id)
+    .bind(torrent_name)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .map(|v| v != 0)
+}
+
 /// Get all grabs that have not yet been processed.
 pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at FROM grabbed_torrents WHERE state = 'pending' ORDER BY grabbed_at ASC",
+        "SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, COALESCE(is_batch, 0) AS is_batch FROM grabbed_torrents WHERE state = 'pending' ORDER BY grabbed_at ASC",
     )
     .fetch_all(db)
     .await?;
@@ -62,6 +100,7 @@ pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sql
             let eps_json: String = row.get("episode_numbers");
             let episode_numbers: Vec<i32> =
                 serde_json::from_str(&eps_json).unwrap_or_default();
+            let is_batch_i: i64 = row.get("is_batch");
             GrabbedTorrent {
                 id: row.get("id"),
                 hash: row.get("hash"),
@@ -70,6 +109,7 @@ pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sql
                 episode_numbers,
                 state: "pending".to_string(),
                 grabbed_at: row.get("grabbed_at"),
+                is_batch: is_batch_i != 0,
             }
         })
         .collect())
@@ -216,6 +256,7 @@ pub async fn find_imported_for_episode(
                 episode_numbers,
                 state: "imported".to_string(),
                 grabbed_at: row.get("grabbed_at"),
+                is_batch: false,
             }
         })
         .collect())

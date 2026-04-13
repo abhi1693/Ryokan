@@ -240,6 +240,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         &result.title,
                         row.id,
                         &ep_nums,
+                        result.is_batch,
                     )
                     .await;
                     for ep_num in &ep_nums {

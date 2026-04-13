@@ -1941,6 +1941,7 @@ async fn run_auto_search_targets_with_upgrades(
                                 &result.title,
                                 sid,
                                 &ep_nums,
+                                result.is_batch,
                             ).await;
                             for ep_num in &ep_nums {
                                 let _ = episode_tags::record_grab(
@@ -2254,7 +2255,7 @@ pub async fn search_batch_releases(
             ).await;
             if let Some(sid) = series_id_for_grab {
                 let _ = crate::models::grabbed_torrents::record_grab(
-                    &state.db, &result.info_hash, &result.title, sid, &[],
+                    &state.db, &result.info_hash, &result.title, sid, &[], result.is_batch,
                 ).await;
             }
             Ok(Json(auto_search::AutoSearchReport {
@@ -2387,8 +2388,9 @@ pub async fn grab_interactive_result(
     ).await;
 
     if let Some(sid) = series_id {
+        // Interactive single-episode grab — not a batch by definition.
         let _ = crate::models::grabbed_torrents::record_grab(
-            &state.db, &info_hash, &title, sid, &[episode_number],
+            &state.db, &info_hash, &title, sid, &[episode_number], false,
         ).await;
         let _ = episode_tags::record_grab(
             &state.db, sid, episode_number, &classification, &title, &group,
