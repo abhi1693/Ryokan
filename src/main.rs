@@ -45,6 +45,7 @@ use services::{jellyfin::JellyfinClient, qbit::QbitClient};
         handlers::library::get_episode_grab_history,
         handlers::library::mark_episode_failed,
         handlers::library::episode_download_progress,
+        handlers::library::series_episodes_json,
         // Search
         handlers::search::search_page_api,
         handlers::search::grab_release,
@@ -199,6 +200,7 @@ async fn main() {
         .route("/api/series/{anilist_id}/grab-history/{episode_number}", get(handlers::library::get_episode_grab_history))
         .route("/api/series/{anilist_id}/mark-failed/{episode_number}", post(handlers::library::mark_episode_failed))
         .route("/api/series/{anilist_id}/download-progress", get(handlers::library::episode_download_progress))
+        .route("/api/series/{anilist_id}/episodes", get(handlers::library::series_episodes_json))
         .route("/api/library/folders", get(handlers::library::list_folders))
         .route("/api/grab", post(handlers::search::grab_release))
         .route("/api/search/page", get(handlers::search::search_page_api))
@@ -209,6 +211,8 @@ async fn main() {
         .route("/api/downloads/delete", post(handlers::downloads::api_delete_torrent))
         .route("/api/downloads/blocklist/remove", post(handlers::downloads::api_blocklist_remove))
         .route("/settings", get(handlers::settings::settings_page).post(handlers::settings::settings_submit))
+        .route("/settings/groups", post(handlers::settings::settings_groups_upsert))
+        .route("/settings/groups/delete", post(handlers::settings::settings_groups_delete))
         .route("/api/qbit/test", post(handlers::settings::qbit_test))
         .route("/api/jellyfin/test", post(handlers::settings::jellyfin_test))
         .route("/api/health", get(handlers::settings::api_health))

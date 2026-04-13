@@ -535,6 +535,8 @@ function markEpisodeFailed(historyId, epNum, btn) {
         if (grabbed > 0) {
             const first = data.grabbed[0];
             updateEpisodeRow(epNum, 'grabbed', first.release_group);
+            ensureDlPollRunning();
+            refreshEpisodeRows({ force: true });
         }
         // Refresh the grab history in the modal
         if (SD.dbId) {
@@ -566,6 +568,7 @@ function deleteEpisodeFile() {
             if (status) status.textContent = `Episode ${epNum} file deleted.`;
             document.getElementById('ep-detail-modal').style.display = 'none';
             updateEpisodeRow(epNum, 'deleted');
+            refreshEpisodeRows({ force: true });
         })
         .catch(err => {
             if (status) status.textContent = err.message || 'Delete failed';
@@ -602,6 +605,10 @@ function searchBatchReleases(btn) {
             ? `Batch queued: ${data.grabbed[0].release_title}`
             : 'No batch release found';
         setBusyButton(btn, false);
+        if (grabbed > 0) {
+            ensureDlPollRunning();
+            refreshEpisodeRows({ force: true });
+        }
     })
     .catch(err => {
         status.textContent = err.message || 'Batch search failed';
@@ -685,6 +692,8 @@ function grabInteractiveResult(epNum, idx, btn) {
         if (status) status.textContent = `Episode ${epNum} queued: ${result.title}`;
         // Update the episode row to show grabbed state
         updateEpisodeRow(epNum, 'grabbed', result.group);
+        ensureDlPollRunning();
+        refreshEpisodeRows({ force: true });
         // Close the modal after a short delay
         setTimeout(() => {
             document.getElementById('isearch-modal').style.display = 'none';
@@ -763,6 +772,8 @@ function autoSearchEpisode(episodeNumber, btn) {
             setEpisodeButtonState(btn, 'success', `Queued: ${first.release_title}`);
             status.textContent = `Episode ${episodeNumber} queued${first.release_group ? ` · ${first.release_group}` : ''}`;
             updateEpisodeRow(episodeNumber, 'grabbed', first.release_group);
+            ensureDlPollRunning();
+            refreshEpisodeRows({ force: true });
         } else {
             setEpisodeButtonState(btn, 'error', 'No matching release found');
             status.textContent = `Episode ${episodeNumber}: no matching release found`;
@@ -797,6 +808,10 @@ function autoSearchSeries(btn) {
             ? `${queuedPack ? 'Queued season pack' : `Grabbed ${grabbed} release${grabbed === 1 ? '' : 's'}`}${groups.length ? ` · ${groups.join(', ')}` : ''}`
             : `No release grabbed${skipped ? ` · ${skipped} skipped` : ''}`;
         setBusyButton(btn, false);
+        if (grabbed > 0) {
+            ensureDlPollRunning();
+            refreshEpisodeRows({ force: true });
+        }
     })
     .catch(err => {
         status.textContent = err.message || 'Auto search failed';
@@ -942,6 +957,7 @@ window.addEventListener('storage', () => applyTitleLanguage(localStorage.getItem
 // --- Episode download progress polling ---
 let dlPollTimer = null;
 let dlPollActive = false;
+let dlRefreshing = false;
 
 function formatDlSpeed(bps) {
     if (bps <= 0) return '';
@@ -950,55 +966,188 @@ function formatDlSpeed(bps) {
     return (bps / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
 }
 
+function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = (s == null ? '' : String(s));
+    return div.innerHTML;
+}
+
+const STATUS_ICON_HAVE = '<span class="ep-status-icon ep-have" title="On disk"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></span>';
+const STATUS_ICON_MISSING = '<span class="ep-status-icon ep-missing" title="Missing"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>';
+const DL_PROGRESS_HTML_ZERO = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
+
+// Sync the episode table with the server's authoritative state.
+//
+// By default this only touches rows that are currently showing a progress
+// bar — the poll-path use case: when a download disappears from the
+// progress response (post-processing finished moving the file, or the grab
+// failed), we need to replace the bar with the real row state.
+//
+// Pass `{ force: true }` from mutation handlers (grab, delete, batch
+// search) to patch every row, including rows that weren't previously
+// showing a progress bar. That path also recomputes the season summary
+// badge.
+function refreshEpisodeRows(options) {
+    const opts = options || {};
+    const force = !!opts.force;
+    if (!SD.dbId || dlRefreshing) return;
+    dlRefreshing = true;
+    fetch(`/api/series/${SD.id}/episodes`)
+        .then(r => r.ok ? r.json() : null)
+        .then(episodes => {
+            if (!episodes) return;
+            patchEpisodeRows(episodes, force);
+            if (force) updateSeasonSummary(episodes);
+        })
+        .catch(() => {})
+        .finally(() => { dlRefreshing = false; });
+}
+
+function patchEpisodeRows(episodes, force) {
+    const byNum = {};
+    for (const ep of episodes) byNum[ep.number] = ep;
+    const rows = document.querySelectorAll('.episode-table tbody tr');
+    for (const row of rows) {
+        const numCell = row.querySelector('.ep-col-num');
+        if (!numCell) continue;
+        const n = parseInt(numCell.textContent.trim());
+        const ep = byNum[n];
+        if (!ep) continue;
+        const qualityCell = row.querySelector('.ep-col-quality');
+        if (!qualityCell) continue;
+
+        const showingProgress = qualityCell.querySelector('.dl-progress-wrap') !== null;
+        // Poll-path: only touch rows currently showing a progress bar.
+        // Force-path: touch everything.
+        if (!force && !showingProgress) continue;
+
+        const statusCell = row.querySelector('.ep-col-status');
+
+        if (ep.on_disk) {
+            row.classList.remove('ep-row-missing', 'ep-row-queued');
+            row.classList.add('ep-row-have');
+            if (statusCell) statusCell.innerHTML = STATUS_ICON_HAVE;
+            const quality = ep.quality || 'UNKNOWN';
+            qualityCell.innerHTML = `<span class="tag tag-quality">${escapeHtml(quality)}</span>`;
+            delete qualityCell.dataset.originalHtml;
+        } else if (ep.quality_state === 'grabbed') {
+            // Episode was just grabbed (or is still queued). Show a 0%
+            // progress bar — the poller will update it once qBit reports
+            // real progress.
+            row.classList.remove('ep-row-have', 'ep-row-missing');
+            row.classList.add('ep-row-queued');
+            if (!showingProgress) {
+                if (!qualityCell.dataset.originalHtml) {
+                    qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                }
+                qualityCell.innerHTML = DL_PROGRESS_HTML_ZERO;
+            }
+        } else if (ep.quality_state === 'failed') {
+            row.classList.remove('ep-row-queued', 'ep-row-have');
+            row.classList.add('ep-row-missing');
+            if (statusCell) statusCell.innerHTML = STATUS_ICON_MISSING;
+            qualityCell.innerHTML = `<span class="tag tag-quality-failed">${escapeHtml(ep.quality || '')} ✗</span>`;
+            delete qualityCell.dataset.originalHtml;
+        } else {
+            // Neither on disk, grabbed, nor failed — missing.
+            row.classList.remove('ep-row-have', 'ep-row-queued');
+            row.classList.add('ep-row-missing');
+            if (statusCell) statusCell.innerHTML = STATUS_ICON_MISSING;
+            // Don't blow away a stale progress bar unless force is set:
+            // post-processing may simply not have run yet.
+            if (force) {
+                qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+                delete qualityCell.dataset.originalHtml;
+            }
+        }
+    }
+}
+
+// Recompute the "N / total" season badge at the top of the episodes table
+// from the server's episode list.
+function updateSeasonSummary(episodes) {
+    const onDisk = episodes.filter(ep => ep.on_disk).length;
+    const total = episodes.length;
+    const badge = document.querySelector('.season-header-left .season-badge');
+    if (!badge) return;
+    if (total > 0) {
+        badge.textContent = `${onDisk} / ${total}`;
+    } else {
+        badge.textContent = `${onDisk} files`;
+    }
+    badge.classList.remove('season-badge-complete', 'season-badge-partial', 'season-badge-missing');
+    if (total > 0 && onDisk >= total) {
+        badge.classList.add('season-badge-complete');
+    } else if (onDisk > 0) {
+        badge.classList.add('season-badge-partial');
+    } else {
+        badge.classList.add('season-badge-missing');
+    }
+}
+
+// Start the download-progress poller if it isn't already running. Called
+// after any manual grab so newly-queued progress bars start ticking without
+// waiting for a page reload.
+function ensureDlPollRunning() {
+    if (!SD.dbId || dlPollActive) return;
+    dlPollActive = true;
+    pollDownloadProgress();
+    dlPollTimer = setInterval(pollDownloadProgress, 5000);
+}
+
 function pollDownloadProgress() {
     if (!SD.dbId) return;
     fetch(`/api/series/${SD.id}/download-progress`)
         .then(r => r.ok ? r.json() : [])
         .then(items => {
-            // Note: stale progress bars are cleaned up per-row below
-
-            if (!items || items.length === 0) {
-                if (dlPollActive) {
-                    dlPollActive = false;
-                    clearInterval(dlPollTimer);
-                    dlPollTimer = null;
-                }
-                return;
-            }
-
-            const rows = document.querySelectorAll('.episode-table tbody tr');
+            items = items || [];
             const epMap = {};
             for (const item of items) {
                 epMap[item.episode] = item;
             }
 
+            const rows = document.querySelectorAll('.episode-table tbody tr');
+            let needsRefresh = false;
+
             for (const row of rows) {
                 const numCell = row.querySelector('.ep-col-num');
                 if (!numCell) continue;
                 const ep = parseInt(numCell.textContent.trim());
-                const item = epMap[ep];
                 const qualityCell = row.querySelector('.ep-col-quality');
                 if (!qualityCell) continue;
 
-                if (!item) {
-                    // Restore original content if we previously replaced it
-                    if (qualityCell.dataset.originalHtml && qualityCell.querySelector('.dl-progress-wrap')) {
-                        qualityCell.innerHTML = qualityCell.dataset.originalHtml;
-                        delete qualityCell.dataset.originalHtml;
+                const item = epMap[ep];
+                const showingProgress = qualityCell.querySelector('.dl-progress-wrap') !== null;
+
+                if (item) {
+                    const pct = (item.progress * 100).toFixed(1);
+                    const isComplete = item.state.includes('UP') || item.state === 'uploading';
+                    if (!isComplete) {
+                        if (!qualityCell.dataset.originalHtml) {
+                            qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                        }
+                        qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;
                     }
-                    continue;
+                } else if (showingProgress) {
+                    // Row was showing a progress bar but the download is no
+                    // longer in the response — fetch fresh episode state.
+                    needsRefresh = true;
                 }
+            }
 
-                const pct = (item.progress * 100).toFixed(1);
-                const isComplete = item.state.includes('UP') || item.state === 'uploading';
+            if (needsRefresh) {
+                refreshEpisodeRows();
+            }
 
-                if (!isComplete) {
-                    // Save original content so we can restore it later
-                    if (!qualityCell.dataset.originalHtml) {
-                        qualityCell.dataset.originalHtml = qualityCell.innerHTML;
-                    }
-                    // Replace the entire cell content with a progress bar
-                    qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;
+            // Stop polling once everything is idle: nothing actively
+            // downloading, nothing waiting to be patched, and no stale
+            // progress bars left on the page.
+            const stillShowingProgress = document.querySelector('.episode-table tbody .ep-col-quality .dl-progress-wrap') !== null;
+            if (items.length === 0 && !needsRefresh && !stillShowingProgress) {
+                if (dlPollActive) {
+                    dlPollActive = false;
+                    clearInterval(dlPollTimer);
+                    dlPollTimer = null;
                 }
             }
         })

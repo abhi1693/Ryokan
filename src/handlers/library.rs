@@ -53,7 +53,7 @@ struct ErrorTemplate {
     detail: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Episode {
     pub number: i32,
     pub title: String,
@@ -1445,7 +1445,7 @@ async fn run_auto_search_targets_with_upgrades(
     targets: Vec<auto_search::SearchTarget>,
     allow_batch: bool,
     series_id: Option<i64>,
-    upgrade_tiers: std::collections::HashMap<i32, crate::services::quality::QualityTier>,
+    upgrade_classifications: std::collections::HashMap<i32, crate::services::source::ClassificationResult>,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
     let qbit = {
         let qbit = state.qbit.read().await;
@@ -1479,20 +1479,27 @@ async fn run_auto_search_targets_with_upgrades(
     let mut skipped = Vec::new();
     for target in targets {
         let label = auto_search::target_label(&target);
-        let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrade_tiers.contains_key(n));
-        match auto_search::find_best_for_target(&detail, &cfg, &target, allow_batch, is_upgrade).await {
+        let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrade_classifications.contains_key(n));
+        match auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, allow_batch, is_upgrade).await {
             Some(result) => {
+                // Classify up front so both upgrade-verification and log labels
+                // read the same result.
+                let incoming_classification = crate::services::source::classify_release(
+                    &state.db,
+                    &result.title,
+                    Some(&result.resolution),
+                ).await;
+
                 // For upgrade targets, verify the found release is actually
                 // better quality than what's already on disk.
                 if let auto_search::SearchTarget::Episode(ep_num) = &target {
-                    if let Some(existing_tier) = upgrade_tiers.get(ep_num) {
-                        let incoming_tier = crate::services::quality::detect_tier(&result.title, &result.resolution);
-                        if incoming_tier.rank() <= existing_tier.rank() {
-                            logger::debug(&state.db, LogCategory::AutoSearch, &format!("{}: skipped upgrade (incoming {} not better than existing {})", label, incoming_tier.label(), existing_tier.label()), &result.title).await;
+                    if let Some(existing) = upgrade_classifications.get(ep_num) {
+                        if incoming_classification.rank() <= existing.rank() {
+                            logger::debug(&state.db, LogCategory::AutoSearch, &format!("{}: skipped upgrade (incoming {} not better than existing {})", label, incoming_classification.label(), existing.label()), &result.title).await;
                             skipped.push(format!("{}: no quality upgrade available", label));
                             continue;
                         }
-                        logger::info(&state.db, LogCategory::AutoSearch, &format!("{}: upgrading from {} to {}", label, existing_tier.label(), incoming_tier.label()), &result.title).await;
+                        logger::info(&state.db, LogCategory::AutoSearch, &format!("{}: upgrading from {} to {}", label, existing.label(), incoming_classification.label()), &result.title).await;
                     }
                 }
                 let url = if !result.magnet.is_empty() { result.magnet.clone() } else { result.torrent.clone() };
@@ -1503,12 +1510,11 @@ async fn run_auto_search_targets_with_upgrades(
                 }
                 match qbit.add_torrent(&url).await {
                     Ok(_) => {
-                        let tier = crate::services::quality::detect_tier(&result.title, &result.resolution);
                         logger::info(
                             &state.db,
                             LogCategory::Grab,
                             &format!("Grabbed: {}", result.title),
-                            &format!("target={}, group={}, score={}, tier={}, batch={}", label, result.group, result.score, tier.label(), result.is_batch),
+                            &format!("target={}, group={}, score={}, tier={}, batch={}", label, result.group, result.score, incoming_classification.label(), result.is_batch),
                         ).await;
                         // Record for post-processing and episode quality tags.
                         if let Some(sid) = series_id {
@@ -1532,14 +1538,12 @@ async fn run_auto_search_targets_with_upgrades(
                                 sid,
                                 &ep_nums,
                             ).await;
-                            // Record quality tag for display in episode table.
-                            let detected_tier_for_tag = crate::services::quality::detect_tier(&result.title, &result.resolution);
                             for ep_num in &ep_nums {
                                 let _ = episode_tags::record_grab(
                                     &state.db,
                                     sid,
                                     *ep_num,
-                                    detected_tier_for_tag.label(),
+                                    &incoming_classification,
                                     &result.title,
                                     &result.group,
                                 ).await;
@@ -1552,12 +1556,11 @@ async fn run_auto_search_targets_with_upgrades(
                     }
                 }
                 let queued_batch = result.is_batch;
-                let detected_tier = crate::services::quality::detect_tier(&result.title, &result.resolution);
                 grabbed.push(auto_search::AutoSearchHit {
                     target_label: label.clone(),
                     release_title: result.title,
                     release_group: result.group,
-                    quality_tier: detected_tier.label().to_string(),
+                    quality_tier: incoming_classification.label(),
                     url,
                     score: result.score,
                 });
@@ -1645,13 +1648,14 @@ pub async fn auto_search_series(
     };
 
     // Also include upgrade targets: episodes on disk below the quality cutoff.
-    let cutoff_tier = crate::services::quality::QualityTier::from_str(&cfg.quality_cutoff);
+    let cutoff_source = crate::services::source::Source::from_str(&cfg.cutoff_source);
+    let cutoff_resolution = crate::services::source::Resolution::from_str(&cfg.cutoff_resolution);
     let quality_tags = if let Some(ref t) = tracked {
         episode_tags::get_for_series(&state.db, t.id).await.unwrap_or_default()
     } else {
         std::collections::HashMap::new()
     };
-    let upgrade_targets = auto_search::build_upgrade_targets(&existing_files, &monitored_eps, cutoff_tier, &quality_tags);
+    let upgrade_targets = auto_search::build_upgrade_targets(&existing_files, &monitored_eps, cutoff_source, cutoff_resolution, &quality_tags);
     // Merge upgrade targets (avoid duplicates with missing targets).
     let existing_target_eps: std::collections::HashSet<i32> = targets
         .iter()
@@ -1682,18 +1686,18 @@ pub async fn auto_search_series(
         &format!("on_disk={}, monitored={}, upgradeable={}, total={:?}", existing_eps.len(), monitored_eps.len(), upgrade_count, detail.episodes),
     ).await;
     let series_id_for_grab = tracked.as_ref().map(|s| s.id);
-    // Build a map of existing quality tiers for upgrade filtering in the search task.
-    let upgrade_tiers: std::collections::HashMap<i32, crate::services::quality::QualityTier> = upgrade_targets
+    // Build a map of existing episode classifications for upgrade verification in the search task.
+    let upgrade_classifications: std::collections::HashMap<i32, crate::services::source::ClassificationResult> = upgrade_targets
         .into_iter()
-        .filter_map(|(t, tier)| match t {
-            auto_search::SearchTarget::Episode(n) => Some((n, tier)),
+        .filter_map(|(t, classification)| match t {
+            auto_search::SearchTarget::Episode(n) => Some((n, classification)),
             _ => None,
         })
         .collect();
     // Spawn as an independent task so the grab completes even if the client disconnects.
     let state_clone = state.clone();
     let handle = tokio::spawn(async move {
-        run_auto_search_targets_with_upgrades(&state_clone, request_id, targets, true, series_id_for_grab, upgrade_tiers).await
+        run_auto_search_targets_with_upgrades(&state_clone, request_id, targets, true, series_id_for_grab, upgrade_classifications).await
     });
     let report = handle.await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
@@ -1787,6 +1791,7 @@ pub async fn search_batch_releases(
 
     // Use auto_search::find_best_for_target with batch allowed; then grab if found.
     let best = auto_search::find_best_for_target(
+        &state.db,
         &detail,
         &cfg,
         &auto_search::SearchTarget::Single,
@@ -1813,12 +1818,17 @@ pub async fn search_batch_releases(
             }
             qbit.add_torrent(&url).await
                 .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-            let tier = crate::services::quality::detect_tier(&result.title, &result.resolution);
+            let classification = crate::services::source::classify_release(
+                &state.db,
+                &result.title,
+                Some(&result.resolution),
+            ).await;
+            let tier_label = classification.label();
             logger::info(
                 &state.db,
                 LogCategory::Grab,
                 &format!("Grabbed batch: {}", result.title),
-                &format!("group={}, score={}, tier={}", result.group, result.score, tier.label()),
+                &format!("group={}, score={}, tier={}", result.group, result.score, tier_label),
             ).await;
             if let Some(sid) = series_id_for_grab {
                 let _ = crate::models::grabbed_torrents::record_grab(
@@ -1830,7 +1840,7 @@ pub async fn search_batch_releases(
                     target_label: "Batch".to_string(),
                     release_title: result.title,
                     release_group: result.group,
-                    quality_tier: tier.label().to_string(),
+                    quality_tier: tier_label,
                     url,
                     score: result.score,
                 }],
@@ -1871,6 +1881,7 @@ pub async fn interactive_search_episode(
         .unwrap_or_default();
 
     let results = auto_search::find_all_for_target(
+        &state.db,
         &detail,
         &cfg,
         &auto_search::SearchTarget::Episode(episode_number),
@@ -1928,12 +1939,16 @@ pub async fn grab_interactive_result(
     qbit.add_torrent(&url).await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
-    let tier = crate::services::quality::detect_tier(&title, &resolution);
+    let classification = crate::services::source::classify_release(
+        &state.db,
+        &title,
+        Some(&resolution),
+    ).await;
     logger::info(
         &state.db,
         LogCategory::Grab,
         &format!("Interactive grab: {}", title),
-        &format!("episode={}, group={}, tier={}", episode_number, group, tier.label()),
+        &format!("episode={}, group={}, tier={}", episode_number, group, classification.label()),
     ).await;
 
     if let Some(sid) = series_id {
@@ -1941,7 +1956,7 @@ pub async fn grab_interactive_result(
             &state.db, &info_hash, &title, sid, &[episode_number],
         ).await;
         let _ = episode_tags::record_grab(
-            &state.db, sid, episode_number, tier.label(), &title, &group,
+            &state.db, sid, episode_number, &classification, &title, &group,
         ).await;
     }
 
@@ -2198,4 +2213,45 @@ pub struct EpisodeProgress {
     pub progress: f64,
     pub speed: i64,
     pub state: String,
+}
+
+/// Returns the current episode state for a series as JSON.
+///
+/// Used by the series page's download-progress poller: when a torrent
+/// disappears from the progress response (meaning the download completed and
+/// the post-processing tick has moved the file into the library), the client
+/// fetches this endpoint and patches the affected row in-place so the user
+/// sees the new on-disk file without a full page refresh.
+#[utoipa::path(
+    get,
+    path = "/api/series/{anilist_id}/episodes",
+    tag = "Library",
+    summary = "Episode state snapshot",
+    description = "Returns the current list of episodes for a series, reflecting on-disk state.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    responses(
+        (status = 200, description = "Episode state", body = Vec<Episode>),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
+pub async fn series_episodes_json(
+    State(state): State<AppState>,
+    Path(request_id): Path<i64>,
+) -> Result<Json<Vec<Episode>>, (axum::http::StatusCode, String)> {
+    let (db_series, _, detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let db_id = db_series.as_ref().map(|s| s.id);
+    let folder_name = db_series.as_ref().map(|s| s.folder_name.clone()).unwrap_or_default();
+
+    let cfg = config::get_config(&state.db).await.ok().flatten();
+    let media_root = cfg.as_ref().map(|c| c.media_root.clone()).unwrap_or_default();
+
+    let (episodes, _, _, _) =
+        build_episodes(&state.db, &detail, db_id, &folder_name, &media_root).await;
+
+    Ok(Json(episodes))
 }

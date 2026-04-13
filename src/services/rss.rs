@@ -5,6 +5,7 @@ use regex_lite::Regex;
 use crate::{
     models::{config, episode_tags, monitoring, rss, series},
     models::log::LogCategory,
+    services::source::{self, ClassificationResult, Resolution, Source},
     services::{auto_search, logger, media, monitoring as monitoring_service, quality},
     AppState,
 };
@@ -242,7 +243,10 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let mut monitored_cache: HashMap<i64, HashSet<i32>> = HashMap::new();
     let mut quality_tags_cache: HashMap<i64, HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>> = HashMap::new();
 
-    let cutoff_tier = quality::QualityTier::from_str(&cfg.quality_cutoff);
+    let cutoff = source::cutoff_classification(
+        Source::from_str(&cfg.cutoff_source),
+        Resolution::from_str(&cfg.cutoff_resolution),
+    );
 
     let mut items_seen = 0;
     let mut matched = 0;
@@ -319,7 +323,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 .unwrap_or_default();
             quality_tags_cache.entry(found.series.id).or_insert(tags)
         };
-        let decision = evaluate_candidate(&found.series, &item, disk_files, &actionable_eps, cutoff_tier, qtags);
+        let decision = evaluate_candidate(&found.series, &item, disk_files, &actionable_eps, &cutoff, qtags);
         if let Some(reason) = decision.reject_reason {
             skipped += 1;
             let reason = format!("{} | {}", reason, build_match_diag(&item, Some(&found), 0));
@@ -335,7 +339,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
-        let score = score_candidate(&cfg, &item, &found.series, &found.resolved_eps, found.alias_score, found.parsed.parse_mode);
+        let score = score_candidate(&state.db, &cfg, &item, &found.series, &found.resolved_eps, found.alias_score, found.parsed.parse_mode).await;
         pending.push(PendingCandidate {
             item,
             item_key,
@@ -412,14 +416,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     cand.found.series.id,
                     &ep_list,
                 ).await;
-                // Record quality tag for episode status display.
-                let tier = quality::detect_tier(&cand.item.title, &cand.item.resolution);
+                // Record quality tag + classification for episode status display.
+                let classification = crate::services::source::classify_release(
+                    &state.db,
+                    &cand.item.title,
+                    Some(&cand.item.resolution),
+                ).await;
                 for ep_num in &ep_list {
                     let _ = episode_tags::record_grab(
                         &state.db,
                         cand.found.series.id,
                         *ep_num,
-                        tier.label(),
+                        &classification,
                         &cand.item.title,
                         &cand.item.group,
                     ).await;
@@ -513,7 +521,8 @@ fn canonical_episode_key(found: &MatchResult, is_batch: bool) -> String {
     )
 }
 
-fn score_candidate(
+async fn score_candidate(
+    db: &sqlx::SqlitePool,
     cfg: &config::Config,
     item: &RssItem,
     found: &series::Series,
@@ -521,11 +530,20 @@ fn score_candidate(
     alias_score: f32,
     parse_mode: &str,
 ) -> i32 {
-    let preferred_tier = quality::QualityTier::from_str(&cfg.quality_profile);
-    let cutoff_tier = quality::QualityTier::from_str(&cfg.quality_cutoff);
+    let preferred_source = Source::from_str(&cfg.preferred_source);
+    let preferred_resolution = Resolution::from_str(&cfg.preferred_resolution);
+    let cutoff_source = Source::from_str(&cfg.cutoff_source);
+    let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
     let finished_mode = quality::FinishedSeriesMode::from_str(&cfg.finished_series_quality);
-    let detected_tier = quality::detect_tier(&item.title, &item.resolution);
-    let mut score = quality::tier_score(detected_tier, preferred_tier, cutoff_tier);
+
+    let classification = source::classify_release(db, &item.title, Some(&item.resolution)).await;
+    let mut score = source::score_classification(
+        &classification,
+        preferred_source,
+        preferred_resolution,
+        cutoff_source,
+        cutoff_resolution,
+    );
 
     score += quality::preferred_group_bonus(&item.group, &quality::parse_group_list(&cfg.preferred_groups));
     score += (alias_score * 50.0) as i32;
@@ -572,7 +590,7 @@ fn evaluate_candidate(
     item: &RssItem,
     disk_files: &[media::EpisodeFile],
     parsed_eps: &HashSet<i32>,
-    cutoff_tier: quality::QualityTier,
+    cutoff: &ClassificationResult,
     quality_tags: &HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> CandidateDecision {
     let existing_ep_numbers: HashSet<i32> = disk_files.iter().map(|f| f.episode_number).collect();
@@ -582,7 +600,7 @@ fn evaluate_candidate(
             // For batches, count episodes that are either missing or upgradeable.
             let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
             let upgrade_count = parsed_eps.iter().filter(|ep| {
-                existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff_tier, quality_tags)
+                existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
             }).count() as i32;
             let actionable = new_count + upgrade_count;
             if actionable == 0 {
@@ -620,7 +638,7 @@ fn evaluate_candidate(
 
     let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
     let upgrade_count = parsed_eps.iter().filter(|ep| {
-        existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff_tier, quality_tags)
+        existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
     }).count() as i32;
     let actionable = new_count + upgrade_count;
 
@@ -640,35 +658,35 @@ fn evaluate_candidate(
 }
 
 /// Check if an episode on disk is below the quality cutoff and the incoming
-/// release would be an upgrade.  Prefers the DB-stored quality tag (from the
-/// original release title at grab time) over the post-processed filename,
-/// which often loses resolution/source markers.
+/// release would be an upgrade. Classifies both sides via the classification
+/// pipeline (stored columns / release title / filename fallback for existing;
+/// filename-only for incoming) and compares by rank tuple.
 fn episode_is_upgradeable(
     ep: &i32,
     disk_files: &[media::EpisodeFile],
     incoming: &RssItem,
-    cutoff_tier: quality::QualityTier,
+    cutoff: &ClassificationResult,
     quality_tags: &HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> bool {
     let Some(existing) = disk_files.iter().find(|f| f.episode_number == *ep) else {
         return false; // not on disk — not an "upgrade", it's a new episode
     };
-    let existing_tier = if let Some(tag) = quality_tags.get(ep) {
-        let tier = quality::QualityTier::from_str(&tag.quality_tag);
-        if tier != quality::QualityTier::Unknown { tier } else { quality::tier_from_disk_quality(&existing.quality) }
-    } else {
-        quality::tier_from_disk_quality(&existing.quality)
-    };
-    if existing_tier == quality::QualityTier::Unknown {
+    let existing_classification =
+        auto_search::resolve_existing_classification(existing, quality_tags.get(ep));
+    // If we can't place existing anywhere, be conservative and don't upgrade.
+    if existing_classification.source == Source::Unknown
+        && existing_classification.resolution == Resolution::Unknown
+    {
         return false;
     }
-    // Only upgrade if existing is below cutoff
-    if existing_tier.rank() >= cutoff_tier.rank() {
+    // Only upgrade if existing is below cutoff.
+    if existing_classification.rank() >= cutoff.rank() {
         return false;
     }
-    let incoming_tier = quality::detect_tier(&incoming.title, &incoming.resolution);
-    // Incoming must be strictly better than what's on disk
-    incoming_tier.rank() > existing_tier.rank()
+    let incoming_classification =
+        source::classify_release_sync(&incoming.title, Some(&incoming.resolution));
+    // Incoming must be strictly better than what's on disk.
+    incoming_classification.rank() > existing_classification.rank()
 }
 
 fn is_finished_status(status: &str) -> bool {

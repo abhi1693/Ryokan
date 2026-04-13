@@ -13,7 +13,14 @@ pub struct Config {
     pub preferred_groups: String,
     pub blocked_groups: String,
     pub preferred_resolution: String,
+    pub preferred_source: String,
+    pub cutoff_source: String,
+    pub cutoff_resolution: String,
+    /// Legacy combined preferred-quality field. Kept one release for
+    /// rollback; read paths should prefer `preferred_source` +
+    /// `preferred_resolution`.
     pub quality_profile: String,
+    /// Legacy combined cutoff field. See `quality_profile`.
     pub quality_cutoff: String,
     pub finished_series_quality: String,
     pub media_root: String,
@@ -47,6 +54,9 @@ impl Default for Config {
             preferred_groups: String::new(),
             blocked_groups: String::new(),
             preferred_resolution: "1080".to_string(),
+            preferred_source: "web".to_string(),
+            cutoff_source: "bluray".to_string(),
+            cutoff_resolution: "1080".to_string(),
             quality_profile: "web_1080".to_string(),
             quality_cutoff: "bd_1080".to_string(),
             finished_series_quality: "prefer_bd".to_string(),
@@ -82,6 +92,9 @@ struct ConfigRow {
     preferred_groups: String,
     blocked_groups: String,
     preferred_resolution: String,
+    preferred_source: String,
+    cutoff_source: String,
+    cutoff_resolution: String,
     quality_profile: String,
     quality_cutoff: String,
     finished_series_quality: String,
@@ -106,7 +119,7 @@ struct ConfigRow {
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled FROM config WHERE id = 1",
+        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -122,6 +135,9 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         preferred_groups: r.preferred_groups,
         blocked_groups: r.blocked_groups,
         preferred_resolution: r.preferred_resolution,
+        preferred_source: r.preferred_source,
+        cutoff_source: r.cutoff_source,
+        cutoff_resolution: r.cutoff_resolution,
         quality_profile: r.quality_profile,
         quality_cutoff: r.quality_cutoff,
         finished_series_quality: r.finished_series_quality,
@@ -148,8 +164,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             qbit_url = excluded.qbit_url,
             qbit_user = excluded.qbit_user,
@@ -161,6 +177,9 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             preferred_groups = excluded.preferred_groups,
             blocked_groups = excluded.blocked_groups,
             preferred_resolution = excluded.preferred_resolution,
+            preferred_source = excluded.preferred_source,
+            cutoff_source = excluded.cutoff_source,
+            cutoff_resolution = excluded.cutoff_resolution,
             quality_profile = excluded.quality_profile,
             quality_cutoff = excluded.quality_cutoff,
             finished_series_quality = excluded.finished_series_quality,
@@ -192,6 +211,9 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(&config.preferred_groups)
     .bind(&config.blocked_groups)
     .bind(&config.preferred_resolution)
+    .bind(&config.preferred_source)
+    .bind(&config.cutoff_source)
+    .bind(&config.cutoff_resolution)
     .bind(&config.quality_profile)
     .bind(&config.quality_cutoff)
     .bind(&config.finished_series_quality)

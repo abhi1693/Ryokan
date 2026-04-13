@@ -28,3 +28,8 @@ pub mod post_processing;
 
 pub mod anibridge;
 pub mod upgrade;
+
+// Classification pipeline (Phase 1a foundations).
+pub mod source;
+pub mod source_filename;
+pub mod source_groups;

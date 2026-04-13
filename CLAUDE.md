@@ -45,8 +45,9 @@ Three top-level modules, each in its own directory:
 - **`services/`** — Business logic and external API clients. Key services:
   - `anilist`, `jikan`, `kitsu` — metadata providers (AniList is primary, others are fallbacks)
   - `nyaa` — Nyaa torrent search via HTML scraping
-  - `scoring` — release quality scoring (seeders, group preference, resolution, quality tier)
-  - `quality` — quality tier enum (`QualityTier`: Web480 through Remux1080, 9 tiers)
+  - `scoring` — release quality scoring (seeders, group preference, resolution, source)
+  - `source` — multi-layer classification pipeline producing `(Source, Resolution, is_remux)` results used for scoring and upgrade decisions
+  - `quality` — shared helpers (`preferred_group_bonus`, `FinishedSeriesMode`, Nyaa category/probe helpers)
   - `rss` — RSS auto-sync for new episodes
   - `qbit`, `jellyfin` — download client and media server integrations
   - `post_processing` — moves/renames completed downloads into the media library

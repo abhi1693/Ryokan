@@ -1,10 +1,10 @@
 use askama::Template;
-use axum::{extract::{Query, State}, response::Html, Form, Json};
+use axum::{extract::{Query, State}, response::{Html, Redirect}, Form, Json};
 use serde::Deserialize;
 
-use crate::models::config;
+use crate::models::{config, group_source_map};
 use crate::models::log::LogCategory;
-use crate::services::{jellyfin::JellyfinClient, logger, qbit::QbitClient};
+use crate::services::{jellyfin::JellyfinClient, logger, qbit::QbitClient, source::Source};
 use crate::AppState;
 
 #[derive(Template)]
@@ -13,6 +13,7 @@ struct SettingsTemplate {
     page: String,
     tab: String,
     config: config::Config,
+    groups: Vec<group_source_map::GroupSourceEntry>,
     message: Option<String>,
     error: Option<String>,
 }
@@ -34,9 +35,10 @@ pub struct SettingsForm {
     jellyfin_api_key: String,
     preferred_groups: String,
     blocked_groups: String,
+    preferred_source: String,
     preferred_resolution: String,
-    quality_profile: String,
-    quality_cutoff: String,
+    cutoff_source: String,
+    cutoff_resolution: String,
     finished_series_quality: String,
     media_root: String,
     title_language: String,
@@ -70,8 +72,44 @@ pub struct JellyfinTestForm {
 fn normalize_settings_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
         Some("quality") => "quality".to_string(),
+        Some("groups") => "groups".to_string(),
         Some("general") => "general".to_string(),
         _ => "integrations".to_string(),
+    }
+}
+
+async fn load_groups(
+    db: &sqlx::SqlitePool,
+) -> Vec<group_source_map::GroupSourceEntry> {
+    group_source_map::list_all(db).await.unwrap_or_default()
+}
+
+/// Validate a form-submitted source string by round-tripping through
+/// `Source::from_str`. Returns the canonical lowercase form on success, or
+/// the supplied default when the value is unrecognized.
+fn validate_source(value: &str, default: &str) -> String {
+    use crate::services::source::Source;
+    let parsed = Source::from_str(value);
+    if parsed == Source::Unknown {
+        default.to_string()
+    } else {
+        // Store the canonical lowercase form (e.g. "bluray", "web") so reads
+        // via Source::from_str always succeed.
+        parsed.as_str().to_ascii_lowercase()
+    }
+}
+
+/// Validate a form-submitted resolution string by round-tripping through
+/// `Resolution::from_str`. Returns the bare numeric form ("1080", "720", …)
+/// on success, or the supplied default when unrecognized.
+fn validate_resolution(value: &str, default: &str) -> String {
+    use crate::services::source::Resolution;
+    let parsed = Resolution::from_str(value);
+    if parsed == Resolution::Unknown {
+        default.to_string()
+    } else {
+        // Strip the trailing 'p' for DB consistency ("1080" not "1080p").
+        parsed.as_str().trim_end_matches('p').to_string()
     }
 }
 
@@ -85,10 +123,13 @@ pub async fn settings_page(
         .flatten()
         .unwrap_or_default();
 
+    let groups = load_groups(&state.db).await;
+
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(params.tab),
         config: cfg,
+        groups,
         message: None,
         error: None,
     };
@@ -123,23 +164,20 @@ pub async fn settings_submit(
         jellyfin_api_key: form.jellyfin_api_key.trim().to_string(),
         preferred_groups: form.preferred_groups.trim().to_string(),
         blocked_groups: form.blocked_groups.trim().to_string(),
-        preferred_resolution: form.preferred_resolution.trim().to_string(),
-        quality_profile: {
-            let tier = crate::services::quality::QualityTier::from_str(&form.quality_profile);
-            if tier != crate::services::quality::QualityTier::Unknown {
-                form.quality_profile
-            } else {
-                "web_1080".to_string()
-            }
-        },
-        quality_cutoff: {
-            let tier = crate::services::quality::QualityTier::from_str(&form.quality_cutoff);
-            if tier != crate::services::quality::QualityTier::Unknown {
-                form.quality_cutoff
-            } else {
-                "bd_1080".to_string()
-            }
-        },
+        preferred_source: validate_source(&form.preferred_source, "web"),
+        preferred_resolution: validate_resolution(&form.preferred_resolution, "1080"),
+        cutoff_source: validate_source(&form.cutoff_source, "bluray"),
+        cutoff_resolution: validate_resolution(&form.cutoff_resolution, "1080"),
+        // Legacy combined tier columns — kept one release for rollback.
+        // No longer user-editable; carried forward from the existing row.
+        quality_profile: existing_cfg
+            .as_ref()
+            .map(|c| c.quality_profile.clone())
+            .unwrap_or_else(|| "web_1080".to_string()),
+        quality_cutoff: existing_cfg
+            .as_ref()
+            .map(|c| c.quality_cutoff.clone())
+            .unwrap_or_else(|| "bd_1080".to_string()),
         finished_series_quality: match form.finished_series_quality.as_str() {
             "same" | "prefer_bd" | "bd_only" => form.finished_series_quality,
             _ => "prefer_bd".to_string(),
@@ -192,10 +230,12 @@ pub async fn settings_submit(
 
     if let Err(e) = config::save_config(&state.db, &cfg).await {
         logger::error(&state.db, LogCategory::System, "Failed to save settings", &e.to_string()).await;
+        let groups = load_groups(&state.db).await;
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
             config: cfg,
+            groups,
             message: None,
             error: Some(format!("Failed to save: {}", e)),
         };
@@ -255,14 +295,110 @@ pub async fn settings_submit(
         }
     }
 
+    let groups = load_groups(&state.db).await;
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
         config: cfg,
+        groups,
         message: Some(notices.join("<br>")),
         error: None,
     };
     Html(template.render().unwrap_or_default())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Release group source map CRUD
+// ─────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GroupUpsertForm {
+    group_name: String,
+    source: String,
+    confidence: Option<f32>,
+    notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GroupDeleteForm {
+    group_name: String,
+}
+
+/// Upsert a user-edited row in `group_source_map`. Silently no-ops on an
+/// empty group name or unknown source. Redirects back to the groups tab
+/// regardless so the user sees the updated list.
+pub async fn settings_groups_upsert(
+    State(state): State<AppState>,
+    Form(form): Form<GroupUpsertForm>,
+) -> Redirect {
+    let name = form.group_name.trim();
+    if name.is_empty() {
+        return Redirect::to("/settings?tab=groups");
+    }
+    let source = Source::from_str(&form.source);
+    if source == Source::Unknown {
+        return Redirect::to("/settings?tab=groups");
+    }
+    let confidence = form.confidence.unwrap_or(0.95).clamp(0.0, 1.0);
+    let notes = form.notes.unwrap_or_default();
+    let notes = notes.trim();
+
+    match group_source_map::upsert_user_edit(&state.db, name, source, confidence, notes).await {
+        Ok(_) => {
+            logger::info(
+                &state.db,
+                LogCategory::System,
+                &format!("Group source updated: {}", name),
+                source.as_str(),
+            )
+            .await;
+        }
+        Err(e) => {
+            logger::error(
+                &state.db,
+                LogCategory::System,
+                "Group source upsert failed",
+                &e.to_string(),
+            )
+            .await;
+        }
+    }
+    Redirect::to("/settings?tab=groups")
+}
+
+/// Delete a row from `group_source_map` by group name. Works on both seeded
+/// and user-edited rows — seeded rows will be re-inserted on the next
+/// startup via `seed_defaults`, so deletes of seeds are effectively a
+/// one-session reset.
+pub async fn settings_groups_delete(
+    State(state): State<AppState>,
+    Form(form): Form<GroupDeleteForm>,
+) -> Redirect {
+    let name = form.group_name.trim();
+    if name.is_empty() {
+        return Redirect::to("/settings?tab=groups");
+    }
+    match group_source_map::delete(&state.db, name).await {
+        Ok(_) => {
+            logger::info(
+                &state.db,
+                LogCategory::System,
+                &format!("Group source deleted: {}", name),
+                "",
+            )
+            .await;
+        }
+        Err(e) => {
+            logger::error(
+                &state.db,
+                LogCategory::System,
+                "Group source delete failed",
+                &e.to_string(),
+            )
+            .await;
+        }
+    }
+    Redirect::to("/settings?tab=groups")
 }
 
 #[utoipa::path(

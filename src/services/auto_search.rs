@@ -2,8 +2,10 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex_lite::Regex;
+use sqlx::SqlitePool;
 
 use crate::models::config::Config;
+use crate::services::source::{self, ClassificationResult, Resolution, Source};
 use crate::services::{anilist::AnimeDetail, media, nyaa::{self, SearchOptions, SearchResult}, quality};
 
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
@@ -74,6 +76,7 @@ pub struct AutoSearchReport {
 /// allows batch results and uses relaxed title matching so users see a broader
 /// set of candidates to choose from.
 pub async fn find_all_for_target(
+    db: &SqlitePool,
     detail: &AnimeDetail,
     config: &Config,
     target: &SearchTarget,
@@ -82,11 +85,13 @@ pub async fn find_all_for_target(
     let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
-    let preferred_res = preferred_resolution_for_profile(&config.quality_profile);
+    let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.status == "FINISHED";
     let finished_mode = quality::FinishedSeriesMode::from_str(&config.finished_series_quality);
-    let preferred_tier = quality::QualityTier::from_str(&config.quality_profile);
-    let cutoff_tier = quality::QualityTier::from_str(&config.quality_cutoff);
+    let preferred_source_enum = Source::from_str(&config.preferred_source);
+    let preferred_resolution_enum = Resolution::from_str(&config.preferred_resolution);
+    let cutoff_source_enum = Source::from_str(&config.cutoff_source);
+    let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
@@ -112,7 +117,22 @@ pub async fn find_all_for_target(
     }
 
     for c in &mut candidates {
-        c.score = rescore_for_auto_search(c, config, &aliases, target, expected_season, is_finished, detail.season_year, finished_mode, preferred_tier, cutoff_tier);
+        let classification = source::classify_release(db, &c.title, Some(&c.resolution)).await;
+        c.score = rescore_for_auto_search(
+            c,
+            &classification,
+            config,
+            &aliases,
+            target,
+            expected_season,
+            is_finished,
+            detail.season_year,
+            finished_mode,
+            preferred_source_enum,
+            preferred_resolution_enum,
+            cutoff_source_enum,
+            cutoff_resolution_enum,
+        );
     }
 
     candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
@@ -120,6 +140,7 @@ pub async fn find_all_for_target(
 }
 
 pub async fn find_best_for_target(
+    db: &SqlitePool,
     detail: &AnimeDetail,
     config: &Config,
     target: &SearchTarget,
@@ -129,11 +150,13 @@ pub async fn find_best_for_target(
     let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
-    let preferred_res = preferred_resolution_for_profile(&config.quality_profile);
+    let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.status == "FINISHED";
     let finished_mode = quality::FinishedSeriesMode::from_str(&config.finished_series_quality);
-    let preferred_tier = quality::QualityTier::from_str(&config.quality_profile);
-    let cutoff_tier = quality::QualityTier::from_str(&config.quality_cutoff);
+    let preferred_source_enum = Source::from_str(&config.preferred_source);
+    let preferred_resolution_enum = Resolution::from_str(&config.preferred_resolution);
+    let cutoff_source_enum = Source::from_str(&config.cutoff_source);
+    let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
@@ -166,10 +189,12 @@ pub async fn find_best_for_target(
     }
 
     // Phase 3: for finished series with BD preference, probe for BD releases.
+    // The "any BD candidate" check uses a filename-only heuristic so we can
+    // decide before running the full classification pass.
     if is_finished && finished_mode != quality::FinishedSeriesMode::SameAsAiring {
-        let has_bd_candidate = candidates.iter().any(|c| {
-            quality::detect_tier(&c.title, &c.resolution).is_bluray()
-        });
+        let has_bd_candidate = candidates
+            .iter()
+            .any(|c| source::looks_like_bluray_filename(&c.title));
 
         if !has_bd_candidate {
             let bd_queries = quality::bd_probe_queries(&aliases);
@@ -177,21 +202,42 @@ pub async fn find_best_for_target(
         }
     }
 
-    // Filter by finished-series quality mode.
-    if is_finished && finished_mode == quality::FinishedSeriesMode::BdOnly {
-        candidates.retain(|c| {
-            let tier = quality::detect_tier(&c.title, &c.resolution);
-            quality::passes_finished_filter(tier, finished_mode, true)
-        });
+    // Classify + filter + rescore in one pass. Each candidate is classified
+    // exactly once, and both the BdOnly filter and the classification-aware
+    // scoring reuse that single result.
+    let mut scored: Vec<SearchResult> = Vec::with_capacity(candidates.len());
+    for mut c in candidates.drain(..) {
+        let classification = source::classify_release(db, &c.title, Some(&c.resolution)).await;
+
+        // BdOnly filter: drop non-BluRay releases for finished series when the
+        // user has asked for BD only. Unknown sources get a pass.
+        if is_finished
+            && finished_mode == quality::FinishedSeriesMode::BdOnly
+            && !source::passes_bd_only_filter(&classification)
+        {
+            continue;
+        }
+
+        c.score = rescore_for_auto_search(
+            &c,
+            &classification,
+            config,
+            &aliases,
+            target,
+            expected_season,
+            is_finished,
+            detail.season_year,
+            finished_mode,
+            preferred_source_enum,
+            preferred_resolution_enum,
+            cutoff_source_enum,
+            cutoff_resolution_enum,
+        );
+        scored.push(c);
     }
 
-    // Rescore all candidates with quality-tier-aware scoring.
-    for c in &mut candidates {
-        c.score = rescore_for_auto_search(c, config, &aliases, target, expected_season, is_finished, detail.season_year, finished_mode, preferred_tier, cutoff_tier);
-    }
-
-    candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
-    candidates.into_iter().next()
+    scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
+    scored.into_iter().next()
 }
 
 /// Run a set of queries against Nyaa page 1, collecting valid candidates.
@@ -242,16 +288,18 @@ async fn run_queries(
                 if !matches_target(&result.title, aliases, target, expected_season, batch_episode_match && result.is_batch) {
                     continue;
                 }
-                // For FINISHED series, reject non-BD results uploaded 2+ years after airing
+                // For FINISHED series, reject non-BD results uploaded 2+ years after airing.
+                // Uses a filename-only BD heuristic so we don't hit the DB here — full
+                // classification runs later in the rescore pass.
                 if is_finished {
                     if let Some(air_year) = season_year {
                         if result.upload_timestamp > 0 {
                             let upload_year = 1970 + (result.upload_timestamp / 31_536_000) as i32;
-                            if upload_year - air_year >= 2 {
-                                let tier = quality::detect_tier(&result.title, &result.resolution);
-                                if !tier.is_bluray() && !result.is_batch {
-                                    continue;
-                                }
+                            if upload_year - air_year >= 2
+                                && !source::looks_like_bluray_filename(&result.title)
+                                && !result.is_batch
+                            {
+                                continue;
                             }
                         }
                     }
@@ -327,16 +375,17 @@ async fn run_queries_interactive(
                     }
                 }
             }
-            // For FINISHED series, reject non-BD results uploaded 2+ years after airing
+            // For FINISHED series, reject non-BD results uploaded 2+ years after airing.
+            // Uses a filename-only BD heuristic so we don't hit the DB here.
             if is_finished {
                 if let Some(air_year) = season_year {
                     if result.upload_timestamp > 0 {
                         let upload_year = 1970 + (result.upload_timestamp / 31_536_000) as i32;
-                        if upload_year - air_year >= 2 {
-                            let tier = quality::detect_tier(&result.title, &result.resolution);
-                            if !tier.is_bluray() && !result.is_batch {
-                                continue;
-                            }
+                        if upload_year - air_year >= 2
+                            && !source::looks_like_bluray_filename(&result.title)
+                            && !result.is_batch
+                        {
+                            continue;
                         }
                     }
                 }
@@ -413,34 +462,40 @@ pub fn build_monitored_targets(detail: &AnimeDetail, existing_episodes: &[i32], 
 
 /// Build upgrade targets: candidate episodes that exist on disk but are below
 /// the quality cutoff. These are candidates for automatic quality upgrades.
+///
+/// Hydration order for each on-disk episode:
+/// 1. Structured classification columns on `episode_quality_tags` (written
+///    since Phase 1b).
+/// 2. Legacy `release_title` column parsed via filename-only classification
+///    (for rows grabbed before Phase 1b landed, where the structured cols
+///    are empty).
+/// 3. On-disk filename + `quality` string, also via filename-only
+///    classification (for episodes that have no grab record at all — e.g.
+///    pre-existing library files that Ryokan didn't grab itself).
 pub fn build_upgrade_targets(
     disk_files: &[media::EpisodeFile],
     candidate_episodes: &[i32],
-    cutoff_tier: quality::QualityTier,
+    cutoff_source: Source,
+    cutoff_resolution: Resolution,
     quality_tags: &std::collections::HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
-) -> Vec<(SearchTarget, quality::QualityTier)> {
+) -> Vec<(SearchTarget, ClassificationResult)> {
     let candidates: HashSet<i32> = candidate_episodes.iter().copied().collect();
+    let cutoff = source::cutoff_classification(cutoff_source, cutoff_resolution);
+    let cutoff_rank = cutoff.rank();
+
     let mut targets = Vec::new();
     for file in disk_files {
         if !candidates.contains(&file.episode_number) {
             continue;
         }
-        // Prefer the quality tag recorded at grab time (from the release title)
-        // over re-detecting from the renamed filename on disk.
-        let existing_tier = if let Some(tag) = quality_tags.get(&file.episode_number) {
-            let tier = quality::QualityTier::from_str(&tag.quality_tag);
-            if tier != quality::QualityTier::Unknown { tier } else { quality::tier_from_disk_quality(&file.quality) }
-        } else {
-            quality::tier_from_disk_quality(&file.quality)
-        };
-        if existing_tier == quality::QualityTier::Unknown {
+        let existing = resolve_existing_classification(file, quality_tags.get(&file.episode_number));
+        // Skip completely unclassified episodes — we have no way to know
+        // whether an incoming release would actually be an upgrade.
+        if existing.source == Source::Unknown && existing.resolution == Resolution::Unknown {
             continue;
         }
-        if existing_tier.rank() < cutoff_tier.rank() {
-            targets.push((
-                SearchTarget::Episode(file.episode_number),
-                existing_tier,
-            ));
+        if existing.rank() < cutoff_rank {
+            targets.push((SearchTarget::Episode(file.episode_number), existing));
         }
     }
     targets.sort_by_key(|(t, _)| match t {
@@ -448,6 +503,30 @@ pub fn build_upgrade_targets(
         SearchTarget::Single => 0,
     });
     targets
+}
+
+/// Resolve the best-available classification for an on-disk episode. Public
+/// so RSS upgrade detection can use the same hydration order.
+pub fn resolve_existing_classification(
+    file: &media::EpisodeFile,
+    tag: Option<&crate::models::episode_tags::EpisodeQualityTag>,
+) -> ClassificationResult {
+    if let Some(tag) = tag {
+        if !tag.source.is_empty() || !tag.resolution.is_empty() {
+            return source::classification_from_stored(
+                &tag.source,
+                &tag.resolution,
+                tag.is_remux,
+                tag.classification_confidence,
+                tag.needs_review,
+            );
+        }
+        if !tag.release_title.is_empty() {
+            return source::classify_release_sync(&tag.release_title, None);
+        }
+    }
+    // No usable tag — fall back to the on-disk filename + parsed quality.
+    source::classify_release_sync(&file.filename, Some(&file.quality))
 }
 
 pub fn target_label(target: &SearchTarget) -> String {
@@ -607,8 +686,10 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, ex
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rescore_for_auto_search(
     result: &SearchResult,
+    classification: &ClassificationResult,
     config: &Config,
     aliases: &[String],
     target: &SearchTarget,
@@ -616,8 +697,10 @@ fn rescore_for_auto_search(
     is_finished: bool,
     season_year: Option<i32>,
     finished_mode: quality::FinishedSeriesMode,
-    preferred_tier: quality::QualityTier,
-    cutoff_tier: quality::QualityTier,
+    preferred_source: Source,
+    preferred_resolution: Resolution,
+    cutoff_source: Source,
+    cutoff_resolution: Resolution,
 ) -> i32 {
     let mut score = result.score;
     let lower = result.title.to_lowercase();
@@ -644,8 +727,8 @@ fn rescore_for_auto_search(
     // Exempt BD releases since those legitimately appear years later.
     if is_finished {
         if let Some(air_year) = season_year {
-            let detected_tier = quality::detect_tier(&result.title, &result.resolution);
-            if result.upload_timestamp > 0 && !detected_tier.is_bluray() {
+            let is_bluray = classification.source == Source::BluRay;
+            if result.upload_timestamp > 0 && !is_bluray {
                 // Approximate the upload year from the timestamp
                 let upload_year = 1970 + (result.upload_timestamp / 31_536_000) as i32;
                 let year_gap = upload_year - air_year;
@@ -680,24 +763,36 @@ fn rescore_for_auto_search(
 
     score += quality::preferred_group_bonus(&result.group, &quality::parse_group_list(&config.preferred_groups));
 
-    // Quality tier scoring.
-    let detected_tier = quality::detect_tier(&result.title, &result.resolution);
-    score += quality::tier_score(detected_tier, preferred_tier, cutoff_tier);
+    // Classification-aware quality scoring.
+    score += source::score_classification(
+        classification,
+        preferred_source,
+        preferred_resolution,
+        cutoff_source,
+        cutoff_resolution,
+    );
 
     // For finished series with BD preference, give BD releases a significant boost.
-    if is_finished && finished_mode == quality::FinishedSeriesMode::PreferBd && detected_tier.is_bluray() {
+    if is_finished
+        && finished_mode == quality::FinishedSeriesMode::PreferBd
+        && classification.source == Source::BluRay
+    {
         score += 35;
     }
 
     score
 }
 
-fn preferred_resolution_for_profile(profile: &str) -> String {
-    match profile {
-        "web_480" | "dvd" | "bd_480" => "480".to_string(),
-        "web_720" | "bd_720" | "remux_720" => "720".to_string(),
-        "web_1080" | "bd_1080" | "remux_1080" => "1080".to_string(),
-        _ => "1080".to_string(),
+/// Map the config's resolution preference to the bare-number string form that
+/// Nyaa search options expect ("480", "720", "1080", "2160").
+fn preferred_resolution_search_value(config: &Config) -> String {
+    match Resolution::from_str(&config.preferred_resolution) {
+        Resolution::R480p => "480".to_string(),
+        Resolution::R576p => "576".to_string(),
+        Resolution::R720p => "720".to_string(),
+        Resolution::R1080p => "1080".to_string(),
+        Resolution::R2160p => "2160".to_string(),
+        Resolution::Unknown => "1080".to_string(),
     }
 }
 

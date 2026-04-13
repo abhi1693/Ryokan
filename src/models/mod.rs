@@ -11,6 +11,7 @@ pub mod scheduled_tasks;
 pub mod artwork_cache;
 pub mod grabbed_torrents;
 pub mod episode_tags;
+pub mod group_source_map;
 
 use sqlx::SqlitePool;
 
@@ -707,6 +708,112 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+
+    // Classification pipeline: release group → source map (Phase 1a).
+    // Creates the table and seeds the built-in defaults. Idempotent.
+    group_source_map::migrate(db).await?;
+
+    // ── Phase 1b: classification columns on episode_quality_tags ─────────
+    // These record the ClassificationResult at grab time so later scoring,
+    // upgrade detection, and UI review workflows can read structured source
+    // / resolution / remux data instead of parsing the legacy quality_tag
+    // string. Defaults are empty/zero for rows that predate Phase 1b; the
+    // legacy quality_tag column remains populated for backwards compat.
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN is_remux INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN classification_confidence REAL NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    // ── Phase 1b: split quality_profile/quality_cutoff into explicit source
+    //             and resolution fields ──────────────────────────────────
+    // preferred_resolution already exists and stores a bare resolution
+    // string ("1080", "720", …) — it's migrated in place and is now the
+    // authoritative preferred-resolution field. The three new columns cover
+    // the bits that didn't exist before. Legacy quality_profile and
+    // quality_cutoff are kept for one release as a rollback hatch.
+    sqlx::query("ALTER TABLE config ADD COLUMN preferred_source TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN cutoff_source TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN cutoff_resolution TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // Backfill the new columns from the legacy combined fields. Only runs
+    // for existing rows where the new columns are still empty, so a fresh
+    // install (which uses Default::default values) is left alone.
+    sqlx::query(
+        r#"
+        UPDATE config SET preferred_source = CASE
+            WHEN quality_profile LIKE 'web_%' THEN 'web'
+            WHEN quality_profile LIKE 'bd_%' THEN 'bluray'
+            WHEN quality_profile LIKE 'remux_%' THEN 'bluray'
+            WHEN quality_profile = 'dvd' THEN 'dvd'
+            ELSE 'web'
+        END
+        WHERE id = 1 AND preferred_source = ''
+        "#,
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    sqlx::query(
+        r#"
+        UPDATE config SET cutoff_source = CASE
+            WHEN quality_cutoff LIKE 'web_%' THEN 'web'
+            WHEN quality_cutoff LIKE 'bd_%' THEN 'bluray'
+            WHEN quality_cutoff LIKE 'remux_%' THEN 'bluray'
+            WHEN quality_cutoff = 'dvd' THEN 'dvd'
+            ELSE 'bluray'
+        END
+        WHERE id = 1 AND cutoff_source = ''
+        "#,
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    sqlx::query(
+        r#"
+        UPDATE config SET cutoff_resolution = CASE
+            WHEN quality_cutoff LIKE '%_480' OR quality_cutoff = 'dvd' THEN '480'
+            WHEN quality_cutoff LIKE '%_720' THEN '720'
+            WHEN quality_cutoff LIKE '%_1080' THEN '1080'
+            WHEN quality_cutoff LIKE '%_2160' THEN '2160'
+            ELSE '1080'
+        END
+        WHERE id = 1 AND cutoff_resolution = ''
+        "#,
+    )
+    .execute(db)
+    .await
+    .ok();
 
     sqlx::query(
         r#"
