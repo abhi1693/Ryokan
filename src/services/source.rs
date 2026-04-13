@@ -1753,4 +1753,183 @@ mod tests {
             "disagreeing strong signals must flag needs_review"
         );
     }
+
+    // ─── Boundary tests for aggregator thresholds ──────────────────────────
+    //
+    // The aggregator is full of `>=` / `<` comparisons against tuned
+    // constants (STRONG_THRESHOLD=0.90, CONFLICT_THRESHOLD=0.70,
+    // MIN_LEAD=0.30, MIN_TOTAL=0.50, ORIGIN_MAX=1.30). A refactor that
+    // flipped one of those to `>` or `<=` would shift the behavior in
+    // ways the happy-path tests above wouldn't catch. These tests pin
+    // the exact boundary in each direction so a mis-flipped inequality
+    // fails loudly instead of silently.
+
+    #[test]
+    fn boundary_strong_threshold_exactly_090_fires_rule_1() {
+        // 0.90 is the strong threshold; the filter uses `>= 0.90`, so an
+        // evidence record at exactly 0.90 must take the rule-1 path.
+        let result = aggregate(&[ev(Source::Web, 0.90, "filename")]);
+        assert_eq!(result.decision_rule, DecisionRule::Rule1Strong);
+        assert_eq!(result.source, Source::Web);
+        assert!(!result.needs_review);
+    }
+
+    #[test]
+    fn boundary_strong_threshold_just_below_falls_through_to_rule_2() {
+        // 0.89 is below 0.90 so it's *not* strong. With no other evidence
+        // the record still wins via rule 2's sum path, but the decision
+        // rule is Rule2Sum (not Rule1Strong). This is what catches a
+        // hypothetical `> 0.90` flip in the strong filter.
+        let result = aggregate(&[ev(Source::Web, 0.89, "filename")]);
+        assert_eq!(result.decision_rule, DecisionRule::Rule2Sum);
+        assert_eq!(result.source, Source::Web);
+    }
+
+    #[test]
+    fn boundary_conflict_threshold_exactly_070_can_trigger_rule_4() {
+        // Runner-up sitting at exactly 0.70 is eligible for rule-4
+        // conflict detection (the filter is `>= 0.70`). With a small
+        // lead, rule 4 must fire.
+        let result = aggregate(&[
+            ev(Source::Web, 0.75, "filename"),
+            ev(Source::BluRay, 0.70, "group"),
+        ]);
+        assert!(result.needs_review);
+        assert_eq!(result.decision_rule, DecisionRule::Rule4Conflict);
+    }
+
+    #[test]
+    fn boundary_conflict_threshold_just_below_does_not_trigger_rule_4() {
+        // Runner-up at 0.69 is below the conflict threshold, so even a
+        // narrow lead stays a clean rule-2 win.
+        let result = aggregate(&[
+            ev(Source::Web, 0.75, "filename"),
+            ev(Source::BluRay, 0.69, "group"),
+        ]);
+        assert!(!result.needs_review);
+        assert_eq!(result.decision_rule, DecisionRule::Rule2Sum);
+    }
+
+    #[test]
+    fn boundary_min_total_exactly_050_clears_rule_3() {
+        // Sum to exactly 0.50: the test is `< MIN_TOTAL`, so 0.50 must
+        // NOT be weak enough for the Unknown fallback.
+        let result = aggregate(&[
+            ev(Source::Web, 0.30, "filename"),
+            ev(Source::Web, 0.20, "group"),
+        ]);
+        assert_ne!(result.decision_rule, DecisionRule::Rule3Weak);
+        assert_eq!(result.source, Source::Web);
+    }
+
+    #[test]
+    fn boundary_min_total_just_below_triggers_rule_3() {
+        // Sum to 0.49 — strictly below MIN_TOTAL, so rule 3 fires.
+        let result = aggregate(&[
+            ev(Source::Web, 0.30, "filename"),
+            ev(Source::Web, 0.19, "group"),
+        ]);
+        assert_eq!(result.decision_rule, DecisionRule::Rule3Weak);
+        assert_eq!(result.source, Source::Unknown);
+        assert!(result.needs_review);
+    }
+
+    #[test]
+    fn boundary_min_lead_exactly_030_clears_rule_4() {
+        // Lead of exactly 0.30 is the boundary for rule 4 (`lead <
+        // MIN_LEAD`). Strong runner-up present, but the lead is big
+        // enough that rule 4 must NOT fire.
+        //
+        // Web sums to 1.00 (filename 0.30 + group 0.70), BluRay sums
+        // to 0.70 (ffprobe 0.70). Lead = 0.30 exactly. BluRay's 0.70
+        // is ≥ CONFLICT_THRESHOLD so the conflict check is armed; it's
+        // the lead that keeps rule 4 silent.
+        //
+        // BluRay's 0.70 is below STRONG_THRESHOLD (0.90), so the
+        // ground-truth veto rule 5 also stays silent.
+        let result = aggregate(&[
+            ev(Source::Web, 0.30, "filename"),
+            ev(Source::Web, 0.70, "group"),
+            ev(Source::BluRay, 0.70, "ffprobe"),
+        ]);
+        assert_eq!(result.source, Source::Web);
+        assert!(
+            !result.needs_review,
+            "lead of exactly 0.30 should clear rule 4 — the check is `lead < MIN_LEAD`"
+        );
+        assert_eq!(result.decision_rule, DecisionRule::Rule2Sum);
+    }
+
+    #[test]
+    fn boundary_min_lead_just_below_triggers_rule_4() {
+        // Lead of 0.29 — strictly below MIN_LEAD. Rule 4 must fire
+        // because there's a conflicting runner-up at ≥ 0.70.
+        // Web sums to 0.99, BluRay sums to 0.70, lead = 0.29.
+        let result = aggregate(&[
+            ev(Source::Web, 0.29, "filename"),
+            ev(Source::Web, 0.70, "group"),
+            ev(Source::BluRay, 0.70, "ffprobe"),
+        ]);
+        assert!(result.needs_review);
+        assert_eq!(result.decision_rule, DecisionRule::Rule4Conflict);
+    }
+
+    #[test]
+    fn boundary_origin_cap_exactly_130_kept_intact() {
+        // A single origin summing to exactly 1.30 hits `sum.min(1.30)`
+        // and stays at 1.30 — the cap is idempotent at the boundary.
+        // Runner-up at 0.40 leaves a 0.90 lead, a clean rule-2 win with
+        // no conflict.
+        let result = aggregate(&[
+            ev(Source::BluRay, 0.65, "filename"),
+            ev(Source::BluRay, 0.65, "filename"),
+            ev(Source::Web, 0.40, "temporal"),
+        ]);
+        assert_eq!(result.source, Source::BluRay);
+        assert_eq!(result.decision_rule, DecisionRule::Rule2Sum);
+    }
+
+    #[test]
+    fn boundary_origin_cap_above_130_is_clipped() {
+        // A filename origin that would naturally sum to 1.80 (0.95 +
+        // 0.85) must be clipped to 1.30. With a competing ffprobe
+        // signal at 0.90, the *uncapped* sum would leave BluRay ahead
+        // by 0.90 — a clean win with no review. With the cap, BluRay
+        // sums to only 1.30, still wins by 0.40, but the strong ffprobe
+        // disagreement trips the ground-truth veto (rule 5).
+        //
+        // This is the exact regression guarded by Issue 1's origin cap,
+        // and it's a good anchor for verifying the cap is actually
+        // clipping — a flip to `< 1.30` / `> 1.30` on the comparison
+        // would change the behavior here.
+        let result = aggregate(&[
+            ev(Source::BluRay, 0.95, "filename"),
+            ev(Source::BluRay, 0.85, "filename"),
+            ev(Source::Web, 0.90, "ffprobe"),
+        ]);
+        assert_eq!(result.source, Source::BluRay);
+        assert!(result.needs_review);
+        assert_eq!(result.decision_rule, DecisionRule::Rule5GroundTruthVeto);
+    }
+
+    #[test]
+    fn boundary_origin_cap_is_per_source_per_origin() {
+        // The cap is keyed on `(source, origin)`, not just origin. A
+        // filename layer emitting 0.90 for BluRay and 0.90 for Web
+        // should contribute the full 0.90 to each source — not split
+        // 1.30 across them or clip one of them.
+        let result = aggregate(&[
+            ev(Source::BluRay, 0.90, "filename"),
+            ev(Source::Web, 0.90, "filename"),
+        ]);
+        // Rule 1 falls through because the two strong signals disagree.
+        // Rule 2 sees BluRay=0.90 and Web=0.90 — a tie. Source::rank
+        // tiebreaks to the higher-ranked source. This test doesn't
+        // care which wins — it cares that rule 5 fires because both
+        // are strong and disagreeing. Actually neither origin is
+        // ffprobe/dir here so rule 5 stays silent; we get rule 4
+        // instead because the lead is zero and both are ≥ 0.70.
+        assert!(result.needs_review);
+        assert_eq!(result.decision_rule, DecisionRule::Rule4Conflict);
+    }
 }
