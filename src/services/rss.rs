@@ -1,10 +1,25 @@
-use std::{cmp::Ordering, collections::{HashMap, HashSet}, sync::LazyLock};
+use std::{cmp::Ordering, collections::{HashMap, HashSet}, sync::LazyLock, time::Duration};
 
 use regex_lite::Regex;
+
+/// Process-global `reqwest::Client` for RSS fetches. See the same pattern
+/// in `source_description.rs`/`nyaa.rs`: a fresh client per call throws
+/// away connection keepalive and re-handshakes TLS every tick. 30-second
+/// per-request timeout caps the damage from a hung connection so the
+/// 5-minute outer `sync_once` timeout isn't the only backstop — a single
+/// slow DNS lookup used to be able to eat the whole sync budget.
+static RSS_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("Ryokan/0.1")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("building the RSS reqwest client should not fail")
+});
 
 use crate::{
     models::{config, episode_tags, monitoring, rss, series},
     models::log::LogCategory,
+    services::source::{self, ClassificationResult, Resolution, Source},
     services::{auto_search, logger, media, monitoring as monitoring_service, quality},
     AppState,
 };
@@ -202,16 +217,29 @@ pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, S
             let _ = rss::finish_run(
                 &state.db,
                 run_id,
-                "ok",
-                summary.items_seen,
-                summary.matched,
-                summary.grabbed,
-                summary.skipped,
-                &summary.detail,
+                rss::RunSummary {
+                    status: "ok",
+                    items_seen: summary.items_seen,
+                    matched: summary.matched,
+                    grabbed: summary.grabbed,
+                    skipped: summary.skipped,
+                    detail: &summary.detail,
+                },
             ).await;
         }
         Err(err) => {
-            let _ = rss::finish_run(&state.db, run_id, "error", 0, 0, 0, 0, err).await;
+            let _ = rss::finish_run(
+                &state.db,
+                run_id,
+                rss::RunSummary {
+                    status: "error",
+                    items_seen: 0,
+                    matched: 0,
+                    grabbed: 0,
+                    skipped: 0,
+                    detail: err,
+                },
+            ).await;
         }
     }
 
@@ -242,7 +270,14 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let mut monitored_cache: HashMap<i64, HashSet<i32>> = HashMap::new();
     let mut quality_tags_cache: HashMap<i64, HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>> = HashMap::new();
 
-    let cutoff_tier = quality::QualityTier::from_str(&cfg.quality_cutoff);
+    let (cutoff_src, cutoff_is_remux, cutoff_is_bdmv) =
+        source::parse_cutoff_source(&cfg.cutoff_source);
+    let cutoff = source::cutoff_classification(
+        cutoff_src,
+        Resolution::from_str(&cfg.cutoff_resolution),
+        cutoff_is_remux,
+        cutoff_is_bdmv,
+    );
 
     let mut items_seen = 0;
     let mut matched = 0;
@@ -257,7 +292,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         let item_key = build_item_key(&item);
         if rss::item_was_grabbed(&state.db, &item_key).await.map_err(|e| e.to_string())? {
             skipped += 1;
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, None, "", &item.group, item.is_batch, "skipped", "Already grabbed earlier; skipping duplicate RSS item", "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: None,
+                series_title: "",
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "skipped",
+                reason: "Already grabbed earlier; skipping duplicate RSS item",
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -265,7 +311,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             skipped += 1;
             let diag = build_match_diag(&item, None, 0);
             let reason = format!("No tracked series match | {}", diag);
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, None, "", &item.group, item.is_batch, "skipped", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: None,
+                series_title: "",
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "skipped",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         };
 
@@ -274,7 +331,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if group_matches_blacklist(&item.group, &blacklist) {
             skipped += 1;
             let reason = format!("Blocked group: {} | {}", item.group, build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: Some(found.series.id),
+                series_title: &found.series.title,
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -285,7 +353,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             } else {
                 format!("Group not in whitelist: {} | {}", item.group, build_match_diag(&item, Some(&found), 0))
             };
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: Some(found.series.id),
+                series_title: &found.series.title,
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -319,11 +398,22 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 .unwrap_or_default();
             quality_tags_cache.entry(found.series.id).or_insert(tags)
         };
-        let decision = evaluate_candidate(&found.series, &item, disk_files, &actionable_eps, cutoff_tier, qtags);
+        let decision = evaluate_candidate(&found.series, &item, disk_files, &actionable_eps, &cutoff, qtags);
         if let Some(reason) = decision.reject_reason {
             skipped += 1;
             let reason = format!("{} | {}", reason, build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: Some(found.series.id),
+                series_title: &found.series.title,
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -331,11 +421,22 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if !canonical_key.is_empty() && canonical_history.contains(&canonical_key) {
             skipped += 1;
             let reason = format!("Logical episode is already queued or was grabbed earlier | {}", build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: Some(found.series.id),
+                series_title: &found.series.title,
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
-        let score = score_candidate(&cfg, &item, &found.series, &found.resolved_eps, found.alias_score, found.parsed.parse_mode);
+        let score = score_candidate(&state.db, &cfg, &item, &found.series, &found.resolved_eps, found.alias_score, found.parsed.parse_mode).await;
         pending.push(PendingCandidate {
             item,
             item_key,
@@ -365,7 +466,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         for cand in pending {
             skipped += 1;
             let reason = format!("qBittorrent is not configured | {}", build_match_diag(&cand.item, Some(&cand.found), cand.score));
-            let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &cand.item_key,
+                title: &cand.item.title,
+                link: &cand.item.link,
+                series_id: Some(cand.found.series.id),
+                series_title: &cand.found.series.title,
+                group_name: &cand.item.group,
+                is_batch: cand.item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
         }
         let detail = format!("Processed {} items • matched {} • grabbed {} • skipped {}", items_seen, matched, grabbed, skipped);
         logger::info(&state.db, LogCategory::System, "RSS sync finished", &detail).await;
@@ -380,7 +492,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 "Lower score than selected candidate for the same logical episode | {}",
                 build_match_diag(&cand.item, Some(&cand.found), cand.score)
             );
-            let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &cand.item_key,
+                title: &cand.item.title,
+                link: &cand.item.link,
+                series_id: Some(cand.found.series.id),
+                series_title: &cand.found.series.title,
+                group_name: &cand.item.group,
+                is_batch: cand.item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -402,7 +525,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     format!("Accepted best candidate ({}) for {} episode(s) | {}", action, cand.new_episode_count.max(1), build_match_diag(&cand.item, Some(&cand.found), cand.score))
                 };
                 canonical_history.insert(canonical_episode_key(&cand.found, cand.item.is_batch));
-                let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "grabbed", &reason, "rss").await;
+                let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                    item_key: &cand.item_key,
+                    title: &cand.item.title,
+                    link: &cand.item.link,
+                    series_id: Some(cand.found.series.id),
+                    series_title: &cand.found.series.title,
+                    group_name: &cand.item.group,
+                    is_batch: cand.item.is_batch,
+                    decision: "grabbed",
+                    reason: &reason,
+                    source: "rss",
+                }).await;
                 // Record for post-processing.
                 let ep_list: Vec<i32> = cand.found.resolved_eps.iter().copied().collect();
                 let _ = crate::models::grabbed_torrents::record_grab(
@@ -412,14 +546,27 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     cand.found.series.id,
                     &ep_list,
                 ).await;
-                // Record quality tag for episode status display.
-                let tier = quality::detect_tier(&cand.item.title, &cand.item.resolution);
+                // Record quality tag + classification for episode status display.
+                let classification = crate::services::source::classify_release(
+                    &state.db,
+                    &cand.item.title,
+                    Some(&cand.item.resolution),
+                    Some(crate::services::source::NyaaContext {
+                        info_hash: &cand.item.info_hash,
+                        view_url: &cand.item.link,
+                        is_batch: cand.item.is_batch,
+                    }),
+                    Some(crate::services::source::SeriesContext {
+                        status: &cand.found.series.status,
+                        season_year: cand.found.series.season_year,
+                    }),
+                ).await;
                 for ep_num in &ep_list {
                     let _ = episode_tags::record_grab(
                         &state.db,
                         cand.found.series.id,
                         *ep_num,
-                        tier.label(),
+                        &classification,
                         &cand.item.title,
                         &cand.item.group,
                     ).await;
@@ -428,7 +575,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             Err(err) => {
                 skipped += 1;
                 let reason = format!("{} | {}", err, build_match_diag(&cand.item, Some(&cand.found), cand.score));
-                let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "error", &reason, "rss").await;
+                let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                    item_key: &cand.item_key,
+                    title: &cand.item.title,
+                    link: &cand.item.link,
+                    series_id: Some(cand.found.series.id),
+                    series_title: &cand.found.series.title,
+                    group_name: &cand.item.group,
+                    is_batch: cand.item.is_batch,
+                    decision: "error",
+                    reason: &reason,
+                    source: "rss",
+                }).await;
             }
         }
     }
@@ -513,7 +671,8 @@ fn canonical_episode_key(found: &MatchResult, is_batch: bool) -> String {
     )
 }
 
-fn score_candidate(
+async fn score_candidate(
+    db: &sqlx::SqlitePool,
     cfg: &config::Config,
     item: &RssItem,
     found: &series::Series,
@@ -521,11 +680,38 @@ fn score_candidate(
     alias_score: f32,
     parse_mode: &str,
 ) -> i32 {
-    let preferred_tier = quality::QualityTier::from_str(&cfg.quality_profile);
-    let cutoff_tier = quality::QualityTier::from_str(&cfg.quality_cutoff);
+    let preferred_source = Source::from_str(&cfg.preferred_source);
+    let preferred_resolution = Resolution::from_str(&cfg.preferred_resolution);
+    // Scoring uses the coarse Source rank, so collapse any BluRay sub-tier
+    // (bluray_remux/bluray_bdmv) back to plain BluRay here. Upgrade-detection
+    // and anywhere else that needs the sub-tier already went through
+    // `parse_cutoff_source` at their own call sites.
+    let (cutoff_source, _, _) = source::parse_cutoff_source(&cfg.cutoff_source);
+    let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
     let finished_mode = quality::FinishedSeriesMode::from_str(&cfg.finished_series_quality);
-    let detected_tier = quality::detect_tier(&item.title, &item.resolution);
-    let mut score = quality::tier_score(detected_tier, preferred_tier, cutoff_tier);
+
+    let classification = source::classify_release(
+        db,
+        &item.title,
+        Some(&item.resolution),
+        Some(source::NyaaContext {
+            info_hash: &item.info_hash,
+            view_url: &item.link,
+            is_batch: item.is_batch,
+        }),
+        Some(source::SeriesContext {
+            status: &found.status,
+            season_year: found.season_year,
+        }),
+    )
+    .await;
+    let mut score = source::score_classification(
+        &classification,
+        preferred_source,
+        preferred_resolution,
+        cutoff_source,
+        cutoff_resolution,
+    );
 
     score += quality::preferred_group_bonus(&item.group, &quality::parse_group_list(&cfg.preferred_groups));
     score += (alias_score * 50.0) as i32;
@@ -572,7 +758,7 @@ fn evaluate_candidate(
     item: &RssItem,
     disk_files: &[media::EpisodeFile],
     parsed_eps: &HashSet<i32>,
-    cutoff_tier: quality::QualityTier,
+    cutoff: &ClassificationResult,
     quality_tags: &HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> CandidateDecision {
     let existing_ep_numbers: HashSet<i32> = disk_files.iter().map(|f| f.episode_number).collect();
@@ -582,7 +768,7 @@ fn evaluate_candidate(
             // For batches, count episodes that are either missing or upgradeable.
             let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
             let upgrade_count = parsed_eps.iter().filter(|ep| {
-                existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff_tier, quality_tags)
+                existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
             }).count() as i32;
             let actionable = new_count + upgrade_count;
             if actionable == 0 {
@@ -620,7 +806,7 @@ fn evaluate_candidate(
 
     let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
     let upgrade_count = parsed_eps.iter().filter(|ep| {
-        existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff_tier, quality_tags)
+        existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
     }).count() as i32;
     let actionable = new_count + upgrade_count;
 
@@ -640,35 +826,35 @@ fn evaluate_candidate(
 }
 
 /// Check if an episode on disk is below the quality cutoff and the incoming
-/// release would be an upgrade.  Prefers the DB-stored quality tag (from the
-/// original release title at grab time) over the post-processed filename,
-/// which often loses resolution/source markers.
+/// release would be an upgrade. Classifies both sides via the classification
+/// pipeline (stored columns / release title / filename fallback for existing;
+/// filename-only for incoming) and compares by rank tuple.
 fn episode_is_upgradeable(
     ep: &i32,
     disk_files: &[media::EpisodeFile],
     incoming: &RssItem,
-    cutoff_tier: quality::QualityTier,
+    cutoff: &ClassificationResult,
     quality_tags: &HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> bool {
     let Some(existing) = disk_files.iter().find(|f| f.episode_number == *ep) else {
         return false; // not on disk — not an "upgrade", it's a new episode
     };
-    let existing_tier = if let Some(tag) = quality_tags.get(ep) {
-        let tier = quality::QualityTier::from_str(&tag.quality_tag);
-        if tier != quality::QualityTier::Unknown { tier } else { quality::tier_from_disk_quality(&existing.quality) }
-    } else {
-        quality::tier_from_disk_quality(&existing.quality)
-    };
-    if existing_tier == quality::QualityTier::Unknown {
+    let existing_classification =
+        auto_search::resolve_existing_classification(existing, quality_tags.get(ep));
+    // If we can't place existing anywhere, be conservative and don't upgrade.
+    if existing_classification.source == Source::Unknown
+        && existing_classification.resolution == Resolution::Unknown
+    {
         return false;
     }
-    // Only upgrade if existing is below cutoff
-    if existing_tier.rank() >= cutoff_tier.rank() {
+    // Only upgrade if existing is below cutoff.
+    if existing_classification.rank() >= cutoff.rank() {
         return false;
     }
-    let incoming_tier = quality::detect_tier(&incoming.title, &incoming.resolution);
-    // Incoming must be strictly better than what's on disk
-    incoming_tier.rank() > existing_tier.rank()
+    let incoming_classification =
+        source::classify_release_sync(&incoming.title, Some(&incoming.resolution));
+    // Incoming must be strictly better than what's on disk.
+    incoming_classification.rank() > existing_classification.rank()
 }
 
 fn is_finished_status(status: &str) -> bool {
@@ -682,19 +868,23 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
 
     let mut best: Option<(f32, MatchResult)> = None;
 
+    let item_view = ItemView {
+        normalized: &parsed.normalized_title,
+        tokens: &item_tokens,
+        core: &parsed.core_title,
+        core_tokens: &item_core_tokens,
+        collapsed: &parsed.collapsed_title,
+        collapsed_core: &parsed.collapsed_core_title,
+    };
+
     for meta in all_meta {
-        let alias_score = score_alias_overlap(
-            &parsed.normalized_title,
-            &item_tokens,
-            &parsed.core_title,
-            &item_core_tokens,
-            &parsed.collapsed_title,
-            &parsed.collapsed_core_title,
-            &meta.aliases,
-            &meta.core_aliases,
-            &meta.collapsed_aliases,
-            &meta.collapsed_core_aliases,
-        );
+        let alias_set = AliasSet {
+            aliases: &meta.aliases,
+            core_aliases: &meta.core_aliases,
+            collapsed_aliases: &meta.collapsed_aliases,
+            collapsed_core_aliases: &meta.collapsed_core_aliases,
+        };
+        let alias_score = score_alias_overlap(&item_view, &alias_set);
         if alias_score < 0.82 {
             continue;
         }
@@ -822,46 +1012,60 @@ fn compare_series_meta(a: &SeriesMeta, b: &SeriesMeta) -> Ordering {
     }
 }
 
-fn score_alias_overlap(
-    normalized_item: &str,
-    item_tokens: &HashSet<String>,
-    item_core: &str,
-    item_core_tokens: &HashSet<String>,
-    collapsed_item: &str,
-    collapsed_item_core: &str,
-    aliases: &[String],
-    core_aliases: &[String],
-    collapsed_aliases: &[String],
-    collapsed_core_aliases: &[String],
-) -> f32 {
-    let alias_max = aliases.iter().map(|alias| {
+/// Four parallel views of an RSS item title — normalized, core-only,
+/// and a collapsed (alphanumeric-only) variant of each — grouped so
+/// `score_alias_overlap` can take a single bundle instead of six
+/// positional `&str`/`&HashSet` args. Four `&str`s that happen to be
+/// next to each other in a signature is exactly the kind of thing the
+/// compiler can't protect you from at the call site.
+struct ItemView<'a> {
+    normalized: &'a str,
+    tokens: &'a HashSet<String>,
+    core: &'a str,
+    core_tokens: &'a HashSet<String>,
+    collapsed: &'a str,
+    collapsed_core: &'a str,
+}
+
+/// The four parallel alias lists on a `SeriesMeta`, bundled together
+/// for the same reason as `ItemView`: four `&[String]` args in a row
+/// is a positional-swap hazard.
+struct AliasSet<'a> {
+    aliases: &'a [String],
+    core_aliases: &'a [String],
+    collapsed_aliases: &'a [String],
+    collapsed_core_aliases: &'a [String],
+}
+
+fn score_alias_overlap(item: &ItemView<'_>, meta: &AliasSet<'_>) -> f32 {
+    let alias_max = meta.aliases.iter().map(|alias| {
         let normalized_alias = auto_search::normalize_title(alias);
         let alias_tokens = auto_search::token_set(&normalized_alias);
         let mut score = 0.0f32;
-        if !normalized_alias.is_empty() && (normalized_item.contains(&normalized_alias) || normalized_alias.contains(normalized_item)) {
+        if !normalized_alias.is_empty() && (item.normalized.contains(&normalized_alias) || normalized_alias.contains(item.normalized)) {
             score = score.max(1.0);
         }
-        let overlap_ab = auto_search::token_overlap_ratio(item_tokens, &alias_tokens);
-        let overlap_ba = auto_search::token_overlap_ratio(&alias_tokens, item_tokens);
+        let overlap_ab = auto_search::token_overlap_ratio(item.tokens, &alias_tokens);
+        let overlap_ba = auto_search::token_overlap_ratio(&alias_tokens, item.tokens);
         score.max(overlap_ab.min(overlap_ba))
     }).fold(0.0f32, f32::max);
 
-    let core_max = core_aliases.iter().map(|alias_core| {
+    let core_max = meta.core_aliases.iter().map(|alias_core| {
         let core_tokens = auto_search::token_set(alias_core);
         let mut score = 0.0f32;
-        if !alias_core.is_empty() && !item_core.is_empty() && (item_core.contains(alias_core) || alias_core.contains(item_core)) {
+        if !alias_core.is_empty() && !item.core.is_empty() && (item.core.contains(alias_core) || alias_core.contains(item.core)) {
             score = score.max(1.0);
         }
-        let overlap_ab = auto_search::token_overlap_ratio(item_core_tokens, &core_tokens);
-        let overlap_ba = auto_search::token_overlap_ratio(&core_tokens, item_core_tokens);
+        let overlap_ab = auto_search::token_overlap_ratio(item.core_tokens, &core_tokens);
+        let overlap_ba = auto_search::token_overlap_ratio(&core_tokens, item.core_tokens);
         score.max(overlap_ab.min(overlap_ba))
     }).fold(0.0f32, f32::max);
 
-    let collapsed_max = collapsed_aliases.iter().chain(collapsed_core_aliases.iter()).map(|alias| {
+    let collapsed_max = meta.collapsed_aliases.iter().chain(meta.collapsed_core_aliases.iter()).map(|alias| {
         if alias.is_empty() {
             return 0.0;
         }
-        if collapsed_item == *alias || collapsed_item_core == *alias || collapsed_item.contains(alias) || alias.contains(collapsed_item_core) {
+        if item.collapsed == *alias || item.collapsed_core == *alias || item.collapsed.contains(alias) || alias.contains(item.collapsed_core) {
             1.0
         } else {
             0.0
@@ -1114,10 +1318,8 @@ fn build_item_key(item: &RssItem) -> String {
 
 async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
     let url = format!("{}&c={}", NYAA_RSS_BASE, category);
-    let client = reqwest::Client::new();
-    let xml = client
+    let xml = RSS_HTTP_CLIENT
         .get(&url)
-        .header("User-Agent", "Ryokan/0.1")
         .send()
         .await
         .map_err(|e| format!("RSS request failed: {}", e))?
@@ -1195,9 +1397,32 @@ fn parse_feed(xml: &str) -> Vec<RssItem> {
     items
 }
 
+/// Pre-compiled regexes keyed by RSS tag name. Populated lazily on first
+/// feed parse so we don't re-compile six regexes per item across thousands
+/// of items per sync. Only the six tags `parse_feed` actually reads are
+/// included; `extract_tag` returns an empty string for any other tag,
+/// matching the old behavior of `Regex::new(...).unwrap()` silently
+/// returning no captures for an unmatched pattern.
+static RE_EXTRACT_TAGS: LazyLock<HashMap<&'static str, Regex>> = LazyLock::new(|| {
+    let mut m = HashMap::new();
+    for tag in [
+        "title",
+        "link",
+        "guid",
+        "nyaa:downloadurl",
+        "nyaa:magneturi",
+        "nyaa:infohash",
+    ] {
+        let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>", tag = tag);
+        m.insert(tag, Regex::new(&pattern).expect("extract_tag pattern compiles"));
+    }
+    m
+});
+
 fn extract_tag(block: &str, tag: &str) -> String {
-    let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>", tag = tag);
-    let re = Regex::new(&pattern).unwrap();
+    let Some(re) = RE_EXTRACT_TAGS.get(tag) else {
+        return String::new();
+    };
     re.captures(block)
         .and_then(|caps| caps.get(1))
         .map(|m| strip_cdata(m.as_str()))
@@ -1213,13 +1438,81 @@ fn strip_cdata(value: &str) -> String {
         .to_string()
 }
 
+/// Decode XML character references in a single pass.
+///
+/// Handles the five predefined XML entities (`&amp;`, `&lt;`, `&gt;`,
+/// `&quot;`, `&apos;`) plus decimal (`&#NNN;`) and hexadecimal
+/// (`&#xHH;`) numeric character references. Unknown entities are left
+/// untouched.
+///
+/// The previous implementation used chained `str::replace` calls, which
+/// had two problems: (1) it missed `&apos;` and any numeric reference
+/// other than the specific literal `&#39;`, so feeds emitting e.g.
+/// `&#039;` or `&#x27;` for apostrophes came through mangled; and (2)
+/// the `&amp;` → `&` pass ran first, which could cause double-decoding
+/// on pathological input like `&amp;lt;`. Scanning once from left to
+/// right avoids both issues.
 fn decode_xml(value: &str) -> String {
-    value
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'&' {
+            // Push the current char (use the &str to handle multi-byte UTF-8).
+            let ch = value[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        // Look for the terminating ';' within a reasonable distance.
+        // 16 comfortably covers every legal predefined-entity name plus
+        // the longest hex codepoint form (`&#x10FFFF;` is 9 bytes after
+        // the `&`) with margin for the occasional leading-zero or
+        // stray-whitespace oddball a lazy feed might emit; anything
+        // longer is almost certainly a literal ampersand with no entity.
+        let end = bytes[i + 1..]
+            .iter()
+            .take(16)
+            .position(|&b| b == b';')
+            .map(|p| i + 1 + p);
+        let Some(end) = end else {
+            out.push('&');
+            i += 1;
+            continue;
+        };
+        let entity = &value[i + 1..end];
+        let decoded: Option<char> = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => {
+                if let Some(num) = entity.strip_prefix('#') {
+                    let code = if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        num.parse::<u32>().ok()
+                    };
+                    code.and_then(char::from_u32)
+                } else {
+                    None
+                }
+            }
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                i = end + 1;
+            }
+            None => {
+                // Unknown entity — leave the literal text alone.
+                out.push('&');
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn extract_group(title: &str) -> String {

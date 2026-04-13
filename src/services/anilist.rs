@@ -268,6 +268,36 @@ pub struct AnimeDetail {
     pub relations: Vec<RelatedEntry>,
 }
 
+impl AnimeDetail {
+    /// Effective episode count for rendering, episode cache building, and
+    /// monitoring. AniList reports `episodes: null` for currently-airing
+    /// series because the final count isn't known yet, so we fall back to
+    /// `nextAiringEpisode - 1` (the number of episodes that have already
+    /// aired). Without this every airing show looks like it has zero
+    /// episodes, which breaks the episode list and the monitoring UI.
+    pub fn effective_episode_count(&self) -> i32 {
+        match self.episodes.unwrap_or(0) {
+            0 => self.next_airing_episode.map(|n| (n - 1).max(0)).unwrap_or(0),
+            n => n,
+        }
+    }
+
+    /// True when the series has finished airing (or was cancelled) per any
+    /// of the three metadata providers' vocabularies. AniList uses
+    /// `FINISHED` / `CANCELLED`, Jikan normalizes "Finished Airing" →
+    /// `FINISHED_AIRING`, and Kitsu uses `FINISHED`. Without this helper
+    /// the callsites that just compared against the literal `"FINISHED"`
+    /// string silently misclassified every Jikan-fed series as "still
+    /// airing", breaking the finished-mode BD probe and the 2-year
+    /// sequel-rejection filter whenever the AniList fallback kicked in.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "FINISHED" | "FINISHED_AIRING" | "CANCELLED"
+        )
+    }
+}
+
 fn prettify_status(status: &str) -> String {
     status.replace('_', " ")
 }

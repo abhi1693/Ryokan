@@ -43,15 +43,25 @@ pub async fn has_blob(db: &SqlitePool, blob_hash: &str) -> Result<bool, sqlx::Er
     Ok(row.is_some())
 }
 
+/// Payload for `upsert_ref`. Named fields so callers can't swap the
+/// four `&str` arguments (cache_key / parent_kind / image_kind /
+/// source_url) without the compiler noticing — swapping two of those
+/// silently corrupts the cache index, and the call arrives in a
+/// background task where the error wouldn't surface until someone
+/// notices wrong artwork.
+pub struct RefUpsert<'a> {
+    pub cache_key: &'a str,
+    pub parent_kind: &'a str,
+    pub parent_id: Option<i64>,
+    pub image_kind: &'a str,
+    pub source_url: &'a str,
+    pub blob_hash: &'a str,
+    pub last_write: i64,
+}
+
 pub async fn upsert_ref(
     db: &SqlitePool,
-    cache_key: &str,
-    parent_kind: &str,
-    parent_id: Option<i64>,
-    image_kind: &str,
-    source_url: &str,
-    blob_hash: &str,
-    last_write: i64,
+    r: RefUpsert<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -70,13 +80,13 @@ pub async fn upsert_ref(
             cached_at = CURRENT_TIMESTAMP
         "#,
     )
-    .bind(cache_key)
-    .bind(parent_kind)
-    .bind(parent_id)
-    .bind(image_kind)
-    .bind(source_url)
-    .bind(blob_hash)
-    .bind(last_write)
+    .bind(r.cache_key)
+    .bind(r.parent_kind)
+    .bind(r.parent_id)
+    .bind(r.image_kind)
+    .bind(r.source_url)
+    .bind(r.blob_hash)
+    .bind(r.last_write)
     .execute(db)
     .await?;
     Ok(())

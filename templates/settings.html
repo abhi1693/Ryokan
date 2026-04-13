@@ -16,10 +16,12 @@
 
 <div class="settings-tabs system-tabs">
     <a href="/settings?tab=integrations" class="system-tab {% if tab == "integrations" %}active{% endif %}">Connections</a>
-    <a href="/settings?tab=quality" class="system-tab {% if tab == "quality" %}active{% endif %}">Quality &amp; Scoring</a>
+    <a href="/settings?tab=quality" class="system-tab {% if tab == "quality" %}active{% endif %}">Preferred Quality &amp; Releases</a>
+    <a href="/settings?tab=groups" class="system-tab {% if tab == "groups" %}active{% endif %}">Release Groups</a>
     <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
 </div>
 
+{% if tab != "groups" %}
 <form method="post" action="/settings" class="settings-form">
     <input type="hidden" name="tab" value="{{ tab }}">
 
@@ -123,7 +125,7 @@
 
     <div class="settings-tab-panel {% if tab == "quality" %}active{% endif %}">
         <fieldset>
-            <legend>Quality &amp; Scoring</legend>
+            <legend>Preferred Quality &amp; Releases</legend>
             <div class="form-group">
                 <label for="preferred_groups">Preferred Group Whitelist</label>
                 <input type="text" name="preferred_groups" id="preferred_groups" value="{{ config.preferred_groups }}" placeholder="SubsPlease, Erai-raws, Judas">
@@ -135,34 +137,44 @@
                 <span class="form-hint">Comma-separated groups Ryokan should never auto-grab from. Manual search results still appear, but RSS auto-grabs will reject them.</span>
             </div>
             <div class="form-group">
-                <label for="quality_profile">Preferred Quality</label>
-                <select name="quality_profile" id="quality_profile">
-                    <option value="web_480" {% if config.quality_profile == "web_480" %}selected{% endif %}>WEB 480p</option>
-                    <option value="dvd" {% if config.quality_profile == "dvd" %}selected{% endif %}>DVD</option>
-                    <option value="bd_480" {% if config.quality_profile == "bd_480" %}selected{% endif %}>BD 480p</option>
-                    <option value="web_720" {% if config.quality_profile == "web_720" %}selected{% endif %}>WEB 720p</option>
-                    <option value="bd_720" {% if config.quality_profile == "bd_720" %}selected{% endif %}>BD 720p</option>
-                    <option value="remux_720" {% if config.quality_profile == "remux_720" %}selected{% endif %}>BD Remux 720p</option>
-                    <option value="web_1080" {% if config.quality_profile == "web_1080" %}selected{% endif %}>WEB 1080p</option>
-                    <option value="bd_1080" {% if config.quality_profile == "bd_1080" %}selected{% endif %}>BD 1080p</option>
-                    <option value="remux_1080" {% if config.quality_profile == "remux_1080" %}selected{% endif %}>BD Remux 1080p</option>
+                <label for="preferred_source">Preferred Source</label>
+                <select name="preferred_source" id="preferred_source">
+                    <option value="web" {% if config.preferred_source == "web" %}selected{% endif %}>WEB</option>
+                    <option value="bluray" {% if config.preferred_source == "bluray" %}selected{% endif %}>BluRay</option>
+                    <option value="dvd" {% if config.preferred_source == "dvd" %}selected{% endif %}>DVD</option>
                 </select>
-                <span class="form-hint">The quality tier auto search targets. For airing series, this is the primary target.</span>
+                <span class="form-hint">The release source auto search ranks highest. Other sources still match but are deprioritized in scoring.</span>
             </div>
             <div class="form-group">
-                <label for="quality_cutoff">Quality Cutoff</label>
-                <select name="quality_cutoff" id="quality_cutoff">
-                    <option value="web_480" {% if config.quality_cutoff == "web_480" %}selected{% endif %}>WEB 480p</option>
-                    <option value="dvd" {% if config.quality_cutoff == "dvd" %}selected{% endif %}>DVD</option>
-                    <option value="bd_480" {% if config.quality_cutoff == "bd_480" %}selected{% endif %}>BD 480p</option>
-                    <option value="web_720" {% if config.quality_cutoff == "web_720" %}selected{% endif %}>WEB 720p</option>
-                    <option value="bd_720" {% if config.quality_cutoff == "bd_720" %}selected{% endif %}>BD 720p</option>
-                    <option value="remux_720" {% if config.quality_cutoff == "remux_720" %}selected{% endif %}>BD Remux 720p</option>
-                    <option value="web_1080" {% if config.quality_cutoff == "web_1080" %}selected{% endif %}>WEB 1080p</option>
-                    <option value="bd_1080" {% if config.quality_cutoff == "bd_1080" %}selected{% endif %}>BD 1080p</option>
-                    <option value="remux_1080" {% if config.quality_cutoff == "remux_1080" %}selected{% endif %}>BD Remux 1080p</option>
+                <label for="preferred_resolution">Preferred Resolution</label>
+                <select name="preferred_resolution" id="preferred_resolution">
+                    <option value="2160" {% if config.preferred_resolution == "2160" %}selected{% endif %}>2160p</option>
+                    <option value="1080" {% if config.preferred_resolution == "1080" %}selected{% endif %}>1080p</option>
+                    <option value="720" {% if config.preferred_resolution == "720" %}selected{% endif %}>720p</option>
+                    <option value="480" {% if config.preferred_resolution == "480" %}selected{% endif %}>480p</option>
                 </select>
-                <span class="form-hint">Stop upgrading once this quality is reached. Should be ≥ preferred quality.</span>
+                <span class="form-hint">Target resolution for both manual and auto search. Resolution dominates source in scoring, so resolution matches are prioritized over source matches.</span>
+            </div>
+            <div class="form-group">
+                <label for="cutoff_source">Cutoff Source</label>
+                <select name="cutoff_source" id="cutoff_source">
+                    <option value="web" {% if config.cutoff_source == "web" %}selected{% endif %}>WEB</option>
+                    <option value="bluray" {% if config.cutoff_source == "bluray" %}selected{% endif %}>BluRay</option>
+                    <option value="bluray_remux" {% if config.cutoff_source == "bluray_remux" %}selected{% endif %}>BD Remux</option>
+                    <option value="bluray_bdmv" {% if config.cutoff_source == "bluray_bdmv" %}selected{% endif %}>BD RAW (BDMV)</option>
+                    <option value="dvd" {% if config.cutoff_source == "dvd" %}selected{% endif %}>DVD</option>
+                </select>
+                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source. BD Remux and BD RAW require a matching sub-tier — plain BluRay encodes will stay upgradeable.</span>
+            </div>
+            <div class="form-group">
+                <label for="cutoff_resolution">Cutoff Resolution</label>
+                <select name="cutoff_resolution" id="cutoff_resolution">
+                    <option value="2160" {% if config.cutoff_resolution == "2160" %}selected{% endif %}>2160p</option>
+                    <option value="1080" {% if config.cutoff_resolution == "1080" %}selected{% endif %}>1080p</option>
+                    <option value="720" {% if config.cutoff_resolution == "720" %}selected{% endif %}>720p</option>
+                    <option value="480" {% if config.cutoff_resolution == "480" %}selected{% endif %}>480p</option>
+                </select>
+                <span class="form-hint">Minimum resolution required to satisfy the cutoff. Files below this are candidates for upgrade search.</span>
             </div>
             <div class="form-group">
                 <label for="finished_series_quality">Finished Series</label>
@@ -172,16 +184,6 @@
                     <option value="bd_only" {% if config.finished_series_quality == "bd_only" %}selected{% endif %}>BD only (skip WEB)</option>
                 </select>
                 <span class="form-hint">For series marked "Finished" on AniList. "Prefer BD" searches for Bluray releases first, falling back to WEB if none found. "BD only" will skip WEB releases entirely.</span>
-            </div>
-            <div class="form-group">
-                <label for="preferred_resolution">Manual Search Resolution Bias</label>
-                <select name="preferred_resolution" id="preferred_resolution">
-                    <option value="2160" {% if config.preferred_resolution == "2160" %}selected{% endif %}>4K (2160p)</option>
-                    <option value="1080" {% if config.preferred_resolution == "1080" %}selected{% endif %}>1080p</option>
-                    <option value="720" {% if config.preferred_resolution == "720" %}selected{% endif %}>720p</option>
-                    <option value="480" {% if config.preferred_resolution == "480" %}selected{% endif %}>480p</option>
-                </select>
-                <span class="form-hint">Used for manual Nyaa search ranking. Auto search derives resolution from the quality profile.</span>
             </div>
             <div class="form-group">
                 <label>Audio Preference</label>
@@ -263,6 +265,117 @@
 
     <button type="submit" class="btn btn-primary">Save Settings</button>
 </form>
+{% endif %}
+
+{% if tab == "groups" %}
+<div class="settings-tab-panel active">
+    <fieldset>
+        <legend>Release Group Source Map</legend>
+        <p class="form-hint">Maps release groups to their known source. Used by Layer 3 of the classification pipeline when the filename alone doesn't carry source keywords (e.g. SubsPlease is WEB, VCB-Studio is BluRay). Seeded rows are restored on startup; user-edited rows are preserved.</p>
+
+        {% if !suggestions.is_empty() %}
+        <h3 class="settings-subheading">Suggested Mappings ({{ suggestions.len() }})</h3>
+        <p class="form-hint">Inferred from your manual classification overrides. When you've pinned multiple episodes from the same release group to the same source, Ryokan surfaces it here so you can teach the identity table.</p>
+        <table class="group-source-table">
+            <thead>
+                <tr>
+                    <th>Group</th>
+                    <th>Suggested source</th>
+                    <th>Overrides</th>
+                    <th>Currently mapped</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in suggestions %}
+                <tr>
+                    <td>{{ s.group_name }}</td>
+                    <td>{{ s.source.as_str() }}</td>
+                    <td>{{ s.episode_count }} episode{% if s.episode_count != 1 %}s{% endif %}</td>
+                    <td>
+                        {% if let Some(existing) = s.existing_source %}
+                        <span class="tag tag-res" title="Accepting will overwrite the existing mapping">conflicts: {{ existing.as_str() }}</span>
+                        {% else %}
+                        <span class="form-hint">— (new)</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <form method="post" action="/settings/groups" class="group-upsert-form">
+                            <input type="hidden" name="group_name" value="{{ s.group_name }}">
+                            <input type="hidden" name="source" value="{{ s.source.as_str()|lowercase }}">
+                            <input type="hidden" name="confidence" value="0.95">
+                            <input type="hidden" name="notes" value="from {{ s.episode_count }} manual override{% if s.episode_count != 1 %}s{% endif %}">
+                            <button type="submit" class="btn btn-primary">Accept</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+
+        <h3 class="settings-subheading">Add or Update Group</h3>
+        <form method="post" action="/settings/groups" class="settings-form group-upsert-form">
+            <div class="form-group">
+                <label for="new_group_name">Group Name</label>
+                <input type="text" name="group_name" id="new_group_name" required placeholder="e.g. SubsPlease">
+                <span class="form-hint">Submitting an existing group name updates that row instead of creating a new one.</span>
+            </div>
+            <div class="form-group">
+                <label for="new_group_source">Source</label>
+                <select name="source" id="new_group_source">
+                    <option value="web">WEB</option>
+                    <option value="bluray">BluRay</option>
+                    <option value="dvd">DVD</option>
+                    <option value="hdtv">HDTV</option>
+                    <option value="tv">TV</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="new_group_confidence">Confidence (0.0 – 1.0)</label>
+                <input type="number" name="confidence" id="new_group_confidence" min="0" max="1" step="0.05" value="0.95">
+                <span class="form-hint">How strongly this mapping should weigh in classification. Defaults used by seeded groups are around 0.95.</span>
+            </div>
+            <div class="form-group">
+                <label for="new_group_notes">Notes</label>
+                <input type="text" name="notes" id="new_group_notes" placeholder="optional">
+            </div>
+            <button type="submit" class="btn btn-primary">Save Group</button>
+        </form>
+
+        <h3 class="settings-subheading">Current Entries ({{ groups.len() }})</h3>
+        <table class="group-source-table">
+            <thead>
+                <tr>
+                    <th>Group</th>
+                    <th>Source</th>
+                    <th>Conf.</th>
+                    <th>Notes</th>
+                    <th>Kind</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for group in groups %}
+                <tr>
+                    <td>{{ group.group_name }}</td>
+                    <td>{{ group.source.as_str() }}</td>
+                    <td>{{ group.confidence }}</td>
+                    <td>{{ group.notes }}</td>
+                    <td>{% if group.is_user_edit %}User{% else %}Seed{% endif %}</td>
+                    <td>
+                        <form method="post" action="/settings/groups/delete" class="group-delete-form">
+                            <input type="hidden" name="group_name" value="{{ group.group_name }}">
+                            <button type="submit" class="btn btn-danger">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </fieldset>
+</div>
+{% endif %}
 
 <script>
 function generateApiKey() {

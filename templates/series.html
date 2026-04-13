@@ -50,9 +50,6 @@
             <button class="btn btn-primary" id="btn-auto-search" onclick="autoSearchSeries(this)">
                 <span class="btn-label">Search Missing Episodes</span>
             </button>
-            <button class="btn btn-secondary" id="btn-search-batch" onclick="searchBatchReleases(this)">
-                <span class="btn-label">Search Batch Releases</span>
-            </button>
             {% if is_tracked %}
                 {% if let Some(id) = db_id %}
                 <button class="btn btn-danger" id="btn-track" onclick="removeSeries({{ id }})">Remove from Library</button>
@@ -77,7 +74,11 @@
 {% if !relation_groups.is_empty() %}
 <div class="relations-section">
     <h3 class="relations-heading">Relations</h3>
-    <div class="relation-cards">
+    <div class="relations-row">
+        <button type="button" class="relation-scroll-btn relation-scroll-btn-left" aria-label="Scroll relations left" hidden>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="relation-cards">
         {% for group in relation_groups %}
         {% for card in group.entries %}
         <a href="/series/{{ card.id }}" class="relation-card">
@@ -105,6 +106,10 @@
         </a>
         {% endfor %}
         {% endfor %}
+        </div>
+        <button type="button" class="relation-scroll-btn relation-scroll-btn-right" aria-label="Scroll relations right" hidden>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
     </div>
 </div>
 {% endif %}
@@ -130,17 +135,30 @@
 
 {% if is_tracked %}
 <div class="detail-section monitoring-section">
-    <div class="folder-row monitoring-row">
-        <span class="folder-label">Monitoring:</span>
-        <div class="monitoring-controls">
-            <select id="monitor-mode" class="folder-select monitoring-select" onchange="setMonitoring(this.value)">
-                <option value="all" {% if monitor_mode.as_str() == "all" %}selected{% endif %}>All Episodes</option>
-                <option value="future" {% if monitor_mode.as_str() == "future" %}selected{% endif %}>Future Episodes</option>
-                <option value="missing" {% if monitor_mode.as_str() == "missing" %}selected{% endif %}>Missing Episodes</option>
-                <option value="existing" {% if monitor_mode.as_str() == "existing" %}selected{% endif %}>Existing Episodes</option>
-                <option value="none" {% if monitor_mode.as_str() == "none" %}selected{% endif %}>None</option>
-            </select>
-            <span class="form-hint" id="monitor-summary">{{ monitor_mode_label }} · {{ monitored_count }} monitored</span>
+    <div class="monitoring-card">
+        <div class="monitoring-row">
+            <span class="folder-label">Monitoring:</span>
+            <div class="monitoring-controls">
+                <select id="monitor-mode" class="folder-select monitoring-select" onchange="setMonitoring(this.value)">
+                    <option value="all" {% if monitor_mode.as_str() == "all" %}selected{% endif %}>All Episodes</option>
+                    <option value="future" {% if monitor_mode.as_str() == "future" %}selected{% endif %}>Future Episodes</option>
+                    <option value="missing" {% if monitor_mode.as_str() == "missing" %}selected{% endif %}>Missing Episodes</option>
+                    <option value="existing" {% if monitor_mode.as_str() == "existing" %}selected{% endif %}>Existing Episodes</option>
+                    <option value="none" {% if monitor_mode.as_str() == "none" %}selected{% endif %}>None</option>
+                </select>
+                <span class="form-hint" id="monitor-summary">{{ monitor_mode_label }} · {{ monitored_count }} monitored</span>
+            </div>
+        </div>
+        <div class="monitoring-divider"></div>
+        <div class="monitoring-row">
+            <span class="folder-label">Upgrades:</span>
+            <div class="monitoring-controls">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="allow-upgrades" {% if allow_upgrades %}checked{% endif %} onchange="setAllowUpgrades(this.checked)">
+                    Allow automatic upgrades when a higher-quality release is found
+                </label>
+                <span class="form-hint" id="allow-upgrades-status"></span>
+            </div>
         </div>
     </div>
 </div>
@@ -166,6 +184,15 @@
         {% if is_tracked %}
         {% if let Some(id) = db_id %}
         <div class="season-header-actions">
+            <button class="icon-btn btn-search-batch" type="button"
+                id="btn-search-batch"
+                onclick="searchBatchReleases(this)"
+                title="Search for a batch release covering this season"
+                aria-label="Search batch releases">
+                <span class="icon-btn-inner">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                </span>
+            </button>
             <button class="monitor-all-btn {% if all_monitored %}is-active{% endif %}" type="button"
                 id="btn-monitor-all"
                 onclick="toggleMonitorAll({{ id }}, {{ all_monitored }})"
@@ -258,17 +285,20 @@
                         {% if ep.quality_state == "grabbed" %}
                         <div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>
                         {% else if ep.quality_state == "completed" %}
-                        <span class="tag tag-quality">{{ ep.quality }}</span>
+                        <span class="tag tag-quality{% if ep.manual_override %} tag-quality-manual{% endif %}">{{ ep.quality }}{% if ep.manual_override %} 📌{% endif %}</span>
                         {% else if !ep.quality.is_empty() %}
                             {% if ep.quality_state == "failed" %}
                             <span class="tag tag-quality-failed">{{ ep.quality }} ✗</span>
                             {% else %}
-                            <span class="tag tag-quality">{{ ep.quality }}</span>
+                            <span class="tag tag-quality{% if ep.manual_override %} tag-quality-manual{% endif %}">{{ ep.quality }}{% if ep.manual_override %} 📌{% endif %}</span>
                             {% endif %}
                         {% else if ep.on_disk %}
                         <span class="tag tag-quality">UNKNOWN</span>
                         {% else %}
                         <span class="ep-missing-label">Missing</span>
+                        {% endif %}
+                        {% if ep.needs_review && !ep.manual_override %}
+                        <span class="tag tag-needs-review" title="Classifier wasn't confident — click override to tag manually">⚠ review</span>
                         {% endif %}
                     </td>
                     <td class="ep-col-actions">
@@ -278,9 +308,14 @@
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
                             </span>
                         </button>
-                        <button class="icon-btn btn-episode-isearch" type="button" onclick="openInteractiveSearch({{ ep.number }}, this)" title="Interactive search episode {{ ep.number }}" aria-label="Interactive search episode {{ ep.number }}">
+                        <button class="icon-btn btn-episode-isearch" type="button" onclick="openInteractiveSearch({{ ep.number }}, this)" title="Interactive search episode {{ ep.number }}" aria-label="Interactive search episode {{ ep.number }}" style="margin-right:4px">
                             <span class="icon-btn-inner">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="5"/><line x1="12" y1="12" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><line x1="13" y1="13" x2="20" y2="20"/></svg>
+                            </span>
+                        </button>
+                        <button class="icon-btn btn-episode-override" type="button" onclick="openManualOverride({{ ep.number }}, '{{ ep.class_source }}', '{{ ep.class_resolution }}', {{ ep.class_is_remux }}, {{ ep.class_is_bdmv }}, '{{ ep.class_web_kind }}')" title="Override source/resolution tag" aria-label="Override source/resolution tag for episode {{ ep.number }}">
+                            <span class="icon-btn-inner">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4z"/></svg>
                             </span>
                         </button>
                         {% else %}
@@ -332,6 +367,55 @@
     </div>
 </div>
 
+<!-- Manual Source Override Modal -->
+<div class="modal-backdrop" id="override-modal" style="display:none" onclick="closeManualOverride(event)">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px">
+        <div class="modal-header">
+            <h3 id="override-title">Override classification</h3>
+            <button class="btn-icon" onclick="document.getElementById('override-modal').style.display='none'">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body" style="padding:16px 24px">
+            <p class="form-hint" style="margin-top:0">
+                Pin a source/resolution tag for this episode. The pin survives re-classification, so automatic post-download checks won't touch it. Clear the override to let Ryokan classify again.
+            </p>
+            <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
+                <label class="form-row">
+                    <span class="form-label">Source</span>
+                    <select id="override-source" class="folder-select">
+                        <option value="bluray_bdmv">BD-Raw (BDMV)</option>
+                        <option value="bluray_remux">BD-Remux</option>
+                        <option value="bluray">BluRay</option>
+                        <option value="web_dl">WEB-DL</option>
+                        <option value="webrip">WEBRip</option>
+                        <option value="dvd">DVD</option>
+                        <option value="hdtv">HDTV</option>
+                        <option value="tv">TV</option>
+                        <option value="unknown">Unknown</option>
+                    </select>
+                </label>
+                <label class="form-row">
+                    <span class="form-label">Resolution</span>
+                    <select id="override-resolution" class="folder-select">
+                        <option value="2160p">2160p</option>
+                        <option value="1080p">1080p</option>
+                        <option value="720p">720p</option>
+                        <option value="576p">576p</option>
+                        <option value="480p">480p</option>
+                        <option value="Unknown">Unknown</option>
+                    </select>
+                </label>
+                <div id="override-status" class="form-hint"></div>
+            </div>
+        </div>
+        <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
+            <button class="btn btn-secondary" type="button" onclick="clearManualOverride()">Clear override</button>
+            <button class="btn btn-primary" type="button" onclick="applyManualOverride()">Apply</button>
+        </div>
+    </div>
+</div>
+
 <div id="series-data" hidden
     data-id="{{ route_id }}"
     data-title-romaji="{{ detail.title_romaji }}"
@@ -352,26 +436,10 @@
 <script>
 const SD = document.getElementById('series-data').dataset;
 
-function applyTitleLanguage(lang) {
-    const normalized = ['english', 'romaji', 'native'].includes(lang) ? lang : 'english';
-    document.querySelectorAll('.title-switcher').forEach(el => {
-        const options = el.querySelectorAll('.title-option');
-        let shown = false;
-        options.forEach(opt => {
-            const match = opt.dataset.titleLang === normalized && opt.textContent.trim() !== '';
-            opt.style.display = match ? 'inline' : 'none';
-            if (match) shown = true;
-        });
-        if (!shown && options.length) {
-            for (const opt of options) {
-                if (opt.textContent.trim() !== '') {
-                    opt.style.display = 'inline';
-                    break;
-                }
-            }
-        }
-    });
-}
+// Title-language switching is handled entirely by CSS via the
+// `html[data-title-language]` attribute set by the inline head script in
+// base.html. No DOM walking here — doing it post-parse caused a visible
+// flash of the english titles before they were swapped to romaji.
 
 function toggleMonitorAll(dbId, currentlyAllMonitored) {
     if (!dbId) return;
@@ -515,39 +583,49 @@ function renderGrabHistory(entries, epNum) {
 }
 
 function markEpisodeFailed(historyId, epNum, btn) {
-    if (!confirm('Mark this grab as failed and re-search for the episode?')) return;
-    const addToBlocklist = confirm('Also add this release to the blocklist?');
-    btn.disabled = true;
-    btn.textContent = 'Searching…';
-    const status = document.getElementById('auto-search-status');
-    fetch(`/api/series/${SD.id}/mark-failed/${epNum}`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ history_id: historyId, blocklist: addToBlocklist })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed');
-        const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
-        if (status) status.textContent = grabbed > 0 ? `Re-grabbed episode ${epNum}` : `No replacement found for episode ${epNum}`;
-        btn.textContent = grabbed > 0 ? 'Re-grabbed' : 'No result';
-        if (grabbed > 0) {
-            const first = data.grabbed[0];
-            updateEpisodeRow(epNum, 'grabbed', first.release_group);
-        }
-        // Refresh the grab history in the modal
-        if (SD.dbId) {
-            fetch(`/api/series/${SD.id}/grab-history/${epNum}`)
-                .then(r => r.json())
-                .then(entries => renderGrabHistory(entries, epNum))
-                .catch(() => {});
-        }
-    })
-    .catch(err => {
-        if (status) status.textContent = err.message || 'Failed to mark as failed';
-        btn.disabled = false;
-        btn.textContent = 'Mark Failed';
+    window.ryokanConfirm({
+        title: `Mark Episode ${epNum} as Failed`,
+        body: 'Mark this grab as failed and re-search for the episode?',
+        yesLabel: 'Mark Failed',
+        noLabel: 'Cancel',
+        extras: [{id: 'blocklist', label: 'Also add this release to the blocklist', default: false}],
+    }).then(function(res) {
+        if (!res.ok) return;
+        const addToBlocklist = !!res.extras.blocklist;
+        btn.disabled = true;
+        btn.textContent = 'Searching…';
+        const status = document.getElementById('auto-search-status');
+        fetch(`/api/series/${SD.id}/mark-failed/${epNum}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ history_id: historyId, blocklist: addToBlocklist })
+        })
+        .then(async r => {
+            let data = {};
+            try { data = await r.json(); } catch (_) {}
+            if (!r.ok) throw new Error(data.message || 'Failed');
+            const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
+            if (status) status.textContent = grabbed > 0 ? `Re-grabbed episode ${epNum}` : `No replacement found for episode ${epNum}`;
+            btn.textContent = grabbed > 0 ? 'Re-grabbed' : 'No result';
+            if (grabbed > 0) {
+                const first = data.grabbed[0];
+                updateEpisodeRow(epNum, 'grabbed', first.release_group);
+                ensureDlPollRunning();
+                refreshEpisodeRows({ force: true });
+            }
+            // Refresh the grab history in the modal
+            if (SD.dbId) {
+                fetch(`/api/series/${SD.id}/grab-history/${epNum}`)
+                    .then(r => r.json())
+                    .then(entries => renderGrabHistory(entries, epNum))
+                    .catch(() => {});
+            }
+        })
+        .catch(err => {
+            if (status) status.textContent = err.message || 'Failed to mark as failed';
+            btn.disabled = false;
+            btn.textContent = 'Mark Failed';
+        });
     });
 }
 
@@ -566,6 +644,7 @@ function deleteEpisodeFile() {
             if (status) status.textContent = `Episode ${epNum} file deleted.`;
             document.getElementById('ep-detail-modal').style.display = 'none';
             updateEpisodeRow(epNum, 'deleted');
+            refreshEpisodeRows({ force: true });
         })
         .catch(err => {
             if (status) status.textContent = err.message || 'Delete failed';
@@ -602,6 +681,10 @@ function searchBatchReleases(btn) {
             ? `Batch queued: ${data.grabbed[0].release_title}`
             : 'No batch release found';
         setBusyButton(btn, false);
+        if (grabbed > 0) {
+            ensureDlPollRunning();
+            refreshEpisodeRows({ force: true });
+        }
     })
     .catch(err => {
         status.textContent = err.message || 'Batch search failed';
@@ -685,6 +768,8 @@ function grabInteractiveResult(epNum, idx, btn) {
         if (status) status.textContent = `Episode ${epNum} queued: ${result.title}`;
         // Update the episode row to show grabbed state
         updateEpisodeRow(epNum, 'grabbed', result.group);
+        ensureDlPollRunning();
+        refreshEpisodeRows({ force: true });
         // Close the modal after a short delay
         setTimeout(() => {
             document.getElementById('isearch-modal').style.display = 'none';
@@ -763,6 +848,8 @@ function autoSearchEpisode(episodeNumber, btn) {
             setEpisodeButtonState(btn, 'success', `Queued: ${first.release_title}`);
             status.textContent = `Episode ${episodeNumber} queued${first.release_group ? ` · ${first.release_group}` : ''}`;
             updateEpisodeRow(episodeNumber, 'grabbed', first.release_group);
+            ensureDlPollRunning();
+            refreshEpisodeRows({ force: true });
         } else {
             setEpisodeButtonState(btn, 'error', 'No matching release found');
             status.textContent = `Episode ${episodeNumber}: no matching release found`;
@@ -797,6 +884,10 @@ function autoSearchSeries(btn) {
             ? `${queuedPack ? 'Queued season pack' : `Grabbed ${grabbed} release${grabbed === 1 ? '' : 's'}`}${groups.length ? ` · ${groups.join(', ')}` : ''}`
             : `No release grabbed${skipped ? ` · ${skipped} skipped` : ''}`;
         setBusyButton(btn, false);
+        if (grabbed > 0) {
+            ensureDlPollRunning();
+            refreshEpisodeRows({ force: true });
+        }
     })
     .catch(err => {
         status.textContent = err.message || 'Auto search failed';
@@ -832,6 +923,163 @@ function setMonitoring(mode) {
     .catch(err => {
         if (summary) summary.textContent = err.message || 'Failed to update monitoring';
         if (select) select.disabled = false;
+    });
+}
+
+let overrideTargetEpisode = null;
+
+// Composite dropdown key ↔ backend quartet. Each entry maps the <select>'s
+// value to the {source, is_remux, is_bdmv, web_kind} payload that the
+// /api/library/manual-override handler expects. Centralising the mapping
+// here means the HTML options and the POST body can't drift apart.
+const OVERRIDE_SOURCE_MAP = {
+    bluray_bdmv: { source: 'BluRay', is_remux: false, is_bdmv: true,  web_kind: '' },
+    bluray_remux:{ source: 'BluRay', is_remux: true,  is_bdmv: false, web_kind: '' },
+    bluray:      { source: 'BluRay', is_remux: false, is_bdmv: false, web_kind: '' },
+    web_dl:      { source: 'Web',    is_remux: false, is_bdmv: false, web_kind: 'WEB-DL' },
+    webrip:      { source: 'Web',    is_remux: false, is_bdmv: false, web_kind: 'WEBRip' },
+    dvd:         { source: 'DVD',    is_remux: false, is_bdmv: false, web_kind: '' },
+    hdtv:        { source: 'HDTV',   is_remux: false, is_bdmv: false, web_kind: '' },
+    tv:          { source: 'TV',     is_remux: false, is_bdmv: false, web_kind: '' },
+    unknown:     { source: 'Unknown',is_remux: false, is_bdmv: false, web_kind: '' },
+};
+
+// Reverse lookup: given the current classification quartet on the episode,
+// pick the dropdown key that best represents it. Falls back to 'bluray' so
+// a freshly-opened modal has a sensible default even when the tag is
+// missing or unrecognized.
+function overrideKeyFromClassification(source, isRemux, isBdmv, webKind) {
+    const src = (source || '').toLowerCase();
+    if (src === 'bluray' || src === 'blu-ray') {
+        if (isBdmv) return 'bluray_bdmv';
+        if (isRemux) return 'bluray_remux';
+        return 'bluray';
+    }
+    if (src === 'web') {
+        const wk = (webKind || '').toLowerCase();
+        if (wk === 'web-dl' || wk === 'webdl') return 'web_dl';
+        if (wk === 'webrip') return 'webrip';
+        return 'web_dl';
+    }
+    if (src === 'dvd') return 'dvd';
+    if (src === 'hdtv') return 'hdtv';
+    if (src === 'tv') return 'tv';
+    return 'unknown';
+}
+
+function openManualOverride(epNumber, currentSource, currentResolution, isRemux, isBdmv, webKind) {
+    overrideTargetEpisode = epNumber;
+    const modal = document.getElementById('override-modal');
+    const title = document.getElementById('override-title');
+    const srcSelect = document.getElementById('override-source');
+    const resSelect = document.getElementById('override-resolution');
+    const status = document.getElementById('override-status');
+    if (title) title.textContent = `Override classification — Episode ${epNumber}`;
+    if (srcSelect) {
+        const key = overrideKeyFromClassification(currentSource, isRemux, isBdmv, webKind);
+        srcSelect.value = OVERRIDE_SOURCE_MAP[key] ? key : 'bluray';
+    }
+    if (resSelect) resSelect.value = currentResolution || '1080p';
+    if (status) status.textContent = '';
+    if (modal) modal.style.display = 'flex';
+}
+
+function closeManualOverride(event) {
+    if (event && event.target !== event.currentTarget) return;
+    const modal = document.getElementById('override-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function applyManualOverride() {
+    if (overrideTargetEpisode == null) return;
+    const dbId = parseInt(SD.dbId);
+    if (!dbId) return;
+    const key = document.getElementById('override-source').value;
+    const mapped = OVERRIDE_SOURCE_MAP[key] || OVERRIDE_SOURCE_MAP.unknown;
+    const resolution = document.getElementById('override-resolution').value;
+    const status = document.getElementById('override-status');
+    if (status) status.textContent = 'Saving…';
+    fetch('/api/library/manual-override', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            series_id: dbId,
+            episode_number: overrideTargetEpisode,
+            source: mapped.source,
+            resolution: resolution,
+            is_remux: mapped.is_remux,
+            is_bdmv: mapped.is_bdmv,
+            web_kind: mapped.web_kind,
+        })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Failed to apply override');
+        return data;
+    })
+    .then(_ => { location.reload(); })
+    .catch(err => { if (status) status.textContent = err.message || 'Failed to apply override'; });
+}
+
+function clearManualOverride() {
+    if (overrideTargetEpisode == null) return;
+    const dbId = parseInt(SD.dbId);
+    if (!dbId) return;
+    const status = document.getElementById('override-status');
+    if (status) status.textContent = 'Clearing…';
+    fetch('/api/library/manual-override', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            series_id: dbId,
+            episode_number: overrideTargetEpisode,
+            source: '',
+            resolution: '',
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: '',
+        })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Failed to clear override');
+        return data;
+    })
+    .then(_ => { location.reload(); })
+    .catch(err => { if (status) status.textContent = err.message || 'Failed to clear override'; });
+}
+
+function setAllowUpgrades(allow) {
+    const dbId = parseInt(SD.dbId);
+    if (!dbId) return;
+    const checkbox = document.getElementById('allow-upgrades');
+    const status = document.getElementById('allow-upgrades-status');
+    if (checkbox) checkbox.disabled = true;
+    if (status) status.textContent = 'Saving…';
+
+    fetch('/api/library/allow-upgrades', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ series_id: dbId, allow: allow })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Failed to update upgrades toggle');
+        return data;
+    })
+    .then(_ => {
+        if (status) status.textContent = allow ? 'Upgrades enabled' : 'Upgrades paused for this series';
+        if (checkbox) checkbox.disabled = false;
+    })
+    .catch(err => {
+        if (status) status.textContent = err.message || 'Failed to update upgrades toggle';
+        if (checkbox) {
+            checkbox.checked = !allow;
+            checkbox.disabled = false;
+        }
     });
 }
 
@@ -880,7 +1128,7 @@ function addSeries() {
 }
 
 function removeSeries(dbId) {
-    if (!confirm('Remove from library?')) return;
+    if (!confirm('Remove from library?\n\nThis will also delete the series folder from disk and remove every torrent for this series from qBittorrent. Imported episodes and the Jellyfin folder will be gone.\n\nThis cannot be undone.')) return;
     const btn = document.getElementById('btn-track');
     btn.disabled = true;
     btn.textContent = '...';
@@ -888,12 +1136,12 @@ function removeSeries(dbId) {
     fetch('/api/library/remove', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({id: dbId})
+        body: JSON.stringify({id: dbId, delete_files: true})
     })
     .then(async r => {
         let data = {};
         try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Add failed');
+        if (!r.ok) throw new Error(data.message || 'Remove failed');
         return data;
     })
     .then(() => {
@@ -936,12 +1184,56 @@ function updateEpisodeRow(epNum, state, group) {
     }
 }
 
-applyTitleLanguage(localStorage.getItem('titleLanguage') || SD.titleLanguage || 'english');
-window.addEventListener('storage', () => applyTitleLanguage(localStorage.getItem('titleLanguage') || SD.titleLanguage || 'english'));
+// --- Relations carousel scroll buttons ---
+// The relations list is a horizontal-scroll flexbox. The native scrollbar is
+// styled thin and is easy to miss, so we flank the cards with chevron buttons
+// when the content actually overflows. At the scroll edges the buttons are
+// kept in layout (via visibility:hidden in CSS) so the cards don't jitter as
+// the user crosses the first or last position. For series whose relations
+// already fit in view, the `.no-scroll` class removes the buttons entirely so
+// short lists aren't padded with dead space.
+(function initRelationsCarousel() {
+    const EDGE_SLOP = 2; // pixels of tolerance for "reached the edge"
+    document.querySelectorAll('.relations-section').forEach(section => {
+        const row = section.querySelector('.relations-row');
+        const track = section.querySelector('.relation-cards');
+        const btnLeft = section.querySelector('.relation-scroll-btn-left');
+        const btnRight = section.querySelector('.relation-scroll-btn-right');
+        if (!row || !track || !btnLeft || !btnRight) return;
+
+        const updateButtons = () => {
+            const scrollable = track.scrollWidth > track.clientWidth + EDGE_SLOP;
+            if (!scrollable) {
+                row.classList.add('no-scroll');
+                btnLeft.hidden = true;
+                btnRight.hidden = true;
+                return;
+            }
+            row.classList.remove('no-scroll');
+            btnLeft.hidden = track.scrollLeft <= EDGE_SLOP;
+            btnRight.hidden = track.scrollLeft >= track.scrollWidth - track.clientWidth - EDGE_SLOP;
+        };
+
+        const scrollByViewport = direction => {
+            // Scroll by roughly one viewport minus a card, so the card at the
+            // current edge remains visible as an anchor.
+            const delta = Math.max(track.clientWidth - 152, 200) * direction;
+            track.scrollBy({ left: delta, behavior: 'smooth' });
+        };
+
+        btnLeft.addEventListener('click', () => scrollByViewport(-1));
+        btnRight.addEventListener('click', () => scrollByViewport(1));
+        track.addEventListener('scroll', updateButtons, { passive: true });
+        window.addEventListener('resize', updateButtons);
+
+        updateButtons();
+    });
+})();
 
 // --- Episode download progress polling ---
 let dlPollTimer = null;
 let dlPollActive = false;
+let dlRefreshing = false;
 
 function formatDlSpeed(bps) {
     if (bps <= 0) return '';
@@ -950,55 +1242,188 @@ function formatDlSpeed(bps) {
     return (bps / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
 }
 
+function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = (s == null ? '' : String(s));
+    return div.innerHTML;
+}
+
+const STATUS_ICON_HAVE = '<span class="ep-status-icon ep-have" title="On disk"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></span>';
+const STATUS_ICON_MISSING = '<span class="ep-status-icon ep-missing" title="Missing"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>';
+const DL_PROGRESS_HTML_ZERO = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
+
+// Sync the episode table with the server's authoritative state.
+//
+// By default this only touches rows that are currently showing a progress
+// bar — the poll-path use case: when a download disappears from the
+// progress response (post-processing finished moving the file, or the grab
+// failed), we need to replace the bar with the real row state.
+//
+// Pass `{ force: true }` from mutation handlers (grab, delete, batch
+// search) to patch every row, including rows that weren't previously
+// showing a progress bar. That path also recomputes the season summary
+// badge.
+function refreshEpisodeRows(options) {
+    const opts = options || {};
+    const force = !!opts.force;
+    if (!SD.dbId || dlRefreshing) return;
+    dlRefreshing = true;
+    fetch(`/api/series/${SD.id}/episodes`)
+        .then(r => r.ok ? r.json() : null)
+        .then(episodes => {
+            if (!episodes) return;
+            patchEpisodeRows(episodes, force);
+            if (force) updateSeasonSummary(episodes);
+        })
+        .catch(() => {})
+        .finally(() => { dlRefreshing = false; });
+}
+
+function patchEpisodeRows(episodes, force) {
+    const byNum = {};
+    for (const ep of episodes) byNum[ep.number] = ep;
+    const rows = document.querySelectorAll('.episode-table tbody tr');
+    for (const row of rows) {
+        const numCell = row.querySelector('.ep-col-num');
+        if (!numCell) continue;
+        const n = parseInt(numCell.textContent.trim());
+        const ep = byNum[n];
+        if (!ep) continue;
+        const qualityCell = row.querySelector('.ep-col-quality');
+        if (!qualityCell) continue;
+
+        const showingProgress = qualityCell.querySelector('.dl-progress-wrap') !== null;
+        // Poll-path: only touch rows currently showing a progress bar.
+        // Force-path: touch everything.
+        if (!force && !showingProgress) continue;
+
+        const statusCell = row.querySelector('.ep-col-status');
+
+        if (ep.on_disk) {
+            row.classList.remove('ep-row-missing', 'ep-row-queued');
+            row.classList.add('ep-row-have');
+            if (statusCell) statusCell.innerHTML = STATUS_ICON_HAVE;
+            const quality = ep.quality || 'UNKNOWN';
+            qualityCell.innerHTML = `<span class="tag tag-quality">${escapeHtml(quality)}</span>`;
+            delete qualityCell.dataset.originalHtml;
+        } else if (ep.quality_state === 'grabbed') {
+            // Episode was just grabbed (or is still queued). Show a 0%
+            // progress bar — the poller will update it once qBit reports
+            // real progress.
+            row.classList.remove('ep-row-have', 'ep-row-missing');
+            row.classList.add('ep-row-queued');
+            if (!showingProgress) {
+                if (!qualityCell.dataset.originalHtml) {
+                    qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                }
+                qualityCell.innerHTML = DL_PROGRESS_HTML_ZERO;
+            }
+        } else if (ep.quality_state === 'failed') {
+            row.classList.remove('ep-row-queued', 'ep-row-have');
+            row.classList.add('ep-row-missing');
+            if (statusCell) statusCell.innerHTML = STATUS_ICON_MISSING;
+            qualityCell.innerHTML = `<span class="tag tag-quality-failed">${escapeHtml(ep.quality || '')} ✗</span>`;
+            delete qualityCell.dataset.originalHtml;
+        } else {
+            // Neither on disk, grabbed, nor failed — missing.
+            row.classList.remove('ep-row-have', 'ep-row-queued');
+            row.classList.add('ep-row-missing');
+            if (statusCell) statusCell.innerHTML = STATUS_ICON_MISSING;
+            // Don't blow away a stale progress bar unless force is set:
+            // post-processing may simply not have run yet.
+            if (force) {
+                qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+                delete qualityCell.dataset.originalHtml;
+            }
+        }
+    }
+}
+
+// Recompute the "N / total" season badge at the top of the episodes table
+// from the server's episode list.
+function updateSeasonSummary(episodes) {
+    const onDisk = episodes.filter(ep => ep.on_disk).length;
+    const total = episodes.length;
+    const badge = document.querySelector('.season-header-left .season-badge');
+    if (!badge) return;
+    if (total > 0) {
+        badge.textContent = `${onDisk} / ${total}`;
+    } else {
+        badge.textContent = `${onDisk} files`;
+    }
+    badge.classList.remove('season-badge-complete', 'season-badge-partial', 'season-badge-missing');
+    if (total > 0 && onDisk >= total) {
+        badge.classList.add('season-badge-complete');
+    } else if (onDisk > 0) {
+        badge.classList.add('season-badge-partial');
+    } else {
+        badge.classList.add('season-badge-missing');
+    }
+}
+
+// Start the download-progress poller if it isn't already running. Called
+// after any manual grab so newly-queued progress bars start ticking without
+// waiting for a page reload.
+function ensureDlPollRunning() {
+    if (!SD.dbId || dlPollActive) return;
+    dlPollActive = true;
+    pollDownloadProgress();
+    dlPollTimer = setInterval(pollDownloadProgress, 5000);
+}
+
 function pollDownloadProgress() {
     if (!SD.dbId) return;
     fetch(`/api/series/${SD.id}/download-progress`)
         .then(r => r.ok ? r.json() : [])
         .then(items => {
-            // Note: stale progress bars are cleaned up per-row below
-
-            if (!items || items.length === 0) {
-                if (dlPollActive) {
-                    dlPollActive = false;
-                    clearInterval(dlPollTimer);
-                    dlPollTimer = null;
-                }
-                return;
-            }
-
-            const rows = document.querySelectorAll('.episode-table tbody tr');
+            items = items || [];
             const epMap = {};
             for (const item of items) {
                 epMap[item.episode] = item;
             }
 
+            const rows = document.querySelectorAll('.episode-table tbody tr');
+            let needsRefresh = false;
+
             for (const row of rows) {
                 const numCell = row.querySelector('.ep-col-num');
                 if (!numCell) continue;
                 const ep = parseInt(numCell.textContent.trim());
-                const item = epMap[ep];
                 const qualityCell = row.querySelector('.ep-col-quality');
                 if (!qualityCell) continue;
 
-                if (!item) {
-                    // Restore original content if we previously replaced it
-                    if (qualityCell.dataset.originalHtml && qualityCell.querySelector('.dl-progress-wrap')) {
-                        qualityCell.innerHTML = qualityCell.dataset.originalHtml;
-                        delete qualityCell.dataset.originalHtml;
+                const item = epMap[ep];
+                const showingProgress = qualityCell.querySelector('.dl-progress-wrap') !== null;
+
+                if (item) {
+                    const pct = (item.progress * 100).toFixed(1);
+                    const isComplete = item.state.includes('UP') || item.state === 'uploading';
+                    if (!isComplete) {
+                        if (!qualityCell.dataset.originalHtml) {
+                            qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                        }
+                        qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;
                     }
-                    continue;
+                } else if (showingProgress) {
+                    // Row was showing a progress bar but the download is no
+                    // longer in the response — fetch fresh episode state.
+                    needsRefresh = true;
                 }
+            }
 
-                const pct = (item.progress * 100).toFixed(1);
-                const isComplete = item.state.includes('UP') || item.state === 'uploading';
+            if (needsRefresh) {
+                refreshEpisodeRows();
+            }
 
-                if (!isComplete) {
-                    // Save original content so we can restore it later
-                    if (!qualityCell.dataset.originalHtml) {
-                        qualityCell.dataset.originalHtml = qualityCell.innerHTML;
-                    }
-                    // Replace the entire cell content with a progress bar
-                    qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;
+            // Stop polling once everything is idle: nothing actively
+            // downloading, nothing waiting to be patched, and no stale
+            // progress bars left on the page.
+            const stillShowingProgress = document.querySelector('.episode-table tbody .ep-col-quality .dl-progress-wrap') !== null;
+            if (items.length === 0 && !needsRefresh && !stillShowingProgress) {
+                if (dlPollActive) {
+                    dlPollActive = false;
+                    clearInterval(dlPollTimer);
+                    dlPollTimer = null;
                 }
             }
         })

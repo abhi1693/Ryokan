@@ -4,7 +4,7 @@ use chrono::{NaiveDate, Utc};
 use sqlx::SqlitePool;
 
 use crate::{
-    models::{config, local_metadata, monitoring::{self, EpisodeMonitorState, MonitorMode}, series},
+    models::{config, local_metadata, metadata_cache, monitoring::{self, EpisodeMonitorState, MonitorMode}, series},
     services::{jikan, media},
 };
 
@@ -28,7 +28,7 @@ pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Res
     };
 
     let mode = row.monitor_mode_enum();
-    let total = row.episodes.unwrap_or(0).max(0);
+    let total = effective_episode_count(db, &row).await;
     let episode_numbers: Vec<i32> = (1..=total).collect();
 
     if episode_numbers.is_empty() {
@@ -69,16 +69,17 @@ pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Res
 }
 
 pub async fn ensure_series_monitoring_rows(db: &SqlitePool, tracked: &series::Series) -> Result<MonitoringSummary, String> {
-    let total = tracked.episodes.unwrap_or(0).max(0);
+    let total = effective_episode_count(db, tracked).await;
     let episode_numbers: Vec<i32> = (1..=total).collect();
     let existing = monitoring::get_series_states(db, tracked.id)
         .await
         .map_err(|e| e.to_string())?;
 
+    // Recompute from scratch whenever the row count diverges from the
+    // effective episode count. `recompute_series_monitoring` uses a single
+    // transaction to DELETE + INSERT, which avoids the 1157-round-trip cost
+    // that a naive insert loop would pay for something like One Piece.
     if existing.len() != episode_numbers.len() {
-        monitoring::ensure_series_rows(db, tracked.id, &episode_numbers)
-            .await
-            .map_err(|e| e.to_string())?;
         return recompute_series_monitoring(db, tracked.id).await;
     }
 
@@ -88,6 +89,33 @@ pub async fn ensure_series_monitoring_rows(db: &SqlitePool, tracked: &series::Se
         monitored_count,
         total_count: episode_numbers.len(),
     })
+}
+
+/// Returns the effective episode count for a tracked series, preferring the
+/// AniList-reported `episodes` field and falling back through cached
+/// metadata (`next_airing_episode - 1`) and the cached episode map. This
+/// matters for currently-airing long-runners like One Piece where AniList
+/// reports `episodes: null` — without the fallback, monitoring recomputes
+/// against zero episodes and the per-episode Monitor buttons have nothing
+/// to toggle.
+async fn effective_episode_count(db: &SqlitePool, row: &series::Series) -> i32 {
+    if let Some(n) = row.episodes {
+        if n > 0 {
+            return n;
+        }
+    }
+    if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, row.id).await {
+        let n = cached.detail.effective_episode_count();
+        if n > 0 {
+            return n;
+        }
+    }
+    if let Ok(map) = local_metadata::get_episode_map_for_series(db, row.id).await {
+        if let Some(max) = map.keys().copied().max() {
+            return max;
+        }
+    }
+    0
 }
 
 async fn load_episode_info(db: &SqlitePool, row: &series::Series) -> HashMap<i32, jikan::EpisodeInfo> {

@@ -532,17 +532,19 @@ pub async fn add_series(
     // Add to Ryokan's library.
     let (id, _created) = series::upsert(
         &state.db,
-        detail.id,
-        detail.id_mal,
-        title,
-        &detail.title_romaji,
-        &detail.title_english,
-        &detail.title_native,
-        &detail.cover_url,
-        &detail.format,
-        &detail.status,
-        detail.episodes,
-        detail.season_year,
+        series::SeriesCore {
+            anilist_id: detail.id,
+            mal_id: detail.id_mal,
+            title,
+            title_romaji: &detail.title_romaji,
+            title_english: &detail.title_english,
+            title_native: &detail.title_native,
+            cover_url: &detail.cover_url,
+            format: &detail.format,
+            status: &detail.status,
+            episodes: detail.episodes,
+            season_year: detail.season_year,
+        },
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

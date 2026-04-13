@@ -32,5 +32,105 @@
     <main class="content">
         {% block content %}{% endblock %}
     </main>
+
+    <!-- Shared confirm modal — used by any page that needs a yes/no
+         prompt instead of the browser's native confirm(). Invoked via
+         window.ryokanConfirm({title, body, yesLabel, noLabel, extras}).
+         `extras` is an optional list of {id, label, default} describing
+         checkboxes to render inside the modal body; the resolved promise
+         carries back their values. -->
+    <div class="modal-backdrop" id="ryokan-confirm-modal" style="display:none">
+        <div class="modal" style="max-width:420px">
+            <div class="modal-header">
+                <h3 id="ryokan-confirm-title">Confirm</h3>
+                <button class="btn-icon" type="button" id="ryokan-confirm-close" aria-label="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding:16px 24px">
+                <p id="ryokan-confirm-body" class="form-hint" style="margin-top:0"></p>
+                <div id="ryokan-confirm-extras" style="display:flex;flex-direction:column;gap:8px;margin-top:12px"></div>
+            </div>
+            <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
+                <button class="btn btn-secondary" type="button" id="ryokan-confirm-no">No</button>
+                <button class="btn btn-primary" type="button" id="ryokan-confirm-yes">Yes</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        // In-app replacement for browser confirm(). Returns a promise that
+        // resolves to {ok: boolean, extras: {id: value}}. Falls back to
+        // ok=false if the user dismisses via the close button or backdrop.
+        let current = null;
+        const modal = document.getElementById('ryokan-confirm-modal');
+        const titleEl = document.getElementById('ryokan-confirm-title');
+        const bodyEl = document.getElementById('ryokan-confirm-body');
+        const extrasEl = document.getElementById('ryokan-confirm-extras');
+        const yesBtn = document.getElementById('ryokan-confirm-yes');
+        const noBtn = document.getElementById('ryokan-confirm-no');
+        const closeBtn = document.getElementById('ryokan-confirm-close');
+
+        function collectExtras() {
+            const out = {};
+            if (!current || !current.extras) return out;
+            for (const e of current.extras) {
+                const cb = document.getElementById('ryokan-confirm-extra-' + e.id);
+                if (cb) out[e.id] = cb.checked;
+            }
+            return out;
+        }
+
+        function close(result) {
+            if (!current) return;
+            const resolve = current.resolve;
+            current = null;
+            modal.style.display = 'none';
+            resolve(result);
+        }
+
+        yesBtn.addEventListener('click', function() {
+            close({ok: true, extras: collectExtras()});
+        });
+        noBtn.addEventListener('click', function() { close({ok: false, extras: {}}); });
+        closeBtn.addEventListener('click', function() { close({ok: false, extras: {}}); });
+        modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) close({ok: false, extras: {}});
+        });
+        document.addEventListener('keydown', function(ev) {
+            if (!current) return;
+            if (ev.key === 'Escape') close({ok: false, extras: {}});
+            if (ev.key === 'Enter') close({ok: true, extras: collectExtras()});
+        });
+
+        window.ryokanConfirm = function(opts) {
+            opts = opts || {};
+            return new Promise(function(resolve) {
+                current = {resolve: resolve, extras: opts.extras || []};
+                titleEl.textContent = opts.title || 'Confirm';
+                bodyEl.textContent = opts.body || 'Are you sure?';
+                yesBtn.textContent = opts.yesLabel || 'Yes';
+                noBtn.textContent = opts.noLabel || 'No';
+                // Build extras checkboxes.
+                extrasEl.innerHTML = '';
+                for (const e of current.extras) {
+                    const label = document.createElement('label');
+                    label.className = 'checkbox-label';
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.id = 'ryokan-confirm-extra-' + e.id;
+                    cb.checked = !!e.default;
+                    label.appendChild(cb);
+                    label.appendChild(document.createTextNode(' ' + (e.label || e.id)));
+                    extrasEl.appendChild(label);
+                }
+                modal.style.display = 'flex';
+                // Focus the No button by default so Enter doesn't surprise-confirm.
+                setTimeout(function() { noBtn.focus(); }, 10);
+            });
+        };
+    })();
+    </script>
 </body>
 </html>

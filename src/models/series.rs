@@ -19,6 +19,10 @@ pub struct Series {
     pub season_year: Option<i32>,
     pub folder_name: String,
     pub monitor_mode: String,
+    /// Phase 4 per-series upgrade toggle. When false the upgrade scanner
+    /// skips this series entirely, even if a higher-quality release is
+    /// available. Defaults to true to preserve historical behavior.
+    pub allow_upgrades: bool,
 }
 
 impl Series {
@@ -43,13 +47,16 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
         season_year: row.try_get("season_year").ok().flatten(),
         folder_name: row.get("folder_name"),
         monitor_mode: row.try_get("monitor_mode").unwrap_or_else(|_| "future".to_string()),
+        // Default to true so series from before the column existed (migration
+        // backfills via ADD COLUMN DEFAULT 1) opt *in* to upgrades.
+        allow_upgrades: row.try_get::<i64, _>("allow_upgrades").map(|v| v != 0).unwrap_or(true),
     }
 }
 
 /// Get all tracked series, ordered by most recently added.
 pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode, allow_upgrades FROM series ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -59,7 +66,7 @@ pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series WHERE id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
@@ -70,7 +77,7 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx:
 
 pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series WHERE anilist_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE anilist_id = ?",
     )
     .bind(anilist_id)
     .fetch_optional(db)
@@ -81,7 +88,7 @@ pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Optio
 
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series WHERE mal_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE mal_id = ?",
     )
     .bind(mal_id)
     .fetch_optional(db)
@@ -90,22 +97,35 @@ pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series
     Ok(row.map(map_series_row))
 }
 
+/// Core metadata bundle shared by `upsert` and `refresh_core_metadata`.
+///
+/// Collapsing the 11 scalar args into a named struct closes a real
+/// correctness hole: four of the fields (`title`, `title_romaji`,
+/// `title_english`, `title_native`) are all `&str` and sit next to
+/// each other in the call order. Positional callers could swap any
+/// two of them and neither the compiler nor the SQL would object —
+/// the wrong string would just silently end up in the wrong column.
+/// Named fields force callsites to be explicit.
+pub struct SeriesCore<'a> {
+    pub anilist_id: i64,
+    pub mal_id: Option<i64>,
+    pub title: &'a str,
+    pub title_romaji: &'a str,
+    pub title_english: &'a str,
+    pub title_native: &'a str,
+    pub cover_url: &'a str,
+    pub format: &'a str,
+    pub status: &'a str,
+    pub episodes: Option<i32>,
+    pub season_year: Option<i32>,
+}
+
 /// Insert or update a series based on AniList/MAL provider identity.
 pub async fn upsert(
     db: &SqlitePool,
-    anilist_id: i64,
-    mal_id: Option<i64>,
-    title: &str,
-    title_romaji: &str,
-    title_english: &str,
-    title_native: &str,
-    cover_url: &str,
-    format: &str,
-    status: &str,
-    episodes: Option<i32>,
-    season_year: Option<i32>,
+    core: SeriesCore<'_>,
 ) -> Result<(i64, bool), sqlx::Error> {
-    if let Some(mid) = mal_id {
+    if let Some(mid) = core.mal_id {
         if let Some(existing) = get_by_mal_id(db, mid).await? {
             sqlx::query(
                 r#"
@@ -125,18 +145,18 @@ pub async fn upsert(
                 WHERE id = ?
                 "#,
             )
-            .bind(anilist_id)
+            .bind(core.anilist_id)
             .bind(mid)
-            .bind(title)
-            .bind(title_romaji)
-            .bind(title_english)
-            .bind(title_native)
-            .bind(cover_url)
-            .bind(format)
-            .bind(status)
-            .bind(episodes)
-            .bind(season_year)
-            .bind(default_monitor_mode(status).as_str())
+            .bind(core.title)
+            .bind(core.title_romaji)
+            .bind(core.title_english)
+            .bind(core.title_native)
+            .bind(core.cover_url)
+            .bind(core.format)
+            .bind(core.status)
+            .bind(core.episodes)
+            .bind(core.season_year)
+            .bind(default_monitor_mode(core.status).as_str())
             .bind(existing.id)
             .execute(db)
             .await?;
@@ -144,7 +164,7 @@ pub async fn upsert(
         }
     }
 
-    if let Some(existing) = get_by_anilist_id(db, anilist_id).await? {
+    if let Some(existing) = get_by_anilist_id(db, core.anilist_id).await? {
         sqlx::query(
             r#"
             UPDATE series
@@ -162,17 +182,17 @@ pub async fn upsert(
             WHERE id = ?
             "#,
         )
-        .bind(mal_id)
-        .bind(title)
-        .bind(title_romaji)
-        .bind(title_english)
-        .bind(title_native)
-        .bind(cover_url)
-        .bind(format)
-        .bind(status)
-        .bind(episodes)
-        .bind(season_year)
-        .bind(default_monitor_mode(status).as_str())
+        .bind(core.mal_id)
+        .bind(core.title)
+        .bind(core.title_romaji)
+        .bind(core.title_english)
+        .bind(core.title_native)
+        .bind(core.cover_url)
+        .bind(core.format)
+        .bind(core.status)
+        .bind(core.episodes)
+        .bind(core.season_year)
+        .bind(default_monitor_mode(core.status).as_str())
         .bind(existing.id)
         .execute(db)
         .await?;
@@ -181,12 +201,12 @@ pub async fn upsert(
 
     // Auto-generate a folder name from the best available title.
     let folder = {
-        let raw = if !title_english.is_empty() {
-            title_english
-        } else if !title_romaji.is_empty() {
-            title_romaji
+        let raw = if !core.title_english.is_empty() {
+            core.title_english
+        } else if !core.title_romaji.is_empty() {
+            core.title_romaji
         } else {
-            title
+            core.title
         };
         crate::services::media::sanitize_folder_name(raw)
     };
@@ -197,19 +217,19 @@ pub async fn upsert(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
-    .bind(anilist_id)
-    .bind(mal_id)
-    .bind(title)
-    .bind(title_romaji)
-    .bind(title_english)
-    .bind(title_native)
-    .bind(cover_url)
-    .bind(format)
-    .bind(status)
-    .bind(episodes)
-    .bind(season_year)
+    .bind(core.anilist_id)
+    .bind(core.mal_id)
+    .bind(core.title)
+    .bind(core.title_romaji)
+    .bind(core.title_english)
+    .bind(core.title_native)
+    .bind(core.cover_url)
+    .bind(core.format)
+    .bind(core.status)
+    .bind(core.episodes)
+    .bind(core.season_year)
     .bind(&folder)
-    .bind(default_monitor_mode(status).as_str())
+    .bind(default_monitor_mode(core.status).as_str())
     .execute(db)
     .await?;
 
@@ -249,17 +269,7 @@ pub async fn update_folder(db: &SqlitePool, id: i64, folder_name: &str) -> Resul
 pub async fn refresh_core_metadata(
     db: &SqlitePool,
     id: i64,
-    anilist_id: i64,
-    mal_id: Option<i64>,
-    title: &str,
-    title_romaji: &str,
-    title_english: &str,
-    title_native: &str,
-    cover_url: &str,
-    format: &str,
-    status: &str,
-    episodes: Option<i32>,
-    season_year: Option<i32>,
+    core: SeriesCore<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -278,17 +288,17 @@ pub async fn refresh_core_metadata(
         WHERE id = ?
         "#,
     )
-    .bind(anilist_id)
-    .bind(mal_id)
-    .bind(title)
-    .bind(title_romaji)
-    .bind(title_english)
-    .bind(title_native)
-    .bind(cover_url)
-    .bind(format)
-    .bind(status)
-    .bind(episodes)
-    .bind(season_year)
+    .bind(core.anilist_id)
+    .bind(core.mal_id)
+    .bind(core.title)
+    .bind(core.title_romaji)
+    .bind(core.title_english)
+    .bind(core.title_native)
+    .bind(core.cover_url)
+    .bind(core.format)
+    .bind(core.status)
+    .bind(core.episodes)
+    .bind(core.season_year)
     .bind(id)
     .execute(db)
     .await?;
@@ -297,7 +307,7 @@ pub async fn refresh_core_metadata(
 
 pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -308,6 +318,17 @@ pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, 
 pub async fn update_monitor_mode(db: &SqlitePool, id: i64, monitor_mode: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE series SET monitor_mode = ? WHERE id = ?")
         .bind(monitor_mode)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Toggle the per-series upgrade opt-in. When false the upgrade scanner
+/// in `services::upgrade` skips this series entirely.
+pub async fn update_allow_upgrades(db: &SqlitePool, id: i64, allow: bool) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE series SET allow_upgrades = ? WHERE id = ?")
+        .bind(if allow { 1_i64 } else { 0_i64 })
         .bind(id)
         .execute(db)
         .await?;

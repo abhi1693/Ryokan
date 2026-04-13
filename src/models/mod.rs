@@ -11,6 +11,9 @@ pub mod scheduled_tasks;
 pub mod artwork_cache;
 pub mod grabbed_torrents;
 pub mod episode_tags;
+pub mod group_source_map;
+pub mod nyaa_description_cache;
+pub mod media_probe_cache;
 
 use sqlx::SqlitePool;
 
@@ -462,8 +465,22 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Add the column under its old name for DBs that predate the Kitsu migration,
-    // then rename it to force_kitsu_fallback for DBs that still have the old name.
+    // Three-DB-states rename for `force_tmdb_fallback` → `force_kitsu_fallback`:
+    //
+    //   1. Fresh install — neither column exists. The ADD succeeds and creates
+    //      `force_tmdb_fallback`; the subsequent RENAME moves it to the new name.
+    //      End state: `force_kitsu_fallback` exists.
+    //   2. Legacy install — only `force_tmdb_fallback` exists. The ADD is a no-op
+    //      (`.ok()` swallows "duplicate column name"); the RENAME moves it to the
+    //      new name. End state: `force_kitsu_fallback` exists.
+    //   3. Post-migration install — only `force_kitsu_fallback` exists. The ADD
+    //      *creates* `force_tmdb_fallback` as a vestigial column because SQLite has
+    //      no IF NOT EXISTS check on column name alone; the RENAME then fails
+    //      because the target name is already taken (swallowed by `.ok()`). End
+    //      state: `force_kitsu_fallback` still exists, but so does a stray
+    //      `force_tmdb_fallback` column. This is harmless — nothing reads it — but
+    //      it's a cosmetic wart. If you're cleaning up, an `IF NOT EXISTS` guarded
+    //      by a `PRAGMA table_info` check would fix it.
     sqlx::query("ALTER TABLE config ADD COLUMN force_tmdb_fallback INTEGER NOT NULL DEFAULT 0")
         .execute(db)
         .await
@@ -694,6 +711,14 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Phase 4: per-series upgrade toggle. When 0, the upgrade scanner
+    // skips this series entirely — user opts out of re-grabs even if a
+    // higher-quality release appears. Default 1 preserves prior behavior.
+    sqlx::query("ALTER TABLE series ADD COLUMN allow_upgrades INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
+
     // Radarr API compatibility layer for Seerr integration (anime movies).
     sqlx::query("ALTER TABLE config ADD COLUMN radarr_enabled INTEGER NOT NULL DEFAULT 0")
         .execute(db)
@@ -707,6 +732,137 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+
+    // Classification pipeline: release group → source map (Phase 1a).
+    // Creates the table and seeds the built-in defaults. Idempotent.
+    group_source_map::migrate(db).await?;
+
+    // Layer 2 description cache — scraped Nyaa description bodies keyed by
+    // torrent info_hash, populated on the low-confidence classifier path.
+    nyaa_description_cache::migrate(db).await?;
+
+    // Layer 5 ffprobe cache — cached ffprobe JSON keyed by (path, mtime, size).
+    // Populated after imports land so re-classifications (library scans,
+    // upgrade checks) don't re-shell out to ffprobe for the same file.
+    media_probe_cache::migrate(db).await?;
+
+    // ── Phase 1b: classification columns on episode_quality_tags ─────────
+    // These record the ClassificationResult at grab time so later scoring,
+    // upgrade detection, and UI review workflows can read structured source
+    // / resolution / remux data instead of parsing the legacy quality_tag
+    // string. Defaults are empty/zero for rows that predate Phase 1b; the
+    // legacy quality_tag column remains populated for backwards compat.
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN is_remux INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN classification_confidence REAL NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    // Sonarr-parity sub-classification columns:
+    //  - is_bdmv: distinguishes BD-RAW / BDMV (full disc structure) from
+    //    a plain BluRay encode or a Remux. Mutually exclusive with
+    //    is_remux at the label level.
+    //  - web_kind: distinguishes WEB-DL from WEBRip when the filename was
+    //    specific enough to tell. Stored as the canonical string ("WEB-DL",
+    //    "WEBRip", or "" for legacy bare-WEB rows).
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN is_bdmv INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN web_kind TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // ── Phase 1b: split quality_profile/quality_cutoff into explicit source
+    //             and resolution fields ──────────────────────────────────
+    // preferred_resolution already exists and stores a bare resolution
+    // string ("1080", "720", …) — it's migrated in place and is now the
+    // authoritative preferred-resolution field. The three new columns cover
+    // the bits that didn't exist before. Legacy quality_profile and
+    // quality_cutoff are kept for one release as a rollback hatch.
+    sqlx::query("ALTER TABLE config ADD COLUMN preferred_source TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN cutoff_source TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN cutoff_resolution TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // Backfill the new columns from the legacy combined fields. Only runs
+    // for existing rows where the new columns are still empty, so a fresh
+    // install (which uses Default::default values) is left alone.
+    sqlx::query(
+        r#"
+        UPDATE config SET preferred_source = CASE
+            WHEN quality_profile LIKE 'web_%' THEN 'web'
+            WHEN quality_profile LIKE 'bd_%' THEN 'bluray'
+            WHEN quality_profile LIKE 'remux_%' THEN 'bluray'
+            WHEN quality_profile = 'dvd' THEN 'dvd'
+            ELSE 'web'
+        END
+        WHERE id = 1 AND preferred_source = ''
+        "#,
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    sqlx::query(
+        r#"
+        UPDATE config SET cutoff_source = CASE
+            WHEN quality_cutoff LIKE 'web_%' THEN 'web'
+            WHEN quality_cutoff LIKE 'bd_%' THEN 'bluray'
+            WHEN quality_cutoff LIKE 'remux_%' THEN 'bluray'
+            WHEN quality_cutoff = 'dvd' THEN 'dvd'
+            ELSE 'bluray'
+        END
+        WHERE id = 1 AND cutoff_source = ''
+        "#,
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    sqlx::query(
+        r#"
+        UPDATE config SET cutoff_resolution = CASE
+            WHEN quality_cutoff LIKE '%_480' OR quality_cutoff = 'dvd' THEN '480'
+            WHEN quality_cutoff LIKE '%_720' THEN '720'
+            WHEN quality_cutoff LIKE '%_1080' THEN '1080'
+            WHEN quality_cutoff LIKE '%_2160' THEN '2160'
+            ELSE '1080'
+        END
+        WHERE id = 1 AND cutoff_resolution = ''
+        "#,
+    )
+    .execute(db)
+    .await
+    .ok();
 
     sqlx::query(
         r#"

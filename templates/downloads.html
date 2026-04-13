@@ -166,9 +166,20 @@ function resumeTorrent(hash) {
 }
 
 function deleteTorrent(hash) {
-    const deleteFiles = confirm('Also delete downloaded files?');
-    fetch('/api/downloads/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hash, delete_files: deleteFiles})})
-        .then(() => setTimeout(loadQueue, 500));
+    window.ryokanConfirm({
+        title: 'Remove torrent',
+        body: 'Remove this torrent from qBittorrent?',
+        yesLabel: 'Remove',
+        noLabel: 'Cancel',
+        extras: [{id: 'deleteFiles', label: 'Also delete downloaded files', default: false}],
+    }).then(function(res) {
+        if (!res.ok) return;
+        fetch('/api/downloads/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({hash: hash, delete_files: !!res.extras.deleteFiles}),
+        }).then(function() { setTimeout(loadQueue, 500); });
+    });
 }
 
 setInterval(loadQueue, 5000);

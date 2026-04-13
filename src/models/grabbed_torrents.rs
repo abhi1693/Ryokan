@@ -230,6 +230,38 @@ pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Return every (id, hash) pair currently associated with `series_id`,
+/// regardless of state. Used by the "remove series" handler so we can
+/// stop seeding and tell qBittorrent to drop the data when the user
+/// removes a series from the library — without this, qBit keeps holding
+/// torrent state for a series Ryokan has already forgotten about.
+pub async fn get_all_for_series(
+    db: &SqlitePool,
+    series_id: i64,
+) -> Result<Vec<(i64, String)>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id, hash FROM grabbed_torrents WHERE series_id = ?")
+        .bind(series_id)
+        .fetch_all(db)
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| (row.get::<i64, _>("id"), row.get::<String, _>("hash")))
+        .collect())
+}
+
+/// Delete every grabbed_torrents row for a series in one query. Called
+/// after the per-torrent qBit delete pass during series removal so the
+/// table doesn't accumulate stale rows pointing at hashes qBit no longer
+/// knows about.
+pub async fn delete_all_for_series(db: &SqlitePool, series_id: i64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM grabbed_torrents WHERE series_id = ?")
+        .bind(series_id)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GrabbedTorrentWithSeries {
     pub id: i64,

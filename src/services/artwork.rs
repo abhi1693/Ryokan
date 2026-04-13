@@ -131,13 +131,15 @@ pub async fn cache_image(
     let last_write = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
     artwork_cache::upsert_ref(
         db,
-        &safe_key,
-        parent_kind,
-        parent_id,
-        image_kind,
-        source_url,
-        &blob_hash,
-        last_write,
+        artwork_cache::RefUpsert {
+            cache_key: &safe_key,
+            parent_kind,
+            parent_id,
+            image_kind,
+            source_url,
+            blob_hash: &blob_hash,
+            last_write,
+        },
     ).await.map_err(|e| e.to_string())?;
 
     Ok(Some(local_url(&safe_key, last_write)))
@@ -192,6 +194,9 @@ pub async fn cached_or_source_url(db: &SqlitePool, cache_key: &str, source_url: 
 
 pub async fn load_bytes(db: &SqlitePool, cache_key: &str) -> Option<(Vec<u8>, String)> {
     let entry = artwork_cache::get(db, cache_key).await.ok().flatten()?;
-    let bytes = std::fs::read(Path::new(&entry.local_path)).ok()?;
+    // Use tokio::fs::read so the artwork serving path doesn't block a
+    // runtime worker — Seerr does a lot of artwork lookups during
+    // discovery scans and the sync read would stack up behind itself.
+    let bytes = tokio::fs::read(Path::new(&entry.local_path)).await.ok()?;
     Some((bytes, entry.content_type))
 }

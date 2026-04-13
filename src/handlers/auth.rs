@@ -1,18 +1,190 @@
 use askama::Template;
 use axum::{
     body::Body,
-    extract::State,
-    http::{header, Request, StatusCode},
+    extract::{ConnectInfo, State},
+    http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
     Form,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::models::{session, user};
 use crate::models::log::LogCategory;
 use crate::services::logger;
 use crate::AppState;
+
+// ---------- Login rate limiting ----------
+//
+// In-process throttle: reject once a given key has accumulated 5 failed
+// logins in a sliding 60-second window. We track two keys per attempt —
+// one per username and one per client IP — so neither a per-account nor a
+// distributed-across-usernames-from-one-box brute force can slip through.
+// Keeping this in memory is fine for the self-hosted PVR deployment: a
+// process restart resets the state, but an attacker sustaining 5/min across
+// restarts is indistinguishable from an unlimited attacker in practice.
+
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+const LOGIN_MAX_FAILURES: usize = 5;
+/// Hard cap — past this many failures in the window, we stop running
+/// `verify_user` entirely and return an immediate throttled response.
+/// The soft cap (LOGIN_MAX_FAILURES) still equalizes wall time with a
+/// bcrypt call to avoid leaking whether the throttle has tripped; the
+/// hard cap is a DoS guard for the pathological case where a single key
+/// keeps hammering the endpoint — past the hard cap we'd rather leak a
+/// faint timing side channel than burn 50 ms of CPU per attempt forever.
+const LOGIN_HARD_CAP: usize = 20;
+
+static LOGIN_FAILURES: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Outcome of a rate-limit check. Distinguishes the two throttle tiers
+/// so the login handler can choose between "equalize timing by running
+/// bcrypt anyway" (soft) and "abort before any CPU work" (hard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginCheck {
+    /// Under the soft cap — run the full verify path.
+    Allow,
+    /// Over the soft cap but under the hard cap. The caller still runs
+    /// `verify_user` to equalize wall time, then ignores the result.
+    SoftThrottled,
+    /// Over the hard cap. Skip bcrypt entirely and return throttled.
+    HardThrottled,
+}
+
+/// Classifies `key` against the rate-limit window. Always sweeps expired
+/// entries for `key` as a side effect, and drops the map entry entirely
+/// when its Vec empties out so rotated usernames / spoofed X-F-F values
+/// can't grow LOGIN_FAILURES unboundedly (one idle key per probe forever).
+fn login_check(key: &str) -> LoginCheck {
+    let mut guard = LOGIN_FAILURES.lock().unwrap();
+    let cutoff = Instant::now() - LOGIN_WINDOW;
+    let (count, empty) = {
+        let entry = guard.entry(key.to_string()).or_default();
+        entry.retain(|t| *t > cutoff);
+        (entry.len(), entry.is_empty())
+    };
+    if empty {
+        guard.remove(key);
+    }
+    if count >= LOGIN_HARD_CAP {
+        LoginCheck::HardThrottled
+    } else if count >= LOGIN_MAX_FAILURES {
+        LoginCheck::SoftThrottled
+    } else {
+        LoginCheck::Allow
+    }
+}
+
+/// Walks every entry in LOGIN_FAILURES, prunes expired timestamps, and
+/// drops buckets that empty out. Call from the periodic cleanup task so
+/// idle keys (IPs/usernames that failed once an hour ago and never came
+/// back) don't linger forever — the per-request sweep in `login_check`
+/// only reaches buckets that are actively being touched.
+pub(crate) fn sweep_login_failures() {
+    let mut guard = LOGIN_FAILURES.lock().unwrap();
+    let cutoff = Instant::now() - LOGIN_WINDOW;
+    guard.retain(|_, v| {
+        v.retain(|t| *t > cutoff);
+        !v.is_empty()
+    });
+}
+
+/// Record a failed login attempt against `key`.
+fn login_record_failure(key: &str) {
+    let mut guard = LOGIN_FAILURES.lock().unwrap();
+    let entry = guard.entry(key.to_string()).or_default();
+    let cutoff = Instant::now() - LOGIN_WINDOW;
+    entry.retain(|t| *t > cutoff);
+    entry.push(Instant::now());
+}
+
+/// Reset the counter for `key` after a successful login so a
+/// legitimate user who mistyped a few times isn't locked out by
+/// their own prior failures.
+fn login_clear(key: &str) {
+    let mut guard = LOGIN_FAILURES.lock().unwrap();
+    guard.remove(key);
+}
+
+/// Whether to honor `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Host`
+/// from the request, or ignore them entirely and use the TCP peer address
+/// as the ground truth. Read once at startup from `RYOKAN_TRUSTED_PROXY`
+/// (values `1`, `true`, `yes`, `on` enable it, case-insensitive). Default
+/// off because Ryokan's default bind is `0.0.0.0:8978` — a direct-exposure
+/// deploy (no reverse proxy) is a common self-hosted shape, and in that
+/// shape *any* HTTP client can set these headers freely. Trusting them by
+/// default would let an attacker spoof a fresh IP per attempt and defeat
+/// the per-IP login throttle. Flip this on only when Ryokan is behind a
+/// proxy that overwrites the headers on ingress.
+static TRUST_PROXY_HEADERS: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("RYOKAN_TRUSTED_PROXY")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+});
+
+/// Client IP extraction. When `RYOKAN_TRUSTED_PROXY` is set, prefers the
+/// leftmost `X-Forwarded-For` entry (the address the reverse proxy saw
+/// from the outside world), falling back to `X-Real-IP`, then to the TCP
+/// peer. When the flag is unset, ignores both headers and uses the TCP
+/// peer directly so a direct-exposure deploy can't be bypassed by a
+/// spoofed header.
+fn client_ip_from_request(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
+    if *TRUST_PROXY_HEADERS {
+        if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = h.split(',').next() {
+                let trimmed = first.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+        if let Some(h) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+            let trimmed = h.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    match peer {
+        Some(addr) => addr.ip().to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+/// Strip control characters and cap length before embedding a piece of
+/// attacker-supplied text (e.g. `form.username`) in a log line. Keeps
+/// newlines / terminal escapes / multi-kilobyte probes from showing up
+/// in the auth_log table and the tracing stream.
+pub(crate) fn sanitize_for_log(s: &str) -> String {
+    let trimmed = s.trim();
+    trimmed
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect()
+}
+
+/// Whether to append `Secure` to the session cookie. Read once at startup
+/// from `RYOKAN_COOKIE_SECURE` (values `1`, `true`, `yes`, `on` enable it,
+/// case-insensitive). Default off so `cargo run` on localhost keeps working
+/// over HTTP; flip on for any HTTPS-fronted deployment so a stolen session
+/// cookie can't leak over cleartext.
+static COOKIE_SECURE: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("RYOKAN_COOKIE_SECURE")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+});
 
 // ---------- Templates ----------
 
@@ -57,11 +229,131 @@ fn get_session_token(req: &Request<Body>) -> Option<String> {
 }
 
 fn set_session_cookie(token: &str) -> String {
-    format!("session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800", token)
+    let secure = if *COOKIE_SECURE { "; Secure" } else { "" };
+    format!(
+        "session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800{}",
+        token, secure
+    )
 }
 
 fn clear_session_cookie() -> String {
-    "session=; Path=/; HttpOnly; Max-Age=0".to_string()
+    // Match the Secure attribute on the set path — some browsers refuse to
+    // clear a Secure cookie from a non-Secure response, but the reverse is
+    // harmless, so mirror whatever the set path emitted.
+    let secure = if *COOKIE_SECURE { "; Secure" } else { "" };
+    format!("session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}", secure)
+}
+
+// ---------- CSRF helpers ----------
+
+/// Extract the host portion (without scheme or port) from an Origin or
+/// Referer header value. Returns None if the value is not a well-formed
+/// absolute URL we can reason about.
+fn url_host(value: &str) -> Option<String> {
+    // Strip scheme.
+    let after_scheme = value.split_once("://").map(|(_, rest)| rest)?;
+    // Host ends at the first `/`, `?`, `#`, or end of string.
+    let host_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let host_with_port = &after_scheme[..host_end];
+    if host_with_port.is_empty() {
+        return None;
+    }
+    // Strip port so we compare against the Host header cleanly — Host may or
+    // may not include a port depending on the client, and we want to match
+    // either way. An attacker can't spoof Host from a cross-origin browser
+    // anyway, so we're comparing hosts for equality as a sanity check.
+    let host_only = host_with_port.split_once(':').map(|(h, _)| h).unwrap_or(host_with_port);
+    Some(host_only.to_ascii_lowercase())
+}
+
+fn host_of(req: &Request<Body>) -> Option<String> {
+    let raw = req.headers().get(header::HOST)?.to_str().ok()?;
+    let host_only = raw.split_once(':').map(|(h, _)| h).unwrap_or(raw);
+    Some(host_only.to_ascii_lowercase())
+}
+
+/// Build the set of hosts that are acceptable matches for an Origin or
+/// Referer check. Always includes the `Host` header. When
+/// `RYOKAN_TRUSTED_PROXY` is set, also includes every entry in
+/// `X-Forwarded-Host` so a reverse proxy that rewrites the upstream Host
+/// header doesn't break every form POST — the browser sees the
+/// externally-visible host and sends it in Origin, while the backend sees
+/// the rewritten upstream name in Host, so without this check the two
+/// never match and every POST is rejected as "origin host mismatch".
+fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
+    let mut hosts = Vec::new();
+    if let Some(h) = host_of(req) {
+        hosts.push(h);
+    }
+    if *TRUST_PROXY_HEADERS {
+        if let Some(raw) = req.headers().get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
+            for part in raw.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let host_only = part.split_once(':').map(|(h, _)| h).unwrap_or(part);
+                hosts.push(host_only.to_ascii_lowercase());
+            }
+        }
+    }
+    hosts
+}
+
+/// Verify that a state-changing request came from the same origin this
+/// server is serving. Uses the Origin header if present (modern browsers
+/// set this on all POST/PUT/PATCH/DELETE requests, including cross-site
+/// form submissions), falling back to Referer. This is the OWASP
+/// "Verifying Origin With Standard Headers" CSRF mitigation and is
+/// sufficient because an attacker page cannot forge either header from
+/// cross-origin JavaScript.
+///
+/// Returns `Ok(())` if the method is safe (GET/HEAD/OPTIONS) or the
+/// request is same-origin. Returns `Err` with a short reason otherwise.
+fn verify_same_origin(req: &Request<Body>) -> Result<(), &'static str> {
+    match *req.method() {
+        Method::GET | Method::HEAD | Method::OPTIONS => return Ok(()),
+        _ => {}
+    }
+
+    let hosts = allowed_host_matches(req);
+    if hosts.is_empty() {
+        return Err("missing Host header");
+    }
+
+    // Prefer Origin (always set by browsers on unsafe methods).
+    if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
+        // "null" is what browsers send for e.g. sandboxed iframes — never
+        // same-origin by definition.
+        if origin == "null" {
+            return Err("null origin");
+        }
+        return match url_host(origin) {
+            Some(h) if hosts.contains(&h) => Ok(()),
+            Some(_) => Err("origin host mismatch"),
+            None => Err("malformed Origin header"),
+        };
+    }
+
+    // Fall back to Referer when Origin is absent (older clients, some
+    // proxies). Reject if neither header is present — on POST from a real
+    // browser at least one of them will be set.
+    if let Some(referer) = req.headers().get(header::REFERER).and_then(|v| v.to_str().ok()) {
+        return match url_host(referer) {
+            Some(h) if hosts.contains(&h) => Ok(()),
+            Some(_) => Err("referer host mismatch"),
+            None => Err("malformed Referer header"),
+        };
+    }
+
+    Err("missing Origin and Referer headers")
+}
+
+fn csrf_forbidden(reason: &str) -> Response {
+    tracing::warn!("CSRF rejection: {}", reason);
+    (StatusCode::FORBIDDEN, "Forbidden: cross-origin request rejected").into_response()
 }
 
 // ---------- Auth middleware ----------
@@ -83,9 +375,34 @@ pub async fn require_auth(
     };
 
     match session::validate_session(&state.db, &token).await {
-        Ok(Some(_user_id)) => next.run(req).await,
+        Ok(Some(_user_id)) => {
+            // Session is valid. Enforce same-origin on state-changing
+            // requests to block CSRF — a malicious page at evil.com cannot
+            // forge either Origin or Referer from cross-origin JS, so even
+            // though the browser will attach our session cookie on top-level
+            // form POSTs (SameSite=Lax permits this for GET-style
+            // navigations, but the rejection here catches the rest), a
+            // cross-origin POST is rejected.
+            if let Err(reason) = verify_same_origin(&req) {
+                return csrf_forbidden(reason);
+            }
+            next.run(req).await
+        }
         _ => Redirect::to("/login").into_response(),
     }
+}
+
+/// CSRF middleware for the public `/login` and `/setup` POST paths. These
+/// routes have no session to attach a token to, so we fall back to the
+/// same Origin/Referer same-origin check used on authenticated routes.
+/// An attacker's page cannot set either header to our host from
+/// cross-origin JavaScript, so a drive-by POST to `/setup` from a
+/// malicious site is rejected before `setup_submit` ever sees the form.
+pub async fn csrf_public(req: Request<Body>, next: Next) -> Response {
+    if let Err(reason) = verify_same_origin(&req) {
+        return csrf_forbidden(reason);
+    }
+    next.run(req).await
 }
 
 // ---------- Setup ----------
@@ -134,7 +451,7 @@ pub async fn setup_submit(
                 .header(header::LOCATION, "/")
                 .header(header::SET_COOKIE, set_session_cookie(&token))
                 .body(Body::empty())
-                .unwrap()
+                .expect("setup-redirect response uses only static headers, should always build")
                 .into_response()
         }
         Err(e) => {
@@ -159,11 +476,85 @@ pub async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
 
 pub async fn login_submit(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Form(form): Form<LoginForm>,
-) -> impl IntoResponse {
-    match user::verify_user(&state.db, &form.username, &form.password).await {
+) -> Response {
+    // Resolve the bucket keys up front so we always rate-limit, even when
+    // the incoming form has an empty username.
+    let ip = client_ip_from_request(&headers, Some(peer_addr));
+    let ip_key = format!("ip:{}", ip);
+    let user_key = format!("u:{}", form.username.trim().to_ascii_lowercase());
+    let safe_username = sanitize_for_log(&form.username);
+
+    // Pre-check: figure out which throttle tier we're in.
+    //
+    // - Allow: run verify_user normally.
+    // - SoftThrottled: still run verify_user below so the response pays
+    //   ~50ms of bcrypt. Returning early here would leak to a probing
+    //   attacker whether they're throttled (fast return) vs. just wrong
+    //   (slow return), which is enough to confirm that per-user throttling
+    //   has tripped — i.e., that the username is worth pounding from
+    //   another IP. Equalizing the wall time closes that timing oracle.
+    // - HardThrottled: past the hard cap, skip bcrypt entirely. A single
+    //   key that's been failing for a minute straight is almost certainly
+    //   an attacker — we'd rather leak a faint timing side channel than
+    //   keep burning 50 ms of CPU per attempt forever. We still sleep a
+    //   randomized ~30–80 ms before responding so the fast-return is not
+    //   a crisp signal.
+    let user_tier = login_check(&user_key);
+    let ip_tier = login_check(&ip_key);
+    let hard_throttled =
+        user_tier == LoginCheck::HardThrottled || ip_tier == LoginCheck::HardThrottled;
+    let rate_limited = hard_throttled
+        || user_tier == LoginCheck::SoftThrottled
+        || ip_tier == LoginCheck::SoftThrottled;
+
+    // Run verify_user only when we're under the hard cap. Under soft
+    // throttling we still pay bcrypt to preserve the equalized-timing
+    // property; past the hard cap we drop it to protect the server.
+    let verify_result = if hard_throttled {
+        // Jittered sleep roughly the width of a bcrypt verify so the fast
+        // return doesn't crisply flag the hard-cap transition. Uses a
+        // cheap deterministic-but-per-request source (nanos of the
+        // current instant) to avoid a full PRNG dep just for this.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let jitter_ms = 30 + (nanos as u64 % 50);
+        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+        Ok(None)
+    } else {
+        user::verify_user(&state.db, &form.username, &form.password).await
+    };
+
+    if rate_limited {
+        logger::warn(
+            &state.db,
+            LogCategory::Auth,
+            &format!(
+                "Login rate-limited ({}): {} from {}",
+                if hard_throttled { "hard" } else { "soft" },
+                safe_username,
+                ip
+            ),
+            "",
+        )
+        .await;
+        let template = LoginTemplate {
+            error: Some("Too many failed attempts. Please wait a minute and try again.".into()),
+        };
+        return Html(template.render().unwrap_or_default()).into_response();
+    }
+
+    match verify_result {
         Ok(Some(u)) => {
-            logger::info(&state.db, LogCategory::Auth, &format!("Login: {}", form.username), "").await;
+            // Successful login — clear the counters so an honest user who
+            // mistyped a few times isn't punished for their own typos.
+            login_clear(&user_key);
+            login_clear(&ip_key);
+            logger::info(&state.db, LogCategory::Auth, &format!("Login: {}", safe_username), "").await;
             let token = session::create_session(&state.db, u.id)
                 .await
                 .unwrap_or_default();
@@ -173,11 +564,13 @@ pub async fn login_submit(
                 .header(header::LOCATION, "/")
                 .header(header::SET_COOKIE, set_session_cookie(&token))
                 .body(Body::empty())
-                .unwrap()
+                .expect("login-redirect response uses only static headers, should always build")
                 .into_response()
         }
         _ => {
-            logger::warn(&state.db, LogCategory::Auth, &format!("Failed login attempt: {}", form.username), "").await;
+            login_record_failure(&user_key);
+            login_record_failure(&ip_key);
+            logger::warn(&state.db, LogCategory::Auth, &format!("Failed login attempt: {}", safe_username), "").await;
             let template = LoginTemplate {
                 error: Some("Invalid username or password.".into()),
             };
@@ -198,6 +591,6 @@ pub async fn logout(State(state): State<AppState>, req: Request<Body>) -> impl I
         .header(header::LOCATION, "/login")
         .header(header::SET_COOKIE, clear_session_cookie())
         .body(Body::empty())
-        .unwrap()
+        .expect("logout-redirect response uses only static headers, should always build")
         .into_response()
 }

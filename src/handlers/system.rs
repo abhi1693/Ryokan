@@ -315,13 +315,16 @@ pub async fn api_anibridge_reload(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     logger::info(&state.db, LogCategory::System, "Anibridge mappings reload requested", "").await;
+    let _ = scheduled_tasks::mark_started(&state.db, "anibridge_refresh", "Manual anibridge mappings refresh").await;
 
     if crate::services::anibridge::reload().await {
+        let _ = scheduled_tasks::mark_finished(&state.db, "anibridge_refresh", "ok", "Mappings refreshed").await;
         Ok(Json(serde_json::json!({
             "ok": true,
             "message": "Anibridge mappings reloaded successfully",
         })))
     } else {
+        let _ = scheduled_tasks::mark_finished(&state.db, "anibridge_refresh", "error", "Failed to download mappings").await;
         Err((axum::http::StatusCode::BAD_GATEWAY, "Failed to reload anibridge mappings".to_string()))
     }
 }
@@ -486,6 +489,37 @@ pub async fn api_force_post_processing(
         "ok": true,
         "message": "Post-processing run completed",
     })))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/tasks/library-classify",
+    tag = "System",
+    summary = "Classify externally-imported files",
+    description = "Walk every tracked series' media folder and run the source/resolution classifier on files that don't yet have a structured classification row. Useful after importing pre-existing media from another PVR or a manual drop.",
+    responses(
+        (status = 200, description = "Library classify report", body = serde_json::Value),
+    ),
+)]
+pub async fn api_force_library_classify(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let report = post_processing::scan_library_for_unclassified(&state).await;
+    let message = format!(
+        "Library classify scan complete. Series scanned: {}. Files scanned: {}. Classified: {}. Needs review: {}.",
+        report.series_scanned,
+        report.files_scanned,
+        report.files_classified,
+        report.files_needing_review,
+    );
+    Json(serde_json::json!({
+        "ok": true,
+        "message": message,
+        "series_scanned": report.series_scanned,
+        "files_scanned": report.files_scanned,
+        "files_classified": report.files_classified,
+        "files_needing_review": report.files_needing_review,
+    }))
 }
 
 #[utoipa::path(

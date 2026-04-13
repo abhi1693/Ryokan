@@ -346,6 +346,7 @@ function forceRunTask(btn, taskKey) {
         cleanup: '/api/tasks/cleanup',
         post_processing: '/api/tasks/post-processing',
         upgrade_search: '/api/tasks/upgrade-search',
+        anibridge_refresh: '/api/system/reload-anibridge',
     };
     const url = endpoints[taskKey];
     if (!url) { alert('No run endpoint for task: ' + taskKey); return; }
@@ -404,6 +405,11 @@ function forceRunTask(btn, taskKey) {
                     <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
                     <span id="rebuild-cache-result" class="form-hint debug-action-result"></span>
                 </div>
+                <div class="debug-action-row">
+                    <button type="button" class="btn btn-secondary" onclick="classifyLibrary(this)">Classify imported files</button>
+                    <span id="library-classify-result" class="form-hint debug-action-result"></span>
+                </div>
+                <span class="form-hint">Walk every tracked series folder and run the source/resolution classifier on files that don't yet have a structured tag. Useful after migrating from another PVR or dropping files in manually.</span>
                 <div class="settings-inline-actions" style="margin-top:8px">
                     <button type="submit" class="btn btn-primary">Save Debug Settings</button>
                 </div>
@@ -457,6 +463,28 @@ function rebuildAniListCache(btn) {
         const data = await r.json();
         if (!r.ok) throw new Error(data.message || 'Rebuild failed');
         result.textContent = data.message || 'Metadata cache rebuild complete.';
+    })
+    .catch(err => {
+        result.textContent = err.message;
+    })
+    .finally(() => {
+        btn.disabled = false;
+    });
+}
+
+function classifyLibrary(btn) {
+    if (!confirm('Run the source/resolution classifier on every tracked series folder? Files that already have a structured classification row are skipped. This can take a while for large libraries because it runs ffprobe on each unclassified file.')) return;
+    const result = document.getElementById('library-classify-result');
+    btn.disabled = true;
+    result.textContent = 'Scanning...';
+    fetch('/api/tasks/library-classify', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+    })
+    .then(async r => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.message || 'Library classify failed');
+        result.textContent = data.message || 'Library classify complete.';
     })
     .catch(err => {
         result.textContent = err.message;

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, metadata_cache, series};
-use crate::services::{auto_search, logger, media, quality};
+use crate::services::source::{self, ClassificationResult, Resolution, Source};
+use crate::services::{auto_search, logger, media};
 use crate::AppState;
 
 static UPGRADE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
@@ -25,8 +26,10 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
 
-    let cutoff_tier = quality::QualityTier::from_str(&cfg.quality_cutoff);
-    if cutoff_tier == quality::QualityTier::Unknown {
+    let (cutoff_source, cutoff_is_remux, cutoff_is_bdmv) =
+        source::parse_cutoff_source(&cfg.cutoff_source);
+    let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
+    if cutoff_source == Source::Unknown && cutoff_resolution == Resolution::Unknown {
         return Ok(UpgradeSummary {
             series_checked: 0,
             episodes_checked: 0,
@@ -67,6 +70,12 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             continue;
         }
 
+        // Phase 4: per-series upgrade opt-out. User can disable upgrades
+        // for individual series via the series detail page toggle.
+        if !row.allow_upgrades {
+            continue;
+        }
+
         let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
         if disk_files.is_empty() {
             continue;
@@ -81,8 +90,15 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         // disk presence directly rather than monitor state.
         let on_disk_eps: Vec<i32> = disk_files.iter().map(|f| f.episode_number).collect();
 
-        let upgrade_targets =
-            auto_search::build_upgrade_targets(&disk_files, &on_disk_eps, cutoff_tier, &quality_tags);
+        let upgrade_targets = auto_search::build_upgrade_targets(
+            &disk_files,
+            &on_disk_eps,
+            cutoff_source,
+            cutoff_resolution,
+            cutoff_is_remux,
+            cutoff_is_bdmv,
+            &quality_tags,
+        );
         if upgrade_targets.is_empty() {
             continue;
         }
@@ -110,18 +126,15 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             &detail.title_romaji
         };
 
-        let upgrade_tiers: HashMap<i32, quality::QualityTier> = upgrade_targets
-            .iter()
-            .filter_map(|(t, tier)| match t {
-                auto_search::SearchTarget::Episode(n) => Some((*n, *tier)),
-                _ => None,
-            })
-            .collect();
-
-        let targets: Vec<auto_search::SearchTarget> = upgrade_targets
-            .into_iter()
-            .map(|(t, _)| t)
-            .collect();
+        let mut upgrade_classifications: HashMap<i32, ClassificationResult> = HashMap::new();
+        let mut targets: Vec<auto_search::SearchTarget> =
+            Vec::with_capacity(upgrade_targets.len());
+        for (t, c) in upgrade_targets {
+            if let auto_search::SearchTarget::Episode(n) = &t {
+                upgrade_classifications.insert(*n, c);
+            }
+            targets.push(t);
+        }
         let target_count = targets.len();
         total_episodes_checked += target_count;
 
@@ -137,18 +150,34 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             let label = auto_search::target_label(&target);
             // batch_episode_match=true so BD season packs can match episode targets.
             let best =
-                auto_search::find_best_for_target(&detail, &cfg, &target, true, true).await;
+                auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, true, true).await;
 
             let Some(result) = best else {
                 continue;
             };
 
+            // Classify the incoming release once; reused for upgrade verification,
+            // grab logging, and episode tag persistence below.
+            let incoming_classification = source::classify_release(
+                &state.db,
+                &result.title,
+                Some(&result.resolution),
+                Some(source::NyaaContext {
+                    info_hash: &result.info_hash,
+                    view_url: &result.link,
+                    is_batch: result.is_batch,
+                }),
+                Some(source::SeriesContext {
+                    status: &row.status,
+                    season_year: row.season_year,
+                }),
+            )
+            .await;
+
             // Verify this is actually an upgrade.
             if let auto_search::SearchTarget::Episode(ep_num) = &target {
-                if let Some(existing_tier) = upgrade_tiers.get(ep_num) {
-                    let incoming_tier =
-                        quality::detect_tier(&result.title, &result.resolution);
-                    if incoming_tier.rank() <= existing_tier.rank() {
+                if let Some(existing_classification) = upgrade_classifications.get(ep_num) {
+                    if incoming_classification.rank() <= existing_classification.rank() {
                         continue;
                     }
                     logger::info(
@@ -158,8 +187,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             "Upgrade: {} {} — {} -> {}",
                             title,
                             label,
-                            existing_tier.label(),
-                            incoming_tier.label()
+                            existing_classification.label(),
+                            incoming_classification.label()
                         ),
                         &result.title,
                     )
@@ -179,14 +208,16 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             match client.add_torrent(&url).await {
                 Ok(_) => {
                     total_upgrades_grabbed += 1;
-                    let tier = quality::detect_tier(&result.title, &result.resolution);
                     logger::info(
                         &state.db,
                         LogCategory::Grab,
                         &format!("Upgrade grabbed: {}", result.title),
                         &format!(
                             "series={}, target={}, group={}, tier={}",
-                            title, label, result.group, tier.label()
+                            title,
+                            label,
+                            result.group,
+                            incoming_classification.label()
                         ),
                     )
                     .await;
@@ -216,7 +247,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             &state.db,
                             row.id,
                             *ep_num,
-                            tier.label(),
+                            &incoming_classification,
                             &result.title,
                             &result.group,
                         )
