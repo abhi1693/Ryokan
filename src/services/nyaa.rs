@@ -30,6 +30,37 @@ static SEL_NEXT: LazyLock<Selector> = LazyLock::new(|| {
     Selector::parse("ul.pagination li.next:not(.disabled)").expect("SEL_NEXT parses")
 });
 
+/// Episode range like "01-12", "01~24", "1 - 24". Broader than the old
+/// `01[-~]\d{2,3}` hard-coded form so releases that start at a non-01
+/// episode (sequels, cour splits) still register as batches.
+static BATCH_RANGE_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r"(?i)\b\d{1,3}\s*[-~]\s*\d{2,3}\b").expect("BATCH_RANGE_RE parses")
+});
+
+/// Bare season marker: `S1`, `S01`, `Season 1`, etc. A season marker on
+/// its own — without a paired single-episode indicator — means the
+/// release covers the whole season. This is how most BD packs from
+/// high-quality groups (MTBB, Okay-Subs, Sephirotic, YURASUKA, neoDESU)
+/// are titled: `[Group] Show S1 (BD 1080p)` or `[Group] Show [Season 1]`.
+static SEASON_MARKER_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r"(?i)\b(s\d{1,2}|season\s*\d+)\b").expect("SEASON_MARKER_RE parses")
+});
+
+/// Single-episode indicator. If any of these hit, the release is
+/// scoped to one episode (or a very small multi-ep span) and should
+/// NOT be flagged as a batch even if a season marker is present.
+/// Patterns covered:
+///   - `S01E12`, `S1E05` — Western-style
+///   - ` - 12`, ` - 24.5` — classic fansub single-ep suffix
+///   - `Ep 12`, `Ep. 12`, `Episode 12`
+///   - `#12`
+static SINGLE_EP_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(
+        r"(?i)(s\d{1,2}e\d{1,3}|\s-\s*\d{1,3}(?:\.\d+)?\b|\bep\.?\s*\d{1,3}\b|\bepisode\s*\d{1,3}\b|#\d{1,3})",
+    )
+    .expect("SINGLE_EP_RE parses")
+});
+
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct SearchResult {
     pub title: String,
@@ -251,13 +282,27 @@ fn extract_resolution(title: &str) -> String {
 
 fn detect_batch(title: &str) -> bool {
     let lower = title.to_lowercase();
-    lower.contains("batch")
-        || lower.contains("complete")
-        || {
-            // Match patterns like "01-12", "01~24", "S01 Complete".
-            let re = regex_lite::Regex::new(r"(?i)(01[-~]\d{2,3}|s\d+\s*complete|\d{2,3}\s*[-~]\s*\d{2,3})").unwrap();
-            re.is_match(&lower)
-        }
+
+    // Explicit batch keywords.
+    if lower.contains("batch") || lower.contains("complete") {
+        return true;
+    }
+
+    // Numeric episode ranges like "01-12", "01~24", "1 - 24".
+    if BATCH_RANGE_RE.is_match(&lower) {
+        return true;
+    }
+
+    // Season marker with no single-episode indicator — the dominant
+    // batch form for BD season packs: `Show S1 (BD 1080p)`, `Show
+    // [Season 1] [BD 1080p]`, `Show.S01.1080p.BluRay...`. The
+    // single-ep guard keeps `Show S01E12` / `Show S1 - 12` off the
+    // batch path.
+    if SEASON_MARKER_RE.is_match(&lower) && !SINGLE_EP_RE.is_match(&lower) {
+        return true;
+    }
+
+    false
 }
 
 fn extract_hash(magnet: &str) -> String {
