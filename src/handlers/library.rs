@@ -2210,18 +2210,17 @@ pub async fn search_batch_releases(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
-    // Use auto_search::find_best_for_target with batch allowed; then grab if found.
-    let best = auto_search::find_best_for_target(
+    // Pick the best *batch* — filtering to is_batch pre-selection instead
+    // of post-selection. The old code called find_best_for_target and
+    // post-filtered, which returned None whenever the top-scored result
+    // was a single-episode weekly release (i.e. almost every popular show
+    // with active weekly seeders).
+    let best = auto_search::find_best_batch_for_target(
         &state.db,
         &detail,
         &cfg,
         &auto_search::SearchTarget::Single,
-        true,
-        false,
     ).await;
-
-    // We want batch-only, so filter.
-    let best = best.filter(|r| r.is_batch);
 
     let qbit = {
         let qbit = state.qbit.read().await;

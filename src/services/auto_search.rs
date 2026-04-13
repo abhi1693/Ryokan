@@ -189,6 +189,175 @@ pub async fn find_best_for_target(
     allow_batch: bool,
     batch_episode_match: bool,
 ) -> Option<SearchResult> {
+    collect_scored_for_target(db, detail, config, target, allow_batch, batch_episode_match)
+        .await
+        .into_iter()
+        .next()
+}
+
+/// Same multi-phase auto-search as `find_best_for_target`, but picks the
+/// best *batch* release instead of the best overall. Two things had to
+/// change relative to the pre-existing `best + filter(is_batch)` approach
+/// that this function replaces:
+///
+/// 1. Filtering to `is_batch` happens *before* selection. The old code
+///    picked the overall best scored candidate and then filtered, which
+///    returned `None` whenever the top-scored result was a single-episode
+///    weekly release — i.e. for almost every popular currently- or
+///    recently-finished show.
+/// 2. An extra batch-probe query phase runs alongside the standard query
+///    sweep. Nyaa page 1 for a plain title query on a popular show is
+///    dominated by weekly single-episode uploads; batches get pushed off
+///    the first page entirely. The "X batch" / "X complete" / "X 01-"
+///    probes funnel toward listings whose titles carry those tokens, so
+///    batches surface even when the generic queries would miss them.
+pub async fn find_best_batch_for_target(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+    config: &Config,
+    target: &SearchTarget,
+) -> Option<SearchResult> {
+    collect_scored_batches_for_target(db, detail, config, target)
+        .await
+        .into_iter()
+        .next()
+}
+
+/// Collection + scoring variant focused on batch releases.
+///
+/// Runs the same Phase 1/1.5/2/3 query sweep as the standard auto-search
+/// but augments it with `quality::batch_probe_queries` to surface batches
+/// that generic queries would miss on Nyaa page 1. Non-batch candidates
+/// are dropped before scoring, so the returned `Vec` only contains batch
+/// releases sorted by score descending.
+pub async fn collect_scored_batches_for_target(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+    config: &Config,
+    target: &SearchTarget,
+) -> Vec<SearchResult> {
+    let aliases = collect_aliases(detail);
+    let preferred_groups = quality::parse_group_list(&config.preferred_groups);
+    let preferred_res = preferred_resolution_search_value(config);
+    let is_finished = detail.is_finished();
+    let finished_mode = quality::FinishedSeriesMode::from_str(&config.finished_series_quality);
+    let preferred_source_enum = Source::from_str(&config.preferred_source);
+    let preferred_resolution_enum = Resolution::from_str(&config.preferred_resolution);
+    let (cutoff_source_enum, _, _) = source::parse_cutoff_source(&config.cutoff_source);
+    let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
+
+    let expected_season = infer_season_from_detail(detail);
+    let mut seen = HashSet::new();
+    let mut candidates: Vec<SearchResult> = Vec::new();
+
+    let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
+
+    let ctx = AutoQueryCtx {
+        aliases: &aliases,
+        preferred_groups: &preferred_groups,
+        preferred_resolution: &preferred_res,
+        target,
+        allow_batch: true,
+        expected_season,
+        is_finished,
+        season_year: detail.season_year,
+        categories: &categories,
+        batch_episode_match: false,
+    };
+
+    // Standard query sweep — picks up any batches that happen to surface
+    // on Nyaa page 1 alongside the singles.
+    let queries = build_queries(detail, target);
+    run_queries(&queries, ctx, &mut seen, &mut candidates).await;
+
+    // Batch-targeted probes — the important addition for this function.
+    // Explicit "batch" / "complete" keywords push the Nyaa search toward
+    // listings that wouldn't appear on page 1 for a plain title query.
+    let batch_queries = quality::batch_probe_queries(&aliases);
+    run_queries(&batch_queries, ctx, &mut seen, &mut candidates).await;
+
+    // Preferred-group queries, scoped to batches. Same fallback rule as
+    // `collect_scored_for_target`: only fire if no preferred-group hit
+    // has surfaced yet.
+    let has_preferred_hit = !preferred_groups.is_empty()
+        && candidates.iter().any(|c| {
+            preferred_groups.iter().any(|g| g.eq_ignore_ascii_case(&c.group))
+        });
+    if !has_preferred_hit && !preferred_groups.is_empty() {
+        let group_queries = build_group_queries(detail, target, &preferred_groups);
+        run_queries(&group_queries, ctx, &mut seen, &mut candidates).await;
+    }
+
+    // Drop non-batches before the classify/rescore pass so we don't pay
+    // the classification cost on candidates we're going to throw away.
+    candidates.retain(|c| c.is_batch);
+
+    let mut scored: Vec<SearchResult> = Vec::with_capacity(candidates.len());
+    for mut c in candidates.drain(..) {
+        let classification = source::classify_release(
+            db,
+            &c.title,
+            Some(&c.resolution),
+            Some(source::NyaaContext {
+                info_hash: &c.info_hash,
+                view_url: &c.link,
+                is_batch: c.is_batch,
+            }),
+            Some(source::SeriesContext {
+                status: &detail.status,
+                season_year: detail.season_year,
+                end_year: detail.end_year,
+            }),
+        )
+        .await;
+
+        if is_finished
+            && finished_mode == quality::FinishedSeriesMode::BdOnly
+            && !source::passes_bd_only_filter(&classification)
+        {
+            continue;
+        }
+
+        c.score = rescore_for_auto_search(
+            &c,
+            &classification,
+            config,
+            &aliases,
+            target,
+            expected_season,
+            is_finished,
+            detail.season_year,
+            finished_mode,
+            preferred_source_enum,
+            preferred_resolution_enum,
+            cutoff_source_enum,
+            cutoff_resolution_enum,
+        );
+        scored.push(c);
+    }
+
+    scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
+    scored
+}
+
+/// Internal: run the full auto-search query sweep (Phase 1 primary →
+/// Phase 1.5 extended aliases → Phase 2 preferred-group queries →
+/// Phase 3 BD probe), classify each candidate exactly once, filter via
+/// the BdOnly rule, rescore, and return the sorted `Vec<SearchResult>`.
+///
+/// Factored out so `find_best_for_target` (picks the top result) and
+/// `find_best_batch_for_target` (picks the top batch) can share the
+/// expensive collection pass. Filtering to batches post-sort gives the
+/// same answer as filtering pre-scoring because `rescore_for_auto_search`
+/// applies its per-target batch bump uniformly inside each target kind.
+async fn collect_scored_for_target(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+    config: &Config,
+    target: &SearchTarget,
+    allow_batch: bool,
+    batch_episode_match: bool,
+) -> Vec<SearchResult> {
     let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
@@ -309,7 +478,7 @@ pub async fn find_best_for_target(
     }
 
     scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
-    scored.into_iter().next()
+    scored
 }
 
 /// Shared context for `run_queries` — everything that stays constant

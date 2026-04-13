@@ -73,3 +73,22 @@ pub fn bd_probe_queries(aliases: &[String]) -> Vec<String> {
     }
     queries
 }
+
+/// Build Nyaa search queries that target batch/complete releases.
+///
+/// For popular shows with active weekly seeders, Nyaa page 1 under a
+/// plain title query is dominated by recent single-episode releases —
+/// batches get pushed off the first page entirely. Adding explicit
+/// "batch" / "complete" / "01-" keywords funnels the Nyaa search toward
+/// listings with those tokens in the title and surfaces batch releases
+/// that a generic query would never reach on page 1.
+pub fn batch_probe_queries(aliases: &[String]) -> Vec<String> {
+    let mut queries = Vec::new();
+    for alias in aliases {
+        queries.push(format!("{} batch", alias));
+        queries.push(format!("{} complete", alias));
+        // "X 01-" catches the common "01-12", "01~24" batch naming.
+        queries.push(format!("{} 01-", alias));
+    }
+    queries
+}
