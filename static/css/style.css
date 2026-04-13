@@ -1089,6 +1089,32 @@ fieldset legend {
     font-size: 13px;
 }
 
+/* One card containing both monitoring + upgrades rows, instead of two
+   separate cards. The rows share the background/border of the wrapper
+   and are separated by a thin divider for visual grouping. */
+.monitoring-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 13px;
+}
+
+.monitoring-card .monitoring-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+}
+
+.monitoring-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 0 14px;
+}
+
 .folder-label {
     color: var(--text-dim);
     font-weight: 600;
@@ -1317,7 +1343,6 @@ fieldset legend {
 
 .ep-missing-text {
     color: var(--text-dim);
-    font-style: italic;
 }
 
 .ep-missing-label {

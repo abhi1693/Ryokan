@@ -30,27 +30,68 @@ use crate::AppState;
 
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const LOGIN_MAX_FAILURES: usize = 5;
+/// Hard cap — past this many failures in the window, we stop running
+/// `verify_user` entirely and return an immediate throttled response.
+/// The soft cap (LOGIN_MAX_FAILURES) still equalizes wall time with a
+/// bcrypt call to avoid leaking whether the throttle has tripped; the
+/// hard cap is a DoS guard for the pathological case where a single key
+/// keeps hammering the endpoint — past the hard cap we'd rather leak a
+/// faint timing side channel than burn 50 ms of CPU per attempt forever.
+const LOGIN_HARD_CAP: usize = 20;
 
 static LOGIN_FAILURES: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Returns `Ok(())` if `key` is under the failure threshold, or
-/// `Err(())` if it is rate-limited right now. Always sweeps expired
+/// Outcome of a rate-limit check. Distinguishes the two throttle tiers
+/// so the login handler can choose between "equalize timing by running
+/// bcrypt anyway" (soft) and "abort before any CPU work" (hard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginCheck {
+    /// Under the soft cap — run the full verify path.
+    Allow,
+    /// Over the soft cap but under the hard cap. The caller still runs
+    /// `verify_user` to equalize wall time, then ignores the result.
+    SoftThrottled,
+    /// Over the hard cap. Skip bcrypt entirely and return throttled.
+    HardThrottled,
+}
+
+/// Classifies `key` against the rate-limit window. Always sweeps expired
 /// entries for `key` as a side effect, and drops the map entry entirely
 /// when its Vec empties out so rotated usernames / spoofed X-F-F values
 /// can't grow LOGIN_FAILURES unboundedly (one idle key per probe forever).
-fn login_check(key: &str) -> Result<(), ()> {
+fn login_check(key: &str) -> LoginCheck {
     let mut guard = LOGIN_FAILURES.lock().unwrap();
     let cutoff = Instant::now() - LOGIN_WINDOW;
-    let (allow, empty) = {
+    let (count, empty) = {
         let entry = guard.entry(key.to_string()).or_default();
         entry.retain(|t| *t > cutoff);
-        (entry.len() < LOGIN_MAX_FAILURES, entry.is_empty())
+        (entry.len(), entry.is_empty())
     };
     if empty {
         guard.remove(key);
     }
-    if allow { Ok(()) } else { Err(()) }
+    if count >= LOGIN_HARD_CAP {
+        LoginCheck::HardThrottled
+    } else if count >= LOGIN_MAX_FAILURES {
+        LoginCheck::SoftThrottled
+    } else {
+        LoginCheck::Allow
+    }
+}
+
+/// Walks every entry in LOGIN_FAILURES, prunes expired timestamps, and
+/// drops buckets that empty out. Call from the periodic cleanup task so
+/// idle keys (IPs/usernames that failed once an hour ago and never came
+/// back) don't linger forever — the per-request sweep in `login_check`
+/// only reaches buckets that are actively being touched.
+pub(crate) fn sweep_login_failures() {
+    let mut guard = LOGIN_FAILURES.lock().unwrap();
+    let cutoff = Instant::now() - LOGIN_WINDOW;
+    guard.retain(|_, v| {
+        v.retain(|t| *t > cutoff);
+        !v.is_empty()
+    });
 }
 
 /// Record a failed login attempt against `key`.
@@ -122,7 +163,7 @@ fn client_ip_from_request(headers: &HeaderMap, peer: Option<SocketAddr>) -> Stri
 /// attacker-supplied text (e.g. `form.username`) in a log line. Keeps
 /// newlines / terminal escapes / multi-kilobyte probes from showing up
 /// in the auth_log table and the tracing stream.
-fn sanitize_for_log(s: &str) -> String {
+pub(crate) fn sanitize_for_log(s: &str) -> String {
     let trimmed = s.trim();
     trimmed
         .chars()
@@ -446,27 +487,58 @@ pub async fn login_submit(
     let user_key = format!("u:{}", form.username.trim().to_ascii_lowercase());
     let safe_username = sanitize_for_log(&form.username);
 
-    // Pre-check: if either bucket is already over the limit, we still
-    // unconditionally run `verify_user` below and discard the result.
-    // Returning early without paying the bcrypt cost would leak to a
-    // probing attacker whether they're throttled (fast return) vs. just
-    // wrong (slow return after bcrypt::verify), which is enough to
-    // confirm that per-user throttling has tripped — i.e., that the
-    // username is worth pounding from another IP. Equalizing the wall
-    // time closes that timing oracle.
-    let rate_limited = login_check(&user_key).is_err() || login_check(&ip_key).is_err();
+    // Pre-check: figure out which throttle tier we're in.
+    //
+    // - Allow: run verify_user normally.
+    // - SoftThrottled: still run verify_user below so the response pays
+    //   ~50ms of bcrypt. Returning early here would leak to a probing
+    //   attacker whether they're throttled (fast return) vs. just wrong
+    //   (slow return), which is enough to confirm that per-user throttling
+    //   has tripped — i.e., that the username is worth pounding from
+    //   another IP. Equalizing the wall time closes that timing oracle.
+    // - HardThrottled: past the hard cap, skip bcrypt entirely. A single
+    //   key that's been failing for a minute straight is almost certainly
+    //   an attacker — we'd rather leak a faint timing side channel than
+    //   keep burning 50 ms of CPU per attempt forever. We still sleep a
+    //   randomized ~30–80 ms before responding so the fast-return is not
+    //   a crisp signal.
+    let user_tier = login_check(&user_key);
+    let ip_tier = login_check(&ip_key);
+    let hard_throttled =
+        user_tier == LoginCheck::HardThrottled || ip_tier == LoginCheck::HardThrottled;
+    let rate_limited = hard_throttled
+        || user_tier == LoginCheck::SoftThrottled
+        || ip_tier == LoginCheck::SoftThrottled;
 
-    // Always run verify_user so every response path pays ~50ms of bcrypt,
-    // whether the attempt is a genuine wrong password, a failed username
-    // (handled inside verify_user by DUMMY_BCRYPT_HASH), or a throttled
-    // request. The result is only honored when we were not rate-limited.
-    let verify_result = user::verify_user(&state.db, &form.username, &form.password).await;
+    // Run verify_user only when we're under the hard cap. Under soft
+    // throttling we still pay bcrypt to preserve the equalized-timing
+    // property; past the hard cap we drop it to protect the server.
+    let verify_result = if hard_throttled {
+        // Jittered sleep roughly the width of a bcrypt verify so the fast
+        // return doesn't crisply flag the hard-cap transition. Uses a
+        // cheap deterministic-but-per-request source (nanos of the
+        // current instant) to avoid a full PRNG dep just for this.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let jitter_ms = 30 + (nanos as u64 % 50);
+        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+        Ok(None)
+    } else {
+        user::verify_user(&state.db, &form.username, &form.password).await
+    };
 
     if rate_limited {
         logger::warn(
             &state.db,
             LogCategory::Auth,
-            &format!("Login rate-limited: {} from {}", safe_username, ip),
+            &format!(
+                "Login rate-limited ({}): {} from {}",
+                if hard_throttled { "hard" } else { "soft" },
+                safe_username,
+                ip
+            ),
             "",
         )
         .await;

@@ -362,6 +362,7 @@ async fn main() {
     let upgrade_enabled = models::config::get_config(&db).await.ok().flatten().map(|c| c.upgrade_search_enabled).unwrap_or(false);
     let _ = models::scheduled_tasks::touch_definition(&db, "upgrade_search", "Quality upgrade search", "Every 24 hours (when enabled)", upgrade_enabled).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "anibridge_refresh", "Anibridge mappings refresh", "Every 24 hours", true).await;
+    let _ = models::scheduled_tasks::touch_definition(&db, "library_classify", "Library classify sweep", "Every 6 hours", true).await;
 
     // Pre-load anibridge mappings so the first Seerr request doesn't block on download.
     tokio::spawn(async { services::anibridge::ensure_loaded().await; });
@@ -535,6 +536,12 @@ async fn main() {
                     }
                     _ => {}
                 }
+                // Prune idle LOGIN_FAILURES entries. The per-request sweep
+                // in `login_check` only touches keys actively being hit,
+                // so IPs / usernames that failed once and then went quiet
+                // would linger until the process restarts. Hourly global
+                // sweep keeps the map bounded.
+                handlers::auth::sweep_login_failures();
                 let status = if cleanup_errors.is_empty() { "ok" } else { "warn" };
                 let detail = if cleanup_errors.is_empty() { "Cleanup completed".to_string() } else { cleanup_errors.join("; ") };
                 let _ = models::scheduled_tasks::mark_finished(&cleanup_db, "cleanup", status, &detail).await;
@@ -573,6 +580,56 @@ async fn main() {
                         let _ = models::scheduled_tasks::mark_started(&pp_state.db, "post_processing", "Checking for completed downloads").await;
                         services::post_processing::run_once(&pp_state).await;
                         let _ = models::scheduled_tasks::mark_finished(&pp_state.db, "post_processing", "ok", "").await;
+                    }
+                }
+            }).await;
+        });
+    }
+
+    // Background task: library classify sweep every 6 hours. Re-runs the
+    // classifier against any on-disk files that are still tagged empty or
+    // "unknown" so the library self-heals when earlier low-confidence
+    // filename-only results can now be resolved with ffprobe. The 6-hour
+    // cadence is slow enough that ffprobe cost stays trivial and fast
+    // enough that a new unknown row upgrades the same day.
+    {
+        let classify_state = state.clone();
+        tokio::spawn(async move {
+            supervise("library_classify", move || {
+                let classify_state = classify_state.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
+                    // Skip the immediate tick — we don't want a big ffprobe
+                    // sweep racing the rest of startup.
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        let _ = models::scheduled_tasks::touch_definition(
+                            &classify_state.db,
+                            "library_classify",
+                            "Library classify sweep",
+                            "Every 6 hours",
+                            true,
+                        ).await;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &classify_state.db,
+                            "library_classify",
+                            "Re-classifying unknown / unclassified files",
+                        ).await;
+                        let report = services::post_processing::scan_library_for_unclassified(&classify_state).await;
+                        let detail = format!(
+                            "series={}, files_scanned={}, classified={}, needs_review={}",
+                            report.series_scanned,
+                            report.files_scanned,
+                            report.files_classified,
+                            report.files_needing_review,
+                        );
+                        let _ = models::scheduled_tasks::mark_finished(
+                            &classify_state.db,
+                            "library_classify",
+                            "ok",
+                            &detail,
+                        ).await;
                     }
                 }
             }).await;

@@ -105,7 +105,8 @@ pub async fn find_all_for_target(
     let finished_mode = quality::FinishedSeriesMode::from_str(&config.finished_series_quality);
     let preferred_source_enum = Source::from_str(&config.preferred_source);
     let preferred_resolution_enum = Resolution::from_str(&config.preferred_resolution);
-    let cutoff_source_enum = Source::from_str(&config.cutoff_source);
+    // Scoring only looks at Source rank, so drop the BluRay sub-tier.
+    let (cutoff_source_enum, _, _) = source::parse_cutoff_source(&config.cutoff_source);
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
     let expected_season = infer_season_from_detail(detail);
@@ -195,7 +196,8 @@ pub async fn find_best_for_target(
     let finished_mode = quality::FinishedSeriesMode::from_str(&config.finished_series_quality);
     let preferred_source_enum = Source::from_str(&config.preferred_source);
     let preferred_resolution_enum = Resolution::from_str(&config.preferred_resolution);
-    let cutoff_source_enum = Source::from_str(&config.cutoff_source);
+    // Scoring only looks at Source rank, so drop the BluRay sub-tier.
+    let (cutoff_source_enum, _, _) = source::parse_cutoff_source(&config.cutoff_source);
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
     let expected_season = infer_season_from_detail(detail);
@@ -576,10 +578,17 @@ pub fn build_upgrade_targets(
     candidate_episodes: &[i32],
     cutoff_source: Source,
     cutoff_resolution: Resolution,
+    cutoff_is_remux: bool,
+    cutoff_is_bdmv: bool,
     quality_tags: &std::collections::HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> Vec<(SearchTarget, ClassificationResult)> {
     let candidates: HashSet<i32> = candidate_episodes.iter().copied().collect();
-    let cutoff = source::cutoff_classification(cutoff_source, cutoff_resolution);
+    let cutoff = source::cutoff_classification(
+        cutoff_source,
+        cutoff_resolution,
+        cutoff_is_remux,
+        cutoff_is_bdmv,
+    );
     let cutoff_rank = cutoff.rank();
 
     let mut targets = Vec::new();

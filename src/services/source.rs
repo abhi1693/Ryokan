@@ -1020,16 +1020,37 @@ pub fn classification_from_stored_full(
 /// Build a synthetic `ClassificationResult` representing the user's quality
 /// cutoff. Used so upgrade-detection can compare real releases against the
 /// cutoff using the same rank tuple comparison as everything else.
-pub fn cutoff_classification(cutoff_source: Source, cutoff_resolution: Resolution) -> ClassificationResult {
+///
+/// `is_remux`/`is_bdmv` feed into `bluray_tier()` so a "BD Remux" or
+/// "BD-Raw (BDMV)" cutoff can out-rank a plain BluRay encode at the same
+/// resolution. Only meaningful when `cutoff_source == Source::BluRay`.
+pub fn cutoff_classification(
+    cutoff_source: Source,
+    cutoff_resolution: Resolution,
+    is_remux: bool,
+    is_bdmv: bool,
+) -> ClassificationResult {
     ClassificationResult {
         source: cutoff_source,
         resolution: cutoff_resolution,
-        is_remux: false,
+        is_remux,
         web_kind: WebKind::Unknown,
-        is_bdmv: false,
+        is_bdmv,
         confidence: 1.0,
         needs_review: false,
         evidence: Vec::new(),
+    }
+}
+
+/// Parse the stored `cutoff_source` config string into `(Source, is_remux,
+/// is_bdmv)`. Recognizes the BluRay sub-tier values "bluray_remux" and
+/// "bluray_bdmv" (persisted when the user picks "BD Remux" or "BD RAW" in
+/// settings), and falls back to `Source::from_str` for the plain variants.
+pub fn parse_cutoff_source(s: &str) -> (Source, bool, bool) {
+    match s {
+        "bluray_remux" => (Source::BluRay, true, false),
+        "bluray_bdmv" => (Source::BluRay, false, true),
+        other => (Source::from_str(other), false, false),
     }
 }
 

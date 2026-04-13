@@ -110,6 +110,17 @@ fn validate_source(value: &str, default: &str) -> String {
     }
 }
 
+/// Validate a form-submitted cutoff-source string. Like `validate_source`
+/// but also passes through the BluRay sub-tier markers "bluray_remux" and
+/// "bluray_bdmv" so settings can store BD Remux / BD RAW as distinct
+/// cutoffs. Reads go through `source::parse_cutoff_source`.
+fn validate_cutoff_source(value: &str, default: &str) -> String {
+    if value == "bluray_remux" || value == "bluray_bdmv" {
+        return value.to_string();
+    }
+    validate_source(value, default)
+}
+
 /// Validate a form-submitted resolution string by round-tripping through
 /// `Resolution::from_str`. Returns the bare numeric form ("1080", "720", …)
 /// on success, or the supplied default when unrecognized.
@@ -179,7 +190,7 @@ pub async fn settings_submit(
         blocked_groups: form.blocked_groups.trim().to_string(),
         preferred_source: validate_source(&form.preferred_source, "web"),
         preferred_resolution: validate_resolution(&form.preferred_resolution, "1080"),
-        cutoff_source: validate_source(&form.cutoff_source, "bluray"),
+        cutoff_source: validate_cutoff_source(&form.cutoff_source, "bluray"),
         cutoff_resolution: validate_resolution(&form.cutoff_resolution, "1080"),
         // Legacy combined tier columns — kept one release for rollback.
         // No longer user-editable; carried forward from the existing row.

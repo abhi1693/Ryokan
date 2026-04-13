@@ -148,7 +148,7 @@
             <div class="form-group">
                 <label for="preferred_resolution">Preferred Resolution</label>
                 <select name="preferred_resolution" id="preferred_resolution">
-                    <option value="2160" {% if config.preferred_resolution == "2160" %}selected{% endif %}>4K (2160p)</option>
+                    <option value="2160" {% if config.preferred_resolution == "2160" %}selected{% endif %}>2160p</option>
                     <option value="1080" {% if config.preferred_resolution == "1080" %}selected{% endif %}>1080p</option>
                     <option value="720" {% if config.preferred_resolution == "720" %}selected{% endif %}>720p</option>
                     <option value="480" {% if config.preferred_resolution == "480" %}selected{% endif %}>480p</option>
@@ -160,14 +160,16 @@
                 <select name="cutoff_source" id="cutoff_source">
                     <option value="web" {% if config.cutoff_source == "web" %}selected{% endif %}>WEB</option>
                     <option value="bluray" {% if config.cutoff_source == "bluray" %}selected{% endif %}>BluRay</option>
+                    <option value="bluray_remux" {% if config.cutoff_source == "bluray_remux" %}selected{% endif %}>BD Remux</option>
+                    <option value="bluray_bdmv" {% if config.cutoff_source == "bluray_bdmv" %}selected{% endif %}>BD RAW (BDMV)</option>
                     <option value="dvd" {% if config.cutoff_source == "dvd" %}selected{% endif %}>DVD</option>
                 </select>
-                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source.</span>
+                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source. BD Remux and BD RAW require a matching sub-tier — plain BluRay encodes will stay upgradeable.</span>
             </div>
             <div class="form-group">
                 <label for="cutoff_resolution">Cutoff Resolution</label>
                 <select name="cutoff_resolution" id="cutoff_resolution">
-                    <option value="2160" {% if config.cutoff_resolution == "2160" %}selected{% endif %}>4K (2160p)</option>
+                    <option value="2160" {% if config.cutoff_resolution == "2160" %}selected{% endif %}>2160p</option>
                     <option value="1080" {% if config.cutoff_resolution == "1080" %}selected{% endif %}>1080p</option>
                     <option value="720" {% if config.cutoff_resolution == "720" %}selected{% endif %}>720p</option>
                     <option value="480" {% if config.cutoff_resolution == "480" %}selected{% endif %}>480p</option>

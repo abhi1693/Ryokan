@@ -716,19 +716,20 @@ struct PendingClassification {
     row_exists: bool,
 }
 
-/// Walk every tracked series and classify on-disk video files that don't
-/// yet have a structured classification row. This is the Phase 2 "library
-/// scan path" — it catches files that were imported outside of Ryokan's
-/// own grab pipeline (pre-existing rips, manual drops, migrations from
-/// another PVR), which otherwise never get a structured source/resolution
-/// tag because `import_torrent` is the only path that currently calls
-/// `classify_post_download`.
+/// Walk every tracked series and (re-)classify on-disk video files that
+/// don't yet have a confident classification row. This is the Phase 2
+/// "library scan path" — it catches files that were imported outside of
+/// Ryokan's own grab pipeline (pre-existing rips, manual drops, migrations
+/// from another PVR), AND it self-heals rows that the classifier first
+/// saw as `Unknown` (low-confidence filename-only result) now that the
+/// file is actually on disk and the full ffprobe/dir-walk pipeline can
+/// run against it.
 ///
-/// Skips files that already have a non-empty `source` column on
-/// `episode_quality_tags` — those were classified at grab time or on a
-/// previous post-download pass and don't need to be re-touched. Files
-/// with `manual_override = 1` are left alone by
-/// `update_classification` regardless, so there's no special case here.
+/// Skips files whose tag row is:
+///  - already classified with a confident non-empty, non-"unknown" source,
+///  - flagged `needs_review = 1` (user should resolve via the review
+///    queue — we don't want to race against them),
+///  - flagged `manual_override = 1` (user pinned the classification).
 ///
 /// **Locking:** the enumeration phase (config read, `scan_series_folder`,
 /// existing-tag lookup, disk-existence filter) holds `POST_PROC_LOCK` so
@@ -779,14 +780,36 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             for file in &disk_files {
                 report.files_scanned += 1;
 
-                // Skip files that already have a structured classification.
-                // The `source` column is empty for rows predating Phase 1b
-                // and for files that have never been classified at all; a
-                // non-empty value means the classifier (grab-time or
-                // post-download) already set it.
+                // Decide whether to (re-)classify this file.
+                //
+                // Skip when:
+                //  - a tag exists with a non-empty source that isn't
+                //    "unknown" — already confidently classified.
+                //  - the tag is flagged `needs_review` — user should
+                //    resolve it manually via the Needs Review queue;
+                //    we don't want to silently overwrite their pending
+                //    decision with another low-confidence result.
+                //  - the tag is `manual_override` — the user explicitly
+                //    pinned this classification.
+                //
+                // Pick up when:
+                //  - no tag exists yet (externally-imported file).
+                //  - the source column is empty (pre-Phase-1b rows).
+                //  - the source is literally "unknown" (case-insensitive)
+                //    — the classifier couldn't decide at grab time but
+                //    the file exists now, so retry with the full
+                //    ffprobe/dir-walk pipeline. This is the background
+                //    self-healing path for rows that started as Unknown.
                 let tag = existing.get(&file.episode_number);
-                if tag.map(|t| !t.source.is_empty()).unwrap_or(false) {
-                    continue;
+                if let Some(t) = tag {
+                    if t.manual_override || t.needs_review {
+                        continue;
+                    }
+                    let src = t.source.trim();
+                    let is_unknown = src.is_empty() || src.eq_ignore_ascii_case("unknown");
+                    if !is_unknown {
+                        continue;
+                    }
                 }
 
                 // Reconstruct the absolute path so ffprobe can read the file.

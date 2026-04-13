@@ -50,9 +50,6 @@
             <button class="btn btn-primary" id="btn-auto-search" onclick="autoSearchSeries(this)">
                 <span class="btn-label">Search Missing Episodes</span>
             </button>
-            <button class="btn btn-secondary" id="btn-search-batch" onclick="searchBatchReleases(this)">
-                <span class="btn-label">Search Batch Releases</span>
-            </button>
             {% if is_tracked %}
                 {% if let Some(id) = db_id %}
                 <button class="btn btn-danger" id="btn-track" onclick="removeSeries({{ id }})">Remove from Library</button>
@@ -138,27 +135,30 @@
 
 {% if is_tracked %}
 <div class="detail-section monitoring-section">
-    <div class="folder-row monitoring-row">
-        <span class="folder-label">Monitoring:</span>
-        <div class="monitoring-controls">
-            <select id="monitor-mode" class="folder-select monitoring-select" onchange="setMonitoring(this.value)">
-                <option value="all" {% if monitor_mode.as_str() == "all" %}selected{% endif %}>All Episodes</option>
-                <option value="future" {% if monitor_mode.as_str() == "future" %}selected{% endif %}>Future Episodes</option>
-                <option value="missing" {% if monitor_mode.as_str() == "missing" %}selected{% endif %}>Missing Episodes</option>
-                <option value="existing" {% if monitor_mode.as_str() == "existing" %}selected{% endif %}>Existing Episodes</option>
-                <option value="none" {% if monitor_mode.as_str() == "none" %}selected{% endif %}>None</option>
-            </select>
-            <span class="form-hint" id="monitor-summary">{{ monitor_mode_label }} · {{ monitored_count }} monitored</span>
+    <div class="monitoring-card">
+        <div class="monitoring-row">
+            <span class="folder-label">Monitoring:</span>
+            <div class="monitoring-controls">
+                <select id="monitor-mode" class="folder-select monitoring-select" onchange="setMonitoring(this.value)">
+                    <option value="all" {% if monitor_mode.as_str() == "all" %}selected{% endif %}>All Episodes</option>
+                    <option value="future" {% if monitor_mode.as_str() == "future" %}selected{% endif %}>Future Episodes</option>
+                    <option value="missing" {% if monitor_mode.as_str() == "missing" %}selected{% endif %}>Missing Episodes</option>
+                    <option value="existing" {% if monitor_mode.as_str() == "existing" %}selected{% endif %}>Existing Episodes</option>
+                    <option value="none" {% if monitor_mode.as_str() == "none" %}selected{% endif %}>None</option>
+                </select>
+                <span class="form-hint" id="monitor-summary">{{ monitor_mode_label }} · {{ monitored_count }} monitored</span>
+            </div>
         </div>
-    </div>
-    <div class="folder-row monitoring-row">
-        <span class="folder-label">Upgrades:</span>
-        <div class="monitoring-controls">
-            <label class="checkbox-label">
-                <input type="checkbox" id="allow-upgrades" {% if allow_upgrades %}checked{% endif %} onchange="setAllowUpgrades(this.checked)">
-                Allow automatic upgrades when a higher-quality release is found
-            </label>
-            <span class="form-hint" id="allow-upgrades-status"></span>
+        <div class="monitoring-divider"></div>
+        <div class="monitoring-row">
+            <span class="folder-label">Upgrades:</span>
+            <div class="monitoring-controls">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="allow-upgrades" {% if allow_upgrades %}checked{% endif %} onchange="setAllowUpgrades(this.checked)">
+                    Allow automatic upgrades when a higher-quality release is found
+                </label>
+                <span class="form-hint" id="allow-upgrades-status"></span>
+            </div>
         </div>
     </div>
 </div>
@@ -184,6 +184,15 @@
         {% if is_tracked %}
         {% if let Some(id) = db_id %}
         <div class="season-header-actions">
+            <button class="icon-btn btn-search-batch" type="button"
+                id="btn-search-batch"
+                onclick="searchBatchReleases(this)"
+                title="Search for a batch release covering this season"
+                aria-label="Search batch releases">
+                <span class="icon-btn-inner">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                </span>
+            </button>
             <button class="monitor-all-btn {% if all_monitored %}is-active{% endif %}" type="button"
                 id="btn-monitor-all"
                 onclick="toggleMonitorAll({{ id }}, {{ all_monitored }})"
@@ -304,7 +313,7 @@
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><line x1="13" y1="13" x2="20" y2="20"/></svg>
                             </span>
                         </button>
-                        <button class="icon-btn btn-episode-override" type="button" onclick="openManualOverride({{ ep.number }}, '{{ ep.class_source }}', '{{ ep.class_resolution }}', {{ ep.class_is_remux }})" title="Override source/resolution tag" aria-label="Override source/resolution tag for episode {{ ep.number }}">
+                        <button class="icon-btn btn-episode-override" type="button" onclick="openManualOverride({{ ep.number }}, '{{ ep.class_source }}', '{{ ep.class_resolution }}', {{ ep.class_is_remux }}, {{ ep.class_is_bdmv }}, '{{ ep.class_web_kind }}')" title="Override source/resolution tag" aria-label="Override source/resolution tag for episode {{ ep.number }}">
                             <span class="icon-btn-inner">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4z"/></svg>
                             </span>
@@ -375,12 +384,15 @@
                 <label class="form-row">
                     <span class="form-label">Source</span>
                     <select id="override-source" class="folder-select">
-                        <option value="BluRay">BluRay</option>
-                        <option value="Web">Web</option>
-                        <option value="DVD">DVD</option>
-                        <option value="HDTV">HDTV</option>
-                        <option value="TV">TV</option>
-                        <option value="Unknown">Unknown</option>
+                        <option value="bluray_bdmv">BD-Raw (BDMV)</option>
+                        <option value="bluray_remux">BD-Remux</option>
+                        <option value="bluray">BluRay</option>
+                        <option value="web_dl">WEB-DL</option>
+                        <option value="webrip">WEBRip</option>
+                        <option value="dvd">DVD</option>
+                        <option value="hdtv">HDTV</option>
+                        <option value="tv">TV</option>
+                        <option value="unknown">Unknown</option>
                     </select>
                 </label>
                 <label class="form-row">
@@ -394,15 +406,11 @@
                         <option value="Unknown">Unknown</option>
                     </select>
                 </label>
-                <label class="checkbox-label">
-                    <input type="checkbox" id="override-remux">
-                    Remux (lossless re-packaging)
-                </label>
                 <div id="override-status" class="form-hint"></div>
             </div>
         </div>
         <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
-            <button class="btn" type="button" onclick="clearManualOverride()">Clear override</button>
+            <button class="btn btn-secondary" type="button" onclick="clearManualOverride()">Clear override</button>
             <button class="btn btn-primary" type="button" onclick="applyManualOverride()">Apply</button>
         </div>
     </div>
@@ -575,41 +583,49 @@ function renderGrabHistory(entries, epNum) {
 }
 
 function markEpisodeFailed(historyId, epNum, btn) {
-    if (!confirm('Mark this grab as failed and re-search for the episode?')) return;
-    const addToBlocklist = confirm('Also add this release to the blocklist?');
-    btn.disabled = true;
-    btn.textContent = 'Searching…';
-    const status = document.getElementById('auto-search-status');
-    fetch(`/api/series/${SD.id}/mark-failed/${epNum}`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ history_id: historyId, blocklist: addToBlocklist })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed');
-        const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
-        if (status) status.textContent = grabbed > 0 ? `Re-grabbed episode ${epNum}` : `No replacement found for episode ${epNum}`;
-        btn.textContent = grabbed > 0 ? 'Re-grabbed' : 'No result';
-        if (grabbed > 0) {
-            const first = data.grabbed[0];
-            updateEpisodeRow(epNum, 'grabbed', first.release_group);
-            ensureDlPollRunning();
-            refreshEpisodeRows({ force: true });
-        }
-        // Refresh the grab history in the modal
-        if (SD.dbId) {
-            fetch(`/api/series/${SD.id}/grab-history/${epNum}`)
-                .then(r => r.json())
-                .then(entries => renderGrabHistory(entries, epNum))
-                .catch(() => {});
-        }
-    })
-    .catch(err => {
-        if (status) status.textContent = err.message || 'Failed to mark as failed';
-        btn.disabled = false;
-        btn.textContent = 'Mark Failed';
+    window.ryokanConfirm({
+        title: `Mark Episode ${epNum} as Failed`,
+        body: 'Mark this grab as failed and re-search for the episode?',
+        yesLabel: 'Mark Failed',
+        noLabel: 'Cancel',
+        extras: [{id: 'blocklist', label: 'Also add this release to the blocklist', default: false}],
+    }).then(function(res) {
+        if (!res.ok) return;
+        const addToBlocklist = !!res.extras.blocklist;
+        btn.disabled = true;
+        btn.textContent = 'Searching…';
+        const status = document.getElementById('auto-search-status');
+        fetch(`/api/series/${SD.id}/mark-failed/${epNum}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ history_id: historyId, blocklist: addToBlocklist })
+        })
+        .then(async r => {
+            let data = {};
+            try { data = await r.json(); } catch (_) {}
+            if (!r.ok) throw new Error(data.message || 'Failed');
+            const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
+            if (status) status.textContent = grabbed > 0 ? `Re-grabbed episode ${epNum}` : `No replacement found for episode ${epNum}`;
+            btn.textContent = grabbed > 0 ? 'Re-grabbed' : 'No result';
+            if (grabbed > 0) {
+                const first = data.grabbed[0];
+                updateEpisodeRow(epNum, 'grabbed', first.release_group);
+                ensureDlPollRunning();
+                refreshEpisodeRows({ force: true });
+            }
+            // Refresh the grab history in the modal
+            if (SD.dbId) {
+                fetch(`/api/series/${SD.id}/grab-history/${epNum}`)
+                    .then(r => r.json())
+                    .then(entries => renderGrabHistory(entries, epNum))
+                    .catch(() => {});
+            }
+        })
+        .catch(err => {
+            if (status) status.textContent = err.message || 'Failed to mark as failed';
+            btn.disabled = false;
+            btn.textContent = 'Mark Failed';
+        });
     });
 }
 
@@ -912,18 +928,58 @@ function setMonitoring(mode) {
 
 let overrideTargetEpisode = null;
 
-function openManualOverride(epNumber, currentSource, currentResolution, isRemux) {
+// Composite dropdown key ↔ backend quartet. Each entry maps the <select>'s
+// value to the {source, is_remux, is_bdmv, web_kind} payload that the
+// /api/library/manual-override handler expects. Centralising the mapping
+// here means the HTML options and the POST body can't drift apart.
+const OVERRIDE_SOURCE_MAP = {
+    bluray_bdmv: { source: 'BluRay', is_remux: false, is_bdmv: true,  web_kind: '' },
+    bluray_remux:{ source: 'BluRay', is_remux: true,  is_bdmv: false, web_kind: '' },
+    bluray:      { source: 'BluRay', is_remux: false, is_bdmv: false, web_kind: '' },
+    web_dl:      { source: 'Web',    is_remux: false, is_bdmv: false, web_kind: 'WEB-DL' },
+    webrip:      { source: 'Web',    is_remux: false, is_bdmv: false, web_kind: 'WEBRip' },
+    dvd:         { source: 'DVD',    is_remux: false, is_bdmv: false, web_kind: '' },
+    hdtv:        { source: 'HDTV',   is_remux: false, is_bdmv: false, web_kind: '' },
+    tv:          { source: 'TV',     is_remux: false, is_bdmv: false, web_kind: '' },
+    unknown:     { source: 'Unknown',is_remux: false, is_bdmv: false, web_kind: '' },
+};
+
+// Reverse lookup: given the current classification quartet on the episode,
+// pick the dropdown key that best represents it. Falls back to 'bluray' so
+// a freshly-opened modal has a sensible default even when the tag is
+// missing or unrecognized.
+function overrideKeyFromClassification(source, isRemux, isBdmv, webKind) {
+    const src = (source || '').toLowerCase();
+    if (src === 'bluray' || src === 'blu-ray') {
+        if (isBdmv) return 'bluray_bdmv';
+        if (isRemux) return 'bluray_remux';
+        return 'bluray';
+    }
+    if (src === 'web') {
+        const wk = (webKind || '').toLowerCase();
+        if (wk === 'web-dl' || wk === 'webdl') return 'web_dl';
+        if (wk === 'webrip') return 'webrip';
+        return 'web_dl';
+    }
+    if (src === 'dvd') return 'dvd';
+    if (src === 'hdtv') return 'hdtv';
+    if (src === 'tv') return 'tv';
+    return 'unknown';
+}
+
+function openManualOverride(epNumber, currentSource, currentResolution, isRemux, isBdmv, webKind) {
     overrideTargetEpisode = epNumber;
     const modal = document.getElementById('override-modal');
     const title = document.getElementById('override-title');
     const srcSelect = document.getElementById('override-source');
     const resSelect = document.getElementById('override-resolution');
-    const remuxBox = document.getElementById('override-remux');
     const status = document.getElementById('override-status');
     if (title) title.textContent = `Override classification — Episode ${epNumber}`;
-    if (srcSelect) srcSelect.value = currentSource || 'BluRay';
+    if (srcSelect) {
+        const key = overrideKeyFromClassification(currentSource, isRemux, isBdmv, webKind);
+        srcSelect.value = OVERRIDE_SOURCE_MAP[key] ? key : 'bluray';
+    }
     if (resSelect) resSelect.value = currentResolution || '1080p';
-    if (remuxBox) remuxBox.checked = !!isRemux;
     if (status) status.textContent = '';
     if (modal) modal.style.display = 'flex';
 }
@@ -938,9 +994,9 @@ function applyManualOverride() {
     if (overrideTargetEpisode == null) return;
     const dbId = parseInt(SD.dbId);
     if (!dbId) return;
-    const source = document.getElementById('override-source').value;
+    const key = document.getElementById('override-source').value;
+    const mapped = OVERRIDE_SOURCE_MAP[key] || OVERRIDE_SOURCE_MAP.unknown;
     const resolution = document.getElementById('override-resolution').value;
-    const isRemux = document.getElementById('override-remux').checked;
     const status = document.getElementById('override-status');
     if (status) status.textContent = 'Saving…';
     fetch('/api/library/manual-override', {
@@ -949,9 +1005,11 @@ function applyManualOverride() {
         body: JSON.stringify({
             series_id: dbId,
             episode_number: overrideTargetEpisode,
-            source: source,
+            source: mapped.source,
             resolution: resolution,
-            is_remux: isRemux,
+            is_remux: mapped.is_remux,
+            is_bdmv: mapped.is_bdmv,
+            web_kind: mapped.web_kind,
         })
     })
     .then(async r => {
@@ -979,6 +1037,8 @@ function clearManualOverride() {
             source: '',
             resolution: '',
             is_remux: false,
+            is_bdmv: false,
+            web_kind: '',
         })
     })
     .then(async r => {

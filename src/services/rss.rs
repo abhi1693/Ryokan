@@ -270,9 +270,13 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let mut monitored_cache: HashMap<i64, HashSet<i32>> = HashMap::new();
     let mut quality_tags_cache: HashMap<i64, HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>> = HashMap::new();
 
+    let (cutoff_src, cutoff_is_remux, cutoff_is_bdmv) =
+        source::parse_cutoff_source(&cfg.cutoff_source);
     let cutoff = source::cutoff_classification(
-        Source::from_str(&cfg.cutoff_source),
+        cutoff_src,
         Resolution::from_str(&cfg.cutoff_resolution),
+        cutoff_is_remux,
+        cutoff_is_bdmv,
     );
 
     let mut items_seen = 0;
@@ -678,7 +682,11 @@ async fn score_candidate(
 ) -> i32 {
     let preferred_source = Source::from_str(&cfg.preferred_source);
     let preferred_resolution = Resolution::from_str(&cfg.preferred_resolution);
-    let cutoff_source = Source::from_str(&cfg.cutoff_source);
+    // Scoring uses the coarse Source rank, so collapse any BluRay sub-tier
+    // (bluray_remux/bluray_bdmv) back to plain BluRay here. Upgrade-detection
+    // and anywhere else that needs the sub-tier already went through
+    // `parse_cutoff_source` at their own call sites.
+    let (cutoff_source, _, _) = source::parse_cutoff_source(&cfg.cutoff_source);
     let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
     let finished_mode = quality::FinishedSeriesMode::from_str(&cfg.finished_series_quality);
 

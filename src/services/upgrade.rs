@@ -26,7 +26,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
 
-    let cutoff_source = Source::from_str(&cfg.cutoff_source);
+    let (cutoff_source, cutoff_is_remux, cutoff_is_bdmv) =
+        source::parse_cutoff_source(&cfg.cutoff_source);
     let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
     if cutoff_source == Source::Unknown && cutoff_resolution == Resolution::Unknown {
         return Ok(UpgradeSummary {
@@ -94,6 +95,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             &on_disk_eps,
             cutoff_source,
             cutoff_resolution,
+            cutoff_is_remux,
+            cutoff_is_bdmv,
             &quality_tags,
         );
         if upgrade_targets.is_empty() {

@@ -79,10 +79,14 @@ pub struct Episode {
     pub can_auto_search: bool,
     pub monitored: bool,
     /// Phase 4 classification columns — exposed to the template so the
-    /// manual override picker can pre-select the current values.
+    /// manual override picker can pre-select the current values. The
+    /// override dropdown's composite key (e.g. "bluray_remux", "web_dl")
+    /// is derived from this quartet in the template JS.
     pub class_source: String,
     pub class_resolution: String,
     pub class_is_remux: bool,
+    pub class_is_bdmv: bool,
+    pub class_web_kind: String,
     pub manual_override: bool,
     pub needs_review: bool,
 }
@@ -852,6 +856,8 @@ async fn build_episodes(
         let class_source = tag.map(|t| t.source.clone()).unwrap_or_default();
         let class_resolution = tag.map(|t| t.resolution.clone()).unwrap_or_default();
         let class_is_remux = tag.map(|t| t.is_remux).unwrap_or(false);
+        let class_is_bdmv = tag.map(|t| t.is_bdmv).unwrap_or(false);
+        let class_web_kind = tag.map(|t| t.web_kind.clone()).unwrap_or_default();
         let needs_review = tag.map(|t| t.needs_review).unwrap_or(false);
         let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
 
@@ -872,6 +878,8 @@ async fn build_episodes(
             class_source,
             class_resolution,
             class_is_remux,
+            class_is_bdmv,
+            class_web_kind,
             manual_override,
             needs_review,
         });
@@ -896,6 +904,8 @@ async fn build_episodes(
             let class_source = tag.map(|t| t.source.clone()).unwrap_or_default();
             let class_resolution = tag.map(|t| t.resolution.clone()).unwrap_or_default();
             let class_is_remux = tag.map(|t| t.is_remux).unwrap_or(false);
+            let class_is_bdmv = tag.map(|t| t.is_bdmv).unwrap_or(false);
+            let class_web_kind = tag.map(|t| t.web_kind.clone()).unwrap_or_default();
             let needs_review = tag.map(|t| t.needs_review).unwrap_or(false);
             let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
             episodes.push(Episode {
@@ -915,6 +925,8 @@ async fn build_episodes(
                 class_source,
                 class_resolution,
                 class_is_remux,
+                class_is_bdmv,
+                class_web_kind,
                 manual_override,
                 needs_review,
             });
@@ -1529,10 +1541,20 @@ pub async fn remove_series(
         }
     }
 
+    // Scrub any user-controlled strings that go into the log line —
+    // series titles come from metadata providers and folder paths come
+    // from user input, both of which could contain newlines or control
+    // chars that would corrupt the log format. `sanitize_for_log` strips
+    // control chars and caps length.
     let series_label = tracked
         .as_ref()
-        .map(|t| t.title.clone())
+        .map(|t| crate::handlers::auth::sanitize_for_log(&t.title))
         .unwrap_or_else(|| format!("id={}", series_id));
+    let safe_folder_detail = crate::handlers::auth::sanitize_for_log(&folder_detail);
+    let safe_torrent_failures: Vec<String> = torrent_failures
+        .iter()
+        .map(|e| crate::handlers::auth::sanitize_for_log(e))
+        .collect();
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -1543,11 +1565,11 @@ pub async fn remove_series(
             delete_files,
             torrents_removed,
             folder_status,
-            if folder_detail.is_empty() { String::new() } else { format!(" ({})", folder_detail) },
-            if torrent_failures.is_empty() {
+            if safe_folder_detail.is_empty() { String::new() } else { format!(" ({})", safe_folder_detail) },
+            if safe_torrent_failures.is_empty() {
                 String::new()
             } else {
-                format!(", torrent_errors=[{}]", torrent_failures.join("; "))
+                format!(", torrent_errors=[{}]", safe_torrent_failures.join("; "))
             },
             jellyfin_status,
         ),
@@ -1579,7 +1601,21 @@ pub async fn set_folder(
     State(state): State<AppState>,
     Json(form): Json<SetFolderForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    series::update_folder(&state.db, form.series_id, &form.folder_name)
+    // Validate the folder name before touching the DB or the filesystem.
+    // `sanitize_folder_name` strips path-traversal characters, control
+    // chars, and trims surrounding whitespace/dots. If the result is
+    // empty or differs from the input, the client sent something unsafe —
+    // reject it with 400 rather than silently renaming to the sanitized
+    // form (which would mask the attempt and still succeed).
+    let sanitized = crate::services::media::sanitize_folder_name(&form.folder_name);
+    if sanitized.is_empty() || sanitized != form.folder_name {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Invalid folder name".to_string(),
+        ));
+    }
+
+    series::update_folder(&state.db, form.series_id, &sanitized)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = monitoring_service::recompute_series_monitoring(&state.db, form.series_id).await;
@@ -2016,14 +2052,23 @@ pub async fn auto_search_series(
     };
 
     // Also include upgrade targets: episodes on disk below the quality cutoff.
-    let cutoff_source = crate::services::source::Source::from_str(&cfg.cutoff_source);
+    let (cutoff_source, cutoff_is_remux, cutoff_is_bdmv) =
+        crate::services::source::parse_cutoff_source(&cfg.cutoff_source);
     let cutoff_resolution = crate::services::source::Resolution::from_str(&cfg.cutoff_resolution);
     let quality_tags = if let Some(ref t) = tracked {
         episode_tags::get_for_series(&state.db, t.id).await.unwrap_or_default()
     } else {
         std::collections::HashMap::new()
     };
-    let upgrade_targets = auto_search::build_upgrade_targets(&existing_files, &monitored_eps, cutoff_source, cutoff_resolution, &quality_tags);
+    let upgrade_targets = auto_search::build_upgrade_targets(
+        &existing_files,
+        &monitored_eps,
+        cutoff_source,
+        cutoff_resolution,
+        cutoff_is_remux,
+        cutoff_is_bdmv,
+        &quality_tags,
+    );
     // Merge upgrade targets (avoid duplicates with missing targets).
     let existing_target_eps: std::collections::HashSet<i32> = targets
         .iter()

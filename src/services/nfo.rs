@@ -18,19 +18,43 @@ fn xml_escape(s: &str) -> String {
 /// Removed tags are replaced with a single space so structural tags like
 /// `<br>` between sentences keep acting as word separators. Adjacent runs of
 /// whitespace are then collapsed.
+///
+/// If the input ends mid-tag (an unmatched trailing `<`), the buffered chars
+/// that came after that `<` are flushed as literal text — they weren't really
+/// a tag, the `<` was just a stray bracket, and dropping the rest would
+/// silently eat content from malformed descriptions. The leading `<` itself
+/// is not re-emitted, matching the "strip markup, keep text" spirit of the
+/// function.
 fn strip_html_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    // Buffer for characters that appeared after a `<` — discarded when a
+    // matching `>` closes the tag, or flushed as literal content when the
+    // input ends before `>` arrives (or a second `<` restarts tag-mode).
+    let mut tag_buf = String::new();
     let mut in_tag = false;
     for ch in s.chars() {
         match ch {
             '<' => {
+                // Nested/unmatched `<` — flush the prior false-start as
+                // literal before entering the new tag.
+                if in_tag && !tag_buf.is_empty() {
+                    out.push_str(&tag_buf);
+                    tag_buf.clear();
+                }
                 in_tag = true;
                 out.push(' ');
             }
-            '>' => in_tag = false,
+            '>' if in_tag => {
+                in_tag = false;
+                tag_buf.clear();
+            }
             _ if !in_tag => out.push(ch),
-            _ => {}
+            _ => tag_buf.push(ch),
         }
+    }
+    // Input ended with an unmatched `<foo` — treat the remainder as literal.
+    if in_tag && !tag_buf.is_empty() {
+        out.push_str(&tag_buf);
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -216,9 +240,13 @@ mod tests {
     #[test]
     fn strip_html_tags_handles_unbalanced_input() {
         // Malformed AniList descriptions shouldn't crash or eat characters
-        // outside the broken tag.
-        assert_eq!(strip_html_tags("hello <not closed"), "hello");
+        // outside the broken tag. When the input ends mid-tag, the buffered
+        // chars are flushed as literal text (without the leading `<`).
+        assert_eq!(strip_html_tags("hello <not closed"), "hello not closed");
         assert_eq!(strip_html_tags("plain text"), "plain text");
+        // Two consecutive unclosed `<` — the first one's contents are
+        // flushed when the second `<` arrives.
+        assert_eq!(strip_html_tags("a <bc<d"), "a bc d");
     }
 
     fn detail_with_everything() -> AnimeDetail {
