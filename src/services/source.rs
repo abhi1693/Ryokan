@@ -262,6 +262,53 @@ impl SourceEvidence {
     }
 }
 
+/// Tagged identifier for the aggregator rule that produced a given result.
+///
+/// Stored on the `ClassificationResult` directly by `aggregate()` instead
+/// of being reverse-engineered after the fact. This makes the firing rule
+/// authoritative (rather than a heuristic inference that could drift out of
+/// sync with the rule bodies) and survives serialization so downstream
+/// logging/audit code can read it without re-examining the evidence.
+///
+/// Variants mirror the rules documented on `aggregate()`:
+/// - `Empty` — no evidence at all; fell back to `ClassificationResult::unknown()`.
+/// - `Rule1Strong` — every strong signal agreed on the winner and rule 1's
+///   short-circuit fired.
+/// - `Rule2Sum` — clean per-source sum win with no conflict flag raised.
+/// - `Rule3Weak` — total evidence mass below `MIN_TOTAL`; fell back to Unknown.
+/// - `Rule4Conflict` — rule 4 flagged `needs_review` because a strong
+///   runner-up was within `MIN_LEAD` of the leader.
+/// - `Rule5GroundTruthVeto` — rule 5 vetoed the lead because an
+///   ffprobe/dir observation at `STRONG_THRESHOLD` disagreed with the
+///   aggregator's winning source. Takes precedence over Rule4Conflict in
+///   logging because it's the more specific and more actionable cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub enum DecisionRule {
+    #[default]
+    Empty,
+    Rule1Strong,
+    Rule2Sum,
+    Rule3Weak,
+    Rule4Conflict,
+    Rule5GroundTruthVeto,
+}
+
+impl DecisionRule {
+    /// Short log-friendly identifier for the rule. Matches the strings the
+    /// previous `decision_rule()` helper returned so log consumers don't
+    /// need to learn new vocabulary.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Rule1Strong => "rule1-strong",
+            Self::Rule2Sum => "rule2-sum",
+            Self::Rule3Weak => "rule3-weak",
+            Self::Rule4Conflict => "rule4-conflict",
+            Self::Rule5GroundTruthVeto => "rule5-veto",
+        }
+    }
+}
+
 /// The output of a classification run. Carries the final (source, resolution,
 /// remux) decision plus the full evidence trail for auditing.
 #[derive(Debug, Clone, Serialize)]
@@ -300,6 +347,15 @@ pub struct ClassificationResult {
     /// Full evidence trail. Logged at DEBUG always, logged at INFO when
     /// `needs_review` is true.
     pub evidence: Vec<SourceEvidence>,
+    /// Which aggregator rule produced this result. Set authoritatively
+    /// inside `aggregate()` at the matching branch, so downstream code
+    /// never needs to reverse-engineer it from the other fields. Defaults
+    /// to `DecisionRule::Empty` on constructors that don't run through
+    /// the aggregator (e.g. `unknown()`, `cutoff_classification`, and
+    /// `classification_from_stored_full`, which are all synthesized or
+    /// rehydrated results rather than live classifications).
+    #[serde(default)]
+    pub decision_rule: DecisionRule,
 }
 
 impl ClassificationResult {
@@ -315,6 +371,7 @@ impl ClassificationResult {
             confidence: 0.0,
             needs_review: true,
             evidence: Vec::new(),
+            decision_rule: DecisionRule::Empty,
         }
     }
 
@@ -524,6 +581,7 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
                 confidence: winner.confidence,
                 needs_review: false,
                 evidence: evidence.to_vec(),
+                decision_rule: DecisionRule::Rule1Strong,
             };
         }
         // Strong signals disagree — fall through to rule 2 so per-source
@@ -567,6 +625,7 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
             confidence: evidence_mass,
             needs_review: true,
             evidence: evidence.to_vec(),
+            decision_rule: DecisionRule::Rule3Weak,
         };
     }
 
@@ -575,7 +634,7 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     let has_strong_conflict = evidence
         .iter()
         .any(|e| e.confidence >= CONFLICT_THRESHOLD && e.source != leader);
-    let mut needs_review = has_strong_conflict && lead < MIN_LEAD;
+    let rule4_fires = has_strong_conflict && lead < MIN_LEAD;
 
     // Rule 5: ground-truth veto. If any ffprobe/dir observation at or
     // above STRONG_THRESHOLD disagrees with the winner, flag for review
@@ -583,14 +642,24 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     // win overall while an opposing measurement layer still carries a
     // strong individual signal — that combination is precisely the
     // "human should look" case.
-    let ground_truth_conflict = evidence.iter().any(|e| {
+    let rule5_fires = evidence.iter().any(|e| {
         e.confidence >= STRONG_THRESHOLD
             && e.source != leader
             && (e.origin == "ffprobe" || e.origin == "dir")
     });
-    if ground_truth_conflict {
-        needs_review = true;
-    }
+
+    // Rule precedence for the stored tag: rule 5 is more specific than
+    // rule 4 (a strong ground-truth measurement beating the aggregator
+    // is a distinct, more actionable failure mode than a close intra-
+    // label conflict), so it wins when both fire. Both rules set
+    // needs_review; the rule tag is purely for logging/audit.
+    let (decision_rule, needs_review) = if rule5_fires {
+        (DecisionRule::Rule5GroundTruthVeto, true)
+    } else if rule4_fires {
+        (DecisionRule::Rule4Conflict, true)
+    } else {
+        (DecisionRule::Rule2Sum, false)
+    };
 
     // If the lead is large enough, it's a clean win regardless of conflicts.
     // If the lead is small but no strong conflict, still call it a win.
@@ -608,6 +677,7 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
         confidence: evidence_mass / (evidence_mass + runner_sum).max(evidence_mass),
         needs_review,
         evidence: evidence.to_vec(),
+        decision_rule,
     }
 }
 
@@ -896,7 +966,7 @@ fn log_classification(phase: &str, title: &str, result: &ClassificationResult) {
         title,
         result.label(),
         result.confidence,
-        decision_rule(result),
+        result.decision_rule.as_str(),
         trail,
     );
     if result.needs_review {
@@ -907,7 +977,7 @@ fn log_classification(phase: &str, title: &str, result: &ClassificationResult) {
             title,
             result.label(),
             result.confidence,
-            decision_rule(result),
+            result.decision_rule.as_str(),
             trail,
         );
     }
@@ -933,7 +1003,7 @@ async fn log_classification_to_db(
     let detail = format!(
         "phase={}\nrule={}\nlabel={}\nconfidence={:.2}\nresolution={}\nis_remux={}\nis_bdmv={}\nweb_kind={}\nevidence:\n{}",
         phase,
-        decision_rule(result),
+        result.decision_rule.as_str(),
         result.label(),
         result.confidence,
         result.resolution.as_str(),
@@ -990,38 +1060,6 @@ fn evidence_trail(result: &ClassificationResult) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Reverse-engineer which aggregator rule fired by inspecting the
-/// returned `ClassificationResult`. Cheaper than threading a "rule
-/// fired" field through the result struct, and accurate enough for
-/// debugging — the rules are mutually exclusive by construction.
-///
-/// - `empty` — no evidence at all (`ClassificationResult::unknown()`).
-/// - `rule1-strong` — at least one evidence ≥ `STRONG_THRESHOLD` agreed
-///   with the winning source.
-/// - `rule3-weak` — total mass below `MIN_TOTAL`, fell back to Unknown.
-/// - `rule4-conflict` — runner-up had a strong signal and the lead was
-///   smaller than `MIN_LEAD` (`needs_review = true` on a non-Unknown result).
-/// - `rule2-sum` — clean per-source sum win (the common case).
-fn decision_rule(result: &ClassificationResult) -> &'static str {
-    if result.evidence.is_empty() {
-        return "empty";
-    }
-    if result.source == Source::Unknown {
-        return "rule3-weak";
-    }
-    let strong_for_winner = result
-        .evidence
-        .iter()
-        .any(|e| e.confidence >= STRONG_THRESHOLD && e.source == result.source);
-    if strong_for_winner {
-        return "rule1-strong";
-    }
-    if result.needs_review {
-        return "rule4-conflict";
-    }
-    "rule2-sum"
 }
 
 /// Current calendar year as an `i32`, injected into Layer 4 so the
@@ -1089,6 +1127,9 @@ pub fn classification_from_stored_full(
         confidence,
         needs_review,
         evidence: Vec::new(),
+        // Rehydrated results aren't produced by the live aggregator,
+        // so the firing rule isn't recoverable. Default to Empty.
+        decision_rule: DecisionRule::Empty,
     }
 }
 
@@ -1114,6 +1155,9 @@ pub fn cutoff_classification(
         confidence: 1.0,
         needs_review: false,
         evidence: Vec::new(),
+        // Synthesized cutoff sentinel — not a live classification,
+        // so there's no firing rule to record.
+        decision_rule: DecisionRule::Empty,
     }
 }
 
@@ -1346,6 +1390,7 @@ mod tests {
             confidence: 1.0,
             needs_review: false,
             evidence: vec![],
+            decision_rule: DecisionRule::Empty,
         };
         let bd_720 = ClassificationResult {
             source: Source::BluRay,
@@ -1356,6 +1401,7 @@ mod tests {
             confidence: 1.0,
             needs_review: false,
             evidence: vec![],
+            decision_rule: DecisionRule::Empty,
         };
         assert!(web_1080.rank() > bd_720.rank());
     }
@@ -1371,6 +1417,7 @@ mod tests {
             confidence: 1.0,
             needs_review: false,
             evidence: vec![],
+            decision_rule: DecisionRule::Empty,
         };
         let remux = ClassificationResult { is_remux: true, ..plain.clone() };
         let bdmv = ClassificationResult { is_bdmv: true, ..plain.clone() };
@@ -1394,6 +1441,7 @@ mod tests {
             confidence: 1.0,
             needs_review: false,
             evidence: vec![],
+            decision_rule: DecisionRule::Empty,
         };
         let webdl = ClassificationResult { web_kind: WebKind::WebDl, ..webrip.clone() };
         assert!(webdl.rank() > webrip.rank());
@@ -1569,6 +1617,46 @@ mod tests {
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::BluRay);
         assert!(!result.needs_review);
+    }
+
+    #[test]
+    fn aggregate_decision_rule_tagged_per_branch() {
+        // Empty evidence → Empty.
+        assert_eq!(aggregate(&[]).decision_rule, DecisionRule::Empty);
+
+        // Single strong signal → Rule1Strong.
+        let rule1 = aggregate(&[ev(Source::Web, 0.95, "filename")]);
+        assert_eq!(rule1.decision_rule, DecisionRule::Rule1Strong);
+
+        // Clean sum win with no strong signals → Rule2Sum.
+        let rule2 = aggregate(&[
+            ev(Source::Web, 0.60, "filename"),
+            ev(Source::Web, 0.55, "group"),
+            ev(Source::BluRay, 0.50, "temporal"),
+        ]);
+        assert_eq!(rule2.decision_rule, DecisionRule::Rule2Sum);
+
+        // Total mass below MIN_TOTAL → Rule3Weak.
+        let rule3 = aggregate(&[
+            ev(Source::Web, 0.20, "temporal"),
+            ev(Source::BluRay, 0.15, "temporal"),
+        ]);
+        assert_eq!(rule3.decision_rule, DecisionRule::Rule3Weak);
+
+        // Close strong conflict, no ground-truth layer → Rule4Conflict.
+        let rule4 = aggregate(&[
+            ev(Source::Web, 0.75, "filename"),
+            ev(Source::BluRay, 0.70, "group"),
+        ]);
+        assert_eq!(rule4.decision_rule, DecisionRule::Rule4Conflict);
+
+        // Ground-truth veto beats rule 4 when both would fire.
+        let rule5 = aggregate(&[
+            ev(Source::BluRay, 0.95, "filename"),
+            ev(Source::BluRay, 0.85, "filename"),
+            ev(Source::Web, 0.90, "ffprobe"),
+        ]);
+        assert_eq!(rule5.decision_rule, DecisionRule::Rule5GroundTruthVeto);
     }
 
     #[test]

@@ -374,6 +374,7 @@ pub async fn set_manual_override(
         confidence: 1.0,
         needs_review: false,
         evidence: Vec::new(),
+        decision_rule: crate::services::source::DecisionRule::Empty,
     };
     let label = synthetic.label();
     let is_remux_i = if is_remux { 1_i64 } else { 0_i64 };
