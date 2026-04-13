@@ -248,6 +248,12 @@ pub async fn settings_submit(
         } else {
             existing_cfg.as_ref().map(|c| c.upgrade_search_enabled).unwrap_or(false)
         },
+        // Carried forward from the existing row — edited through the
+        // dedicated Custom Formats settings page (Phase 7), not this form.
+        custom_format_minimum_score: existing_cfg
+            .as_ref()
+            .map(|c| c.custom_format_minimum_score)
+            .unwrap_or(i32::MIN),
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

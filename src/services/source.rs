@@ -208,6 +208,29 @@ impl Resolution {
         }
     }
 
+    /// Parse from Sonarr's `ResolutionSpecification` integer value. Sonarr
+    /// stores the raw pixel height (480, 576, 720, 1080, 2160), with `0 =
+    /// Unknown`. Sonarr also defines `360` and `540` variants; Ryokan
+    /// folds both to `Unknown` since we don't classify them as distinct
+    /// tiers and anime releases at those heights are rare.
+    ///
+    /// Used by the Custom Formats parser to compile a
+    /// `ResolutionSpecification` into a comparison against
+    /// `ClassificationResult::resolution`. Phase 3 lands the helper in
+    /// isolation; Phase 4 (`src/services/custom_formats.rs`) adds the
+    /// caller, at which point the `#[allow(dead_code)]` comes off.
+    #[allow(dead_code)]
+    pub fn from_int(value: i32) -> Self {
+        match value {
+            480 => Resolution::R480p,
+            576 => Resolution::R576p,
+            720 => Resolution::R720p,
+            1080 => Resolution::R1080p,
+            2160 => Resolution::R2160p,
+            _ => Resolution::Unknown,
+        }
+    }
+
     /// Derive resolution from explicit pixel dimensions. Used by ffprobe layer
     /// in Phase 2, and by Layer 1 for cross-referencing against mentioned
     /// dimensions like "1920x1080".
@@ -1452,6 +1475,23 @@ mod tests {
         // Resolution ordering.
         assert!(Resolution::R2160p.rank() > Resolution::R1080p.rank());
         assert!(Resolution::R1080p.rank() > Resolution::R720p.rank());
+    }
+
+    #[test]
+    fn resolution_from_int_maps_sonarr_values() {
+        assert_eq!(Resolution::from_int(480), Resolution::R480p);
+        assert_eq!(Resolution::from_int(576), Resolution::R576p);
+        assert_eq!(Resolution::from_int(720), Resolution::R720p);
+        assert_eq!(Resolution::from_int(1080), Resolution::R1080p);
+        assert_eq!(Resolution::from_int(2160), Resolution::R2160p);
+        // Sonarr's 360 and 540 variants fold to Unknown — Ryokan doesn't
+        // classify those tiers and anime rarely ships at either height.
+        assert_eq!(Resolution::from_int(360), Resolution::Unknown);
+        assert_eq!(Resolution::from_int(540), Resolution::Unknown);
+        // Nonsense input, including Sonarr's sentinel 0, also folds to Unknown.
+        assert_eq!(Resolution::from_int(0), Resolution::Unknown);
+        assert_eq!(Resolution::from_int(-1), Resolution::Unknown);
+        assert_eq!(Resolution::from_int(9999), Resolution::Unknown);
     }
 
     #[test]

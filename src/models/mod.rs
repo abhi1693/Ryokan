@@ -14,6 +14,7 @@ pub mod episode_tags;
 pub mod group_source_map;
 pub mod nyaa_description_cache;
 pub mod media_probe_cache;
+pub mod custom_formats;
 
 use sqlx::SqlitePool;
 
@@ -757,6 +758,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // upgrade checks) don't re-shell out to ffprobe for the same file.
     media_probe_cache::migrate(db).await?;
 
+    // Sonarr-v4-compatible Custom Formats. Two tables: one for CF
+    // definitions (raw JSON preserved for byte-perfect re-export) and
+    // one for (custom_format_id, profile_id) → score. V1 hardcodes
+    // profile_id = 1 everywhere.
+    custom_formats::migrate(db).await?;
+
     // ── Phase 1b: classification columns on episode_quality_tags ─────────
     // These record the ClassificationResult at grab time so later scoring,
     // upgrade detection, and UI review workflows can read structured source
@@ -832,6 +839,16 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // authoritative preferred-resolution field. The three new columns cover
     // the bits that didn't exist before. Legacy quality_profile and
     // quality_cutoff are kept for one release as a rollback hatch.
+    // Floor for total_cf_score after the CF pipeline sums a candidate's
+    // matching formats. Default `-2147483648` (= i32::MIN) means "no
+    // floor" — the user opts in by raising it via the Custom Formats
+    // settings page. Read paths fall back to this sentinel when the
+    // column is present but the row predates it.
+    sqlx::query("ALTER TABLE config ADD COLUMN custom_format_minimum_score INTEGER NOT NULL DEFAULT -2147483648")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query("ALTER TABLE config ADD COLUMN preferred_source TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
