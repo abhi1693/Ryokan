@@ -2163,13 +2163,18 @@ pub async fn auto_search_episode(
         &format!("Episode search: series_ref={}, episode={}", request_id, episode_number),
         "allow_batch=false",
     ).await;
+    // Collapse to Single for single-entry media so movie/OVA/special
+    // release titles (which don't carry episode numbers) aren't filtered
+    // out by the Episode(n) matching rules.
+    let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
+
     // Spawn as an independent task so the grab completes even if the client disconnects.
     let state_clone = state.clone();
     let handle = tokio::spawn(async move {
         run_auto_search_targets(
             &state_clone,
             request_id,
-            vec![auto_search::SearchTarget::Episode(episode_number)],
+            vec![target],
             false,
             series_id_for_grab,
         )
@@ -2310,11 +2315,14 @@ pub async fn interactive_search_episode(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
+    // Same single-entry collapse as auto_search_episode — the interactive
+    // picker otherwise returns zero results for movies.
+    let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
     let results = auto_search::find_all_for_target(
         &state.db,
         &detail,
         &cfg,
-        &auto_search::SearchTarget::Episode(episode_number),
+        &target,
         false,
     ).await;
 
@@ -2729,7 +2737,7 @@ pub async fn mark_episode_failed(
     Path((request_id, episode_number)): Path<(i64, i32)>,
     Json(form): Json<MarkEpisodeFailedForm>,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
-    let (tracked_row, _, _) = resolve_series_context(&state.db, request_id)
+    let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
@@ -2782,13 +2790,16 @@ pub async fn mark_episode_failed(
     }
 
     // Re-trigger auto-search for this episode in the background so it completes
-    // even if the client disconnects.
+    // even if the client disconnects. Collapse to Single for single-entry
+    // media so the retry doesn't get stuck in the same Episode(1)
+    // filter-rejects-everything trap.
+    let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
     let state_clone = state.clone();
     let handle = tokio::spawn(async move {
         run_auto_search_targets(
             &state_clone,
             request_id,
-            vec![auto_search::SearchTarget::Episode(episode_number)],
+            vec![target],
             false,
             Some(series_id),
         ).await

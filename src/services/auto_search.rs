@@ -69,6 +69,35 @@ pub enum SearchTarget {
     Episode(i32),
 }
 
+impl SearchTarget {
+    /// Build a search target for a user-initiated "search this episode"
+    /// action. Collapses to `Single` when the media's format is one that
+    /// doesn't carry episode numbers in release filenames (MOVIE,
+    /// SPECIAL, OVA, ONA); otherwise stays as `Episode(n)`.
+    ///
+    /// This exists because the per-episode handlers used to pass
+    /// `Episode(n)` unconditionally — and for movies, `matches_target`
+    /// then rejected every real release on Nyaa (movie filenames don't
+    /// carry episode numbers), leaving Phase 1 empty and triggering the
+    /// extended-alias fallback with its looser matching. Collapsing to
+    /// `Single` for single-entry formats keeps the search on the correct
+    /// code path and prevents the fallback from firing in the first
+    /// place.
+    ///
+    /// The decision is format-only and does NOT look at episode count:
+    /// an airing TV show with `episodes: None` still needs `Episode(n)`
+    /// because TV releases do carry episode numbers, and collapsing on
+    /// "unknown count" would silently break per-episode search for every
+    /// currently-airing show.
+    pub fn for_episode(detail: &AnimeDetail, episode_number: i32) -> Self {
+        if matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA") {
+            SearchTarget::Single
+        } else {
+            SearchTarget::Episode(episode_number)
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct AutoSearchHit {
     pub target_label: String,
@@ -879,7 +908,23 @@ pub fn collect_extended_aliases(detail: &AnimeDetail) -> Vec<String> {
 }
 
 /// Split a compound title on common delimiters and return meaningful segments.
-/// Filters out segments that are too short to be useful search terms.
+/// Filters out segments that are too short or too generic to be useful search
+/// terms.
+///
+/// Segments are used both as Nyaa search queries AND as matching aliases
+/// inside `matches_target`, which means an over-generic segment can
+/// substring-match unrelated shows on Nyaa and cause a completely wrong
+/// grab. A single-word subtitle (especially a common English word or
+/// hyphenated phrase) is almost always ambiguous — it will substring-match
+/// any release that happens to contain the word, regardless of whether
+/// that release is for this show or an unrelated one with the same word
+/// in its name.
+///
+/// The 2-token minimum is the cheap defense: segments with only one
+/// whitespace-separated token are rejected, regardless of length, because
+/// they can't be trusted to uniquely identify a show. Segments with 2+
+/// tokens remain — those are specific enough that substring-matching them
+/// against an unrelated release is vanishingly unlikely.
 fn split_title_segments(title: &str) -> Vec<String> {
     // Normalize various dash types to a common delimiter for splitting.
     let normalized = title
@@ -895,6 +940,14 @@ fn split_title_segments(title: &str) -> Vec<String> {
             continue;
         }
         if trimmed.eq_ignore_ascii_case(title.trim()) {
+            continue;
+        }
+        // Require at least 2 whitespace-separated tokens. Single-word
+        // segments are too generic to use as matching aliases: they can
+        // substring-match any release title that happens to contain the
+        // word (see doc comment above for the Kizumonogatari / Gundam
+        // Iron-Blooded Orphans incident).
+        if trimmed.split_whitespace().count() < 2 {
             continue;
         }
         // Skip pure numbering like "Part 7", "Season 2", "2nd Season".
@@ -1255,4 +1308,203 @@ fn season_mismatch(release_title: &str, expected_season: i32) -> bool {
     }
     let effective_expected = if expected_season > 0 { expected_season } else { 1 };
     release_season != effective_expected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::anilist::AnimeDetail;
+
+    fn detail_with(format: &str, episodes: Option<i32>) -> AnimeDetail {
+        AnimeDetail {
+            id: 1,
+            id_mal: None,
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            banner_url: String::new(),
+            format: format.to_string(),
+            status: String::new(),
+            status_display: String::new(),
+            episodes,
+            duration: None,
+            season: String::new(),
+            season_year: None,
+            end_year: None,
+            description: String::new(),
+            genres: Vec::new(),
+            average_score: None,
+            average_score_display: None,
+            score_is_ten_point: false,
+            score_class: String::new(),
+            next_airing_episode: None,
+            next_airing_at: None,
+            synonyms: Vec::new(),
+            streaming_episodes: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+
+    // SearchTarget::for_episode collapses to Single for single-entry media
+    // so per-episode handlers don't pass Episode(n) for shows that don't
+    // have episode numbers in their release filenames.
+
+    #[test]
+    fn for_episode_collapses_movie_to_single() {
+        let d = detail_with("MOVIE", Some(1));
+        assert!(matches!(SearchTarget::for_episode(&d, 1), SearchTarget::Single));
+    }
+
+    #[test]
+    fn for_episode_collapses_special_to_single() {
+        let d = detail_with("SPECIAL", Some(1));
+        assert!(matches!(SearchTarget::for_episode(&d, 1), SearchTarget::Single));
+    }
+
+    #[test]
+    fn for_episode_collapses_ova_to_single() {
+        let d = detail_with("OVA", Some(1));
+        assert!(matches!(SearchTarget::for_episode(&d, 1), SearchTarget::Single));
+    }
+
+    #[test]
+    fn for_episode_keeps_episode_for_single_episode_tv() {
+        // TV format stays as Episode(n) regardless of episode count — the
+        // collapse rule is format-only. A TV release titled "Show - 01" still
+        // carries an episode number that Episode(1) can match against.
+        let d = detail_with("TV", Some(1));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 1),
+            SearchTarget::Episode(1)
+        ));
+    }
+
+    #[test]
+    fn for_episode_keeps_episode_for_multi_episode_tv() {
+        let d = detail_with("TV", Some(12));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 7),
+            SearchTarget::Episode(7)
+        ));
+    }
+
+    #[test]
+    fn for_episode_keeps_episode_when_episode_count_unknown() {
+        // AniList reports episodes=None for currently-airing shows — the
+        // fallback should still be Episode(n) because that's the correct
+        // target for an airing weekly release.
+        let d = detail_with("TV", None);
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 3),
+            SearchTarget::Episode(3)
+        ));
+    }
+
+    // split_title_segments uses a 2-token minimum to reject segments that
+    // are too generic to safely become matching aliases. These tests cover
+    // the rule in isolation with abstract inputs so the behavior is
+    // described, not tied to any particular show.
+
+    #[test]
+    fn split_segments_keeps_three_token_subtitle() {
+        let segments = split_title_segments("Main Title: Sub One Two Three");
+        assert!(
+            segments.iter().any(|s| s == "Sub One Two Three"),
+            "multi-word subtitle should be kept as a segment, got {:?}",
+            segments
+        );
+    }
+
+    #[test]
+    fn split_segments_keeps_two_token_subtitle() {
+        // Two whitespace-separated tokens is the minimum.
+        let segments = split_title_segments("Main Title: Alpha Beta");
+        assert!(
+            segments.iter().any(|s| s == "Alpha Beta"),
+            "two-token subtitle should be kept, got {:?}",
+            segments
+        );
+    }
+
+    #[test]
+    fn split_segments_rejects_single_word_subtitle() {
+        let segments = split_title_segments("Main Title: Singleword");
+        assert!(
+            !segments.iter().any(|s| s == "Singleword"),
+            "single-word subtitle should be rejected, got {:?}",
+            segments
+        );
+    }
+
+    #[test]
+    fn split_segments_rejects_hyphenated_single_word() {
+        // Hyphens are not whitespace, so "Hyphen-Word" is still one token
+        // under the rule — important because hyphenated English phrases
+        // like "Iron-Blooded" are common enough to substring-match many
+        // unrelated titles.
+        let segments = split_title_segments("Main Title: Hyphen-Word");
+        assert!(
+            !segments.iter().any(|s| s == "Hyphen-Word"),
+            "hyphenated single-word segment should be rejected, got {:?}",
+            segments
+        );
+    }
+
+    #[test]
+    fn split_segments_keeps_multi_word_main_portion() {
+        // Even when the subtitle is rejected, the leading multi-word
+        // portion of a compound title remains usable.
+        let segments = split_title_segments("Main Title Two: Singleword");
+        assert!(
+            segments.iter().any(|s| s == "Main Title Two"),
+            "multi-word leading portion should be kept, got {:?}",
+            segments
+        );
+    }
+
+    #[test]
+    fn matches_target_rejects_release_whose_only_overlap_is_a_rejected_segment() {
+        // End-to-end regression: a release whose token overlap with the
+        // primary alias is below the 0.6 threshold must not slip through
+        // just because some single-word substring of a synonym happens to
+        // appear in the release filename. With the 2-token rule in place,
+        // that single-word substring is never produced as an alias, so
+        // substring-match can't succeed.
+        let aliases = vec![
+            "Main Title: Subtitle One".to_string(),
+            "Main Title: Subtitle Two".to_string(),
+        ];
+        let unrelated_release =
+            "[Group] Totally Different Show - Subtitle One-Word Thing - 01 [1080p].mkv";
+        // The release shares only the word "Subtitle" with the primary
+        // alias tokens {main, title, subtitle, one} / {main, title,
+        // subtitle, two}. Overlap ratio for either alias is 1/4 = 0.25,
+        // well below 0.6. No segment derived from the primary aliases
+        // survives the 2-token rule to substring-match "Subtitle" in
+        // isolation, so the match must fail.
+        assert!(
+            !matches_target(
+                unrelated_release,
+                &aliases,
+                &SearchTarget::Episode(1),
+                0,
+                false,
+            ),
+            "unrelated release should not match via token overlap alone"
+        );
+    }
+
+    #[test]
+    fn matches_target_accepts_release_with_full_primary_alias_substring() {
+        let aliases = vec!["Main Title Subtitle One".to_string()];
+        let good_release = "[Group] Main Title Subtitle One [BD 1080p].mkv";
+        assert!(matches_target(
+            good_release,
+            &aliases,
+            &SearchTarget::Single,
+            0,
+            false,
+        ));
+    }
 }
