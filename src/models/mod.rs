@@ -12,6 +12,8 @@ pub mod artwork_cache;
 pub mod grabbed_torrents;
 pub mod episode_tags;
 pub mod group_source_map;
+pub mod nyaa_description_cache;
+pub mod media_probe_cache;
 
 use sqlx::SqlitePool;
 
@@ -695,6 +697,14 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Phase 4: per-series upgrade toggle. When 0, the upgrade scanner
+    // skips this series entirely — user opts out of re-grabs even if a
+    // higher-quality release appears. Default 1 preserves prior behavior.
+    sqlx::query("ALTER TABLE series ADD COLUMN allow_upgrades INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
+
     // Radarr API compatibility layer for Seerr integration (anime movies).
     sqlx::query("ALTER TABLE config ADD COLUMN radarr_enabled INTEGER NOT NULL DEFAULT 0")
         .execute(db)
@@ -712,6 +722,15 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // Classification pipeline: release group → source map (Phase 1a).
     // Creates the table and seeds the built-in defaults. Idempotent.
     group_source_map::migrate(db).await?;
+
+    // Layer 2 description cache — scraped Nyaa description bodies keyed by
+    // torrent info_hash, populated on the low-confidence classifier path.
+    nyaa_description_cache::migrate(db).await?;
+
+    // Layer 5 ffprobe cache — cached ffprobe JSON keyed by (path, mtime, size).
+    // Populated after imports land so re-classifications (library scans,
+    // upgrade checks) don't re-shell out to ffprobe for the same file.
+    media_probe_cache::migrate(db).await?;
 
     // ── Phase 1b: classification columns on episode_quality_tags ─────────
     // These record the ClassificationResult at grab time so later scoring,

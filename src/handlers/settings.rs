@@ -14,6 +14,7 @@ struct SettingsTemplate {
     tab: String,
     config: config::Config,
     groups: Vec<group_source_map::GroupSourceEntry>,
+    suggestions: Vec<group_source_map::GroupSuggestion>,
     message: Option<String>,
     error: Option<String>,
 }
@@ -84,6 +85,16 @@ async fn load_groups(
     group_source_map::list_all(db).await.unwrap_or_default()
 }
 
+/// Load group-map suggestions inferred from the user's manual overrides.
+/// Threshold of 2 matches `compute_suggestions`' docstring rationale: a
+/// single override is noise, two matching overrides is the smallest
+/// pattern worth surfacing.
+async fn load_suggestions(
+    db: &sqlx::SqlitePool,
+) -> Vec<group_source_map::GroupSuggestion> {
+    group_source_map::compute_suggestions(db, 2).await.unwrap_or_default()
+}
+
 /// Validate a form-submitted source string by round-tripping through
 /// `Source::from_str`. Returns the canonical lowercase form on success, or
 /// the supplied default when the value is unrecognized.
@@ -124,12 +135,14 @@ pub async fn settings_page(
         .unwrap_or_default();
 
     let groups = load_groups(&state.db).await;
+    let suggestions = load_suggestions(&state.db).await;
 
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(params.tab),
         config: cfg,
         groups,
+        suggestions,
         message: None,
         error: None,
     };
@@ -231,11 +244,13 @@ pub async fn settings_submit(
     if let Err(e) = config::save_config(&state.db, &cfg).await {
         logger::error(&state.db, LogCategory::System, "Failed to save settings", &e.to_string()).await;
         let groups = load_groups(&state.db).await;
+        let suggestions = load_suggestions(&state.db).await;
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
             config: cfg,
             groups,
+            suggestions,
             message: None,
             error: Some(format!("Failed to save: {}", e)),
         };
@@ -296,11 +311,13 @@ pub async fn settings_submit(
     }
 
     let groups = load_groups(&state.db).await;
+    let suggestions = load_suggestions(&state.db).await;
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
         config: cfg,
         groups,
+        suggestions,
         message: Some(notices.join("<br>")),
         error: None,
     };

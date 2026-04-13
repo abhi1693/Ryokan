@@ -421,6 +421,15 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     &state.db,
                     &cand.item.title,
                     Some(&cand.item.resolution),
+                    Some(crate::services::source::NyaaContext {
+                        info_hash: &cand.item.info_hash,
+                        view_url: &cand.item.link,
+                        is_batch: cand.item.is_batch,
+                    }),
+                    Some(crate::services::source::SeriesContext {
+                        status: &cand.found.series.status,
+                        season_year: cand.found.series.season_year,
+                    }),
                 ).await;
                 for ep_num in &ep_list {
                     let _ = episode_tags::record_grab(
@@ -536,7 +545,21 @@ async fn score_candidate(
     let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
     let finished_mode = quality::FinishedSeriesMode::from_str(&cfg.finished_series_quality);
 
-    let classification = source::classify_release(db, &item.title, Some(&item.resolution)).await;
+    let classification = source::classify_release(
+        db,
+        &item.title,
+        Some(&item.resolution),
+        Some(source::NyaaContext {
+            info_hash: &item.info_hash,
+            view_url: &item.link,
+            is_batch: item.is_batch,
+        }),
+        Some(source::SeriesContext {
+            status: &found.status,
+            season_year: found.season_year,
+        }),
+    )
+    .await;
     let mut score = source::score_classification(
         &classification,
         preferred_source,

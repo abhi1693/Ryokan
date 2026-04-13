@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use crate::models::log::LogCategory;
 use crate::models::{artwork_cache, config, episode_tags, grabbed_torrents, local_metadata, series};
+use crate::services::source::{self, SeriesContext};
 use crate::services::{logger, media, nfo};
 use crate::AppState;
 
@@ -328,6 +329,79 @@ async fn import_torrent(
                     &format!("mode={} dest={}", cfg.post_processing_mode, dest_video.display()),
                 )
                 .await;
+
+                // Post-download re-classification (Layers 5 + 6). Runs ffprobe
+                // on the landed file and walks the series directory for BD
+                // artifacts, then updates episode_quality_tags in place.
+                // Rows with manual_override = 1 are left alone by the DB
+                // helper so user tags stick.
+                let series_root = Path::new(&cfg.media_root).join(&folder_name);
+                let pre_source = episode_tags::get_for_series(&state.db, series.id)
+                    .await
+                    .ok()
+                    .and_then(|m| m.get(&ep_num).map(|t| t.source.clone()))
+                    .unwrap_or_default();
+                let post = source::classify_post_download(
+                    &state.db,
+                    &dest_video,
+                    Some(&series_root),
+                    &grab.torrent_name,
+                    Some(SeriesContext {
+                        status: &series.status,
+                        season_year: series.season_year,
+                    }),
+                )
+                .await;
+                if let Err(e) = episode_tags::update_classification(
+                    &state.db,
+                    series.id,
+                    ep_num,
+                    &post,
+                )
+                .await
+                {
+                    logger::warn(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!(
+                            "Post-download tag update failed for S{:02}E{:02}",
+                            season, ep_num
+                        ),
+                        &e.to_string(),
+                    )
+                    .await;
+                } else {
+                    logger::debug(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!(
+                            "Post-download classify S{:02}E{:02}: {} (conf={:.2})",
+                            season,
+                            ep_num,
+                            post.label(),
+                            post.confidence
+                        ),
+                        &format!("pre={}, post={}", pre_source, post.source.as_str()),
+                    )
+                    .await;
+                    // If the post-download classifier flipped into needs_review,
+                    // surface at INFO so the user can find it in the review list.
+                    if post.needs_review {
+                        logger::info(
+                            &state.db,
+                            LogCategory::PostProcess,
+                            &format!(
+                                "Needs review: {} S{:02}E{:02}",
+                                series.title, season, ep_num
+                            ),
+                            &format!(
+                                "post-download classification {} flagged for review",
+                                post.label()
+                            ),
+                        )
+                        .await;
+                    }
+                }
             }
             Err(e) => {
                 logger::error(
@@ -526,4 +600,159 @@ pub async fn run_once(state: &AppState) {
             }
         }
     }
+}
+
+/// Summary of one run of [`scan_library_for_unclassified`]. Used by the
+/// handler to build a user-facing report and by logging to record the
+/// effect of the background task.
+#[derive(Debug, Default)]
+pub struct LibraryClassifyReport {
+    pub series_scanned: usize,
+    pub files_scanned: usize,
+    pub files_classified: usize,
+    pub files_needing_review: usize,
+}
+
+/// Walk every tracked series and classify on-disk video files that don't
+/// yet have a structured classification row. This is the Phase 2 "library
+/// scan path" — it catches files that were imported outside of Ryokan's
+/// own grab pipeline (pre-existing rips, manual drops, migrations from
+/// another PVR), which otherwise never get a structured source/resolution
+/// tag because `import_torrent` is the only path that currently calls
+/// `classify_post_download`.
+///
+/// Skips files that already have a non-empty `source` column on
+/// `episode_quality_tags` — those were classified at grab time or on a
+/// previous post-download pass and don't need to be re-touched. Files
+/// with `manual_override = 1` are left alone by
+/// `update_classification` regardless, so there's no special case here.
+pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyReport {
+    // Re-use the same lock as real post-processing so a library scan
+    // can't race with an in-flight import. Both touch the same episode
+    // tags rows and the same ffprobe cache, so serializing them is
+    // cheaper than coordinating fine-grained invariants.
+    let _guard = POST_PROC_LOCK.lock().await;
+
+    let mut report = LibraryClassifyReport::default();
+
+    let cfg = match config::get_config(&state.db).await.ok().flatten() {
+        Some(c) => c,
+        None => return report,
+    };
+    if cfg.media_root.is_empty() {
+        return report;
+    }
+
+    let tracked = series::get_all(&state.db).await.unwrap_or_default();
+
+    for row in &tracked {
+        if row.folder_name.is_empty() {
+            continue;
+        }
+        let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
+        if disk_files.is_empty() {
+            continue;
+        }
+        report.series_scanned += 1;
+
+        let existing = episode_tags::get_for_series(&state.db, row.id)
+            .await
+            .unwrap_or_default();
+
+        let series_root = Path::new(&cfg.media_root).join(&row.folder_name);
+
+        for file in &disk_files {
+            report.files_scanned += 1;
+
+            // Skip files that already have a structured classification.
+            // The `source` column is empty for rows predating Phase 1b
+            // and for files that have never been classified at all; a
+            // non-empty value means the classifier (grab-time or
+            // post-download) already set it.
+            let already_classified = existing
+                .get(&file.episode_number)
+                .map(|tag| !tag.source.is_empty())
+                .unwrap_or(false);
+            if already_classified {
+                continue;
+            }
+
+            // Reconstruct the absolute path so ffprobe can read the file.
+            let file_path = series_root.join(&file.filename);
+            if !file_path.exists() {
+                continue;
+            }
+
+            // Use the filename itself as the title — we don't have the
+            // original torrent name for externally-imported files.
+            let title = Path::new(&file.filename)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&file.filename);
+
+            let result = source::classify_post_download(
+                &state.db,
+                &file_path,
+                Some(&series_root),
+                title,
+                Some(SeriesContext {
+                    status: &row.status,
+                    season_year: row.season_year,
+                }),
+            )
+            .await;
+
+            // The row may not exist yet for externally-imported files, so
+            // we can't rely on `update_classification` alone (it's an
+            // UPDATE, not an UPSERT). Use `record_grab` with synthetic
+            // release metadata to insert-or-upsert, then flip state to
+            // 'completed' since the file is already on disk.
+            if !existing.contains_key(&file.episode_number) {
+                let _ = episode_tags::record_grab(
+                    &state.db,
+                    row.id,
+                    file.episode_number,
+                    &result,
+                    title,
+                    "",
+                )
+                .await;
+                let _ = episode_tags::mark_completed(
+                    &state.db,
+                    row.id,
+                    &[file.episode_number],
+                )
+                .await;
+            } else {
+                let _ = episode_tags::update_classification(
+                    &state.db,
+                    row.id,
+                    file.episode_number,
+                    &result,
+                )
+                .await;
+            }
+
+            report.files_classified += 1;
+            if result.needs_review {
+                report.files_needing_review += 1;
+            }
+        }
+    }
+
+    logger::info(
+        &state.db,
+        LogCategory::PostProcess,
+        "Library classify scan finished",
+        &format!(
+            "series={}, files_scanned={}, classified={}, needs_review={}",
+            report.series_scanned,
+            report.files_scanned,
+            report.files_classified,
+            report.files_needing_review
+        ),
+    )
+    .await;
+
+    report
 }

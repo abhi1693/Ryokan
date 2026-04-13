@@ -271,6 +271,47 @@
         <legend>Release Group Source Map</legend>
         <p class="form-hint">Maps release groups to their known source. Used by Layer 3 of the classification pipeline when the filename alone doesn't carry source keywords (e.g. SubsPlease is WEB, VCB-Studio is BluRay). Seeded rows are restored on startup; user-edited rows are preserved.</p>
 
+        {% if !suggestions.is_empty() %}
+        <h3 class="settings-subheading">Suggested Mappings ({{ suggestions.len() }})</h3>
+        <p class="form-hint">Inferred from your manual classification overrides. When you've pinned multiple episodes from the same release group to the same source, Ryokan surfaces it here so you can teach the identity table.</p>
+        <table class="group-source-table">
+            <thead>
+                <tr>
+                    <th>Group</th>
+                    <th>Suggested source</th>
+                    <th>Overrides</th>
+                    <th>Currently mapped</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in suggestions %}
+                <tr>
+                    <td>{{ s.group_name }}</td>
+                    <td>{{ s.source.as_str() }}</td>
+                    <td>{{ s.episode_count }} episode{% if s.episode_count != 1 %}s{% endif %}</td>
+                    <td>
+                        {% if let Some(existing) = s.existing_source %}
+                        <span class="tag tag-res" title="Accepting will overwrite the existing mapping">conflicts: {{ existing.as_str() }}</span>
+                        {% else %}
+                        <span class="form-hint">— (new)</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <form method="post" action="/settings/groups" class="group-upsert-form">
+                            <input type="hidden" name="group_name" value="{{ s.group_name }}">
+                            <input type="hidden" name="source" value="{{ s.source.as_str()|lowercase }}">
+                            <input type="hidden" name="confidence" value="0.95">
+                            <input type="hidden" name="notes" value="from {{ s.episode_count }} manual override{% if s.episode_count != 1 %}s{% endif %}">
+                            <button type="submit" class="btn btn-primary">Accept</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+
         <h3 class="settings-subheading">Add or Update Group</h3>
         <form method="post" action="/settings/groups" class="settings-form group-upsert-form">
             <div class="form-group">

@@ -442,3 +442,96 @@ fn row_to_entry(row: sqlx::sqlite::SqliteRow) -> GroupSourceEntry {
         notes: row.get("notes"),
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Manual-override feedback loop
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A suggested new group → source mapping inferred from the user's manual
+/// overrides. Surfaced on the settings "Release Groups" tab with an
+/// "Accept" button that calls the regular upsert endpoint.
+#[derive(Debug, Clone)]
+pub struct GroupSuggestion {
+    pub group_name: String,
+    pub source: Source,
+    /// How many distinct episodes the user has manually pinned to this
+    /// (group, source) pair. Used to sort suggestions and justify them in
+    /// the UI ("3 manual overrides say …").
+    pub episode_count: i64,
+    /// The existing mapping's source if this group is already in
+    /// `group_source_map` but with a *different* source than the user's
+    /// overrides agree on. `None` means the group is brand new and we're
+    /// suggesting a fresh entry.
+    pub existing_source: Option<Source>,
+}
+
+/// Walk `episode_quality_tags` for manually-overridden rows, group by
+/// (release_group, source), and surface combinations with ≥ `min_count`
+/// matching overrides that either (a) aren't in `group_source_map` at all
+/// or (b) are mapped to a *different* source than the user's overrides
+/// agree on.
+///
+/// Requires the override row to carry a non-empty `release_group`, which
+/// is only populated when the file was actually grabbed via Ryokan (so we
+/// know which group produced it). Pure-import overrides — where the user
+/// pinned a classification on a file that the grab pipeline never saw —
+/// have empty `release_group` and are skipped: there's nothing to attribute
+/// the signal to.
+///
+/// Suggestions are returned sorted by descending episode_count so the
+/// most-supported inferences render first. `min_count` of 2 is the
+/// smallest defensible threshold — a single override is noise, two
+/// matching overrides on the same group is a pattern worth surfacing.
+pub async fn compute_suggestions(
+    db: &SqlitePool,
+    min_count: i64,
+) -> Result<Vec<GroupSuggestion>, sqlx::Error> {
+    // Tally manual overrides per (release_group, source). `COLLATE NOCASE`
+    // on the GROUP BY so "subsplease" and "SubsPlease" coalesce the way the
+    // existing lookup table does.
+    let rows = sqlx::query(
+        "SELECT release_group, source, COUNT(*) AS cnt
+         FROM episode_quality_tags
+         WHERE COALESCE(manual_override, 0) = 1
+           AND release_group != ''
+           AND source != ''
+         GROUP BY release_group COLLATE NOCASE, source
+         HAVING cnt >= ?
+         ORDER BY cnt DESC, release_group COLLATE NOCASE ASC",
+    )
+    .bind(min_count)
+    .fetch_all(db)
+    .await?;
+
+    let mut suggestions = Vec::new();
+    for row in rows {
+        let group_name: String = row.get("release_group");
+        let source_str: String = row.get("source");
+        let episode_count: i64 = row.get("cnt");
+
+        let source = Source::from_str(&source_str);
+        if source == Source::Unknown {
+            continue;
+        }
+
+        // Check whether this group is already mapped. Filter out groups
+        // that agree with the existing map (no suggestion needed), and
+        // flag groups whose existing mapping disagrees with the user's
+        // overrides so the UI can present them distinctly.
+        let existing = get(db, &group_name).await?;
+        let existing_source = match existing {
+            Some(entry) if entry.source == source => continue,
+            Some(entry) => Some(entry.source),
+            None => None,
+        };
+
+        suggestions.push(GroupSuggestion {
+            group_name,
+            source,
+            episode_count,
+            existing_source,
+        });
+    }
+
+    Ok(suggestions)
+}

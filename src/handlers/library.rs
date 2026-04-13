@@ -21,6 +21,13 @@ struct IndexTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "needs_review.html")]
+struct NeedsReviewTemplate {
+    page: String,
+    entries: Vec<episode_tags::NeedsReviewEntry>,
+}
+
+#[derive(Template)]
 #[template(path = "series.html")]
 struct SeriesTemplate {
     page: String,
@@ -42,6 +49,9 @@ struct SeriesTemplate {
     monitor_mode_label: String,
     monitored_count: i32,
     all_monitored: bool,
+    /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the
+    /// series detail page; toggled via POST /api/library/allow-upgrades.
+    allow_upgrades: bool,
 }
 
 #[derive(Template)]
@@ -68,6 +78,13 @@ pub struct Episode {
     pub filename: String,
     pub can_auto_search: bool,
     pub monitored: bool,
+    /// Phase 4 classification columns — exposed to the template so the
+    /// manual override picker can pre-select the current values.
+    pub class_source: String,
+    pub class_resolution: String,
+    pub class_is_remux: bool,
+    pub manual_override: bool,
+    pub needs_review: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +150,23 @@ pub struct SetEpisodeMonitoringForm {
     series_id: i64,
     episode_number: i32,
     monitored: bool,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SetAllowUpgradesForm {
+    series_id: i64,
+    allow: bool,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SetManualOverrideForm {
+    series_id: i64,
+    episode_number: i32,
+    /// Empty string clears the override and reverts to classifier output.
+    source: String,
+    resolution: String,
+    #[serde(default)]
+    is_remux: bool,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -402,6 +436,25 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
     Html(template.render().unwrap_or_default())
 }
 
+/// Phase 4 cross-library "needs review" page. Lists every episode the
+/// classifier couldn't land a confident verdict on, with a deep link back
+/// to the series detail page so the user can open the override modal.
+pub async fn needs_review_page(State(state): State<AppState>) -> Html<String> {
+    let mut entries = episode_tags::get_needs_review(&state.db).await.unwrap_or_default();
+    for entry in entries.iter_mut() {
+        entry.cover_url = artwork::cached_or_source_url(
+            &state.db,
+            &format!("series-{}-cover", entry.series_id),
+            &entry.cover_url,
+        ).await;
+    }
+    let template = NeedsReviewTemplate {
+        page: "library".to_string(),
+        entries,
+    };
+    Html(template.render().unwrap_or_default())
+}
+
 pub async fn series_detail(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
@@ -487,6 +540,7 @@ pub async fn series_detail(
     };
 
     let all_monitored = ep_total > 0 && monitored_count >= ep_total;
+    let allow_upgrades = db_series.as_ref().map(|s| s.allow_upgrades).unwrap_or(true);
     let template = SeriesTemplate {
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
@@ -507,6 +561,7 @@ pub async fn series_detail(
         monitor_mode_label,
         monitored_count,
         all_monitored,
+        allow_upgrades,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -771,6 +826,13 @@ async fn build_episodes(
             (String::new(), String::new())
         };
 
+        let tag = quality_tags.get(&ep_num);
+        let class_source = tag.map(|t| t.source.clone()).unwrap_or_default();
+        let class_resolution = tag.map(|t| t.resolution.clone()).unwrap_or_default();
+        let class_is_remux = tag.map(|t| t.is_remux).unwrap_or(false);
+        let needs_review = tag.map(|t| t.needs_review).unwrap_or(false);
+        let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
+
         episodes.push(Episode {
             number: ep_num,
             title: ep_title,
@@ -785,6 +847,11 @@ async fn build_episodes(
             filename,
             can_auto_search: is_tracked,
             monitored,
+            class_source,
+            class_resolution,
+            class_is_remux,
+            manual_override,
+            needs_review,
         });
     }
 
@@ -803,6 +870,12 @@ async fn build_episodes(
             } else {
                 (String::new(), String::new())
             };
+            let tag = quality_tags.get(&f.episode_number);
+            let class_source = tag.map(|t| t.source.clone()).unwrap_or_default();
+            let class_resolution = tag.map(|t| t.resolution.clone()).unwrap_or_default();
+            let class_is_remux = tag.map(|t| t.is_remux).unwrap_or(false);
+            let needs_review = tag.map(|t| t.needs_review).unwrap_or(false);
+            let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
             episodes.push(Episode {
                 number: f.episode_number,
                 title: String::new(),
@@ -817,6 +890,11 @@ async fn build_episodes(
                 filename: f.filename.clone(),
                 can_auto_search: is_tracked,
                 monitored,
+                class_source,
+                class_resolution,
+                class_is_remux,
+                manual_override,
+                needs_review,
             });
         }
     }
@@ -1421,6 +1499,97 @@ pub async fn set_episode_monitoring(
     })))
 }
 
+/// Toggle the per-series upgrade opt-in. Phase 4 feature — when the user
+/// turns this off for a series, the upgrade scanner skips it entirely.
+#[utoipa::path(
+    post,
+    path = "/api/library/allow-upgrades",
+    tag = "Library",
+    summary = "Toggle series upgrade opt-in",
+    description = "Enable or disable automated upgrades for a single tracked series.",
+    request_body = SetAllowUpgradesForm,
+    responses(
+        (status = 200, description = "Allow-upgrades toggled", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
+pub async fn set_allow_upgrades(
+    State(state): State<AppState>,
+    Json(form): Json<SetAllowUpgradesForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    series::update_allow_upgrades(&state.db, form.series_id, form.allow)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!("Upgrade opt-in for series {} set to {}", form.series_id, form.allow),
+        "",
+    ).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "series_id": form.series_id,
+        "allow_upgrades": form.allow,
+    })))
+}
+
+/// Apply (or clear) a user's manual source/resolution override for a single
+/// episode. Phase 4 feature — pins the classification so future re-classifies
+/// (post-download or library scan) won't overwrite it. Passing an empty
+/// `source` clears the override and re-enables automatic re-classification.
+///
+/// Feeds the Phase 4 feedback loop: every non-clearing override emits a
+/// signal that can be aggregated into group_source_map suggestions by the
+/// background job.
+#[utoipa::path(
+    post,
+    path = "/api/library/manual-override",
+    tag = "Library",
+    summary = "Set manual source override on an episode",
+    description = "Force a specific source/resolution classification on an episode, or clear an existing override.",
+    request_body = SetManualOverrideForm,
+    responses(
+        (status = 200, description = "Override applied", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
+pub async fn set_manual_override(
+    State(state): State<AppState>,
+    Json(form): Json<SetManualOverrideForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    episode_tags::set_manual_override(
+        &state.db,
+        form.series_id,
+        form.episode_number,
+        &form.source,
+        &form.resolution,
+        form.is_remux,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let action = if form.source.is_empty() {
+        "cleared".to_string()
+    } else {
+        format!("{} {}", form.source, form.resolution)
+    };
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!("Manual override {} for series {} ep {}", action, form.series_id, form.episode_number),
+        "",
+    ).await;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "series_id": form.series_id,
+        "episode_number": form.episode_number,
+        "source": form.source,
+        "resolution": form.resolution,
+        "is_remux": form.is_remux,
+    })))
+}
+
 #[utoipa::path(
     get,
     path = "/api/library/folders",
@@ -1499,6 +1668,15 @@ async fn run_auto_search_targets_with_upgrades(
                     &state.db,
                     &result.title,
                     Some(&result.resolution),
+                    Some(crate::services::source::NyaaContext {
+                        info_hash: &result.info_hash,
+                        view_url: &result.link,
+                        is_batch: result.is_batch,
+                    }),
+                    Some(crate::services::source::SeriesContext {
+                        status: &detail.status,
+                        season_year: detail.season_year,
+                    }),
                 ).await;
 
                 // For upgrade targets, verify the found release is actually
@@ -1833,6 +2011,15 @@ pub async fn search_batch_releases(
                 &state.db,
                 &result.title,
                 Some(&result.resolution),
+                Some(crate::services::source::NyaaContext {
+                    info_hash: &result.info_hash,
+                    view_url: &result.link,
+                    is_batch: result.is_batch,
+                }),
+                Some(crate::services::source::SeriesContext {
+                    status: &detail.status,
+                    season_year: detail.season_year,
+                }),
             ).await;
             let tier_label = classification.label();
             logger::info(
@@ -1950,10 +2137,23 @@ pub async fn grab_interactive_result(
     qbit.add_torrent(&url).await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
+    // Interactive grab: the frontend doesn't currently round-trip the Nyaa
+    // view URL, so Layer 2 is skipped here. These grabs are user-initiated
+    // and rarely land on the ambiguous tail that Layer 2 targets anyway.
+    // Layer 4 still runs when we have a tracked series — it's a pure
+    // function with no round-trip cost.
+    let series_ctx = tracked_row
+        .as_ref()
+        .map(|s| crate::services::source::SeriesContext {
+            status: &s.status,
+            season_year: s.season_year,
+        });
     let classification = crate::services::source::classify_release(
         &state.db,
         &title,
         Some(&resolution),
+        None,
+        series_ctx,
     ).await;
     logger::info(
         &state.db,

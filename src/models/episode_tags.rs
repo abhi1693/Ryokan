@@ -2,6 +2,69 @@ use sqlx::{Row, SqlitePool};
 
 use crate::services::source::ClassificationResult;
 
+/// One entry in the cross-series "needs review" list. Carries just enough
+/// to render a row: series identity for the link, episode number, and the
+/// current (uncertain) classification for context. Produced by
+/// [`get_needs_review`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NeedsReviewEntry {
+    pub series_id: i64,
+    pub series_anilist_id: i64,
+    pub series_title: String,
+    pub cover_url: String,
+    pub episode_number: i32,
+    pub quality_tag: String,
+    pub release_title: String,
+    pub release_group: String,
+    pub source: String,
+    pub resolution: String,
+    pub classification_confidence: f32,
+}
+
+/// Return every episode currently flagged `needs_review = true` across the
+/// entire library, joined with its series info. Used by the Phase 4
+/// "Needs review" list view. Excludes rows the user has already manually
+/// overridden (manual_override = 1 clears `needs_review` too, but we
+/// filter defensively in case an older row has both set).
+pub async fn get_needs_review(
+    db: &SqlitePool,
+) -> Result<Vec<NeedsReviewEntry>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT t.series_id, t.episode_number, t.quality_tag, t.release_title, t.release_group,
+                t.source, t.resolution, t.classification_confidence,
+                s.anilist_id AS series_anilist_id,
+                COALESCE(NULLIF(s.title_english, ''), NULLIF(s.title_romaji, ''), s.title) AS series_title,
+                s.cover_url
+         FROM episode_quality_tags t
+         JOIN series s ON s.id = t.series_id
+         WHERE t.needs_review = 1
+           AND COALESCE(t.manual_override, 0) = 0
+         ORDER BY s.title_english, t.episode_number",
+    )
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let confidence: f64 = row.get("classification_confidence");
+            NeedsReviewEntry {
+                series_id: row.get("series_id"),
+                series_anilist_id: row.get("series_anilist_id"),
+                series_title: row.get("series_title"),
+                cover_url: row.get("cover_url"),
+                episode_number: row.get("episode_number"),
+                quality_tag: row.get("quality_tag"),
+                release_title: row.get("release_title"),
+                release_group: row.get("release_group"),
+                source: row.get("source"),
+                resolution: row.get("resolution"),
+                classification_confidence: confidence as f32,
+            }
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct GrabHistoryEntry {
     pub id: i64,
@@ -27,6 +90,10 @@ pub struct EpisodeQualityTag {
     pub is_remux: bool,
     pub classification_confidence: f32,
     pub needs_review: bool,
+    /// True when the user has pinned this classification via the manual
+    /// override picker. Prevents `update_classification` from overwriting
+    /// on subsequent post-download re-classifies.
+    pub manual_override: bool,
 }
 
 /// Record a new grab for an episode — inserts into history and upserts the
@@ -107,7 +174,8 @@ pub async fn get_for_series(
 ) -> Result<std::collections::HashMap<i32, EpisodeQualityTag>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT episode_number, quality_tag, release_title, release_group, state,
-                source, resolution, is_remux, classification_confidence, needs_review
+                source, resolution, is_remux, classification_confidence, needs_review,
+                COALESCE(manual_override, 0) AS manual_override
          FROM episode_quality_tags WHERE series_id = ?",
     )
     .bind(series_id)
@@ -119,6 +187,7 @@ pub async fn get_for_series(
         let ep_num: i32 = row.get("episode_number");
         let is_remux_i: i64 = row.get("is_remux");
         let needs_review_i: i64 = row.get("needs_review");
+        let manual_override_i: i64 = row.get("manual_override");
         let confidence: f64 = row.get("classification_confidence");
         map.insert(
             ep_num,
@@ -132,6 +201,7 @@ pub async fn get_for_series(
                 is_remux: is_remux_i != 0,
                 classification_confidence: confidence as f32,
                 needs_review: needs_review_i != 0,
+                manual_override: manual_override_i != 0,
             },
         );
     }
@@ -167,6 +237,121 @@ pub async fn get_grab_history(
             state: row.get("state"),
         })
         .collect())
+}
+
+/// Overwrite the structured classification columns on an existing tag row.
+/// Called after post-download classification (Layer 5 + Layer 6) produces a
+/// verdict that may differ from the pre-download one. Preserves
+/// `release_title`, `release_group`, `state`, and — crucially — any
+/// `manual_override` the user has set. Rows with `manual_override = 1` are
+/// left entirely alone: the user's explicit tag wins over the classifier.
+///
+/// Also refreshes the legacy `quality_tag` string from the new classification
+/// so any UI that still reads that column picks up the post-download update.
+pub async fn update_classification(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+    classification: &ClassificationResult,
+) -> Result<(), sqlx::Error> {
+    let quality_tag = classification.label();
+    let source_str = classification.source.as_str();
+    let resolution_str = classification.resolution.as_str();
+    let is_remux = if classification.is_remux { 1_i64 } else { 0_i64 };
+    let confidence = classification.confidence as f64;
+    let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
+
+    sqlx::query(
+        "UPDATE episode_quality_tags SET
+             quality_tag = ?,
+             source = ?,
+             resolution = ?,
+             is_remux = ?,
+             classification_confidence = ?,
+             needs_review = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE series_id = ?
+           AND episode_number = ?
+           AND COALESCE(manual_override, 0) = 0",
+    )
+    .bind(&quality_tag)
+    .bind(source_str)
+    .bind(resolution_str)
+    .bind(is_remux)
+    .bind(confidence)
+    .bind(needs_review)
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+/// Apply a user's manual classification override for an episode. The row is
+/// upserted (inserted if it doesn't exist yet, e.g. for externally-imported
+/// files the classifier hasn't seen) with `manual_override = 1`, which
+/// prevents `update_classification` from overwriting it on re-classify.
+/// `needs_review` is cleared because the user has explicitly resolved it.
+///
+/// If `source` is empty, the override is removed: the row is updated with
+/// `manual_override = 0` and kept otherwise intact, so the next
+/// post-download classify pass is free to overwrite it.
+pub async fn set_manual_override(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+    source: &str,
+    resolution: &str,
+    is_remux: bool,
+) -> Result<(), sqlx::Error> {
+    if source.is_empty() {
+        // Clear override — leave the row and its current classification in
+        // place, just flip the lock off.
+        sqlx::query(
+            "UPDATE episode_quality_tags SET manual_override = 0, updated_at = CURRENT_TIMESTAMP
+             WHERE series_id = ? AND episode_number = ?",
+        )
+        .bind(series_id)
+        .bind(episode_number)
+        .execute(db)
+        .await?;
+        return Ok(());
+    }
+
+    let remux = if is_remux { " Remux" } else { "" };
+    let label = format!("{}{} {}", source, remux, resolution);
+    let is_remux_i = if is_remux { 1_i64 } else { 0_i64 };
+
+    // Upsert: if the row doesn't exist yet (user tagging a file that the
+    // classifier never saw), insert a fresh row with empty release metadata.
+    // If it exists, flip to manual_override and overwrite the classification
+    // columns with the user's choice.
+    sqlx::query(
+        "INSERT INTO episode_quality_tags (
+             series_id, episode_number, quality_tag, release_title, release_group, state,
+             source, resolution, is_remux, classification_confidence, needs_review, manual_override
+         )
+         VALUES (?, ?, ?, '', '', 'completed', ?, ?, ?, 1.0, 0, 1)
+         ON CONFLICT(series_id, episode_number) DO UPDATE SET
+             quality_tag = excluded.quality_tag,
+             source = excluded.source,
+             resolution = excluded.resolution,
+             is_remux = excluded.is_remux,
+             classification_confidence = 1.0,
+             needs_review = 0,
+             manual_override = 1,
+             updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .bind(&label)
+    .bind(source)
+    .bind(resolution)
+    .bind(is_remux_i)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Mark episode quality tags as "completed" for the given episodes of a series.

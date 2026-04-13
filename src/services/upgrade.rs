@@ -69,6 +69,12 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             continue;
         }
 
+        // Phase 4: per-series upgrade opt-out. User can disable upgrades
+        // for individual series via the series detail page toggle.
+        if !row.allow_upgrades {
+            continue;
+        }
+
         let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
         if disk_files.is_empty() {
             continue;
@@ -153,6 +159,15 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 &state.db,
                 &result.title,
                 Some(&result.resolution),
+                Some(source::NyaaContext {
+                    info_hash: &result.info_hash,
+                    view_url: &result.link,
+                    is_batch: result.is_batch,
+                }),
+                Some(source::SeriesContext {
+                    status: &row.status,
+                    season_year: row.season_year,
+                }),
             )
             .await;
 

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %} - Needs Review{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div class="page-header-row">
+        <div>
+            <h2>Needs Review</h2>
+            <p class="page-desc">
+                Episodes where Ryokan couldn't pick a source/resolution with
+                confidence. Open the series and tap the pencil icon on the
+                episode row to pin a manual classification.
+            </p>
+        </div>
+        <a class="btn" href="/">← Back to Library</a>
+    </div>
+</div>
+
+{% if entries.is_empty() %}
+<div class="empty-state">
+    <p>No episodes currently flagged for review.</p>
+    <p class="form-hint">
+        This view fills up when the classifier lands on a low-confidence
+        verdict — either because no single layer was strong enough or because
+        two strong layers disagreed. Manual overrides and post-download
+        ffprobe checks usually keep it empty.
+    </p>
+</div>
+{% else %}
+<div class="review-list">
+    <table class="review-table" style="width:100%;border-collapse:collapse">
+        <thead>
+            <tr>
+                <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Series</th>
+                <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Episode</th>
+                <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Current tag</th>
+                <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Release</th>
+                <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border)">Confidence</th>
+                <th style="border-bottom:1px solid var(--border)"></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td style="padding:8px 12px;border-bottom:1px solid var(--border)">
+                    <a href="/series/{{ entry.series_id }}" class="review-series-link" style="display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit">
+                        {% if !entry.cover_url.is_empty() %}
+                        <img src="{{ entry.cover_url }}" alt="" loading="lazy" style="width:32px;height:46px;object-fit:cover;border-radius:2px">
+                        {% endif %}
+                        <span>{{ entry.series_title }}</span>
+                    </a>
+                </td>
+                <td style="padding:8px 12px;border-bottom:1px solid var(--border)">{{ entry.episode_number }}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid var(--border)">
+                    <span class="tag tag-quality">{{ entry.quality_tag }}</span>
+                </td>
+                <td style="padding:8px 12px;border-bottom:1px solid var(--border);max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ entry.release_title }}">
+                    {{ entry.release_title }}
+                    {% if !entry.release_group.is_empty() %}
+                    <span class="form-hint">· {{ entry.release_group }}</span>
+                    {% endif %}
+                </td>
+                <td style="padding:8px 12px;border-bottom:1px solid var(--border);text-align:right">
+                    {{ "{:.0}%"|format(entry.classification_confidence * 100.0) }}
+                </td>
+                <td style="padding:8px 12px;border-bottom:1px solid var(--border);text-align:right">
+                    <a class="btn btn-small" href="/series/{{ entry.series_id }}">Open</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

@@ -117,7 +117,21 @@ pub async fn find_all_for_target(
     }
 
     for c in &mut candidates {
-        let classification = source::classify_release(db, &c.title, Some(&c.resolution)).await;
+        let classification = source::classify_release(
+            db,
+            &c.title,
+            Some(&c.resolution),
+            Some(source::NyaaContext {
+                info_hash: &c.info_hash,
+                view_url: &c.link,
+                is_batch: c.is_batch,
+            }),
+            Some(source::SeriesContext {
+                status: &detail.status,
+                season_year: detail.season_year,
+            }),
+        )
+        .await;
         c.score = rescore_for_auto_search(
             c,
             &classification,
@@ -207,7 +221,21 @@ pub async fn find_best_for_target(
     // scoring reuse that single result.
     let mut scored: Vec<SearchResult> = Vec::with_capacity(candidates.len());
     for mut c in candidates.drain(..) {
-        let classification = source::classify_release(db, &c.title, Some(&c.resolution)).await;
+        let classification = source::classify_release(
+            db,
+            &c.title,
+            Some(&c.resolution),
+            Some(source::NyaaContext {
+                info_hash: &c.info_hash,
+                view_url: &c.link,
+                is_batch: c.is_batch,
+            }),
+            Some(source::SeriesContext {
+                status: &detail.status,
+                season_year: detail.season_year,
+            }),
+        )
+        .await;
 
         // BdOnly filter: drop non-BluRay releases for finished series when the
         // user has asked for BD only. Unknown sources get a pass.

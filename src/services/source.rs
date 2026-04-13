@@ -9,15 +9,26 @@
 //! This module defines the primitive types used by the classification pipeline
 //! and the aggregator that folds layer evidence into a final result. Individual
 //! layer implementations live in sibling modules (`source_filename`,
-//! `source_groups`, and — in later phases — `source_ffprobe`, `source_dir`,
-//! `source_description`, `source_temporal`).
+//! `source_groups`, `source_description`, `source_temporal`,
+//! `source_ffprobe`, and `source_dir`).
 //!
 //! The pipeline is split into two phases:
 //! - **Pre-download** (layers 1–4): runs against a torrent title before the
 //!   grab decision. Cheap, filename+DB only. Entry point:
-//!   [`classify_release`].
+//!   [`classify_release`]. Layer 2 (description scraping) does make one
+//!   HTTP round trip to Nyaa, but only for the ambiguous tail that L1+L3
+//!   couldn't resolve, and even that is cached by info_hash and
+//!   rate-limited to one request per second process-wide. Layer 4
+//!   (temporal inference) is a pure synchronous function and runs
+//!   whenever the caller supplies airing metadata.
 //! - **Post-download** (layers 5–6): runs against the on-disk file after
-//!   import. Reads container metadata via ffprobe and walks the directory.
+//!   import. Reads container metadata via ffprobe (L5) and walks the
+//!   series directory for BD-exclusive markers like `BDMV/`, NCOP/NCED
+//!   files, `Specials/` subdirectories (L6). Entry point:
+//!   [`classify_post_download`]. Re-runs the cheap pre-download layers
+//!   (L1/L3/L4 — L2 is skipped since there's no view URL after import)
+//!   so the aggregator sees all evidence in one pass; ffprobe's observed
+//!   resolution overrides the filename-parsed value when set.
 //!
 //! Both phases produce the same [`ClassificationResult`] type, so the two
 //! phases can confirm/override each other via the same aggregator.
@@ -27,8 +38,12 @@ use std::collections::HashMap;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
+use crate::services::source_description::classify_description;
+use crate::services::source_dir::classify_dir;
+use crate::services::source_ffprobe::classify_ffprobe;
 use crate::services::source_filename::classify_filename;
 use crate::services::source_groups::classify_group;
+use crate::services::source_temporal::classify_temporal;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Source
@@ -378,13 +393,54 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
 // Orchestrator
 // ───────────────────────────────────────────────────────────────────────────
 
+/// Per-listing Nyaa metadata used to drive Layers 2 and 4.
+///
+/// Callers that have access to the full Nyaa listing — auto-search, RSS,
+/// upgrade detection, library handlers — pass this alongside the title so
+/// the classifier can escalate to description parsing when the cheaper
+/// layers can't reach a confident verdict, and so Layer 4 can reason
+/// about batch vs. single-episode releases. Callers without a view URL
+/// (on-disk filename reparsing, synthesized cutoffs) pass `None` and
+/// Layer 2 is skipped entirely.
+#[derive(Debug, Clone, Copy)]
+pub struct NyaaContext<'a> {
+    /// BitTorrent info_hash — stable, content-addressed cache key for
+    /// description bodies.
+    pub info_hash: &'a str,
+    /// Full Nyaa view-page URL (`https://nyaa.si/view/{id}`). Only fetched
+    /// on a cache miss, and only when L1+L3 came back unconfident.
+    pub view_url: &'a str,
+    /// Whether this listing is a batch/season pack (vs. a single weekly
+    /// episode). Used by Layer 4 temporal inference.
+    pub is_batch: bool,
+}
+
+/// Series-level metadata used to drive Layer 4 (temporal inference).
+///
+/// Callers that know the tracked-series row for the title being classified
+/// pass this so the temporal layer can reason about airing status. Callers
+/// that don't (e.g. pure filename reparsing of arbitrary on-disk files)
+/// pass `None` and Layer 4 is skipped.
+#[derive(Debug, Clone, Copy)]
+pub struct SeriesContext<'a> {
+    /// Raw AniList-style status string: `"RELEASING"`, `"FINISHED"`,
+    /// `"CANCELLED"`, `"NOT_YET_RELEASED"`, `"HIATUS"`. Match is
+    /// case-insensitive inside the layer.
+    pub status: &'a str,
+    /// Year the series started airing. Ryokan doesn't carry an explicit
+    /// end date, so this doubles as a coarse "how long ago did this
+    /// finish" proxy for the finished-era rules.
+    pub season_year: Option<i32>,
+}
+
 /// Run the pre-download classification pipeline against a release title.
 ///
-/// Fuses Layer 1 (filename tokens via anitomy) with Layer 3 (release group
-/// identity table) and returns the aggregated result. The post-download
-/// layers (ffprobe, directory walk, description scraping) are not wired in
-/// yet — they'll append additional evidence via the same aggregator in later
-/// phases.
+/// Fuses Layer 1 (filename tokens via anitomy), Layer 3 (release group
+/// identity table), Layer 4 (temporal inference — when `series` is
+/// provided), and — when L1+L3 come back unconfident — Layer 2 (Nyaa
+/// description scraping). The post-download layers (ffprobe, directory
+/// walk) are not wired in yet — they'll append additional evidence via
+/// the same aggregator in later phases.
 ///
 /// `resolution_hint` is an externally-supplied resolution string (typically
 /// the `resolution` column scraped from a Nyaa listing). It is **only**
@@ -393,10 +449,26 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
 /// This keeps the provenance of the two resolution sources distinct, so a
 /// listing whose header claims 1080p while the title parses to 720p keeps
 /// the title's value.
+///
+/// `nyaa` is the per-listing metadata needed for Layer 2 (description
+/// fetch) and for the batch-vs-single dimension of Layer 4. Pass `None`
+/// to skip the description-scraping escalation entirely. When supplied,
+/// the classifier only consults Layer 2 if the L1+L3 pass didn't land a
+/// confident verdict (i.e. `source == Unknown` or `needs_review == true`),
+/// so confident classifications never touch the network.
+///
+/// `series` is the tracked-series context needed for Layer 4 (temporal
+/// inference). Unlike Layer 2, Layer 4 is a pure synchronous function
+/// and runs unconditionally when supplied — its signals are capped at
+/// 0.75 confidence so they can't override the stronger layers, only act
+/// as a tiebreaker. Pass `None` when no tracked-series row is available
+/// (e.g. arbitrary on-disk filename reparsing).
 pub async fn classify_release(
     db: &SqlitePool,
     title: &str,
     resolution_hint: Option<&str>,
+    nyaa: Option<NyaaContext<'_>>,
+    series: Option<SeriesContext<'_>>,
 ) -> ClassificationResult {
     let filename = classify_filename(title);
 
@@ -407,7 +479,36 @@ pub async fn classify_release(
         }
     }
 
+    // Layer 4 — temporal inference. Pure synchronous function with no I/O,
+    // so unlike Layer 2 we run it up-front alongside L1+L3 whenever a
+    // SeriesContext is supplied. The signal is deliberately weak (<=0.75)
+    // so it acts as a tiebreaker rather than a decision maker.
+    if let Some(series_ctx) = series {
+        let is_batch = nyaa.map(|n| n.is_batch).unwrap_or(false);
+        let today_year = current_year();
+        if let Some(temporal_ev) =
+            classify_temporal(series_ctx.status, series_ctx.season_year, is_batch, today_year)
+        {
+            evidence.push(temporal_ev);
+        }
+    }
+
     let mut result = aggregate(&evidence);
+
+    // Layer 2 escalation: only when the cheap L1+L3+L4 pass couldn't produce
+    // a confident verdict. This keeps the 90%+ of releases that classify
+    // cleanly from filename + group alone off the rate-limited Nyaa
+    // description fetch path entirely. A "confident" result is one where
+    // the aggregator picked a non-Unknown source without flagging review.
+    if let Some(ctx) = nyaa {
+        if result.source == Source::Unknown || result.needs_review {
+            let extra = classify_description(db, ctx.info_hash, ctx.view_url).await;
+            if !extra.is_empty() {
+                evidence.extend(extra);
+                result = aggregate(&evidence);
+            }
+        }
+    }
 
     // Resolution is observed, not aggregated. Prefer the filename parse —
     // it looked at the actual title tokens — and only fall back to the
@@ -421,7 +522,159 @@ pub async fn classify_release(
     };
     result.is_remux = filename.is_remux;
 
+    log_classification("classify_release", title, &result);
+
     result
+}
+
+/// Run the post-download classification pipeline against a file that has
+/// landed on disk. Used by `post_processing::import_torrent` right after
+/// a successful `do_file_op` — at that point the file is at its final
+/// library path and its sibling directory layout is stable.
+///
+/// Fuses the pre-download layers that are still cheap to re-run (Layer 1
+/// filename, Layer 3 group, Layer 4 temporal) with the two post-download
+/// layers (Layer 5 ffprobe, Layer 6 directory walk). Layer 2 is skipped
+/// because the Nyaa view URL is no longer in hand once the torrent is
+/// gone — and the post-download layers produce much stronger signals
+/// anyway.
+///
+/// Arguments:
+/// - `file_path` — absolute path to the landed video file (used by L5
+///   to shell out to ffprobe).
+/// - `series_root` — the top-level series directory under `media_root`
+///   (used by L6 to look for `BDMV/`, `Scans/`, etc.). Pass `None` to
+///   skip the directory walk — e.g. when classifying a one-off file
+///   that isn't inside a managed library folder.
+/// - `original_title` — the torrent title or filename to run L1 against.
+///   Callers that have the original torrent title (via `grabbed_torrents`)
+///   should pass that; callers reclassifying an externally-imported file
+///   pass the filename itself.
+/// - `series` — optional tracked-series context for Layer 4. Skipped
+///   when absent.
+///
+/// Resolution observed by ffprobe takes precedence over the filename
+/// parse — it's a direct measurement of the actual media, whereas L1 is
+/// only inferring from tokens.
+pub async fn classify_post_download(
+    db: &SqlitePool,
+    file_path: &std::path::Path,
+    series_root: Option<&std::path::Path>,
+    original_title: &str,
+    series: Option<SeriesContext<'_>>,
+) -> ClassificationResult {
+    // L1 — filename tokens.
+    let filename = classify_filename(original_title);
+    let mut evidence = filename.evidence.clone();
+
+    // L3 — release group identity.
+    if let Some(group) = filename.release_group.as_deref() {
+        if let Some(group_ev) = classify_group(db, group).await {
+            evidence.push(group_ev);
+        }
+    }
+
+    // L4 — temporal inference (when we have series context). Post-download,
+    // we don't know if the torrent was a batch or single episode anymore,
+    // so we default is_batch to false; L4's BluRay-leaning "finished + batch"
+    // rule won't fire and we'll only get the airing / recent-finale signals.
+    if let Some(series_ctx) = series {
+        if let Some(temporal_ev) = classify_temporal(
+            series_ctx.status,
+            series_ctx.season_year,
+            false,
+            current_year(),
+        ) {
+            evidence.push(temporal_ev);
+        }
+    }
+
+    // L5 — ffprobe stream analysis. Strongest post-download signal. Returns
+    // an empty classification on any failure (missing binary, unreadable
+    // file, malformed JSON) so we can always safely extend the evidence.
+    let ffprobe = classify_ffprobe(db, file_path).await;
+    evidence.extend(ffprobe.evidence);
+
+    // L6 — directory walk. Only runs when a series_root is supplied; for
+    // one-off file reclassifications we skip it.
+    if let Some(root) = series_root {
+        evidence.extend(classify_dir(root));
+    }
+
+    let mut result = aggregate(&evidence);
+
+    // Resolution precedence post-download:
+    //   1. ffprobe's measured dimensions (ground truth)
+    //   2. filename parse
+    //   3. Unknown
+    result.resolution = if let Some(observed) = ffprobe.resolution {
+        observed
+    } else if filename.resolution != Resolution::Unknown {
+        filename.resolution
+    } else {
+        Resolution::Unknown
+    };
+    result.is_remux = filename.is_remux;
+
+    log_classification("classify_post_download", original_title, &result);
+
+    result
+}
+
+/// Log a completed classification at DEBUG, with the full evidence trail
+/// flattened onto a single line so it's grep-friendly. Per the plan doc
+/// Logging section, `needs_review=true` results additionally log at INFO
+/// so they surface in the default log level without requiring debug filters.
+///
+/// Format:
+/// ```text
+/// [source] classify_release: "Foo" → BluRay/1080p (conf=0.92) [layer1:BluRay:0.95 "BD tag"] [group:BluRay:0.90 "SubsPlease"]
+/// ```
+fn log_classification(phase: &str, title: &str, result: &ClassificationResult) {
+    let trail: String = result
+        .evidence
+        .iter()
+        .map(|e| {
+            format!(
+                "[{}:{}:{:.2} {:?}]",
+                e.origin,
+                e.source.as_str(),
+                e.confidence,
+                e.detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    tracing::debug!(
+        target: "ryokan::source",
+        "[source] {}: {:?} → {}/{} (conf={:.2}) {}",
+        phase,
+        title,
+        result.source.as_str(),
+        result.resolution.as_str(),
+        result.confidence,
+        trail,
+    );
+    if result.needs_review {
+        tracing::info!(
+            target: "ryokan::source",
+            "[source] {}: {:?} needs review → {}/{} (conf={:.2}) {}",
+            phase,
+            title,
+            result.source.as_str(),
+            result.resolution.as_str(),
+            result.confidence,
+            trail,
+        );
+    }
+}
+
+/// Current calendar year as an `i32`, injected into Layer 4 so the
+/// module itself stays a pure function (easier to unit-test). Uses
+/// `chrono::Utc::now()` which is already a dependency of the project.
+fn current_year() -> i32 {
+    use chrono::Datelike;
+    chrono::Utc::now().year()
 }
 
 // ───────────────────────────────────────────────────────────────────────────

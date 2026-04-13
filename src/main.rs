@@ -35,6 +35,8 @@ use services::{jellyfin::JellyfinClient, qbit::QbitClient};
         handlers::library::set_folder,
         handlers::library::set_monitoring,
         handlers::library::set_episode_monitoring,
+        handlers::library::set_allow_upgrades,
+        handlers::library::set_manual_override,
         handlers::library::list_folders,
         handlers::library::auto_search_series,
         handlers::library::auto_search_episode,
@@ -67,6 +69,7 @@ use services::{jellyfin::JellyfinClient, qbit::QbitClient};
         handlers::system::api_force_metadata_refresh,
         handlers::system::api_force_cleanup,
         handlers::system::api_force_post_processing,
+        handlers::system::api_force_library_classify,
         handlers::system::api_force_upgrade_search,
         handlers::system::api_rebuild_cached_metadata,
         handlers::system::api_anibridge_reload,
@@ -88,6 +91,8 @@ use services::{jellyfin::JellyfinClient, qbit::QbitClient};
         handlers::library::SetFolderForm,
         handlers::library::SetMonitoringForm,
         handlers::library::SetEpisodeMonitoringForm,
+        handlers::library::SetAllowUpgradesForm,
+        handlers::library::SetManualOverrideForm,
         handlers::library::MarkEpisodeFailedForm,
         handlers::library::EpisodeProgress,
         handlers::search::GrabForm,
@@ -181,6 +186,7 @@ async fn main() {
     // Routes that require auth.
     let protected_routes = Router::new()
         .route("/", get(handlers::library::index))
+        .route("/library/review", get(handlers::library::needs_review_page))
         .route("/series/{anilist_id}", get(handlers::library::series_detail))
         .route("/search", get(handlers::search::search_page).post(handlers::search::search_submit))
         .route("/api/anilist/search", get(handlers::library::anilist_search))
@@ -191,6 +197,8 @@ async fn main() {
         .route("/api/library/folder", post(handlers::library::set_folder))
         .route("/api/library/monitoring", post(handlers::library::set_monitoring))
         .route("/api/library/episode-monitoring", post(handlers::library::set_episode_monitoring))
+        .route("/api/library/allow-upgrades", post(handlers::library::set_allow_upgrades))
+        .route("/api/library/manual-override", post(handlers::library::set_manual_override))
         .route("/api/series/{anilist_id}/auto-search", post(handlers::library::auto_search_series))
         .route("/api/series/{anilist_id}/auto-search/{episode_number}", post(handlers::library::auto_search_episode))
         .route("/api/series/{anilist_id}/search-batch", post(handlers::library::search_batch_releases))
@@ -223,6 +231,7 @@ async fn main() {
         .route("/api/tasks/metadata-refresh", post(handlers::system::api_force_metadata_refresh))
         .route("/api/tasks/cleanup", post(handlers::system::api_force_cleanup))
         .route("/api/tasks/post-processing", post(handlers::system::api_force_post_processing))
+        .route("/api/tasks/library-classify", post(handlers::system::api_force_library_classify))
         .route("/api/tasks/upgrade-search", post(handlers::system::api_force_upgrade_search))
         .route("/api/system/rebuild-anilist-cache", post(handlers::system::api_rebuild_cached_metadata))
         .route("/api/system/reload-anibridge", post(handlers::system::api_anibridge_reload))

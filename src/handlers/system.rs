@@ -493,6 +493,37 @@ pub async fn api_force_post_processing(
 
 #[utoipa::path(
     post,
+    path = "/api/tasks/library-classify",
+    tag = "System",
+    summary = "Classify externally-imported files",
+    description = "Walk every tracked series' media folder and run the source/resolution classifier on files that don't yet have a structured classification row. Useful after importing pre-existing media from another PVR or a manual drop.",
+    responses(
+        (status = 200, description = "Library classify report", body = serde_json::Value),
+    ),
+)]
+pub async fn api_force_library_classify(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let report = post_processing::scan_library_for_unclassified(&state).await;
+    let message = format!(
+        "Library classify scan complete. Series scanned: {}. Files scanned: {}. Classified: {}. Needs review: {}.",
+        report.series_scanned,
+        report.files_scanned,
+        report.files_classified,
+        report.files_needing_review,
+    );
+    Json(serde_json::json!({
+        "ok": true,
+        "message": message,
+        "series_scanned": report.series_scanned,
+        "files_scanned": report.files_scanned,
+        "files_classified": report.files_classified,
+        "files_needing_review": report.files_needing_review,
+    }))
+}
+
+#[utoipa::path(
+    post,
     path = "/api/tasks/upgrade-search",
     tag = "System",
     summary = "Trigger quality upgrade search",
