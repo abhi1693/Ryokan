@@ -1,8 +1,3 @@
-// Phase 1a foundation: nothing in production calls into this module yet — it
-// is exercised only by unit tests until Phase 2b wires classify_post_download
-// into `post_processing::import_torrent`. Remove this allow when that happens.
-#![allow(dead_code)]
-
 //! Layer 6 — directory / file-structure analysis.
 //!
 //! Scans the series root directory for BD-exclusive content that only
@@ -28,7 +23,7 @@
 
 use std::path::Path;
 
-use crate::services::source::{Source, SourceEvidence};
+use crate::services::source::{contains_word, Source, SourceEvidence};
 
 const ORIGIN: &str = "dir";
 
@@ -41,6 +36,7 @@ pub struct DirItem {
     pub is_dir: bool,
 }
 
+#[cfg(test)]
 impl DirItem {
     pub fn file(name: impl Into<String>) -> Self {
         Self {
@@ -133,13 +129,13 @@ pub fn scan_entries(items: &[DirItem]) -> Vec<SourceEvidence> {
     // Rule: NCOP / NCED files → BluRay 0.90. Creditless OP/ED versions
     // ship only on BD releases, typically named `NCOP1.mkv`, `NCED 01.mkv`,
     // `[Group] Series - NCOP01.mkv`, etc. Match the token anywhere in
-    // the filename.
+    // the filename; `contains_word` handles the digit/punctuation boundary
+    // so `NCOP01` hits but `Syncopation` doesn't.
     for item in items {
         if item.is_dir {
             continue;
         }
-        let upper = item.name.to_ascii_uppercase();
-        if contains_token(&upper, "NCOP") || contains_token(&upper, "NCED") {
+        if contains_word(&item.name, "NCOP") || contains_word(&item.name, "NCED") {
             out.push(SourceEvidence::new(
                 Source::BluRay,
                 0.90,
@@ -187,40 +183,6 @@ fn has_extension_ci(name: &str, ext: &str) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case(ext))
         .unwrap_or(false)
-}
-
-/// Does `haystack` contain `needle` as a whole token — i.e. with a
-/// non-alphanumeric boundary on either side? Used to distinguish
-/// `NCOP01.mkv` (hit) from `SyncopationVol01.mkv` (miss). `haystack`
-/// is assumed already uppercased; `needle` must be uppercase.
-fn contains_token(haystack: &str, needle: &str) -> bool {
-    let mut start = 0;
-    while let Some(idx) = haystack[start..].find(needle) {
-        let abs = start + idx;
-        let before_ok = abs == 0
-            || !haystack
-                .as_bytes()
-                .get(abs - 1)
-                .copied()
-                .map(|b| b.is_ascii_alphanumeric())
-                .unwrap_or(false);
-        let after_abs = abs + needle.len();
-        let after_ok = after_abs == haystack.len()
-            || !haystack
-                .as_bytes()
-                .get(after_abs)
-                .copied()
-                .map(|b| b.is_ascii_alphabetic())
-                .unwrap_or(false);
-        if before_ok && after_ok {
-            return true;
-        }
-        start = abs + needle.len();
-        if start >= haystack.len() {
-            break;
-        }
-    }
-    false
 }
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -1,8 +1,3 @@
-// Phase 1a foundation: nothing in production calls into this module yet — it
-// is exercised only by unit tests until Phase 1b wires the classifier into
-// `auto_search`, `rss`, and `upgrade`. Remove this allow when that happens.
-#![allow(dead_code)]
-
 //! Layer 2 — Nyaa description parsing.
 //!
 //! Only runs when Layers 1 (filename) and 3 (group identity) come back with
@@ -58,6 +53,19 @@ const MIN_FETCH_INTERVAL: Duration = Duration::from_millis(1000);
 /// completes its interval.
 static LAST_FETCH: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
 
+/// Process-global `reqwest::Client` for Nyaa description fetches. `Client`
+/// wraps an internal connection pool and is designed to be shared — creating
+/// a new one per request throws away any established keepalive connections
+/// and forces a fresh TCP (and TLS) handshake every time. Build it once and
+/// reuse it for the life of the process.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("Ryokan/0.1")
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("building the Nyaa description reqwest client should not fail")
+});
+
 /// Classify a torrent by scraping its Nyaa description body.
 ///
 /// `info_hash` is the cache key (stable and content-addressed). `view_url`
@@ -106,11 +114,8 @@ pub async fn classify_description(
 async fn fetch_description(view_url: &str) -> Result<String, String> {
     rate_limit().await;
 
-    let client = reqwest::Client::new();
-    let html = client
+    let html = HTTP_CLIENT
         .get(view_url)
-        .header("User-Agent", "Ryokan/0.1")
-        .timeout(Duration::from_secs(15))
         .send()
         .await
         .map_err(|e| format!("request failed: {}", e))?

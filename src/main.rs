@@ -420,6 +420,20 @@ async fn main() {
                     }
                     _ => {}
                 }
+                // Prune cold Nyaa description cache rows. Active torrents get
+                // their cached_at refreshed on every classification pass, so
+                // this only evicts rows that went fully cold (no RSS / upgrade
+                // activity touched them in 90 days).
+                match models::nyaa_description_cache::cleanup(&cleanup_db, 90).await {
+                    Ok(deleted) if deleted > 0 => {
+                        tracing::debug!("Cleaned up {} old nyaa description cache rows", deleted);
+                    }
+                    Err(e) => {
+                        cleanup_errors.push(format!("nyaa_description_cache: {}", e));
+                        tracing::error!("Nyaa description cache cleanup failed: {}", e);
+                    }
+                    _ => {}
+                }
                 let status = if cleanup_errors.is_empty() { "ok" } else { "warn" };
                 let detail = if cleanup_errors.is_empty() { "Cleanup completed".to_string() } else { cleanup_errors.join("; ") };
                 let _ = models::scheduled_tasks::mark_finished(&cleanup_db, "cleanup", status, &detail).await;

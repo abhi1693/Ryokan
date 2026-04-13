@@ -8,9 +8,13 @@
 //! keyed by `info_hash` keeps repeated classifications of the same torrent
 //! (RSS polling, re-scoring, upgrade detection) off the network entirely.
 //!
-//! The cache never expires. Nyaa listings are immutable after upload in
-//! practice, and we key on `info_hash` (not view ID), which is content-
-//! addressed — so a cached row remains valid as long as the torrent exists.
+//! Rows are keyed on `info_hash` (content-addressed) so they remain valid
+//! as long as the torrent exists. The cache has no functional TTL, but the
+//! hourly cleanup task calls [`cleanup`] to prune rows that haven't been
+//! touched in a long time — this keeps the table from growing unbounded
+//! over the life of a long-running Ryokan instance without impacting the
+//! common case (active torrents get touched on every RSS sweep, so their
+//! `cached_at` keeps getting refreshed).
 
 use sqlx::{Row, SqlitePool};
 
@@ -65,4 +69,20 @@ pub async fn upsert(db: &SqlitePool, info_hash: &str, description: &str) {
     .bind(description)
     .execute(db)
     .await;
+}
+
+/// Prune cache rows whose `cached_at` is older than `max_age_days`. Called
+/// from the hourly cleanup task so long-running instances don't accumulate
+/// description bodies for torrents that haven't been touched in months.
+/// Active torrents (RSS sync re-hits them) get their `cached_at` refreshed
+/// by `upsert`, so this only evicts rows that truly went cold.
+pub async fn cleanup(db: &SqlitePool, max_age_days: i32) -> Result<u64, sqlx::Error> {
+    let cutoff = format!("-{} days", max_age_days);
+    let res = sqlx::query(
+        "DELETE FROM nyaa_description_cache WHERE cached_at < datetime('now', ?)",
+    )
+    .bind(cutoff)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected())
 }

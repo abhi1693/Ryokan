@@ -1,8 +1,3 @@
-// Phase 1a foundation: nothing in production calls into this module yet — it
-// is exercised only by unit tests until Phase 1b wires the classifier into
-// `auto_search`, `rss`, and `upgrade`. Remove this allow when that happens.
-#![allow(dead_code)]
-
 //! Source classification types, signal aggregation, and the pre-download
 //! orchestrator.
 //!
@@ -158,8 +153,12 @@ impl Resolution {
     /// Derive resolution from explicit pixel dimensions. Used by ffprobe layer
     /// in Phase 2, and by Layer 1 for cross-referencing against mentioned
     /// dimensions like "1920x1080".
-    pub fn from_dimensions(width: u32, height: u32) -> Self {
-        // Allow slight variance for anamorphic / cropped content.
+    ///
+    /// The height thresholds are loose lower-bounds to absorb anamorphic and
+    /// cropped content — NTSC DVD (480), PAL DVD (576), and all the common
+    /// anamorphic 720p variants land inside the same brackets, so no separate
+    /// exact-dimension fallbacks are needed.
+    pub fn from_dimensions(_width: u32, height: u32) -> Self {
         if height >= 2000 {
             Resolution::R2160p
         } else if height >= 1000 {
@@ -171,14 +170,7 @@ impl Resolution {
         } else if height >= 460 {
             Resolution::R480p
         } else {
-            // DVD-native dimensions as a special case.
-            if (width, height) == (720, 480) || (width, height) == (704, 480) {
-                Resolution::R480p
-            } else if (width, height) == (720, 576) {
-                Resolution::R576p
-            } else {
-                Resolution::Unknown
-            }
+            Resolution::Unknown
         }
     }
 }
@@ -297,13 +289,12 @@ const MIN_TOTAL: f32 = 0.50;
 ///    that source wins immediately. This lets high-confidence filename or
 ///    ffprobe signals bypass the full aggregation path.
 /// 2. Otherwise, sum confidences per source across all evidence. The source
-///    with the highest total wins, **but only if** it leads the runner-up by
-///    at least `MIN_LEAD (0.30)`.
-/// 3. If there's no clear lead but at least one evidence ≥ `CONFLICT_THRESHOLD
-///    (0.70)` disagrees with the top source, flag `needs_review = true` while
-///    still returning the best guess.
-/// 4. If the total evidence mass for the best source is below `MIN_TOTAL
+///    with the highest total is provisionally the winner.
+/// 3. If the total evidence mass for the best source is below `MIN_TOTAL
 ///    (0.50)`, classify as `Source::Unknown` with `needs_review = true`.
+/// 4. If the leader leads the runner-up by less than `MIN_LEAD (0.30)` and
+///    at least one evidence ≥ `CONFLICT_THRESHOLD (0.70)` disagrees with the
+///    leader, flag `needs_review = true` while still returning the best guess.
 /// 5. Otherwise: return the winner with `needs_review = false`.
 ///
 /// Note: this function does not set `resolution` or `is_remux`. Those come
@@ -355,7 +346,7 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     let runner_sum = ranked.get(1).map(|(_, s)| *s).unwrap_or(0.0);
     let lead = leader_sum - runner_sum;
 
-    // Rule 4: total mass too weak, fall back to Unknown.
+    // Rule 3: total mass too weak, fall back to Unknown.
     if leader_sum < MIN_TOTAL {
         return ClassificationResult {
             source: Source::Unknown,
@@ -367,7 +358,7 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
         };
     }
 
-    // Rule 3: detect strong conflict. If runner-up has a signal ≥
+    // Rule 4: detect strong conflict. If runner-up has a signal ≥
     // CONFLICT_THRESHOLD and the lead is small, flag for review.
     let has_strong_conflict = evidence
         .iter()
@@ -861,6 +852,46 @@ pub fn score_classification(
     }
 
     score
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Shared text helpers
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Case-insensitive whole-word search. Returns `true` when `needle` appears
+/// in `haystack` with non-alphabetic characters (or string boundaries) on
+/// both sides.
+///
+/// Shared between Layer 1 (filename tokens) and Layer 6 (directory walk) so
+/// the two call sites can't drift apart — both layers need a "does this
+/// token appear as a whole word?" check, and both want digits, punctuation,
+/// and whitespace to count as boundaries. That's why the boundary test is
+/// `!is_ascii_alphabetic` rather than `!is_ascii_alphanumeric`: filename tags
+/// like `x264_2flac` should match `flac` (digit before is a boundary), and
+/// directory entries like `NCOP01.mkv` should match `NCOP` (digit after is a
+/// boundary). Alphabetic neighbors stay non-boundary so `SyncopationVol01`
+/// doesn't match `NCOP`.
+pub(crate) fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    if hb.len() < nb.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + nb.len() <= hb.len() {
+        if hb[i..i + nb.len()].eq_ignore_ascii_case(nb) {
+            let left_ok = i == 0 || !hb[i - 1].is_ascii_alphabetic();
+            let right_ok = i + nb.len() == hb.len() || !hb[i + nb.len()].is_ascii_alphabetic();
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 // ───────────────────────────────────────────────────────────────────────────

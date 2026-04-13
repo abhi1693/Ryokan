@@ -1,8 +1,3 @@
-// Phase 1a foundation: nothing in production calls into this module yet — it
-// is exercised only by unit tests until Phase 1b wires the classifier into
-// `auto_search`, `rss`, and `upgrade`. Remove this allow when that happens.
-#![allow(dead_code)]
-
 //! Layer 3 — release group identity lookup.
 //!
 //! Thin wrapper over [`crate::models::group_source_map`]. Given a release

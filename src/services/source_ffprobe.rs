@@ -1,8 +1,3 @@
-// Phase 1a foundation: nothing in production calls into this module yet — it
-// is exercised only by unit tests until Phase 2b wires classify_post_download
-// into `post_processing::import_torrent`. Remove this allow when that happens.
-#![allow(dead_code)]
-
 //! Layer 5 — ffprobe container / stream analysis.
 //!
 //! The strongest single post-download signal. Shells out to `ffprobe` with
@@ -266,10 +261,15 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
     // services don't ship.
     let has_flac = facts.audio_codecs.iter().any(|c| c == "flac");
     let has_truehd = facts.audio_codecs.iter().any(|c| c == "truehd");
+    // ffprobe reports DTS-HD MA as `dts_hd_ma` and DTS-HD HRA as
+    // `dts_hd_hra`. Match those codec IDs explicitly rather than doing a
+    // loose "contains dts && contains hd" substring scan, which could
+    // false-positive on e.g. a hypothetical "dts_hdcam" codec and misses
+    // the point of being a strict BD-exclusive signal.
     let has_dts_hd = facts
         .audio_codecs
         .iter()
-        .any(|c| c.contains("dts") && c.contains("hd"));
+        .any(|c| c == "dts_hd_ma" || c == "dts_hd_hra");
     // PCM on ffprobe comes through as e.g. "pcm_s16le" / "pcm_s24le".
     let has_pcm = facts.audio_codecs.iter().any(|c| c.starts_with("pcm_"));
     if has_flac || has_truehd || has_dts_hd || has_pcm {

@@ -613,6 +613,23 @@ pub struct LibraryClassifyReport {
     pub files_needing_review: usize,
 }
 
+/// One file queued up by the lock-held enumeration phase, carried over
+/// into the unlocked classification phase of `scan_library_for_unclassified`.
+struct PendingClassification {
+    series_id: i64,
+    series_status: String,
+    series_season_year: Option<i32>,
+    series_root: std::path::PathBuf,
+    file_path: std::path::PathBuf,
+    episode_number: i32,
+    title: String,
+    /// True when an `episode_quality_tags` row already exists for this
+    /// (series, episode) pair. Determines whether the persist step goes
+    /// through `update_classification` (UPDATE) or `record_grab` +
+    /// `mark_completed` (INSERT upsert + state flip).
+    row_exists: bool,
+}
+
 /// Walk every tracked series and classify on-disk video files that don't
 /// yet have a structured classification row. This is the Phase 2 "library
 /// scan path" — it catches files that were imported outside of Ryokan's
@@ -626,117 +643,146 @@ pub struct LibraryClassifyReport {
 /// previous post-download pass and don't need to be re-touched. Files
 /// with `manual_override = 1` are left alone by
 /// `update_classification` regardless, so there's no special case here.
+///
+/// **Locking:** the enumeration phase (config read, `scan_series_folder`,
+/// existing-tag lookup, disk-existence filter) holds `POST_PROC_LOCK` so
+/// the work list is a consistent snapshot that can't be invalidated by a
+/// parallel `run_once`. Once the list is built, the lock is released
+/// before we shell out to ffprobe via `classify_post_download` — those
+/// calls can take hundreds of ms per file and would otherwise block the
+/// 1-minute `process_completed_downloads` background loop for the full
+/// duration of a large scan. The DB writes in the second phase rely on
+/// SQLite's normal write serialization; the worst-case race (a real
+/// import landing between our classify and persist steps on the same
+/// episode) leaves a single row briefly stale and self-heals on the
+/// next scan.
 pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyReport {
-    // Re-use the same lock as real post-processing so a library scan
-    // can't race with an in-flight import. Both touch the same episode
-    // tags rows and the same ffprobe cache, so serializing them is
-    // cheaper than coordinating fine-grained invariants.
-    let _guard = POST_PROC_LOCK.lock().await;
-
     let mut report = LibraryClassifyReport::default();
 
-    let cfg = match config::get_config(&state.db).await.ok().flatten() {
-        Some(c) => c,
-        None => return report,
+    let pending: Vec<PendingClassification> = {
+        // Lock scope: enumerate only. Dropped before the classify loop.
+        let _guard = POST_PROC_LOCK.lock().await;
+
+        let cfg = match config::get_config(&state.db).await.ok().flatten() {
+            Some(c) => c,
+            None => return report,
+        };
+        if cfg.media_root.is_empty() {
+            return report;
+        }
+
+        let tracked = series::get_all(&state.db).await.unwrap_or_default();
+        let mut pending = Vec::new();
+
+        for row in &tracked {
+            if row.folder_name.is_empty() {
+                continue;
+            }
+            let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
+            if disk_files.is_empty() {
+                continue;
+            }
+            report.series_scanned += 1;
+
+            let existing = episode_tags::get_for_series(&state.db, row.id)
+                .await
+                .unwrap_or_default();
+
+            let series_root = Path::new(&cfg.media_root).join(&row.folder_name);
+
+            for file in &disk_files {
+                report.files_scanned += 1;
+
+                // Skip files that already have a structured classification.
+                // The `source` column is empty for rows predating Phase 1b
+                // and for files that have never been classified at all; a
+                // non-empty value means the classifier (grab-time or
+                // post-download) already set it.
+                let tag = existing.get(&file.episode_number);
+                if tag.map(|t| !t.source.is_empty()).unwrap_or(false) {
+                    continue;
+                }
+
+                // Reconstruct the absolute path so ffprobe can read the file.
+                let file_path = series_root.join(&file.filename);
+                if !file_path.exists() {
+                    continue;
+                }
+
+                // Use the filename itself as the title — we don't have the
+                // original torrent name for externally-imported files.
+                let title = Path::new(&file.filename)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&file.filename)
+                    .to_string();
+
+                pending.push(PendingClassification {
+                    series_id: row.id,
+                    series_status: row.status.clone(),
+                    series_season_year: row.season_year,
+                    series_root: series_root.clone(),
+                    file_path,
+                    episode_number: file.episode_number,
+                    title,
+                    row_exists: tag.is_some(),
+                });
+            }
+        }
+
+        pending
     };
-    if cfg.media_root.is_empty() {
-        return report;
-    }
 
-    let tracked = series::get_all(&state.db).await.unwrap_or_default();
+    // Unlocked classification + persist phase. ffprobe shell-outs are the
+    // slow part; doing them here instead of under the lock lets
+    // `process_completed_downloads` keep running in parallel.
+    for item in pending {
+        let result = source::classify_post_download(
+            &state.db,
+            &item.file_path,
+            Some(&item.series_root),
+            &item.title,
+            Some(SeriesContext {
+                status: &item.series_status,
+                season_year: item.series_season_year,
+            }),
+        )
+        .await;
 
-    for row in &tracked {
-        if row.folder_name.is_empty() {
-            continue;
-        }
-        let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
-        if disk_files.is_empty() {
-            continue;
-        }
-        report.series_scanned += 1;
-
-        let existing = episode_tags::get_for_series(&state.db, row.id)
-            .await
-            .unwrap_or_default();
-
-        let series_root = Path::new(&cfg.media_root).join(&row.folder_name);
-
-        for file in &disk_files {
-            report.files_scanned += 1;
-
-            // Skip files that already have a structured classification.
-            // The `source` column is empty for rows predating Phase 1b
-            // and for files that have never been classified at all; a
-            // non-empty value means the classifier (grab-time or
-            // post-download) already set it.
-            let already_classified = existing
-                .get(&file.episode_number)
-                .map(|tag| !tag.source.is_empty())
-                .unwrap_or(false);
-            if already_classified {
-                continue;
-            }
-
-            // Reconstruct the absolute path so ffprobe can read the file.
-            let file_path = series_root.join(&file.filename);
-            if !file_path.exists() {
-                continue;
-            }
-
-            // Use the filename itself as the title — we don't have the
-            // original torrent name for externally-imported files.
-            let title = Path::new(&file.filename)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&file.filename);
-
-            let result = source::classify_post_download(
+        // The row may not exist yet for externally-imported files, so
+        // we can't rely on `update_classification` alone (it's an
+        // UPDATE, not an UPSERT). Use `record_grab` with synthetic
+        // release metadata to insert-or-upsert, then flip state to
+        // 'completed' since the file is already on disk.
+        if !item.row_exists {
+            let _ = episode_tags::record_grab(
                 &state.db,
-                &file_path,
-                Some(&series_root),
-                title,
-                Some(SeriesContext {
-                    status: &row.status,
-                    season_year: row.season_year,
-                }),
+                item.series_id,
+                item.episode_number,
+                &result,
+                &item.title,
+                "",
             )
             .await;
+            let _ = episode_tags::mark_completed(
+                &state.db,
+                item.series_id,
+                &[item.episode_number],
+            )
+            .await;
+        } else {
+            let _ = episode_tags::update_classification(
+                &state.db,
+                item.series_id,
+                item.episode_number,
+                &result,
+            )
+            .await;
+        }
 
-            // The row may not exist yet for externally-imported files, so
-            // we can't rely on `update_classification` alone (it's an
-            // UPDATE, not an UPSERT). Use `record_grab` with synthetic
-            // release metadata to insert-or-upsert, then flip state to
-            // 'completed' since the file is already on disk.
-            if !existing.contains_key(&file.episode_number) {
-                let _ = episode_tags::record_grab(
-                    &state.db,
-                    row.id,
-                    file.episode_number,
-                    &result,
-                    title,
-                    "",
-                )
-                .await;
-                let _ = episode_tags::mark_completed(
-                    &state.db,
-                    row.id,
-                    &[file.episode_number],
-                )
-                .await;
-            } else {
-                let _ = episode_tags::update_classification(
-                    &state.db,
-                    row.id,
-                    file.episode_number,
-                    &result,
-                )
-                .await;
-            }
-
-            report.files_classified += 1;
-            if result.needs_review {
-                report.files_needing_review += 1;
-            }
+        report.files_classified += 1;
+        if result.needs_review {
+            report.files_needing_review += 1;
         }
     }
 

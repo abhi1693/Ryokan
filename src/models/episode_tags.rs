@@ -133,6 +133,14 @@ pub async fn record_grab(
     .fetch_one(db)
     .await?;
 
+    // The `WHERE COALESCE(manual_override, 0) = 0` guard mirrors
+    // `update_classification`: if the user has pinned a classification on
+    // this episode, re-grabs must not silently overwrite it. Without the
+    // guard the row would end up internally inconsistent — manual_override
+    // still flipped on, but the columns it's supposed to protect replaced
+    // by the automatic classifier's verdict. An upgrade re-grab on a
+    // pinned row is a no-op on the tag row; the grab history row still
+    // records the event unconditionally above.
     sqlx::query(
         "INSERT INTO episode_quality_tags (
              series_id, episode_number, quality_tag, release_title, release_group, state,
@@ -149,7 +157,8 @@ pub async fn record_grab(
              is_remux = excluded.is_remux,
              classification_confidence = excluded.classification_confidence,
              needs_review = excluded.needs_review,
-             updated_at = CURRENT_TIMESTAMP",
+             updated_at = CURRENT_TIMESTAMP
+         WHERE COALESCE(episode_quality_tags.manual_override, 0) = 0",
     )
     .bind(series_id)
     .bind(episode_number)
@@ -319,8 +328,17 @@ pub async fn set_manual_override(
         return Ok(());
     }
 
+    // Mirror `ClassificationResult::label()` so the UI shows the same text
+    // whether the classification came from the pipeline or from a manual
+    // override. Key detail: if resolution is empty, don't emit a trailing
+    // space — `"BluRay"` instead of `"BluRay "`, `"BluRay Remux"` instead of
+    // `"BluRay Remux "`.
     let remux = if is_remux { " Remux" } else { "" };
-    let label = format!("{}{} {}", source, remux, resolution);
+    let label = if resolution.is_empty() {
+        format!("{}{}", source, remux)
+    } else {
+        format!("{}{} {}", source, remux, resolution)
+    };
     let is_remux_i = if is_remux { 1_i64 } else { 0_i64 };
 
     // Upsert: if the row doesn't exist yet (user tagging a file that the

@@ -1,8 +1,3 @@
-// Phase 1a foundation: nothing in production calls into this module yet — it
-// is exercised only by unit tests until Phase 1b wires the classifier into
-// `auto_search`, `rss`, and `upgrade`. Remove this allow when that happens.
-#![allow(dead_code)]
-
 //! Layer 1 — filename token parsing via anitomy.
 //!
 //! Given a torrent title or filename, extract source/resolution/remux info
@@ -28,7 +23,7 @@
 
 use anitomy::{Anitomy, ElementCategory};
 
-use crate::services::source::{Resolution, Source, SourceEvidence};
+use crate::services::source::{contains_word, Resolution, Source, SourceEvidence};
 
 const ORIGIN: &str = "filename";
 
@@ -377,39 +372,6 @@ const PLATFORM_TAGS: &[&str] = &[
     "atvp",
     "adn",
 ];
-
-/// Whole-word substring search on a string. Word boundaries are any
-/// non-alphabetic byte — brackets, spaces, dots, dashes, underscores, AND
-/// digits. Digits count as boundaries on purpose: release naming frequently
-/// packs codec tokens against numeric prefixes/suffixes (`2flac` for
-/// 2-channel FLAC, `x264_2flac`, `ddp5.1`), and we want those to count as
-/// hits. The tradeoff is that `aac` would still match against `2aac` — which
-/// is the desired behavior for audio codec detection, and harmless for
-/// platform tag detection.
-///
-/// Case-insensitive.
-fn contains_word(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let hb = haystack.as_bytes();
-    let nb = needle.as_bytes();
-    if hb.len() < nb.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i + nb.len() <= hb.len() {
-        if hb[i..i + nb.len()].eq_ignore_ascii_case(nb) {
-            let left_ok = i == 0 || !hb[i - 1].is_ascii_alphabetic();
-            let right_ok = i + nb.len() == hb.len() || !hb[i + nb.len()].is_ascii_alphabetic();
-            if left_ok && right_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
 
 /// Parse a dimension fragment like "1920x1080" or "1280x720" into a
 /// `Resolution`. Returns `Resolution::Unknown` if no dimension pair is found

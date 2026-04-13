@@ -1,8 +1,3 @@
-// Phase 1a foundation: nothing in production calls into this module yet — it
-// is exercised only by unit tests until Phase 1b wires the classifier into
-// `auto_search`, `rss`, and `upgrade`. Remove this allow when that happens.
-#![allow(dead_code)]
-
 //! Layer 4 — temporal inference.
 //!
 //! The weakest pre-download signal, used as a tiebreaker when the stronger
