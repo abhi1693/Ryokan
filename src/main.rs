@@ -420,10 +420,11 @@ async fn main() {
                     }
                     _ => {}
                 }
-                // Prune cold Nyaa description cache rows. Active torrents get
-                // their cached_at refreshed on every classification pass, so
-                // this only evicts rows that went fully cold (no RSS / upgrade
-                // activity touched them in 90 days).
+                // Prune cold Nyaa description cache rows. `cached_at` is only
+                // refreshed on cache miss (live fetch), not on cache hits, so
+                // this evicts rows that haven't triggered a network fetch in
+                // 90 days. Consequence is a forced re-fetch the next time the
+                // row is needed, not lost data.
                 match models::nyaa_description_cache::cleanup(&cleanup_db, 90).await {
                     Ok(deleted) if deleted > 0 => {
                         tracing::debug!("Cleaned up {} old nyaa description cache rows", deleted);
@@ -431,6 +432,21 @@ async fn main() {
                     Err(e) => {
                         cleanup_errors.push(format!("nyaa_description_cache: {}", e));
                         tracing::error!("Nyaa description cache cleanup failed: {}", e);
+                    }
+                    _ => {}
+                }
+                // Prune stale media probe cache rows. These are keyed by
+                // filesystem path, so deleted / renamed files leave rows
+                // that nothing will ever re-touch — the hourly sweep is the
+                // only eviction path. Consequence for still-live files is a
+                // single re-probe after the TTL expires.
+                match models::media_probe_cache::cleanup(&cleanup_db, 90).await {
+                    Ok(deleted) if deleted > 0 => {
+                        tracing::debug!("Cleaned up {} old media probe cache rows", deleted);
+                    }
+                    Err(e) => {
+                        cleanup_errors.push(format!("media_probe_cache: {}", e));
+                        tracing::error!("Media probe cache cleanup failed: {}", e);
                     }
                     _ => {}
                 }

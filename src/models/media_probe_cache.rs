@@ -12,6 +12,14 @@
 //! classification path. On a cache hit the probe JSON is returned verbatim
 //! and re-parsed by the Layer 5 scanner, so the cache layer knows nothing
 //! about stream codecs or PGS tracks.
+//!
+//! Rows are keyed on file path, so deleted or renamed files leave orphaned
+//! entries that will never be invalidated organically — `classify_ffprobe`
+//! only sees live files, so a cached row for a path that no longer exists
+//! just sits there. [`cleanup`] is the eviction path for those: the hourly
+//! cleanup task calls it to drop rows that haven't been touched in a long
+//! time, which naturally sweeps up orphans from library reorganizations,
+//! deleted series, and moved media roots.
 
 use sqlx::{Row, SqlitePool};
 
@@ -79,4 +87,27 @@ pub async fn upsert(db: &SqlitePool, path: &str, mtime: i64, size: i64, probe_js
     .bind(probe_json)
     .execute(db)
     .await;
+}
+
+/// Drop rows whose `cached_at` is older than `max_age_days`. Called from the
+/// hourly cleanup task to evict orphaned entries — rows for files that have
+/// been deleted, moved, or renamed will never get their `cached_at`
+/// refreshed (nothing re-probes them), so they accumulate indefinitely
+/// without this sweep.
+///
+/// Live files whose mtime/size never change also have their `cached_at`
+/// frozen, so they get evicted at the same rate as orphans — but that's
+/// fine, the cost of re-probing a still-live file once per TTL window is
+/// one ffprobe shell-out, which is exactly what the cache was already
+/// saving for more frequent accesses. Use a generous TTL (90 days) so the
+/// common case is still a cache hit.
+pub async fn cleanup(db: &SqlitePool, max_age_days: i32) -> Result<u64, sqlx::Error> {
+    let cutoff = format!("-{} days", max_age_days);
+    let res = sqlx::query(
+        "DELETE FROM media_probe_cache WHERE cached_at < datetime('now', ?)",
+    )
+    .bind(cutoff)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected())
 }

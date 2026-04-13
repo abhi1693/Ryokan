@@ -486,18 +486,26 @@ pub async fn compute_suggestions(
     db: &SqlitePool,
     min_count: i64,
 ) -> Result<Vec<GroupSuggestion>, sqlx::Error> {
-    // Tally manual overrides per (release_group, source). `COLLATE NOCASE`
-    // on the GROUP BY so "subsplease" and "SubsPlease" coalesce the way the
-    // existing lookup table does.
+    // Tally manual overrides per (release_group, source) and LEFT JOIN the
+    // existing `group_source_map` so we can distinguish "brand-new group"
+    // from "existing mapping disagrees" in one round trip instead of N+1
+    // `get()` calls. `COLLATE NOCASE` on the GROUP BY and the join predicate
+    // so "subsplease" and "SubsPlease" coalesce the way the existing lookup
+    // table does.
     let rows = sqlx::query(
-        "SELECT release_group, source, COUNT(*) AS cnt
-         FROM episode_quality_tags
-         WHERE COALESCE(manual_override, 0) = 1
-           AND release_group != ''
-           AND source != ''
-         GROUP BY release_group COLLATE NOCASE, source
+        "SELECT t.release_group AS release_group,
+                t.source         AS source,
+                COUNT(*)         AS cnt,
+                g.source         AS existing_source
+         FROM episode_quality_tags t
+         LEFT JOIN group_source_map g
+                ON g.group_name = t.release_group COLLATE NOCASE
+         WHERE COALESCE(t.manual_override, 0) = 1
+           AND t.release_group != ''
+           AND t.source != ''
+         GROUP BY t.release_group COLLATE NOCASE, t.source
          HAVING cnt >= ?
-         ORDER BY cnt DESC, release_group COLLATE NOCASE ASC",
+         ORDER BY cnt DESC, t.release_group COLLATE NOCASE ASC",
     )
     .bind(min_count)
     .fetch_all(db)
@@ -508,20 +516,26 @@ pub async fn compute_suggestions(
         let group_name: String = row.get("release_group");
         let source_str: String = row.get("source");
         let episode_count: i64 = row.get("cnt");
+        let existing_source_str: Option<String> = row.get("existing_source");
 
         let source = Source::from_str(&source_str);
         if source == Source::Unknown {
             continue;
         }
 
-        // Check whether this group is already mapped. Filter out groups
-        // that agree with the existing map (no suggestion needed), and
-        // flag groups whose existing mapping disagrees with the user's
-        // overrides so the UI can present them distinctly.
-        let existing = get(db, &group_name).await?;
-        let existing_source = match existing {
-            Some(entry) if entry.source == source => continue,
-            Some(entry) => Some(entry.source),
+        // Map the joined column onto the same three-way fate the old
+        // per-row `get()` call produced:
+        //   - no row in group_source_map → brand-new suggestion
+        //   - existing row agrees with the override → nothing to suggest, skip
+        //   - existing row disagrees → suggestion flagged with existing_source
+        let existing_source = match existing_source_str {
+            Some(s) => {
+                let parsed = Source::from_str(&s);
+                if parsed == source {
+                    continue;
+                }
+                Some(parsed)
+            }
             None => None,
         };
 

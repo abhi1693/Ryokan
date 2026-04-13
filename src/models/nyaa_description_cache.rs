@@ -10,11 +10,13 @@
 //!
 //! Rows are keyed on `info_hash` (content-addressed) so they remain valid
 //! as long as the torrent exists. The cache has no functional TTL, but the
-//! hourly cleanup task calls [`cleanup`] to prune rows that haven't been
-//! touched in a long time — this keeps the table from growing unbounded
-//! over the life of a long-running Ryokan instance without impacting the
-//! common case (active torrents get touched on every RSS sweep, so their
-//! `cached_at` keeps getting refreshed).
+//! hourly cleanup task calls [`cleanup`] to prune rows whose `cached_at` is
+//! older than 90 days. `cached_at` is only refreshed on a live fetch (cache
+//! miss path); cache hits leave it alone, so the sweep evicts any row that
+//! hasn't triggered a fresh network fetch in 90 days. The consequence is a
+//! single forced re-fetch on the next access, never data loss — the worst
+//! case is that one Nyaa request gets re-paid for a torrent that's still
+//! being actively re-classified from the cache.
 
 use sqlx::{Row, SqlitePool};
 
