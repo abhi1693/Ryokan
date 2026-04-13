@@ -8,7 +8,7 @@
         "name": "SeaDex best",
         "implementation": "Ryokan.SeaDexBestSpecification",
         "negate": false,
-        "required": true,
+        "required": false,
         "fields": []
       }
     ]

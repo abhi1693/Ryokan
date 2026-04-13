@@ -553,9 +553,11 @@ pub async fn load_compiled_cfs(db: &SqlitePool) -> Vec<CompiledCustomFormat> {
 /// Re-run `load_compiled_cfs` and atomically swap the compiled set into
 /// the shared `CompiledCfCache`. Callers take the write lock only long
 /// enough to replace the inner `Arc`; readers on the scoring hot path
-/// clone the `Arc` out under the read lock and never contend with the
-/// swap after that. Used by the Custom Formats settings page after any
-/// create / update / delete / import.
+/// clone the `Arc` out under the read lock and then release it — so a
+/// reader arriving mid-swap blocks for at most the duration of the Arc
+/// replacement (microseconds) before returning a consistent snapshot.
+/// Used by the Custom Formats settings page after any create / update /
+/// delete / import.
 pub async fn rebuild_cf_cache(cache: &CompiledCfCache, db: &SqlitePool) {
     let fresh = Arc::new(load_compiled_cfs(db).await);
     *cache.write().await = fresh;

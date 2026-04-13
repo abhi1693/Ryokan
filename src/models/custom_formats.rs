@@ -19,7 +19,7 @@
 //! `ALTER TABLE ... ADD COLUMN` — not here — because Ryokan's config is
 //! a single typed row, not a key/value store.
 
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 
 /// Single row in the `custom_formats` table joined with its V1-profile
 /// score from `custom_format_scores`. A row with no score entry yet
@@ -56,6 +56,12 @@ pub const ORIGIN_IMPORT: &str = "import";
 pub const ORIGIN_DEFAULTS: &str = "defaults";
 
 pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    // Fresh installs land the full schema in one shot — including the
+    // `origin` column that records provenance (`manual`/`import`/
+    // `defaults`). `models/mod.rs::migrate` still runs a best-effort
+    // `ALTER TABLE ADD COLUMN origin` after this for databases that
+    // were created before the column shipped; that ALTER is idempotent
+    // via `.ok()` and a no-op here.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS custom_formats (
@@ -63,6 +69,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             name       TEXT NOT NULL UNIQUE,
             trash_id   TEXT,
             json       TEXT NOT NULL,
+            origin     TEXT NOT NULL DEFAULT 'manual',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         )
@@ -148,8 +155,25 @@ pub async fn insert(
     score: i32,
     origin: &str,
 ) -> Result<i64, sqlx::Error> {
-    let now = now_unix();
     let mut tx = db.begin().await?;
+    let id = insert_with_tx(&mut tx, name, trash_id, json, score, origin).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Transaction-scoped variant of [`insert`] for callers that need to
+/// bundle multiple CF operations (e.g. the Reset Defaults handler's
+/// `DELETE defaults` + re-`INSERT` loop) into a single atomic unit.
+/// Does NOT commit — the caller owns transaction lifecycle.
+pub async fn insert_with_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    name: &str,
+    trash_id: Option<&str>,
+    json: &str,
+    score: i32,
+    origin: &str,
+) -> Result<i64, sqlx::Error> {
+    let now = now_unix();
     let res = sqlx::query(
         r#"
         INSERT INTO custom_formats (name, trash_id, json, origin, created_at, updated_at)
@@ -162,7 +186,7 @@ pub async fn insert(
     .bind(origin)
     .bind(now)
     .bind(now)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     let id = res.last_insert_rowid();
@@ -175,10 +199,9 @@ pub async fn insert(
     )
     .bind(id)
     .bind(score as i64)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
     Ok(id)
 }
 
@@ -237,15 +260,20 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Delete every CF row whose origin is `defaults`. Used by the Reset
-/// to Defaults button to wipe just the bundled set before reinstalling
-/// from disk. User-authored (`manual`) and imported (`import`) rows
-/// are left untouched — that's the whole point of the origin column.
-/// Returns the number of rows that were dropped.
-pub async fn delete_defaults(db: &SqlitePool) -> Result<u64, sqlx::Error> {
+/// Delete every CF row whose origin is `defaults`, within a
+/// caller-supplied transaction. Used by the Reset to Defaults handler
+/// to wipe just the bundled set before reinstalling from disk, inside
+/// the same transaction as the reinstall so a mid-loop install failure
+/// rolls the whole operation back. User-authored (`manual`) and
+/// imported (`import`) rows are left untouched — that's the whole
+/// point of the origin column. Does NOT commit — the caller owns
+/// transaction lifecycle. Returns the number of rows that were dropped.
+pub async fn delete_defaults_with_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> Result<u64, sqlx::Error> {
     let res = sqlx::query("DELETE FROM custom_formats WHERE origin = ?")
         .bind(ORIGIN_DEFAULTS)
-        .execute(db)
+        .execute(&mut **tx)
         .await?;
     Ok(res.rows_affected())
 }

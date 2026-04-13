@@ -140,14 +140,12 @@ pub async fn find_all_for_target(
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
     // Single SeaDex lookup per entry-point call, reused across every
-    // candidate in the loop below. The `has_seadex_cf` check suppresses
-    // the hardcoded boost when the user has a SeaDexBestSpecification CF.
-    let seadex_boost_enabled = config.seadex_enabled && !custom_formats::has_seadex_cf(cfs);
-    let seadex_hashes = fetch_seadex_hashes(
-        config.seadex_enabled || custom_formats::has_seadex_cf(cfs),
-        detail.id,
-    )
-    .await;
+    // candidate in the loop below. `seadex_gates` decides whether a
+    // lookup is needed and whether the hardcoded boost is active —
+    // it's suppressed automatically when the user has a
+    // `SeaDexBestSpecification` CF to avoid double counting.
+    let (seadex_needs_lookup, seadex_boost_enabled) = seadex_gates(config, cfs);
+    let seadex_hashes = fetch_seadex_hashes(seadex_needs_lookup, detail.id).await;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
@@ -308,13 +306,8 @@ pub async fn collect_scored_batches_for_target(
     let (cutoff_source_enum, _, _) = source::parse_cutoff_source(&config.cutoff_source);
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
-    let has_seadex_cf_flag = custom_formats::has_seadex_cf(cfs);
-    let seadex_boost_enabled = config.seadex_enabled && !has_seadex_cf_flag;
-    let seadex_hashes = fetch_seadex_hashes(
-        config.seadex_enabled || has_seadex_cf_flag,
-        detail.id,
-    )
-    .await;
+    let (seadex_needs_lookup, seadex_boost_enabled) = seadex_gates(config, cfs);
+    let seadex_hashes = fetch_seadex_hashes(seadex_needs_lookup, detail.id).await;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
@@ -452,13 +445,8 @@ async fn collect_scored_for_target(
     let (cutoff_source_enum, _, _) = source::parse_cutoff_source(&config.cutoff_source);
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
-    let has_seadex_cf_flag = custom_formats::has_seadex_cf(cfs);
-    let seadex_boost_enabled = config.seadex_enabled && !has_seadex_cf_flag;
-    let seadex_hashes = fetch_seadex_hashes(
-        config.seadex_enabled || has_seadex_cf_flag,
-        detail.id,
-    )
-    .await;
+    let (seadex_needs_lookup, seadex_boost_enabled) = seadex_gates(config, cfs);
+    let seadex_hashes = fetch_seadex_hashes(seadex_needs_lookup, detail.id).await;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
@@ -1059,6 +1047,23 @@ async fn fetch_seadex_hashes(seadex_enabled: bool, anilist_id: i64) -> HashSet<S
         Ok(Some(entry)) => seadex::best_hashes(&entry),
         _ => HashSet::new(),
     }
+}
+
+/// Decide whether the current search call needs to make a SeaDex
+/// network round-trip. Hashes are required if *either* the config has
+/// SeaDex enabled (hardcoded boost) or the compiled CF set contains a
+/// `SeaDexBestSpecification` (Custom-Format-driven boost) — so one call
+/// serves both paths. Returns the gate flag plus the "hardcoded boost
+/// active" flag (suppressed whenever the user has a SeaDex CF, to
+/// avoid double-counting).
+fn seadex_gates(
+    config: &Config,
+    cfs: &[CompiledCustomFormat],
+) -> (bool /* needs_lookup */, bool /* boost_enabled */) {
+    let has_cf = custom_formats::has_seadex_cf(cfs);
+    let needs_lookup = config.seadex_enabled || has_cf;
+    let boost_enabled = config.seadex_enabled && !has_cf;
+    (needs_lookup, boost_enabled)
 }
 
 /// Apply the Custom Format + SeaDex overlay to a base score.

@@ -992,12 +992,22 @@ fn import_summary(
     failed: usize,
     first_error: Option<String>,
 ) -> String {
+    // Arm order matters: the (0, 0, f) "all-rejected" arm must come
+    // BEFORE the general (n, s, f) arm, and it must *not* swallow the
+    // skipped count — an earlier version had a `(0, _, f)` arm that
+    // silently dropped `skipped` when imported=0 and both skipped and
+    // failed were non-zero. The arms below break that case out so
+    // every counter combination shows every non-zero counter.
     match (imported, skipped, failed) {
         (0, 0, 0) => "Nothing to import.".to_string(),
         (n, 0, 0) => format!("Imported {n} Custom Format(s)."),
         (n, s, 0) => format!("Imported {n}, skipped {s} on collision."),
-        (0, _, f) => format!(
+        (0, 0, f) => format!(
             "Import failed ({f} rejected). First error: {}",
+            first_error.unwrap_or_default()
+        ),
+        (n, 0, f) => format!(
+            "Imported {n}, failed {f}. First error: {}",
             first_error.unwrap_or_default()
         ),
         (n, s, f) => format!(
@@ -1303,43 +1313,41 @@ struct InstallDefaultsReport {
     first_error: Option<String>,
 }
 
-/// Do the heavy lifting of loading the bundled defaults file, looping
-/// over entries, and inserting each one with `ORIGIN_DEFAULTS`. Returns
-/// either counts (even when `installed == 0` — e.g. the user clicked
-/// install-defaults a second time) or a fatal error string that the
-/// caller should surface as a flash message. The caller is responsible
-/// for rebuilding the compiled-CF cache if `installed > 0`.
-async fn install_default_cfs_core(state: &AppState) -> Result<InstallDefaultsReport, String> {
-    // Baked into the binary at compile time via `include_str!` so the
-    // handler can't ever fail to find the file at runtime. Parsing is
-    // still done once per click rather than at startup — the defaults
-    // payload is a few KB, the user rarely clicks this, and
-    // compile-time validation doesn't catch field-level typos anyway.
-    const DEFAULTS_JSON: &str = include_str!("../../static/default_custom_formats.json");
+/// The raw bundled-defaults JSON baked into the binary at compile time
+/// via `include_str!`. Parsed once per install/reset click rather than
+/// at startup — the payload is a few KB, the user rarely clicks this,
+/// and compile-time validation doesn't catch field-level typos anyway.
+const DEFAULTS_JSON: &str = include_str!("../../static/default_custom_formats.json");
 
+/// Parse the bundled `static/default_custom_formats.json` into a Vec of
+/// CF entry values. Shared by install-defaults and reset-defaults so
+/// they fail the same way on a malformed defaults file.
+fn parse_default_cf_entries() -> Result<Vec<serde_json::Value>, String> {
     let value: serde_json::Value = serde_json::from_str(DEFAULTS_JSON)
         .map_err(|e| format!("Defaults file is malformed: {e}"))?;
-    let entries = match value {
-        serde_json::Value::Array(items) => items,
-        _ => return Err("Defaults file is not a JSON array.".to_string()),
-    };
+    match value {
+        serde_json::Value::Array(items) => Ok(items),
+        _ => Err("Defaults file is not a JSON array.".to_string()),
+    }
+}
 
-    // Collect existing names so we can skip conflicts without a
-    // per-entry SELECT round-trip.
-    let existing: std::collections::HashSet<String> = cf_model::list_with_scores(&state.db)
-        .await
-        .map_err(|e| format!("Failed to read existing CFs: {e}"))?
-        .into_iter()
-        .map(|r| r.name)
-        .collect();
-
-    let mut report = InstallDefaultsReport {
-        installed: 0,
-        skipped: 0,
-        failed: 0,
-        first_error: None,
-    };
-
+/// Loop over parsed defaults entries and insert each one with
+/// `ORIGIN_DEFAULTS` within the caller's transaction. A compile error
+/// on one entry bumps `report.failed` and continues — individual
+/// entries are independent. A propagated `sqlx::Error` (connection
+/// lost, constraint violation, etc.) short-circuits via `?` so the
+/// caller can roll back by dropping the transaction without commit.
+///
+/// `existing_names` pre-seeds the collision-skip set. Reset Defaults
+/// passes an empty set because it already dropped the defaults rows;
+/// Install Defaults passes whatever `list_with_scores` returned before
+/// the transaction started.
+async fn install_defaults_entries_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    entries: Vec<serde_json::Value>,
+    existing_names: &std::collections::HashSet<String>,
+    report: &mut InstallDefaultsReport,
+) -> Result<(), sqlx::Error> {
     for entry in entries {
         let name = entry
             .get("name")
@@ -1354,7 +1362,7 @@ async fn install_default_cfs_core(state: &AppState) -> Result<InstallDefaultsRep
             }
             continue;
         }
-        if existing.contains(&name) {
+        if existing_names.contains(&name) {
             report.skipped += 1;
             continue;
         }
@@ -1377,27 +1385,113 @@ async fn install_default_cfs_core(state: &AppState) -> Result<InstallDefaultsRep
             continue;
         }
 
-        match cf_model::insert(
-            &state.db,
+        cf_model::insert_with_tx(
+            tx,
             &name,
             trash_id.as_deref(),
             &raw_json,
             score,
             cf_model::ORIGIN_DEFAULTS,
         )
-        .await
-        {
-            Ok(_) => report.installed += 1,
-            Err(e) => {
-                report.failed += 1;
-                if report.first_error.is_none() {
-                    report.first_error = Some(format!("'{name}': {e}"));
-                }
-            }
-        }
+        .await?;
+        report.installed += 1;
     }
+    Ok(())
+}
+
+/// Do the heavy lifting of loading the bundled defaults file, looping
+/// over entries, and inserting each one with `ORIGIN_DEFAULTS`. Returns
+/// either counts (even when `installed == 0` — e.g. the user clicked
+/// install-defaults a second time) or a fatal error string that the
+/// caller should surface as a flash message. The caller is responsible
+/// for rebuilding the compiled-CF cache if `installed > 0`.
+///
+/// Wraps the whole insert loop in a single transaction so a propagated
+/// sqlx error mid-loop rolls back whatever was inserted rather than
+/// leaving a half-populated default set.
+async fn install_default_cfs_core(state: &AppState) -> Result<InstallDefaultsReport, String> {
+    let entries = parse_default_cf_entries()?;
+
+    // Collect existing names so we can skip conflicts without a
+    // per-entry SELECT round-trip. Read outside the transaction —
+    // there's no UI for concurrent CF edits, and INSERT will fail
+    // loudly on an unexpected collision anyway.
+    let existing: std::collections::HashSet<String> = cf_model::list_with_scores(&state.db)
+        .await
+        .map_err(|e| format!("Failed to read existing CFs: {e}"))?
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+
+    let mut report = InstallDefaultsReport {
+        installed: 0,
+        skipped: 0,
+        failed: 0,
+        first_error: None,
+    };
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to open transaction: {e}"))?;
+    install_defaults_entries_tx(&mut tx, entries, &existing, &mut report)
+        .await
+        .map_err(|e| format!("Install failed mid-loop: {e}"))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit install transaction: {e}"))?;
 
     Ok(report)
+}
+
+/// Drop every `defaults`-origin row and reinstall the bundled set in
+/// the SAME transaction, so a mid-loop sqlx error rolls the delete
+/// back too — Reset leaves either the old defaults or the fresh
+/// defaults, never nothing. Returns (deleted_count, report). Rebuild
+/// of the compiled-CF cache is the caller's responsibility.
+async fn reset_defaults_core(
+    state: &AppState,
+) -> Result<(u64, InstallDefaultsReport), String> {
+    let entries = parse_default_cf_entries()?;
+
+    let mut report = InstallDefaultsReport {
+        installed: 0,
+        skipped: 0,
+        failed: 0,
+        first_error: None,
+    };
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to open transaction: {e}"))?;
+
+    let deleted = cf_model::delete_defaults_with_tx(&mut tx)
+        .await
+        .map_err(|e| format!("Reset failed (delete step): {e}"))?;
+
+    // After the delete, every remaining CF is manual/import — those
+    // names are still honored so the reinstall doesn't clobber a
+    // user-authored CF that happens to share a name with a default.
+    let existing: std::collections::HashSet<String> =
+        sqlx::query_scalar::<_, String>("SELECT name FROM custom_formats")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to read existing CFs: {e}"))?
+            .into_iter()
+            .collect();
+
+    install_defaults_entries_tx(&mut tx, entries, &existing, &mut report)
+        .await
+        .map_err(|e| format!("Reset failed (install step): {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit reset transaction: {e}"))?;
+
+    Ok((deleted, report))
 }
 
 /// Install the bundled default Custom Format set (plan §7.2). The JSON
@@ -1479,19 +1573,11 @@ pub async fn settings_custom_formats_install_defaults(
 pub async fn settings_custom_formats_reset_defaults(
     State(state): State<AppState>,
 ) -> Redirect {
-    let deleted = match cf_model::delete_defaults(&state.db).await {
-        Ok(n) => n,
-        Err(e) => {
-            return Redirect::to(&cf_redirect(
-                None,
-                None,
-                Some(&format!("Reset failed (delete step): {e}")),
-            ));
-        }
-    };
-
-    let report = match install_default_cfs_core(&state).await {
-        Ok(r) => r,
+    // Delete + reinstall run inside a single transaction so a mid-loop
+    // failure rolls the whole thing back — the user is never left with
+    // a partially-nuked default set.
+    let (deleted, report) = match reset_defaults_core(&state).await {
+        Ok(pair) => pair,
         Err(msg) => return Redirect::to(&cf_redirect(None, None, Some(&msg))),
     };
 
@@ -2130,6 +2216,27 @@ mod tests {
         assert_eq!(
             import_summary(1, 1, 1, Some("bad".to_string())),
             "Imported 1, skipped 1, failed 1. First error: bad"
+        );
+    }
+
+    // Regression for PR #9 review: an earlier version of `import_summary`
+    // had a `(0, _, f)` catch-all arm that silently dropped `skipped`
+    // when imported=0, skipped>0, and failed>0. All three counters must
+    // appear in the flash message so the user knows what happened.
+    #[test]
+    fn import_summary_preserves_skipped_count_when_imported_is_zero() {
+        let msg = import_summary(0, 1, 1, Some("regex".to_string()));
+        assert!(msg.contains("skipped 1"), "missing skipped count: {msg}");
+        assert!(msg.contains("failed 1"), "missing failed count: {msg}");
+        assert!(msg.contains("regex"), "missing error context: {msg}");
+    }
+
+    #[test]
+    fn import_summary_shapes_imports_with_failures_only() {
+        // (n>0, s=0, f>0) — distinct from both (n, s, 0) and (n, s>0, f).
+        assert_eq!(
+            import_summary(2, 0, 1, Some("oops".to_string())),
+            "Imported 2, failed 1. First error: oops"
         );
     }
 }
