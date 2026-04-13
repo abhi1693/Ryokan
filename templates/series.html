@@ -187,10 +187,19 @@
             <button class="icon-btn btn-search-batch" type="button"
                 id="btn-search-batch"
                 onclick="searchBatchReleases(this)"
-                title="Search for a batch release covering this season"
-                aria-label="Search batch releases">
+                title="Auto-grab the best batch release"
+                aria-label="Auto batch search">
                 <span class="icon-btn-inner">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                </span>
+            </button>
+            <button class="icon-btn btn-search-batch-interactive" type="button"
+                id="btn-search-batch-interactive"
+                onclick="openInteractiveBatchSearch(this)"
+                title="Browse batch releases and pick one manually"
+                aria-label="Interactive batch search">
+                <span class="icon-btn-inner">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
                 </span>
             </button>
             <button class="monitor-all-btn {% if all_monitored %}is-active{% endif %}" type="button"
@@ -786,6 +795,96 @@ function closeInteractiveSearch(e) {
     const modal = document.getElementById('isearch-modal');
     if (e && e.target !== modal) return;
     modal.style.display = 'none';
+}
+
+// ── Interactive batch search ───────────────────────────────────────────────
+// Parallel flow to openInteractiveSearch but for batch releases. Shares the
+// isearch-modal element so the UI only has one modal to style. The results
+// render is nearly identical but routes its Grab action to /grab-batch
+// instead of the per-episode /grab endpoint.
+let _ibatchResults = [];
+
+function openInteractiveBatchSearch(btn) {
+    _ibatchResults = [];
+    const modal = document.getElementById('isearch-modal');
+    const titleEl = document.getElementById('isearch-title');
+    const body = document.getElementById('isearch-body');
+    titleEl.textContent = 'Interactive Batch Search';
+    body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">Searching batch releases…</div>';
+    modal.style.display = 'flex';
+
+    fetch(`/api/series/${SD.id}/interactive-search-batch`)
+        .then(r => r.json())
+        .then(results => {
+            _ibatchResults = results || [];
+            renderInteractiveBatchResults(_ibatchResults);
+        })
+        .catch(err => {
+            body.innerHTML = `<div style="text-align:center;color:var(--red);padding:32px">${escHtml(err.message || 'Search failed')}</div>`;
+        });
+}
+
+function renderInteractiveBatchResults(results) {
+    const body = document.getElementById('isearch-body');
+    if (!body) return;
+    if (!results || !results.length) {
+        body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">No batch releases found.</div>';
+        return;
+    }
+    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th>Group</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
+    results.forEach((r, idx) => {
+        const batchTag = r.is_batch ? '<span class="tag tag-batch" style="margin-left:4px">batch</span>' : '';
+        const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
+        const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
+        html += `<tr>
+            <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
+            <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
+            <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
+            <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
+            <td class="col-seeds"><span class="seed-count">${r.seeders}</span></td>
+            <td class="col-grab"><button class="btn-grab" data-idx="${idx}" onclick="grabInteractiveBatchResult(${idx}, this)">Grab</button></td>
+        </tr>`;
+    });
+    html += '</tbody></table>';
+    body.innerHTML = html;
+}
+
+function grabInteractiveBatchResult(idx, btn) {
+    const result = _ibatchResults[idx];
+    if (!result) return;
+    btn.disabled = true;
+    btn.textContent = 'Grabbing…';
+    const url = result.magnet || result.torrent || '';
+    fetch(`/api/series/${SD.id}/grab-batch`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            url,
+            title: result.title,
+            group: result.group,
+            resolution: result.resolution,
+            info_hash: result.info_hash
+        })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Grab failed');
+        btn.textContent = 'Sent';
+        btn.classList.add('btn-success');
+        const status = document.getElementById('auto-search-status');
+        if (status) status.textContent = `Batch queued: ${result.title}`;
+        ensureDlPollRunning();
+        refreshEpisodeRows({ force: true });
+        setTimeout(() => {
+            document.getElementById('isearch-modal').style.display = 'none';
+        }, 600);
+    })
+    .catch(err => {
+        btn.textContent = 'Error';
+        btn.classList.add('btn-error');
+        btn.disabled = false;
+    });
 }
 
 function setBusyButton(btn, busy, busyLabel) {

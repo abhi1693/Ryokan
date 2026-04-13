@@ -2321,6 +2321,135 @@ pub async fn interactive_search_episode(
     Ok(Json(results))
 }
 
+/// Interactive batch search: return all scored batch candidates so the user
+/// can pick one. Uses the same query sweep as the auto batch search
+/// (`find_best_batch_for_target`) so the interactive and auto paths surface
+/// the same candidate pool — the only difference is that this returns every
+/// hit instead of picking the top.
+#[utoipa::path(
+    get,
+    path = "/api/series/{anilist_id}/interactive-search-batch",
+    tag = "Library",
+    summary = "Interactive batch search",
+    description = "Search Nyaa for batch/complete releases of a series, returning scored results for manual selection.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    responses(
+        (status = 200, description = "Batch search results", body = Vec<crate::services::nyaa::SearchResult>),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
+pub async fn interactive_search_batches(
+    State(state): State<AppState>,
+    Path(request_id): Path<i64>,
+) -> Result<Json<Vec<crate::services::nyaa::SearchResult>>, (axum::http::StatusCode, String)> {
+    let (_, _, detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_default();
+
+    let results = auto_search::collect_scored_batches_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &auto_search::SearchTarget::Single,
+    ).await;
+
+    Ok(Json(results))
+}
+
+/// Grab a specific batch release chosen from interactive batch search.
+///
+/// Mirrors `grab_interactive_result` but without an episode number —
+/// batches don't belong to a single episode, and the per-episode tag
+/// bookkeeping (`episode_tags::record_grab`) is skipped because the
+/// episodes will be tagged when the post-processing stage extracts them.
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/grab-batch",
+    tag = "Library",
+    summary = "Grab a specific batch release",
+    description = "Send a specific batch torrent release (chosen from interactive batch search) to qBittorrent for download.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Batch grabbed", body = serde_json::Value),
+        (status = 400, description = "No URL provided or qBittorrent not configured"),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
+pub async fn grab_batch_result(
+    State(state): State<AppState>,
+    Path(request_id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let series_id = tracked_row.as_ref().map(|s| s.id);
+    let url = body["url"].as_str().unwrap_or("").to_string();
+    let title = body["title"].as_str().unwrap_or("").to_string();
+    let group = body["group"].as_str().unwrap_or("").to_string();
+    let resolution = body["resolution"].as_str().unwrap_or("").to_string();
+    let info_hash = body["info_hash"].as_str().unwrap_or("").to_string();
+
+    if url.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "No URL provided".to_string()));
+    }
+
+    let qbit = {
+        let qbit = state.qbit.read().await;
+        qbit.as_ref()
+            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .clone()
+    };
+
+    qbit.add_torrent(&url).await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    // Classify so the log line carries the actual quality tier. Pass the
+    // chosen release as a batch in NyaaContext (Layer 4 uses this for the
+    // finished-series BluRay rule).
+    let classification = crate::services::source::classify_release(
+        &state.db,
+        &title,
+        Some(&resolution),
+        Some(crate::services::source::NyaaContext {
+            info_hash: &info_hash,
+            view_url: "",
+            is_batch: true,
+        }),
+        Some(crate::services::source::SeriesContext {
+            status: &detail.status,
+            season_year: detail.season_year,
+            end_year: detail.end_year,
+        }),
+    ).await;
+
+    logger::info(
+        &state.db,
+        LogCategory::Grab,
+        &format!("Grabbed batch (interactive): {}", title),
+        &format!("group={}, tier={}", group, classification.label()),
+    ).await;
+
+    if let Some(sid) = series_id {
+        let _ = crate::models::grabbed_torrents::record_grab(
+            &state.db, &info_hash, &title, sid, &[], true,
+        ).await;
+    }
+
+    Ok(Json(serde_json::json!({"ok": true, "title": title, "tier": classification.label()})))
+}
+
 /// Grab a specific release chosen from the interactive search.
 #[utoipa::path(
     post,

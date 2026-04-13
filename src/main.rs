@@ -43,7 +43,9 @@ use services::{jellyfin::JellyfinClient, qbit::QbitClient};
         handlers::library::auto_search_episode,
         handlers::library::search_batch_releases,
         handlers::library::interactive_search_episode,
+        handlers::library::interactive_search_batches,
         handlers::library::grab_interactive_result,
+        handlers::library::grab_batch_result,
         handlers::library::delete_episode_file,
         handlers::library::get_episode_grab_history,
         handlers::library::mark_episode_failed,
@@ -259,7 +261,9 @@ async fn main() {
         .route("/api/series/{anilist_id}/auto-search/{episode_number}", post(handlers::library::auto_search_episode))
         .route("/api/series/{anilist_id}/search-batch", post(handlers::library::search_batch_releases))
         .route("/api/series/{anilist_id}/interactive-search/{episode_number}", get(handlers::library::interactive_search_episode))
+        .route("/api/series/{anilist_id}/interactive-search-batch", get(handlers::library::interactive_search_batches))
         .route("/api/series/{anilist_id}/grab/{episode_number}", post(handlers::library::grab_interactive_result))
+        .route("/api/series/{anilist_id}/grab-batch", post(handlers::library::grab_batch_result))
         .route("/api/series/{anilist_id}/delete-file/{episode_number}", post(handlers::library::delete_episode_file))
         .route("/api/series/{anilist_id}/grab-history/{episode_number}", get(handlers::library::get_episode_grab_history))
         .route("/api/series/{anilist_id}/mark-failed/{episode_number}", post(handlers::library::mark_episode_failed))
