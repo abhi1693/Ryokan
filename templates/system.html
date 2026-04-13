@@ -346,6 +346,7 @@ function forceRunTask(btn, taskKey) {
         cleanup: '/api/tasks/cleanup',
         post_processing: '/api/tasks/post-processing',
         upgrade_search: '/api/tasks/upgrade-search',
+        anibridge_refresh: '/api/system/reload-anibridge',
     };
     const url = endpoints[taskKey];
     if (!url) { alert('No run endpoint for task: ' + taskKey); return; }

@@ -511,6 +511,16 @@ pub async fn series_detail(
     Html(template.render().unwrap_or_default())
 }
 
+/// Maximum number of missing trailing Jikan episodes we'll tolerate before
+/// falling back to Kitsu. MAL typically lags AniList's airing schedule by 1-2
+/// episodes for long-running series (One Piece being the canonical case).
+/// Without this tolerance, every One Piece page load re-runs the Kitsu title
+/// search (`best_candidate` hits the Kitsu HTTP API before checking the
+/// episode cache) to backfill 1-2 trailing episodes. And for long-running
+/// shows Kitsu over-counts anyway — it lists episodes past the actual aired
+/// count — so falling back here wouldn't even give us accurate titles.
+const JIKAN_MAL_LAG_TOLERANCE: i32 = 10;
+
 /// Build the episode list for a single series (no chain walking).
 fn episode_needs_kitsu_backfill<F>(ep_count: i32, mut has_jikan_title: F) -> bool
 where
@@ -520,7 +530,8 @@ where
         return false;
     }
 
-    (1..=ep_count).any(|ep_num| !has_jikan_title(ep_num))
+    let missing = (1..=ep_count).filter(|ep_num| !has_jikan_title(*ep_num)).count() as i32;
+    missing > JIKAN_MAL_LAG_TOLERANCE
 }
 
 async fn build_episodes(
@@ -530,7 +541,14 @@ async fn build_episodes(
     folder_name: &str,
     media_root: &str,
 ) -> (Vec<Episode>, i32, String, i32) {
-    let ep_count = detail.episodes.unwrap_or(0);
+    // AniList reports `episodes: null` for currently-airing series because the
+    // final count isn't known yet. Fall back to `nextAiringEpisode - 1`, which
+    // is the number of episodes that have already aired — without this the
+    // episode list would render empty for any airing show.
+    let ep_count = match detail.episodes.unwrap_or(0) {
+        0 => detail.next_airing_episode.map(|n| (n - 1).max(0)).unwrap_or(0),
+        n => n,
+    };
     let disk_files = media::scan_series_folder(media_root, folder_name);
 
     let cached_eps = if let Some(sid) = db_id {

@@ -315,13 +315,16 @@ pub async fn api_anibridge_reload(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     logger::info(&state.db, LogCategory::System, "Anibridge mappings reload requested", "").await;
+    let _ = scheduled_tasks::mark_started(&state.db, "anibridge_refresh", "Manual anibridge mappings refresh").await;
 
     if crate::services::anibridge::reload().await {
+        let _ = scheduled_tasks::mark_finished(&state.db, "anibridge_refresh", "ok", "Mappings refreshed").await;
         Ok(Json(serde_json::json!({
             "ok": true,
             "message": "Anibridge mappings reloaded successfully",
         })))
     } else {
+        let _ = scheduled_tasks::mark_finished(&state.db, "anibridge_refresh", "error", "Failed to download mappings").await;
         Err((axum::http::StatusCode::BAD_GATEWAY, "Failed to reload anibridge mappings".to_string()))
     }
 }

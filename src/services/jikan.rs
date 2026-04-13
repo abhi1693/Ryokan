@@ -81,7 +81,6 @@ async fn get_json_with_retry<T: for<'de> serde::Deserialize<'de>>(client: &reqwe
 #[derive(Deserialize)]
 struct JikanResponse {
     data: Vec<JikanEpisode>,
-    pagination: JikanPagination,
 }
 
 #[derive(Deserialize)]
@@ -92,11 +91,6 @@ struct JikanEpisode {
     episode_id: Option<i32>,
     title: Option<String>,
     aired: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct JikanPagination {
-    has_next_page: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -527,14 +521,42 @@ pub async fn fetch_episode_titles_for_detail(
         return HashMap::new();
     };
 
+    // Currently-airing series have `episodes: null` on AniList, so
+    // `detail.episodes.unwrap_or(0)` is 0 and the cache check below would
+    // accept whatever short-count is already stored. Use `nextAiringEpisode
+    // - 1` as a lower bound for what a "complete enough" cache looks like;
+    // otherwise a broken partial fetch (see the Jikan pagination bug with
+    // One Piece) would get pinned in the cache forever.
+    let effective_target = detail.episodes.unwrap_or(0).max(
+        detail
+            .next_airing_episode
+            .map(|n| (n - 1).max(0))
+            .unwrap_or(0),
+    );
+
+    // MAL lags AniList by a few episodes for long-running series (One Piece
+    // is the canonical case — AniList's airing schedule is always ahead of
+    // what MAL has indexed). Accept a small gap so we don't re-fetch Jikan
+    // on every page load just because the last 1-2 episodes haven't made it
+    // into MAL's database yet.
+    const JIKAN_LAG_TOLERANCE: i32 = 10;
+
     if let Ok(Some(cached)) = get_cached_episodes(db, mal_id).await {
-        if detail.episodes.unwrap_or(0) <= 0 || (cached.len() as i32) >= detail.episodes.unwrap_or(0) {
+        let cached_count = cached.len() as i32;
+        if effective_target <= 0
+            || cached.is_empty()
+            || cached_count + JIKAN_LAG_TOLERANCE >= effective_target
+        {
             return cached;
         }
     }
 
-    let target_count = detail.episodes.unwrap_or(0);
-    let mut merged = fetch_episode_titles(db, mal_id).await;
+    // Cache missing or insufficient — fetch fresh from Jikan directly so we
+    // don't reuse the same insufficient cache via `fetch_episode_titles`.
+    let fresh = fetch_from_jikan(mal_id).await;
+    let _ = cache_episodes(db, mal_id, &fresh).await;
+    let target_count = effective_target;
+    let mut merged = fresh;
     if target_count <= 0 || (merged.len() as i32) >= target_count {
         return merged;
     }
@@ -672,15 +694,17 @@ async fn fetch_from_jikan(mal_id: i64) -> HashMap<i32, EpisodeInfo> {
             );
         }
 
-        if !body.pagination.has_next_page {
+        // Jikan v4's pagination metadata is unreliable for some anime — One
+        // Piece (mal_id 21), for example, reports `has_next_page: false` on
+        // every page despite having 12 pages of real data. Drive termination
+        // off the payload size instead: Jikan serves 100 episodes per page,
+        // so anything smaller means we're past the last full page.
+        if body.data.len() < 100 {
             break;
         }
 
         page += 1;
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        if page > 10 {
-            break;
-        }
     }
 
     episodes

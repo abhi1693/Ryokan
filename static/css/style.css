@@ -1471,7 +1471,19 @@ fieldset legend {
     display: none;
 }
 
-.title-switcher .title-option:first-child {
+/* Title visibility is driven by the `data-title-language` attribute set on
+   <html> by the inline script at the top of base.html, which runs *before*
+   any body content parses. This means the first paint already shows the
+   correct language — no flash-of-english followed by a JS-driven swap. */
+html[data-title-language="english"] .title-switcher .title-option[data-title-lang="english"],
+html[data-title-language="romaji"] .title-switcher .title-option[data-title-lang="romaji"],
+html[data-title-language="native"] .title-switcher .title-option[data-title-lang="native"] {
+    display: inline;
+}
+
+/* Fallback: if the head script somehow failed to set the attribute (e.g.
+   localStorage access threw), default to english so titles still render. */
+html:not([data-title-language]) .title-switcher .title-option[data-title-lang="english"] {
     display: inline;
 }
 
@@ -1495,13 +1507,59 @@ fieldset legend {
     margin-bottom: 16px;
 }
 
+.relations-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .relation-cards {
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     gap: 16px;
     overflow-x: auto;
     padding: 2px 2px 10px;
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
+    scroll-behavior: smooth;
+}
+
+.relation-scroll-btn {
+    flex: 0 0 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.relation-scroll-btn:hover {
+    background: var(--bg-elevated);
+    border-color: var(--border-accent);
+    color: var(--text-bright);
+}
+
+/* At scroll edges, keep the button in layout so the cards don't jitter as
+   the user scrolls past the first or last position — just make it invisible
+   and non-interactive. */
+.relation-scroll-btn[hidden] {
+    display: flex;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+/* When the carousel has nothing to scroll (content fits in view), remove
+   the buttons from layout entirely so short relation lists aren't padded
+   with dead space. */
+.relations-row.no-scroll .relation-scroll-btn {
+    display: none;
 }
 
 .relation-card {

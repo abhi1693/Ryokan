@@ -118,26 +118,10 @@ function getTitleByLang(entry, lang) {
     return entry.title_english || entry.title_romaji || entry.title_native || '';
 }
 
-function applyTitleLanguage(lang) {
-    const normalized = ['english', 'romaji', 'native'].includes(lang) ? lang : 'english';
-    document.querySelectorAll('.title-switcher').forEach(el => {
-        const options = el.querySelectorAll('.title-option');
-        let shown = false;
-        options.forEach(opt => {
-            const match = opt.dataset.titleLang === normalized && opt.textContent.trim() !== '';
-            opt.style.display = match ? 'inline' : 'none';
-            if (match) shown = true;
-        });
-        if (!shown) {
-            for (const opt of options) {
-                if (opt.textContent.trim() !== '') {
-                    opt.style.display = 'inline';
-                    break;
-                }
-            }
-        }
-    });
-}
+// Title-language switching for `.title-switcher` elements is handled by
+// CSS via the `html[data-title-language]` attribute that base.html sets
+// pre-paint. `getTitleByLang` above is still used for search results and
+// modal titles that render via innerHTML rather than title-switcher spans.
 
 function searchAnilist() {
     const q = document.getElementById('anilist-query').value.trim();
@@ -273,7 +257,5 @@ function escAttr(s) {
     return s.replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-applyTitleLanguage(localStorage.getItem('titleLanguage') || initialTitleLanguage || 'english');
-window.addEventListener('storage', () => applyTitleLanguage(localStorage.getItem('titleLanguage') || initialTitleLanguage || 'english'));
 </script>
 {% endblock %}
