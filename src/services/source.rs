@@ -1932,4 +1932,116 @@ mod tests {
         assert!(result.needs_review);
         assert_eq!(result.decision_rule, DecisionRule::Rule4Conflict);
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // End-to-end: the full pre-download pipeline against a real DB.
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // Every other test in this module pokes the aggregator directly with
+    // hand-constructed SourceEvidence records. This one exercises the
+    // composition: `classify_release` runs Layer 1 (filename), Layer 3
+    // (group lookup — real SQLite hit), Layer 4 (temporal), and the Layer 2
+    // escalation gate in a single call, then writes its audit log to the
+    // real `logs` table. It's the only test that would catch a regression
+    // where one of those layers stops being wired into `classify_release`.
+
+    #[tokio::test]
+    async fn end_to_end_pipeline_classifies_confidently_corroborated_release() {
+        // Full app migration — classify_release writes to the logs table
+        // on every call, so we can't get away with a subset of the schema.
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("full migrate");
+
+        // `migrate()` already seeds the group_source_map with VCB-Studio,
+        // but make the test's dependency on that seed explicit so a future
+        // reshuffle of the seed list doesn't silently break the test.
+        crate::models::group_source_map::upsert_user_edit(
+            &db,
+            "VCB-Studio",
+            Source::BluRay,
+            0.95,
+            "e2e test fixture",
+        )
+        .await
+        .expect("seed group");
+
+        // Title with a BluRay-shaped filename (BDRip keyword, 1080p,
+        // x265 HEVC, FLAC audio) and a known BD-only encoder as the
+        // release group. Filename + group + temporal will all agree on
+        // BluRay, so the L2 escalation gate stays shut and the test
+        // doesn't need to mock any network layer.
+        let title = "[VCB-Studio] Demo Show - 01 [Ma10p_1080p][x265_flac].mkv";
+        let nyaa = NyaaContext {
+            // Empty strings make classify_description a no-op even if the
+            // escalation gate somehow fires, so the test stays hermetic.
+            info_hash: "",
+            view_url: "",
+            is_batch: true,
+        };
+        let series = SeriesContext {
+            status: "FINISHED",
+            season_year: Some(2020),
+            end_year: Some(2020),
+        };
+
+        let result = classify_release(&db, title, None, Some(nyaa), Some(series)).await;
+
+        // Full pipeline lands on BluRay-1080p with a clean verdict.
+        assert_eq!(
+            result.source,
+            Source::BluRay,
+            "expected BluRay, got {:?} — evidence: {:#?}",
+            result.source,
+            result.evidence,
+        );
+        assert_eq!(result.resolution, Resolution::R1080p);
+        assert!(
+            !result.needs_review,
+            "clean multi-layer agreement should not flag review: {:#?}",
+            result.evidence,
+        );
+        // Rule 1 (strong single) or Rule 2 (clean sum) — both acceptable
+        // as "confident verdict". We specifically assert *not* Empty /
+        // Rule3Weak / Rule4Conflict / Rule5GroundTruthVeto.
+        assert!(
+            matches!(
+                result.decision_rule,
+                DecisionRule::Rule1Strong | DecisionRule::Rule2Sum
+            ),
+            "unexpected decision rule: {:?}",
+            result.decision_rule,
+        );
+
+        // The evidence trail must include contributions from each layer
+        // that was wired in — proving the composition actually happened
+        // instead of a single-layer short-circuit.
+        let origins: std::collections::HashSet<_> =
+            result.evidence.iter().map(|e| e.origin).collect();
+        assert!(
+            origins.contains("filename"),
+            "filename evidence missing: {:#?}",
+            result.evidence,
+        );
+        assert!(
+            origins.contains("group"),
+            "group evidence missing — Layer 3 lookup didn't fire: {:#?}",
+            result.evidence,
+        );
+        assert!(
+            origins.contains("temporal"),
+            "temporal evidence missing — Layer 4 didn't fire: {:#?}",
+            result.evidence,
+        );
+
+        // And the audit log row was actually written — end-to-end proof
+        // that the classifier's DB side effects reach the `logs` table.
+        let log_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM logs WHERE category = 'quality'")
+                .fetch_one(&db)
+                .await
+                .expect("count logs");
+        assert!(log_count >= 1, "expected classifier to write an audit log");
+    }
 }
