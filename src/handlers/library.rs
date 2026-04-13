@@ -1876,12 +1876,16 @@ async fn run_auto_search_targets_with_upgrades(
         &format!("{} target(s), allow_batch={}", targets.len(), allow_batch),
     ).await;
 
+    // Clone the compiled-CF Arc out from under the read lock so the
+    // scoring loop below runs without holding it.
+    let cfs = state.custom_formats.read().await.clone();
+
     let mut grabbed = Vec::new();
     let mut skipped = Vec::new();
     for target in targets {
         let label = auto_search::target_label(&target);
         let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrade_classifications.contains_key(n));
-        match auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, allow_batch, is_upgrade).await {
+        match auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, allow_batch, is_upgrade, &cfs).await {
             Some(result) => {
                 // Classify up front so both upgrade-verification and log labels
                 // read the same result.
@@ -2215,6 +2219,8 @@ pub async fn search_batch_releases(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
+    let cfs = state.custom_formats.read().await.clone();
+
     // Pick the best *batch* — filtering to is_batch pre-selection instead
     // of post-selection. The old code called find_best_for_target and
     // post-filtered, which returned None whenever the top-scored result
@@ -2225,6 +2231,7 @@ pub async fn search_batch_releases(
         &detail,
         &cfg,
         &auto_search::SearchTarget::Single,
+        &cfs,
     ).await;
 
     let qbit = {
@@ -2315,6 +2322,8 @@ pub async fn interactive_search_episode(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
+    let cfs = state.custom_formats.read().await.clone();
+
     // Same single-entry collapse as auto_search_episode — the interactive
     // picker otherwise returns zero results for movies.
     let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
@@ -2324,6 +2333,7 @@ pub async fn interactive_search_episode(
         &cfg,
         &target,
         false,
+        &cfs,
     ).await;
 
     Ok(Json(results))
@@ -2361,11 +2371,14 @@ pub async fn interactive_search_batches(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
+    let cfs = state.custom_formats.read().await.clone();
+
     let results = auto_search::collect_scored_batches_for_target(
         &state.db,
         &detail,
         &cfg,
         &auto_search::SearchTarget::Single,
+        &cfs,
     ).await;
 
     Ok(Json(results))

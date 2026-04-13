@@ -35,6 +35,14 @@ use serde::Deserialize;
 
 const SEADEX_API: &str = "https://releases.moe/api/collections/entries/records";
 
+/// Score bump applied at scoring time when a candidate's info hash
+/// matches a SeaDex "best" torrent for the series. Large enough to
+/// reliably outrank an otherwise-tied release, small enough that a
+/// preferred-group or resolution bonus can still move the needle.
+/// Suppressed entirely when the user has a `SeaDexBestSpecification`
+/// Custom Format installed (see `custom_formats::has_seadex_cf`).
+pub const SEADEX_SCORE_BOOST: i32 = 10_000;
+
 /// Process-global reqwest client for SeaDex. Same reasoning as the
 /// nyaa.rs client: avoid re-doing the TLS handshake and keep-alive
 /// pool on every lookup.
@@ -368,6 +376,20 @@ pub fn is_usable(torrent: &SeaDexTorrent, notes: &str) -> bool {
 ///
 /// Returns `None` if the entry has no usable torrent — caller should
 /// fall through to the regular Nyaa search.
+/// Return every usable "best" info hash for the entry as a lowercase
+/// set. Used by the auto-search scoring path to detect SeaDex candidates
+/// without having to re-run [`pick_best`] — multiple torrents can carry
+/// `isBest=true` (different group, different container, etc.), and the
+/// boost should apply to all of them.
+pub fn best_hashes(entry: &SeaDexEntry) -> std::collections::HashSet<String> {
+    entry
+        .torrents
+        .iter()
+        .filter(|t| is_usable(t, &entry.notes))
+        .map(|t| t.info_hash.to_ascii_lowercase())
+        .collect()
+}
+
 pub fn pick_best(entry: &SeaDexEntry, prefer_subs: bool) -> Option<&SeaDexTorrent> {
     let usable: Vec<&SeaDexTorrent> = entry
         .torrents

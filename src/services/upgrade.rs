@@ -56,6 +56,11 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     let mut total_episodes_checked: usize = 0;
     let mut total_upgrades_grabbed: usize = 0;
 
+    // One compiled-CF snapshot for the whole upgrade pass. The background
+    // scheduler can't race a CF edit during this run — if the user edits
+    // a CF mid-sweep, the next scheduled run picks it up.
+    let cfs = state.custom_formats.read().await.clone();
+
     logger::info(
         &state.db,
         LogCategory::AutoSearch,
@@ -150,7 +155,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             let label = auto_search::target_label(&target);
             // batch_episode_match=true so BD season packs can match episode targets.
             let best =
-                auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, true, true).await;
+                auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, true, true, &cfs).await;
 
             let Some(result) = best else {
                 continue;

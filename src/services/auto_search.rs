@@ -5,8 +5,11 @@ use regex_lite::Regex;
 use sqlx::SqlitePool;
 
 use crate::models::config::Config;
+use crate::services::custom_formats::{
+    self, CompiledCustomFormat, EvalContext,
+};
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
-use crate::services::{anilist::AnimeDetail, media, nyaa::{self, SearchOptions, SearchResult}, quality};
+use crate::services::{anilist::AnimeDetail, media, nyaa::{self, SearchOptions, SearchResult}, quality, seadex};
 
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
 static RE_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
@@ -119,6 +122,7 @@ pub async fn find_all_for_target(
     config: &Config,
     target: &SearchTarget,
     _allow_batch: bool,
+    cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
@@ -131,6 +135,16 @@ pub async fn find_all_for_target(
     // Scoring only looks at Source rank, so drop the BluRay sub-tier.
     let (cutoff_source_enum, _, _) = source::parse_cutoff_source(&config.cutoff_source);
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
+
+    // Single SeaDex lookup per entry-point call, reused across every
+    // candidate in the loop below. The `has_seadex_cf` check suppresses
+    // the hardcoded boost when the user has a SeaDexBestSpecification CF.
+    let seadex_boost_enabled = config.seadex_enabled && !custom_formats::has_seadex_cf(cfs);
+    let seadex_hashes = fetch_seadex_hashes(
+        config.seadex_enabled || custom_formats::has_seadex_cf(cfs),
+        detail.id,
+    )
+    .await;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
@@ -164,7 +178,13 @@ pub async fn find_all_for_target(
         run_queries_interactive(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
-    for c in &mut candidates {
+    // Interactive search is user-driven — we want to *show* the
+    // CF-filtered candidates even when they'd be dropped by an
+    // auto-search path, so the minimum_score floor is suppressed here
+    // (passed as `i32::MIN`). The CF score still contributes to ranking
+    // so the user sees the same ordering the auto-picker would have used.
+    let mut scored: Vec<SearchResult> = Vec::with_capacity(candidates.len());
+    for mut c in candidates.drain(..) {
         let classification = source::classify_release(
             db,
             &c.title,
@@ -181,8 +201,8 @@ pub async fn find_all_for_target(
             }),
         )
         .await;
-        c.score = rescore_for_auto_search(
-            c,
+        let base = rescore_for_auto_search(
+            &c,
             &classification,
             config,
             &aliases,
@@ -195,10 +215,23 @@ pub async fn find_all_for_target(
             cutoff_source_enum,
             cutoff_resolution_enum,
         );
+        // No CF floor on the interactive path — see comment above.
+        if let Some(final_score) = apply_cf_seadex_overlay(
+            base,
+            &c,
+            &classification,
+            cfs,
+            &seadex_hashes,
+            seadex_boost_enabled,
+            i32::MIN,
+        ) {
+            c.score = final_score;
+            scored.push(c);
+        }
     }
 
-    candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
-    candidates
+    scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
+    scored
 }
 
 pub async fn find_best_for_target(
@@ -208,8 +241,9 @@ pub async fn find_best_for_target(
     target: &SearchTarget,
     allow_batch: bool,
     batch_episode_match: bool,
+    cfs: &[CompiledCustomFormat],
 ) -> Option<SearchResult> {
-    collect_scored_for_target(db, detail, config, target, allow_batch, batch_episode_match)
+    collect_scored_for_target(db, detail, config, target, allow_batch, batch_episode_match, cfs)
         .await
         .into_iter()
         .next()
@@ -236,8 +270,9 @@ pub async fn find_best_batch_for_target(
     detail: &AnimeDetail,
     config: &Config,
     target: &SearchTarget,
+    cfs: &[CompiledCustomFormat],
 ) -> Option<SearchResult> {
-    collect_scored_batches_for_target(db, detail, config, target)
+    collect_scored_batches_for_target(db, detail, config, target, cfs)
         .await
         .into_iter()
         .next()
@@ -255,6 +290,7 @@ pub async fn collect_scored_batches_for_target(
     detail: &AnimeDetail,
     config: &Config,
     target: &SearchTarget,
+    cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let aliases = collect_aliases(detail);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
@@ -265,6 +301,14 @@ pub async fn collect_scored_batches_for_target(
     let preferred_resolution_enum = Resolution::from_str(&config.preferred_resolution);
     let (cutoff_source_enum, _, _) = source::parse_cutoff_source(&config.cutoff_source);
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
+
+    let has_seadex_cf_flag = custom_formats::has_seadex_cf(cfs);
+    let seadex_boost_enabled = config.seadex_enabled && !has_seadex_cf_flag;
+    let seadex_hashes = fetch_seadex_hashes(
+        config.seadex_enabled || has_seadex_cf_flag,
+        detail.id,
+    )
+    .await;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
@@ -336,7 +380,7 @@ pub async fn collect_scored_batches_for_target(
             continue;
         }
 
-        c.score = rescore_for_auto_search(
+        let base = rescore_for_auto_search(
             &c,
             &classification,
             config,
@@ -350,7 +394,18 @@ pub async fn collect_scored_batches_for_target(
             cutoff_source_enum,
             cutoff_resolution_enum,
         );
-        scored.push(c);
+        if let Some(final_score) = apply_cf_seadex_overlay(
+            base,
+            &c,
+            &classification,
+            cfs,
+            &seadex_hashes,
+            seadex_boost_enabled,
+            config.custom_format_minimum_score,
+        ) {
+            c.score = final_score;
+            scored.push(c);
+        }
     }
 
     scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
@@ -374,6 +429,7 @@ async fn collect_scored_for_target(
     target: &SearchTarget,
     allow_batch: bool,
     batch_episode_match: bool,
+    cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
@@ -386,6 +442,14 @@ async fn collect_scored_for_target(
     // Scoring only looks at Source rank, so drop the BluRay sub-tier.
     let (cutoff_source_enum, _, _) = source::parse_cutoff_source(&config.cutoff_source);
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
+
+    let has_seadex_cf_flag = custom_formats::has_seadex_cf(cfs);
+    let seadex_boost_enabled = config.seadex_enabled && !has_seadex_cf_flag;
+    let seadex_hashes = fetch_seadex_hashes(
+        config.seadex_enabled || has_seadex_cf_flag,
+        detail.id,
+    )
+    .await;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
@@ -474,7 +538,7 @@ async fn collect_scored_for_target(
             continue;
         }
 
-        c.score = rescore_for_auto_search(
+        let base = rescore_for_auto_search(
             &c,
             &classification,
             config,
@@ -488,7 +552,18 @@ async fn collect_scored_for_target(
             cutoff_source_enum,
             cutoff_resolution_enum,
         );
-        scored.push(c);
+        if let Some(final_score) = apply_cf_seadex_overlay(
+            base,
+            &c,
+            &classification,
+            cfs,
+            &seadex_hashes,
+            seadex_boost_enabled,
+            config.custom_format_minimum_score,
+        ) {
+            c.score = final_score;
+            scored.push(c);
+        }
     }
 
     scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
@@ -958,6 +1033,56 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, ex
             parsed.contains(target_ep)
         }
     }
+}
+
+/// Look up the SeaDex entry for `anilist_id` and return the set of
+/// usable "best" info hashes. Disabled (or lookup-failed) returns an
+/// empty set, which causes the scoring-time SeaDex bonus and any
+/// `SeaDexBest` Custom Format spec to harmlessly contribute zero.
+async fn fetch_seadex_hashes(seadex_enabled: bool, anilist_id: i64) -> HashSet<String> {
+    if !seadex_enabled || anilist_id <= 0 {
+        return HashSet::new();
+    }
+    match seadex::lookup(anilist_id).await {
+        Ok(Some(entry)) => seadex::best_hashes(&entry),
+        _ => HashSet::new(),
+    }
+}
+
+/// Apply the Custom Format + SeaDex overlay to a base score.
+///
+/// Returns `Some(final_score)` if the candidate survives the CF
+/// minimum-score floor, or `None` if it should be dropped. The SeaDex
+/// score bump is suppressed whenever the compiled CF set contains a
+/// `SeaDexBestSpecification` — the user has taken ownership of that
+/// number and double-counting would be a silent regression.
+fn apply_cf_seadex_overlay(
+    base: i32,
+    result: &SearchResult,
+    classification: &ClassificationResult,
+    cfs: &[CompiledCustomFormat],
+    seadex_hashes: &HashSet<String>,
+    seadex_boost_enabled: bool,
+    minimum_score: i32,
+) -> Option<i32> {
+    let ctx = EvalContext {
+        result,
+        classification,
+        seadex_hashes,
+    };
+    let cf = custom_formats::total_cf_score(cfs, &ctx);
+    if cf < minimum_score {
+        return None;
+    }
+    let seadex_bonus = if seadex_boost_enabled
+        && !result.info_hash.is_empty()
+        && seadex_hashes.contains(&result.info_hash.to_ascii_lowercase())
+    {
+        seadex::SEADEX_SCORE_BOOST
+    } else {
+        0
+    };
+    Some(base + cf + seadex_bonus)
 }
 
 #[allow(clippy::too_many_arguments)]
