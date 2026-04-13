@@ -71,29 +71,38 @@ pub enum SearchTarget {
 
 impl SearchTarget {
     /// Build a search target for a user-initiated "search this episode"
-    /// action. Collapses to `Single` when the media's format is one that
-    /// doesn't carry episode numbers in release filenames (MOVIE,
-    /// SPECIAL, OVA, ONA); otherwise stays as `Episode(n)`.
+    /// action. Collapses to `Single` only when the media is genuinely
+    /// single-entry; otherwise stays as `Episode(n)`.
     ///
     /// This exists because the per-episode handlers used to pass
     /// `Episode(n)` unconditionally — and for movies, `matches_target`
     /// then rejected every real release on Nyaa (movie filenames don't
     /// carry episode numbers), leaving Phase 1 empty and triggering the
     /// extended-alias fallback with its looser matching. Collapsing to
-    /// `Single` for single-entry formats keeps the search on the correct
+    /// `Single` for single-entry media keeps the search on the correct
     /// code path and prevents the fallback from firing in the first
     /// place.
     ///
-    /// The decision is format-only and does NOT look at episode count:
-    /// an airing TV show with `episodes: None` still needs `Episode(n)`
-    /// because TV releases do carry episode numbers, and collapsing on
-    /// "unknown count" would silently break per-episode search for every
-    /// currently-airing show.
+    /// Rules:
+    /// - `MOVIE` → always `Single`. Movies are always single-entry; if
+    ///   AniList reports something weird like `episodes: None` or
+    ///   `Some(2)`, we still trust the format.
+    /// - `SPECIAL` / `OVA` / `ONA` with `episodes == Some(1)` → `Single`.
+    ///   These formats are single-entry *in the common case*, but
+    ///   multi-episode OVAs (Hellsing Ultimate, LOGH) and multi-episode
+    ///   ONAs absolutely exist and their releases DO carry episode
+    ///   numbers, so only collapse when AniList explicitly confirms a
+    ///   single episode.
+    /// - Everything else (TV, TV_SHORT, multi-episode OVA/ONA/SPECIAL,
+    ///   or unknown episode count) → `Episode(n)`. TV releases carry
+    ///   episode numbers, and for ambiguous formats with unknown episode
+    ///   count the safe default is to keep `Episode(n)` — the failure
+    ///   mode there is "no results" rather than "wrong series grabbed".
     pub fn for_episode(detail: &AnimeDetail, episode_number: i32) -> Self {
-        if matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA") {
-            SearchTarget::Single
-        } else {
-            SearchTarget::Episode(episode_number)
+        match detail.format.as_str() {
+            "MOVIE" => SearchTarget::Single,
+            "SPECIAL" | "OVA" | "ONA" if detail.episodes == Some(1) => SearchTarget::Single,
+            _ => SearchTarget::Episode(episode_number),
         }
     }
 }
@@ -1398,6 +1407,58 @@ mod tests {
         assert!(matches!(
             SearchTarget::for_episode(&d, 3),
             SearchTarget::Episode(3)
+        ));
+    }
+
+    #[test]
+    fn for_episode_collapses_movie_even_when_episode_count_is_none() {
+        // MOVIE always collapses regardless of AniList's episode count — a
+        // film is single-entry even if AniList has weird/missing data.
+        let d = detail_with("MOVIE", None);
+        assert!(matches!(SearchTarget::for_episode(&d, 1), SearchTarget::Single));
+    }
+
+    #[test]
+    fn for_episode_keeps_episode_for_multi_episode_ova() {
+        // Multi-episode OVA series (e.g., long-running OVA franchises with
+        // 10+ entries) carry episode numbers in their release filenames,
+        // so per-episode search must NOT collapse them to Single — that
+        // would return a release for any episode or a full batch when the
+        // user specifically asked for episode N.
+        let d = detail_with("OVA", Some(10));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 5),
+            SearchTarget::Episode(5)
+        ));
+    }
+
+    #[test]
+    fn for_episode_keeps_episode_for_multi_episode_ona() {
+        let d = detail_with("ONA", Some(24));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 12),
+            SearchTarget::Episode(12)
+        ));
+    }
+
+    #[test]
+    fn for_episode_keeps_episode_for_multi_episode_special() {
+        let d = detail_with("SPECIAL", Some(4));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 2),
+            SearchTarget::Episode(2)
+        ));
+    }
+
+    #[test]
+    fn for_episode_keeps_episode_for_ova_with_unknown_count() {
+        // Ambiguous: we don't know whether it's a 1-episode OVA or a
+        // 12-episode OVA. Safe default is Episode(n) — the failure mode
+        // is "no results" rather than "grabbed the wrong release".
+        let d = detail_with("OVA", None);
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 1),
+            SearchTarget::Episode(1)
         ));
     }
 
