@@ -243,9 +243,53 @@ impl Resolution {
 /// final [`ClassificationResult`]. The `origin` and `detail` fields are
 /// preserved end-to-end so the final result carries an audit trail that gets
 /// logged when `needs_review` is true.
+///
+/// # `confidence` semantics
+///
+/// The `confidence` field is **not a probability**. It's a relative
+/// weight in the aggregator's per-source sum — how much this piece of
+/// evidence contributes to the "did source X win?" decision. Think of
+/// it as evidence *mass*, clamped to `[0.0, 1.0]`.
+///
+/// Calibration per layer:
+///
+/// - **L1 filename** (source_filename): 0.30 — 0.95. Generic keyword
+///   hits stay around 0.30 – 0.55; scene tags like `WEB-DL` or
+///   `BDRip` sit at 0.70 – 0.85; an unambiguous group-and-keyword
+///   match can reach 0.90+.
+/// - **L2 Nyaa description** (source_nyaa): 0.60 — 0.90. Description
+///   scrapes are relatively reliable when present, so the layer
+///   emits mid-to-high values; ambiguous matches get dropped instead
+///   of being emitted weakly.
+/// - **L3 release group** (source_groups): 0.85. The group identity
+///   table is curated and unambiguous per entry, so every emitted
+///   record carries the same strong weight.
+/// - **L4 temporal** (source_temporal): 0.55 — 0.75. Deliberately
+///   weak — a tiebreaker, not a primary signal. The 0.55 band is the
+///   `season_year` fallback path (see that module's doc comment);
+///   0.65 and 0.75 are the end_year-backed rules.
+/// - **L5 ffprobe** (source_ffprobe): up to 1.00. This is ground
+///   truth — the file itself — and carries a special interpretation
+///   in the aggregator: it can veto the lead via Rule 5 even when
+///   the rest of the evidence disagrees.
+/// - **L6 directory walk** (source_dir): 0.80 — 0.95. Disc markers
+///   are high confidence; the weaker Specials/Extras/Bonus rule
+///   drops to 0.80 because user-organized libraries sometimes mimic
+///   the structure.
+///
+/// Aggregator thresholds (`STRONG_THRESHOLD = 0.90`, `MIN_TOTAL = 0.50`,
+/// `MIN_LEAD = 0.15`, `ORIGIN_MAX = 1.3`) are calibrated against these
+/// bands. Changing a layer's emission range without re-checking the
+/// aggregator thresholds can silently shift the classification
+/// behavior — bump the confidence of a weak layer too high and it
+/// starts overriding stronger signals.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SourceEvidence {
     pub source: Source,
+    /// Relative weight this evidence record contributes to the
+    /// aggregator sum. **Not** a probability — see the struct-level
+    /// docs for per-layer calibration bands and why the specific
+    /// values matter.
     pub confidence: f32,
     pub origin: &'static str,
     pub detail: String,
@@ -335,9 +379,29 @@ pub struct ClassificationResult {
     /// plain encode < Remux < BDMV.
     #[serde(default)]
     pub is_bdmv: bool,
-    /// Confidence of the winning source decision (0.0–1.0). This is either
-    /// the confidence of the dominant single signal or, for multi-signal
-    /// decisions, the fraction of total evidence mass backing the winner.
+    /// Confidence of the winning source decision (0.0–1.0).
+    ///
+    /// **Not** a calibrated probability — it's a compressed view of
+    /// how much more evidence the winning source had than the
+    /// runner-up, scaled so that a lopsided win approaches 1.0 and a
+    /// close call approaches 0.5:
+    ///
+    /// ```text
+    /// confidence = winner_mass / max(winner_mass + runner_up_mass, winner_mass)
+    /// ```
+    ///
+    /// A single unopposed signal gets `confidence == 1.0`. Two signals
+    /// with masses 1.8 and 0.2 give ~0.9. Two evenly-matched signals
+    /// at 1.0 each give 0.5. The value is meant for UI display and
+    /// ordering, not for statistical reasoning — downstream code that
+    /// needs to know "how strong was this decision" should look at
+    /// `needs_review` and `decision_rule` first.
+    ///
+    /// When `decision_rule == DecisionRule::Rule3Weak` (fallback to
+    /// Unknown because total evidence mass was below `MIN_TOTAL`) this
+    /// field carries the raw total evidence mass instead of the ratio
+    /// — it's always below `MIN_TOTAL` in that case and callers that
+    /// care distinguish the branches via `decision_rule`.
     pub confidence: f32,
     /// True when the aggregator couldn't make a confident decision — either
     /// no signal reached threshold, or two sources had comparable strong
