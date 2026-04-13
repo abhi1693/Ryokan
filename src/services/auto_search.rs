@@ -1,27 +1,12 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use chrono::{DateTime, Datelike};
 use regex_lite::Regex;
 use sqlx::SqlitePool;
 
 use crate::models::config::Config;
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
 use crate::services::{anilist::AnimeDetail, media, nyaa::{self, SearchOptions, SearchResult}, quality};
-
-/// Convert a Unix timestamp to its calendar year.
-///
-/// Previously this was open-coded as `1970 + (ts / 31_536_000)`, which
-/// assumes every year is exactly 365 days. That drifts by one day per
-/// leap year and had already accumulated enough slippage that timestamps
-/// near year boundaries were being bucketed into the wrong year — which
-/// in turn fed the "finished series + 2 years" filter and caused a
-/// handful of legit episodes to get rejected as "probably a sequel."
-/// chrono handles leap years correctly and costs a few hundred
-/// nanoseconds, which is nothing on this code path.
-fn upload_year_of(ts: i64) -> Option<i32> {
-    DateTime::from_timestamp(ts, 0).map(|dt| dt.year())
-}
 
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
 static RE_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
@@ -157,8 +142,6 @@ pub async fn find_all_for_target(
         preferred_resolution: &preferred_res,
         target,
         expected_season,
-        is_finished,
-        season_year: detail.season_year,
     };
 
     // Interactive search: allow batch results so user can see & pick them,
@@ -206,7 +189,6 @@ pub async fn find_all_for_target(
             target,
             expected_season,
             is_finished,
-            detail.season_year,
             finished_mode,
             preferred_source_enum,
             preferred_resolution_enum,
@@ -297,8 +279,6 @@ pub async fn collect_scored_batches_for_target(
         target,
         allow_batch: true,
         expected_season,
-        is_finished,
-        season_year: detail.season_year,
         categories: &categories,
         batch_episode_match: false,
     };
@@ -364,7 +344,6 @@ pub async fn collect_scored_batches_for_target(
             target,
             expected_season,
             is_finished,
-            detail.season_year,
             finished_mode,
             preferred_source_enum,
             preferred_resolution_enum,
@@ -421,8 +400,6 @@ async fn collect_scored_for_target(
         target,
         allow_batch,
         expected_season,
-        is_finished,
-        season_year: detail.season_year,
         categories: &categories,
         batch_episode_match,
     };
@@ -505,7 +482,6 @@ async fn collect_scored_for_target(
             target,
             expected_season,
             is_finished,
-            detail.season_year,
             finished_mode,
             preferred_source_enum,
             preferred_resolution_enum,
@@ -536,8 +512,6 @@ struct AutoQueryCtx<'a> {
     target: &'a SearchTarget,
     allow_batch: bool,
     expected_season: i32,
-    is_finished: bool,
-    season_year: Option<i32>,
     categories: &'a [String],
     batch_episode_match: bool,
 }
@@ -551,43 +525,6 @@ struct InteractiveQueryCtx<'a> {
     preferred_resolution: &'a str,
     target: &'a SearchTarget,
     expected_season: i32,
-    is_finished: bool,
-    season_year: Option<i32>,
-}
-
-/// Should this Nyaa result be dropped as a probable-sequel false positive?
-///
-/// For FINISHED series, any result uploaded 2+ years after the season aired
-/// is much more likely to be for a later season than the one we're
-/// searching (Nyaa listings aren't tagged with AniList IDs, so we have
-/// nothing else to distinguish them). Single-episode, non-BluRay releases
-/// are the only things this filter catches — BD packs legitimately show
-/// up years later, and batch releases are ambiguous enough that we let
-/// the rescore pass handle them.
-///
-/// Returns `true` to drop, `false` to keep. The BD check uses the cheap
-/// filename heuristic so this runs pre-classification without touching
-/// the DB.
-fn is_likely_sequel_leak(
-    result: &SearchResult,
-    is_finished: bool,
-    season_year: Option<i32>,
-) -> bool {
-    if !is_finished {
-        return false;
-    }
-    let Some(air_year) = season_year else {
-        return false;
-    };
-    if result.upload_timestamp <= 0 {
-        return false;
-    }
-    let Some(upload_year) = upload_year_of(result.upload_timestamp) else {
-        return false;
-    };
-    upload_year - air_year >= 2
-        && !source::looks_like_bluray_filename(&result.title)
-        && !result.is_batch
 }
 
 /// Run a set of queries against Nyaa page 1, collecting valid candidates.
@@ -627,9 +564,6 @@ async fn run_queries(
                     continue;
                 }
                 if !matches_target(&result.title, ctx.aliases, ctx.target, ctx.expected_season, ctx.batch_episode_match && result.is_batch) {
-                    continue;
-                }
-                if is_likely_sequel_leak(&result, ctx.is_finished, ctx.season_year) {
                     continue;
                 }
                 candidates.push(result);
@@ -696,9 +630,6 @@ async fn run_queries_interactive(
                         continue;
                     }
                 }
-            }
-            if is_likely_sequel_leak(&result, ctx.is_finished, ctx.season_year) {
-                continue;
             }
             candidates.push(result);
         }
@@ -1038,7 +969,6 @@ fn rescore_for_auto_search(
     target: &SearchTarget,
     expected_season: i32,
     is_finished: bool,
-    season_year: Option<i32>,
     finished_mode: quality::FinishedSeriesMode,
     preferred_source: Source,
     preferred_resolution: Resolution,
@@ -1063,24 +993,6 @@ fn rescore_for_auto_search(
     // Season mismatch penalty (explicit season markers like S03, "3rd Season")
     if season_mismatch(&result.title, expected_season) {
         score -= 100;
-    }
-
-    // Date-based penalty for FINISHED series: if a result was uploaded long after
-    // the series aired, it's likely for a sequel season rather than this one.
-    // Exempt BD releases since those legitimately appear years later.
-    if is_finished {
-        if let Some(air_year) = season_year {
-            let is_bluray = classification.source == Source::BluRay;
-            if result.upload_timestamp > 0 && !is_bluray {
-                if let Some(upload_year) = upload_year_of(result.upload_timestamp) {
-                    let year_gap = upload_year - air_year;
-                    // If uploaded 2+ years after the series aired, it's probably a sequel
-                    if year_gap >= 2 {
-                        score -= 80;
-                    }
-                }
-            }
-        }
     }
 
     match target {

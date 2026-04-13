@@ -47,9 +47,6 @@ pub struct SearchResult {
     pub is_trusted: bool,
     pub score: i32,
     pub info_hash: String,
-    /// Unix timestamp of when the torrent was uploaded (0 if unknown).
-    #[serde(skip_serializing)]
-    pub upload_timestamp: i64,
 }
 
 pub struct SearchOptions {
@@ -183,13 +180,6 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
         let size = tds[3].text().collect::<String>().trim().to_string();
         let size_bytes = parse_size(&size);
 
-        // Date (td index 4) — try data-timestamp attr first, then parse text.
-        let upload_timestamp: i64 = tds[4]
-            .value()
-            .attr("data-timestamp")
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or_else(|| parse_date_text(&tds[4].text().collect::<String>()));
-
         // Seeders, leechers, downloads (td indices 5, 6, 7).
         let seeders = parse_int(&tds[5].text().collect::<String>());
         let leechers = parse_int(&tds[6].text().collect::<String>());
@@ -221,7 +211,6 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
             is_trusted,
             score: 0,
             info_hash,
-            upload_timestamp,
         };
 
         result.score = crate::services::scoring::score_result_with_sub_pref(&result, opts, opts.prefer_subs);
@@ -299,30 +288,4 @@ fn parse_size(s: &str) -> i64 {
 
 fn parse_int(s: &str) -> i32 {
     s.trim().parse().unwrap_or(0)
-}
-
-/// Try to parse a Nyaa date string into a Unix timestamp.
-/// Handles formats like "2024-01-15 12:34" (common on Nyaa).
-///
-/// Uses `chrono` so leap years are handled correctly — the old code
-/// open-coded `(year - 1970) * 31_536_000`, which drifts by one day per
-/// leap year and, when the fallback kicked in (`data-timestamp` missing),
-/// could push a timestamp into the wrong calendar year near year
-/// boundaries. That in turn confused the "finished series + 2 years"
-/// filter in `auto_search`.
-fn parse_date_text(text: &str) -> i64 {
-    let trimmed = text.trim();
-    if trimmed.len() < 10 {
-        return 0;
-    }
-    let Ok(year) = trimmed[..4].parse::<i32>() else { return 0; };
-    if !(2000..=2100).contains(&year) {
-        return 0;
-    }
-    let month: u32 = trimmed.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let day: u32 = trimmed.get(8..10).and_then(|s| s.parse().ok()).unwrap_or(1);
-    chrono::NaiveDate::from_ymd_opt(year, month.clamp(1, 12), day.clamp(1, 28))
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|dt| dt.and_utc().timestamp())
-        .unwrap_or(0)
 }
