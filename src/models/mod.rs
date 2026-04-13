@@ -802,6 +802,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+    // Persist the full evidence trail as JSON so the Needs-Review UI can
+    // audit *why* a row was flagged without re-classifying. Stores a
+    // serialized `Vec<SourceEvidence>` — empty string for legacy rows and
+    // for rehydrated/synthetic classifications that don't carry a live
+    // trail.
+    sqlx::query(
+        "ALTER TABLE episode_quality_tags ADD COLUMN classification_evidence TEXT NOT NULL DEFAULT ''",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     // ── Phase 1b: split quality_profile/quality_cutoff into explicit source
     //             and resolution fields ──────────────────────────────────

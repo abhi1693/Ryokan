@@ -19,6 +19,11 @@ pub struct NeedsReviewEntry {
     pub source: String,
     pub resolution: String,
     pub classification_confidence: f32,
+    /// Serialized `Vec<SourceEvidence>` captured at classification time.
+    /// Rendered inline by the Needs-Review UI so the user can see *why*
+    /// the row was flagged without running a fresh classify. Empty string
+    /// for legacy rows grabbed before the column existed.
+    pub classification_evidence: String,
 }
 
 /// Return every episode currently flagged `needs_review = true` across the
@@ -32,6 +37,7 @@ pub async fn get_needs_review(
     let rows = sqlx::query(
         "SELECT t.series_id, t.episode_number, t.quality_tag, t.release_title, t.release_group,
                 t.source, t.resolution, t.classification_confidence,
+                COALESCE(t.classification_evidence, '') AS classification_evidence,
                 s.anilist_id AS series_anilist_id,
                 COALESCE(NULLIF(s.title_english, ''), NULLIF(s.title_romaji, ''), s.title) AS series_title,
                 s.cover_url
@@ -60,6 +66,7 @@ pub async fn get_needs_review(
                 source: row.get("source"),
                 resolution: row.get("resolution"),
                 classification_confidence: confidence as f32,
+                classification_evidence: row.get("classification_evidence"),
             }
         })
         .collect())
@@ -102,6 +109,10 @@ pub struct EpisodeQualityTag {
     /// override picker. Prevents `update_classification` from overwriting
     /// on subsequent post-download re-classifies.
     pub manual_override: bool,
+    /// Serialized `Vec<SourceEvidence>` captured at classification time.
+    /// Empty string for legacy rows and for manually-overridden rows.
+    /// Consumers (the Needs-Review UI) `serde_json::from_str` to rehydrate.
+    pub classification_evidence: String,
 }
 
 /// Record a new grab for an episode — inserts into history and upserts the
@@ -129,6 +140,12 @@ pub async fn record_grab(
     let web_kind_str = classification.web_kind.as_str();
     let confidence = classification.confidence as f64;
     let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
+    // Serialize the full evidence trail so the Needs-Review UI can audit
+    // *why* the row was flagged without re-running classification. Empty
+    // string on serialize failure — the row is still valid, we just lose
+    // the trail on that particular write.
+    let evidence_json =
+        serde_json::to_string(&classification.evidence).unwrap_or_default();
 
     let history_id: i64 = sqlx::query_scalar(
         "INSERT INTO episode_grab_history (series_id, episode_number, quality_tag, release_title, release_group, state)
@@ -155,9 +172,9 @@ pub async fn record_grab(
         "INSERT INTO episode_quality_tags (
              series_id, episode_number, quality_tag, release_title, release_group, state,
              source, resolution, is_remux, is_bdmv, web_kind,
-             classification_confidence, needs_review
+             classification_confidence, needs_review, classification_evidence
          )
-         VALUES (?, ?, ?, ?, ?, 'grabbed', ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, 'grabbed', ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(series_id, episode_number) DO UPDATE SET
              quality_tag = excluded.quality_tag,
              release_title = excluded.release_title,
@@ -170,6 +187,7 @@ pub async fn record_grab(
              web_kind = excluded.web_kind,
              classification_confidence = excluded.classification_confidence,
              needs_review = excluded.needs_review,
+             classification_evidence = excluded.classification_evidence,
              updated_at = CURRENT_TIMESTAMP
          WHERE COALESCE(episode_quality_tags.manual_override, 0) = 0",
     )
@@ -185,6 +203,7 @@ pub async fn record_grab(
     .bind(web_kind_str)
     .bind(confidence)
     .bind(needs_review)
+    .bind(&evidence_json)
     .execute(db)
     .await?;
 
@@ -202,7 +221,8 @@ pub async fn get_for_series(
                 COALESCE(is_bdmv, 0) AS is_bdmv,
                 COALESCE(web_kind, '') AS web_kind,
                 classification_confidence, needs_review,
-                COALESCE(manual_override, 0) AS manual_override
+                COALESCE(manual_override, 0) AS manual_override,
+                COALESCE(classification_evidence, '') AS classification_evidence
          FROM episode_quality_tags WHERE series_id = ?",
     )
     .bind(series_id)
@@ -232,6 +252,7 @@ pub async fn get_for_series(
                 classification_confidence: confidence as f32,
                 needs_review: needs_review_i != 0,
                 manual_override: manual_override_i != 0,
+                classification_evidence: row.get("classification_evidence"),
             },
         );
     }
@@ -292,6 +313,8 @@ pub async fn update_classification(
     let web_kind_str = classification.web_kind.as_str();
     let confidence = classification.confidence as f64;
     let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
+    let evidence_json =
+        serde_json::to_string(&classification.evidence).unwrap_or_default();
 
     sqlx::query(
         "UPDATE episode_quality_tags SET
@@ -303,6 +326,7 @@ pub async fn update_classification(
              web_kind = ?,
              classification_confidence = ?,
              needs_review = ?,
+             classification_evidence = ?,
              updated_at = CURRENT_TIMESTAMP
          WHERE series_id = ?
            AND episode_number = ?
@@ -316,6 +340,7 @@ pub async fn update_classification(
     .bind(web_kind_str)
     .bind(confidence)
     .bind(needs_review)
+    .bind(&evidence_json)
     .bind(series_id)
     .bind(episode_number)
     .execute(db)
@@ -384,14 +409,17 @@ pub async fn set_manual_override(
     // Upsert: if the row doesn't exist yet (user tagging a file that the
     // classifier never saw), insert a fresh row with empty release metadata.
     // If it exists, flip to manual_override and overwrite the classification
-    // columns with the user's choice.
+    // columns with the user's choice. We explicitly blank the stored
+    // evidence trail — the user's pin isn't backed by layer evidence, so
+    // keeping a stale trail from a previous automatic classify would be
+    // misleading.
     sqlx::query(
         "INSERT INTO episode_quality_tags (
              series_id, episode_number, quality_tag, release_title, release_group, state,
              source, resolution, is_remux, is_bdmv, web_kind,
-             classification_confidence, needs_review, manual_override
+             classification_confidence, needs_review, manual_override, classification_evidence
          )
-         VALUES (?, ?, ?, '', '', 'completed', ?, ?, ?, ?, ?, 1.0, 0, 1)
+         VALUES (?, ?, ?, '', '', 'completed', ?, ?, ?, ?, ?, 1.0, 0, 1, '')
          ON CONFLICT(series_id, episode_number) DO UPDATE SET
              quality_tag = excluded.quality_tag,
              source = excluded.source,
@@ -402,6 +430,7 @@ pub async fn set_manual_override(
              classification_confidence = 1.0,
              needs_review = 0,
              manual_override = 1,
+             classification_evidence = '',
              updated_at = CURRENT_TIMESTAMP",
     )
     .bind(series_id)
