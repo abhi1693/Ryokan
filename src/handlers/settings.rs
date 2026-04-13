@@ -2,10 +2,23 @@ use askama::Template;
 use axum::{extract::{Query, State}, response::{Html, Redirect}, Form, Json};
 use serde::Deserialize;
 
-use crate::models::{config, group_source_map};
+use crate::models::{config, custom_formats as cf_model, group_source_map};
 use crate::models::log::LogCategory;
-use crate::services::{jellyfin::JellyfinClient, logger, qbit::QbitClient, source::Source};
+use crate::services::{
+    custom_formats as cf_service, jellyfin::JellyfinClient, logger, qbit::QbitClient,
+    source::Source,
+};
 use crate::AppState;
+
+/// View-model wrapper rendered on the Custom Formats tab. Pairs each
+/// stored CF row with its parsed spec count (or parse error), so the
+/// table can surface "3 specs" next to well-formed rows and a red
+/// "parse error: ..." marker next to ones the user needs to fix.
+pub struct CustomFormatView {
+    pub row: cf_model::CustomFormatRow,
+    pub specs_count: usize,
+    pub parse_error: Option<String>,
+}
 
 #[derive(Template)]
 #[template(path = "settings.html")]
@@ -15,13 +28,36 @@ struct SettingsTemplate {
     config: config::Config,
     groups: Vec<group_source_map::GroupSourceEntry>,
     suggestions: Vec<group_source_map::GroupSuggestion>,
+    custom_formats: Vec<CustomFormatView>,
+    custom_format_edit: Option<cf_model::CustomFormatRow>,
+    /// Pre-rendered string for the minimum-score input. Empty when the
+    /// floor is the `i32::MIN` "no floor" sentinel. Computed here so the
+    /// Askama template doesn't need to compare against an integer path.
+    custom_format_min_score_display: String,
     message: Option<String>,
     error: Option<String>,
+}
+
+fn min_score_display(score: i32) -> String {
+    if score == i32::MIN {
+        String::new()
+    } else {
+        score.to_string()
+    }
 }
 
 #[derive(Deserialize)]
 pub struct SettingsQuery {
     tab: Option<String>,
+    /// When the Custom Formats tab is active and `edit_id` is set, the
+    /// upsert form prefills from the existing row so the user can fix
+    /// the JSON in place rather than deleting and re-pasting.
+    edit_id: Option<i64>,
+    /// Optional flash message / error surfaced after a POST-redirect.
+    /// Kept minimal — detailed validation errors skip the redirect path
+    /// and re-render inline so the form state is preserved.
+    msg: Option<String>,
+    err: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +89,7 @@ pub struct SettingsForm {
     radarr_enabled: Option<String>,
     radarr_api_key: Option<String>,
     upgrade_search_enabled: Option<String>,
+    seadex_enabled: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -73,10 +110,35 @@ pub struct JellyfinTestForm {
 fn normalize_settings_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
         Some("quality") => "quality".to_string(),
+        Some("custom_formats") => "custom_formats".to_string(),
         Some("groups") => "groups".to_string(),
         Some("general") => "general".to_string(),
         _ => "integrations".to_string(),
     }
+}
+
+/// Load every CF row and annotate each one with its parsed spec count
+/// (or the parse error string, if compilation fails). Used by the
+/// Custom Formats tab to surface broken rows in the list view so the
+/// user can find and fix them without trawling logs.
+async fn load_custom_formats_view(db: &sqlx::SqlitePool) -> Vec<CustomFormatView> {
+    let rows = cf_model::list_with_scores(db).await.unwrap_or_default();
+    rows.into_iter()
+        .map(|row| {
+            match cf_service::compile_from_json(&row.json, row.score as i32, row.id) {
+                Ok(cf) => CustomFormatView {
+                    specs_count: cf.specs.len(),
+                    parse_error: None,
+                    row,
+                },
+                Err(e) => CustomFormatView {
+                    specs_count: 0,
+                    parse_error: Some(e),
+                    row,
+                },
+            }
+        })
+        .collect()
 }
 
 async fn load_groups(
@@ -147,15 +209,28 @@ pub async fn settings_page(
 
     let groups = load_groups(&state.db).await;
     let suggestions = load_suggestions(&state.db).await;
+    let custom_formats = load_custom_formats_view(&state.db).await;
 
+    // Prefill the CF edit form only when the query param points at a row
+    // that actually exists — stale edit links just fall through to the
+    // "Add new" form, which is the safer default.
+    let custom_format_edit = match params.edit_id {
+        Some(id) => cf_model::get_by_id(&state.db, id).await.ok().flatten(),
+        None => None,
+    };
+
+    let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(params.tab),
         config: cfg,
         groups,
         suggestions,
-        message: None,
-        error: None,
+        custom_formats,
+        custom_format_edit,
+        custom_format_min_score_display,
+        message: params.msg,
+        error: params.err,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -248,16 +323,17 @@ pub async fn settings_submit(
         } else {
             existing_cfg.as_ref().map(|c| c.upgrade_search_enabled).unwrap_or(false)
         },
-        // Carried forward from the existing row — edited through the
-        // dedicated Custom Formats settings page (Phase 7), not this form.
+        // Carried forward from the existing row — edited via the
+        // dedicated Custom Formats tab's minimum-score form, not here.
         custom_format_minimum_score: existing_cfg
             .as_ref()
             .map(|c| c.custom_format_minimum_score)
             .unwrap_or(i32::MIN),
-        seadex_enabled: existing_cfg
-            .as_ref()
-            .map(|c| c.seadex_enabled)
-            .unwrap_or(false),
+        seadex_enabled: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
+            form.seadex_enabled.is_some()
+        } else {
+            existing_cfg.as_ref().map(|c| c.seadex_enabled).unwrap_or(false)
+        },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());
@@ -266,12 +342,17 @@ pub async fn settings_submit(
         logger::error(&state.db, LogCategory::System, "Failed to save settings", &e.to_string()).await;
         let groups = load_groups(&state.db).await;
         let suggestions = load_suggestions(&state.db).await;
+        let custom_formats = load_custom_formats_view(&state.db).await;
+        let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
             config: cfg,
             groups,
             suggestions,
+            custom_formats,
+            custom_format_edit: None,
+            custom_format_min_score_display,
             message: None,
             error: Some(format!("Failed to save: {}", e)),
         };
@@ -333,12 +414,17 @@ pub async fn settings_submit(
 
     let groups = load_groups(&state.db).await;
     let suggestions = load_suggestions(&state.db).await;
+    let custom_formats = load_custom_formats_view(&state.db).await;
+    let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
         config: cfg,
         groups,
         suggestions,
+        custom_formats,
+        custom_format_edit: None,
+        custom_format_min_score_display,
         message: Some(notices.join("<br>")),
         error: None,
     };
@@ -437,6 +523,430 @@ pub async fn settings_groups_delete(
         }
     }
     Redirect::to("/settings?tab=groups")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Custom Formats CRUD
+// ─────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct CustomFormatUpsertForm {
+    /// `None` = create a new row; `Some(n)` = update existing row `n`.
+    /// Hidden input on the edit form prefill.
+    id: Option<i64>,
+    name: String,
+    score: i32,
+    trash_id: Option<String>,
+    json: String,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct CustomFormatDeleteForm {
+    id: i64,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct CustomFormatMinScoreForm {
+    /// Blank string = clear the floor (`i32::MIN`). Numeric strings are
+    /// parsed; anything else falls back to the current value so a fat-
+    /// finger save can't silently wipe the user's threshold.
+    minimum_score: String,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct CustomFormatImportForm {
+    /// Pasted Sonarr v4 CF JSON export — either a single CF object or
+    /// an array of them. Each entry compiles through the same
+    /// `compile_from_json` path as the create form; failures are
+    /// counted and reported but don't abort the whole import.
+    payload: String,
+}
+
+/// Create or update a Custom Format row. Validates the supplied JSON
+/// via `compile_from_json` before touching the database — if the parse
+/// fails, the user is bounced back to the CF tab with the error and
+/// the edit form re-prefilled from the attempted id so their work
+/// isn't lost. On success, rebuilds the compiled-CF cache so the next
+/// scoring pass sees the change.
+#[utoipa::path(
+    post,
+    path = "/settings/custom-formats/upsert",
+    tag = "Settings",
+    summary = "Create or update a Custom Format",
+    description = "Upsert a Sonarr v4-compatible Custom Format and its V1-profile score. Validates the JSON via the CF compiler before writing to the database. On success, rebuilds the compiled-CF cache so the next scoring pass sees the change. Redirects back to the Custom Formats settings tab with a flash message.",
+    request_body(content = CustomFormatUpsertForm, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 303, description = "Redirect back to the Custom Formats settings tab"),
+    ),
+)]
+pub async fn settings_custom_formats_upsert(
+    State(state): State<AppState>,
+    Form(form): Form<CustomFormatUpsertForm>,
+) -> Redirect {
+    let name = form.name.trim();
+    if name.is_empty() {
+        return Redirect::to(&cf_redirect(
+            form.id,
+            None,
+            Some("Custom Format name cannot be blank."),
+        ));
+    }
+    let trash_id = form.trash_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let json_trimmed = form.json.trim();
+
+    // Validate against the real compiler so a CF that would fail to
+    // parse on startup also fails to save through the UI.
+    if let Err(e) = cf_service::compile_from_json(json_trimmed, form.score, form.id.unwrap_or(0)) {
+        return Redirect::to(&cf_redirect(form.id, None, Some(&format!("Parse error: {e}"))));
+    }
+
+    let save_result = if let Some(id) = form.id {
+        cf_model::update(&state.db, id, name, trash_id, json_trimmed, form.score)
+            .await
+            .map(|_| id)
+    } else {
+        cf_model::insert(&state.db, name, trash_id, json_trimmed, form.score).await
+    };
+
+    match save_result {
+        Ok(id) => {
+            cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
+            logger::info(
+                &state.db,
+                LogCategory::System,
+                &format!("Custom Format saved: {name} (id={id})"),
+                "",
+            )
+            .await;
+            Redirect::to(&cf_redirect(None, Some(&format!("Saved '{name}'.")), None))
+        }
+        Err(e) => {
+            logger::error(
+                &state.db,
+                LogCategory::System,
+                "Custom Format save failed",
+                &e.to_string(),
+            )
+            .await;
+            Redirect::to(&cf_redirect(
+                form.id,
+                None,
+                Some(&format!("Database error: {e}")),
+            ))
+        }
+    }
+}
+
+/// Delete a Custom Format row by id. Score row is dropped automatically
+/// via the `ON DELETE CASCADE` on `custom_format_scores`.
+#[utoipa::path(
+    post,
+    path = "/settings/custom-formats/delete",
+    tag = "Settings",
+    summary = "Delete a Custom Format",
+    description = "Delete a Custom Format row by id. The associated score row is dropped automatically via ON DELETE CASCADE. Rebuilds the compiled-CF cache on success. Redirects back to the Custom Formats settings tab.",
+    request_body(content = CustomFormatDeleteForm, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 303, description = "Redirect back to the Custom Formats settings tab"),
+    ),
+)]
+pub async fn settings_custom_formats_delete(
+    State(state): State<AppState>,
+    Form(form): Form<CustomFormatDeleteForm>,
+) -> Redirect {
+    match cf_model::delete(&state.db, form.id).await {
+        Ok(_) => {
+            cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
+            logger::info(
+                &state.db,
+                LogCategory::System,
+                &format!("Custom Format deleted: id={}", form.id),
+                "",
+            )
+            .await;
+            Redirect::to(&cf_redirect(None, Some("Custom Format deleted."), None))
+        }
+        Err(e) => {
+            logger::error(
+                &state.db,
+                LogCategory::System,
+                "Custom Format delete failed",
+                &e.to_string(),
+            )
+            .await;
+            Redirect::to(&cf_redirect(
+                None,
+                None,
+                Some(&format!("Delete failed: {e}")),
+            ))
+        }
+    }
+}
+
+/// Update the global `custom_format_minimum_score` floor. Blank input
+/// clears the floor (sets it back to `i32::MIN`, the "no floor"
+/// sentinel). Non-numeric input falls through to the existing value so
+/// a typo can't silently wipe the threshold.
+#[utoipa::path(
+    post,
+    path = "/settings/custom-formats/minimum-score",
+    tag = "Settings",
+    summary = "Set the Custom Format minimum-score floor",
+    description = "Update the global minimum-score threshold. Auto-search drops releases whose summed CF score falls below this value; interactive search still shows everything. Blank clears the floor. Redirects back to the Custom Formats settings tab.",
+    request_body(content = CustomFormatMinScoreForm, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 303, description = "Redirect back to the Custom Formats settings tab"),
+    ),
+)]
+pub async fn settings_custom_formats_minimum_score(
+    State(state): State<AppState>,
+    Form(form): Form<CustomFormatMinScoreForm>,
+) -> Redirect {
+    let existing = config::get_config(&state.db).await.ok().flatten();
+    let Some(mut cfg) = existing else {
+        return Redirect::to(&cf_redirect(None, None, Some("Config not initialized.")));
+    };
+
+    let trimmed = form.minimum_score.trim();
+    let new_floor = if trimmed.is_empty() {
+        i32::MIN
+    } else {
+        match trimmed.parse::<i32>() {
+            Ok(n) => n,
+            Err(_) => {
+                return Redirect::to(&cf_redirect(
+                    None,
+                    None,
+                    Some("Minimum score must be an integer (leave blank for 'no floor')."),
+                ));
+            }
+        }
+    };
+
+    cfg.custom_format_minimum_score = new_floor;
+    match config::save_config(&state.db, &cfg).await {
+        Ok(_) => {
+            let msg = if new_floor == i32::MIN {
+                "Minimum score cleared (no floor).".to_string()
+            } else {
+                format!("Minimum score set to {new_floor}.")
+            };
+            Redirect::to(&cf_redirect(None, Some(&msg), None))
+        }
+        Err(e) => Redirect::to(&cf_redirect(None, None, Some(&format!("Save failed: {e}")))),
+    }
+}
+
+/// Import a Sonarr v4 CF JSON export. Accepts either a single object
+/// or an array of them; per-entry parse / insert failures are counted
+/// and reported but don't abort the whole import. After a successful
+/// run the compiled cache is rebuilt so the imported CFs are live on
+/// the next scoring pass.
+#[utoipa::path(
+    post,
+    path = "/settings/custom-formats/import",
+    tag = "Settings",
+    summary = "Import Custom Formats from Sonarr v4 JSON",
+    description = "Import one or more Custom Formats from a Sonarr v4 JSON export. Accepts either a single object or an array. Each entry is compiled via the standard CF parser; per-entry failures are counted and the first error is surfaced in the flash message, but valid entries still import. Rebuilds the compiled-CF cache on success. Redirects back to the Custom Formats settings tab.",
+    request_body(content = CustomFormatImportForm, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 303, description = "Redirect back to the Custom Formats settings tab"),
+    ),
+)]
+pub async fn settings_custom_formats_import(
+    State(state): State<AppState>,
+    Form(form): Form<CustomFormatImportForm>,
+) -> Redirect {
+    let payload = form.payload.trim();
+    if payload.is_empty() {
+        return Redirect::to(&cf_redirect(None, None, Some("Import payload is empty.")));
+    }
+
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            return Redirect::to(&cf_redirect(
+                None,
+                None,
+                Some(&format!("Import failed: invalid JSON ({e})")),
+            ));
+        }
+    };
+
+    // Normalize single-object imports into a one-element array so the
+    // loop below handles both shapes identically.
+    let entries: Vec<serde_json::Value> = match value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(_) => vec![value],
+        _ => {
+            return Redirect::to(&cf_redirect(
+                None,
+                None,
+                Some("Import failed: top-level must be an object or array."),
+            ));
+        }
+    };
+
+    let mut imported = 0usize;
+    let mut failed = 0usize;
+    let mut first_error: Option<String> = None;
+
+    for entry in entries {
+        // Pull out the Sonarr-shape fields we care about. `specifications`
+        // lives inside the same blob we'll persist, so we re-serialize
+        // the whole object verbatim to keep round-trip exports faithful.
+        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let trash_id = entry
+            .get("trash_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        // Sonarr exports keep the score inside a sibling `score` or
+        // `trash_score` field; both are optional. Default to 0 when
+        // neither is present so the user can set the score later.
+        let score = entry
+            .get("score")
+            .and_then(|v| v.as_i64())
+            .or_else(|| entry.get("trash_score").and_then(|v| v.as_i64()))
+            .unwrap_or(0) as i32;
+
+        if name.is_empty() {
+            failed += 1;
+            if first_error.is_none() {
+                first_error = Some("one entry is missing a `name` field".to_string());
+            }
+            continue;
+        }
+
+        let raw_json = entry.to_string();
+        if let Err(e) = cf_service::compile_from_json(&raw_json, score, 0) {
+            failed += 1;
+            if first_error.is_none() {
+                first_error = Some(format!("'{name}': {e}"));
+            }
+            continue;
+        }
+
+        match cf_model::insert(&state.db, &name, trash_id.as_deref(), &raw_json, score).await {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                failed += 1;
+                if first_error.is_none() {
+                    first_error = Some(format!("'{name}': {e}"));
+                }
+            }
+        }
+    }
+
+    if imported > 0 {
+        cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
+    }
+
+    let summary = match (imported, failed) {
+        (0, 0) => "Nothing to import.".to_string(),
+        (n, 0) => format!("Imported {n} Custom Format(s)."),
+        (0, m) => format!(
+            "Import failed ({m} rejected). First error: {}",
+            first_error.unwrap_or_default()
+        ),
+        (n, m) => format!(
+            "Imported {n}, skipped {m}. First error: {}",
+            first_error.unwrap_or_default()
+        ),
+    };
+
+    if imported == 0 && failed > 0 {
+        Redirect::to(&cf_redirect(None, None, Some(&summary)))
+    } else {
+        Redirect::to(&cf_redirect(None, Some(&summary), None))
+    }
+}
+
+/// Export every Custom Format as a JSON array download. The payload
+/// keeps each row's raw `json` column verbatim so re-importing the
+/// file into Sonarr (or another Ryokan instance) round-trips cleanly.
+#[utoipa::path(
+    get,
+    path = "/settings/custom-formats/export",
+    tag = "Settings",
+    summary = "Export all Custom Formats as JSON",
+    description = "Download every saved Custom Format as a JSON array. Each row's raw Sonarr v4 object is merged with the persisted V1-profile score, so the export round-trips cleanly into Sonarr or another Ryokan instance. Served with `Content-Disposition: attachment; filename=\"ryokan-custom-formats.json\"`.",
+    responses(
+        (status = 200, description = "JSON array of Custom Formats", body = serde_json::Value, content_type = "application/json"),
+        (status = 500, description = "Database error"),
+    ),
+)]
+pub async fn settings_custom_formats_export(
+    State(state): State<AppState>,
+) -> Result<(axum::http::HeaderMap, String), (axum::http::StatusCode, String)> {
+    let rows = cf_model::list_with_scores(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Parse each row's stored JSON back into a `Value` so the exported
+    // array is real JSON (not a string-of-strings). Unparseable rows
+    // are skipped — they wouldn't import cleanly into a target Sonarr
+    // anyway, and logging the skip is enough of a breadcrumb.
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    for row in rows {
+        match serde_json::from_str::<serde_json::Value>(&row.json) {
+            Ok(mut v) => {
+                // Merge the persisted score into the exported object so
+                // the importer doesn't have to re-key scores by name.
+                // Sonarr ignores unknown fields on import, so this is
+                // safe to ship even when re-importing into Sonarr.
+                if let serde_json::Value::Object(ref mut map) = v {
+                    map.insert(
+                        "score".to_string(),
+                        serde_json::Value::Number(row.score.into()),
+                    );
+                }
+                out.push(v);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "custom_formats export: skipping id={} name={} — parse error: {}",
+                    row.id,
+                    row.name,
+                    e
+                );
+            }
+        }
+    }
+
+    let body = serde_json::to_string_pretty(&serde_json::Value::Array(out))
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_static(
+            "attachment; filename=\"ryokan-custom-formats.json\"",
+        ),
+    );
+    Ok((headers, body))
+}
+
+/// Build a redirect target for the Custom Formats tab. Optionally
+/// carries an `edit_id` (to re-open the failed row's form), a success
+/// `msg`, or an `err`. Query values are URL-encoded so arbitrary error
+/// strings survive the round-trip safely.
+fn cf_redirect(edit_id: Option<i64>, msg: Option<&str>, err: Option<&str>) -> String {
+    let mut url = String::from("/settings?tab=custom_formats");
+    if let Some(id) = edit_id {
+        url.push_str(&format!("&edit_id={id}"));
+    }
+    if let Some(m) = msg {
+        url.push_str(&format!("&msg={}", urlencoding::encode(m)));
+    }
+    if let Some(e) = err {
+        url.push_str(&format!("&err={}", urlencoding::encode(e)));
+    }
+    url
 }
 
 #[utoipa::path(

@@ -17,11 +17,12 @@
 <div class="settings-tabs system-tabs">
     <a href="/settings?tab=integrations" class="system-tab {% if tab == "integrations" %}active{% endif %}">Connections</a>
     <a href="/settings?tab=quality" class="system-tab {% if tab == "quality" %}active{% endif %}">Preferred Quality &amp; Releases</a>
+    <a href="/settings?tab=custom_formats" class="system-tab {% if tab == "custom_formats" %}active{% endif %}">Custom Formats</a>
     <a href="/settings?tab=groups" class="system-tab {% if tab == "groups" %}active{% endif %}">Release Groups</a>
     <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
 </div>
 
-{% if tab != "groups" %}
+{% if tab != "groups" && tab != "custom_formats" %}
 <form method="post" action="/settings" class="settings-form">
     <input type="hidden" name="tab" value="{{ tab }}">
 
@@ -200,6 +201,13 @@
                 </label>
                 <span class="form-hint">Periodically search for higher-quality releases of downloaded episodes. Runs every 24 hours. Upgrades via RSS are always active regardless of this setting.</span>
             </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="seadex_enabled" value="1" {% if config.seadex_enabled %}checked{% endif %}>
+                    Enable SeaDex release boost
+                </label>
+                <span class="form-hint">Query <a href="https://releases.moe" target="_blank" rel="noopener">releases.moe</a> during auto-search and boost releases the SeaDex community has flagged as best (or alt-best). Automatically suppressed when you have a <code>SeaDexBestSpecification</code> Custom Format, since the CF takes precedence.</span>
+            </div>
         </fieldset>
     </div>
 
@@ -373,6 +381,128 @@
                 {% endfor %}
             </tbody>
         </table>
+    </fieldset>
+</div>
+{% endif %}
+
+{% if tab == "custom_formats" %}
+<div class="settings-tab-panel active">
+    <fieldset>
+        <legend>Custom Formats</legend>
+        <p class="form-hint">
+            Sonarr v4-compatible Custom Formats. During auto-search, every matching spec contributes its score to the release total.
+            Paste JSON exports from Sonarr or <a href="https://trash-guides.info" target="_blank" rel="noopener">Trash Guides</a>, or build your own from scratch.
+        </p>
+
+        <h3 class="settings-subheading">Global Minimum Score</h3>
+        <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form">
+            <div class="form-group">
+                <label for="cf_min_score">Custom Format Minimum Score</label>
+                <input type="number" name="minimum_score" id="cf_min_score"
+                    value="{{ custom_format_min_score_display }}" placeholder="(blank = no floor)">
+                <span class="form-hint">Auto-search drops releases whose summed CF score falls below this threshold. Interactive search still shows everything. Leave blank to disable the floor.</span>
+            </div>
+            <button type="submit" class="btn btn-primary">Save Minimum Score</button>
+        </form>
+
+        <h3 class="settings-subheading">
+            {% if let Some(edit) = custom_format_edit %}Edit Custom Format #{{ edit.id }}{% else %}Add Custom Format{% endif %}
+        </h3>
+        <form method="post" action="/settings/custom-formats/upsert" class="settings-form">
+            {% if let Some(edit) = custom_format_edit %}
+            <input type="hidden" name="id" value="{{ edit.id }}">
+            {% endif %}
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="cf_name">Name</label>
+                    <input type="text" name="name" id="cf_name" required
+                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.name }}{% endif %}">
+                </div>
+                <div class="form-group">
+                    <label for="cf_score">Score</label>
+                    <input type="number" name="score" id="cf_score" required
+                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.score }}{% else %}0{% endif %}">
+                </div>
+                <div class="form-group">
+                    <label for="cf_trash_id">Trash ID (optional)</label>
+                    <input type="text" name="trash_id" id="cf_trash_id" placeholder="e.g. ed38b0b3..."
+                        value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="cf_json">Sonarr v4 Custom Format JSON</label>
+                <textarea name="json" id="cf_json" rows="16" required spellcheck="false"
+                    placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.json }}{% endif %}</textarea>
+                <span class="form-hint">Full Sonarr v4 CF object. Supported spec implementations: <code>ReleaseTitleSpecification</code>, <code>SourceSpecification</code>, <code>ResolutionSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>LanguageSpecification</code>, <code>SeaDexBestSpecification</code>. The compiler runs before saving, so invalid JSON is rejected with an error message.</span>
+            </div>
+            <div class="settings-inline-actions">
+                <button type="submit" class="btn btn-primary">
+                    {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
+                </button>
+                {% if custom_format_edit.is_some() %}
+                <a href="/settings?tab=custom_formats" class="btn btn-secondary">Cancel</a>
+                {% endif %}
+            </div>
+        </form>
+
+        <h3 class="settings-subheading">Current Custom Formats ({{ custom_formats.len() }})</h3>
+        {% if custom_formats.is_empty() %}
+        <p class="form-hint">No Custom Formats defined. Add one above or import from a Sonarr export below.</p>
+        {% else %}
+        <table class="group-source-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Score</th>
+                    <th>Specs</th>
+                    <th>Trash ID</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for cf in custom_formats %}
+                <tr>
+                    <td>{{ cf.row.name }}</td>
+                    <td>{{ cf.row.score }}</td>
+                    <td>
+                        {% if let Some(err) = cf.parse_error.as_ref() %}
+                        <span class="tag tag-res" title="{{ err }}">parse error</span>
+                        {% else %}
+                        {{ cf.specs_count }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if let Some(tid) = cf.row.trash_id.as_ref() %}<code>{{ tid }}</code>{% else %}<span class="form-hint">—</span>{% endif %}
+                    </td>
+                    <td>
+                        <div class="settings-inline-actions">
+                            <a href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}" class="btn btn-secondary">Edit</a>
+                            <form method="post" action="/settings/custom-formats/delete" class="group-delete-form" onsubmit="return confirm('Delete Custom Format: {{ cf.row.name }}?');">
+                                <input type="hidden" name="id" value="{{ cf.row.id }}">
+                                <button type="submit" class="btn btn-danger">Delete</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+
+        <h3 class="settings-subheading">Import / Export</h3>
+        <div class="settings-inline-actions" style="margin-bottom: 12px;">
+            <a href="/settings/custom-formats/export" class="btn btn-secondary">Export All as JSON</a>
+            <span class="form-hint">Downloads every saved CF (with persisted scores) as a JSON array. Round-trips into Sonarr or another Ryokan instance.</span>
+        </div>
+        <form method="post" action="/settings/custom-formats/import" class="settings-form">
+            <div class="form-group">
+                <label for="cf_import_payload">Paste Sonarr v4 CF Export (object or array)</label>
+                <textarea name="payload" id="cf_import_payload" rows="10" spellcheck="false"
+                    placeholder='[{"name": "...", "specifications": [...], "score": 100}, ...]'></textarea>
+                <span class="form-hint">Each entry is compiled via the same parser as the create form. Per-entry failures are counted and the first error is reported, but valid entries still import.</span>
+            </div>
+            <button type="submit" class="btn btn-primary">Import</button>
+        </form>
     </fieldset>
 </div>
 {% endif %}

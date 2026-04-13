@@ -69,6 +69,12 @@ use services::{
         handlers::settings::qbit_test,
         handlers::settings::jellyfin_test,
         handlers::settings::jellyfin_refresh,
+        // Settings — Custom Formats
+        handlers::settings::settings_custom_formats_upsert,
+        handlers::settings::settings_custom_formats_delete,
+        handlers::settings::settings_custom_formats_minimum_score,
+        handlers::settings::settings_custom_formats_import,
+        handlers::settings::settings_custom_formats_export,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
         handlers::system::api_rss_sync,
@@ -108,12 +114,17 @@ use services::{
         handlers::downloads::BlocklistRemoveForm,
         handlers::settings::QbitTestForm,
         handlers::settings::JellyfinTestForm,
+        handlers::settings::CustomFormatUpsertForm,
+        handlers::settings::CustomFormatDeleteForm,
+        handlers::settings::CustomFormatMinScoreForm,
+        handlers::settings::CustomFormatImportForm,
     )),
     tags(
         (name = "Library", description = "Anime library management — add, remove, search, and monitor series"),
         (name = "Search", description = "Nyaa torrent search and grabbing"),
         (name = "Downloads", description = "qBittorrent download management"),
         (name = "System", description = "Health checks, logs, RSS sync, and background tasks"),
+        (name = "Settings", description = "Settings management — Custom Formats CRUD, import/export, and scoring thresholds"),
     ),
 )]
 struct ApiDoc;
@@ -298,6 +309,11 @@ async fn main() {
         .route("/settings", get(handlers::settings::settings_page).post(handlers::settings::settings_submit))
         .route("/settings/groups", post(handlers::settings::settings_groups_upsert))
         .route("/settings/groups/delete", post(handlers::settings::settings_groups_delete))
+        .route("/settings/custom-formats/upsert", post(handlers::settings::settings_custom_formats_upsert))
+        .route("/settings/custom-formats/delete", post(handlers::settings::settings_custom_formats_delete))
+        .route("/settings/custom-formats/minimum-score", post(handlers::settings::settings_custom_formats_minimum_score))
+        .route("/settings/custom-formats/import", post(handlers::settings::settings_custom_formats_import))
+        .route("/settings/custom-formats/export", get(handlers::settings::settings_custom_formats_export))
         .route("/api/qbit/test", post(handlers::settings::qbit_test))
         .route("/api/jellyfin/test", post(handlers::settings::jellyfin_test))
         .route("/api/health", get(handlers::settings::api_health))

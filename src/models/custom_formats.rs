@@ -19,7 +19,27 @@
 //! `ALTER TABLE ... ADD COLUMN` — not here — because Ryokan's config is
 //! a single typed row, not a key/value store.
 
-use sqlx::SqlitePool;
+use sqlx::{FromRow, SqlitePool};
+
+/// Single row in the `custom_formats` table joined with its V1-profile
+/// score from `custom_format_scores`. A row with no score entry yet
+/// returns `0` (via `COALESCE`) rather than `NULL`, so the settings UI
+/// never has to handle a missing-score case.
+#[derive(Debug, Clone, FromRow)]
+pub struct CustomFormatRow {
+    pub id: i64,
+    pub name: String,
+    pub trash_id: Option<String>,
+    pub json: String,
+    pub score: i64,
+    // Persisted timestamps. Not shown in the current UI but kept on the
+    // struct so a future "sort by recently edited" view has the data
+    // without a schema migration.
+    #[allow(dead_code)]
+    pub created_at: i64,
+    #[allow(dead_code)]
+    pub updated_at: i64,
+}
 
 pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -51,5 +71,149 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    Ok(())
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Return every CF row joined with its V1-profile score, ordered by
+/// name for a stable settings-page layout.
+pub async fn list_with_scores(db: &SqlitePool) -> Result<Vec<CustomFormatRow>, sqlx::Error> {
+    sqlx::query_as::<_, CustomFormatRow>(
+        r#"
+        SELECT cf.id, cf.name, cf.trash_id, cf.json,
+               COALESCE(cfs.score, 0) AS score,
+               cf.created_at, cf.updated_at
+        FROM custom_formats cf
+        LEFT JOIN custom_format_scores cfs
+               ON cfs.custom_format_id = cf.id
+              AND cfs.profile_id = 1
+        ORDER BY cf.name COLLATE NOCASE
+        "#,
+    )
+    .fetch_all(db)
+    .await
+}
+
+/// Fetch a single CF by id, joined with its V1-profile score. Used to
+/// prefill the settings-page edit form when `?edit_id=N` is present.
+pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<CustomFormatRow>, sqlx::Error> {
+    sqlx::query_as::<_, CustomFormatRow>(
+        r#"
+        SELECT cf.id, cf.name, cf.trash_id, cf.json,
+               COALESCE(cfs.score, 0) AS score,
+               cf.created_at, cf.updated_at
+        FROM custom_formats cf
+        LEFT JOIN custom_format_scores cfs
+               ON cfs.custom_format_id = cf.id
+              AND cfs.profile_id = 1
+        WHERE cf.id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+}
+
+/// Insert a new CF row and its V1-profile score in a single transaction.
+/// Returns the newly-assigned row id so the caller can redirect straight
+/// to the edit view.
+pub async fn insert(
+    db: &SqlitePool,
+    name: &str,
+    trash_id: Option<&str>,
+    json: &str,
+    score: i32,
+) -> Result<i64, sqlx::Error> {
+    let now = now_unix();
+    let mut tx = db.begin().await?;
+    let res = sqlx::query(
+        r#"
+        INSERT INTO custom_formats (name, trash_id, json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(name)
+    .bind(trash_id)
+    .bind(json)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    let id = res.last_insert_rowid();
+
+    sqlx::query(
+        r#"
+        INSERT INTO custom_format_scores (custom_format_id, profile_id, score)
+        VALUES (?, 1, ?)
+        "#,
+    )
+    .bind(id)
+    .bind(score as i64)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Update an existing CF row and its V1-profile score. The score row
+/// uses `INSERT ... ON CONFLICT` rather than a plain `UPDATE` so an old
+/// row without a score entry still gets one on first edit.
+pub async fn update(
+    db: &SqlitePool,
+    id: i64,
+    name: &str,
+    trash_id: Option<&str>,
+    json: &str,
+    score: i32,
+) -> Result<(), sqlx::Error> {
+    let now = now_unix();
+    let mut tx = db.begin().await?;
+
+    sqlx::query(
+        r#"
+        UPDATE custom_formats
+        SET name = ?, trash_id = ?, json = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(name)
+    .bind(trash_id)
+    .bind(json)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO custom_format_scores (custom_format_id, profile_id, score)
+        VALUES (?, 1, ?)
+        ON CONFLICT(custom_format_id, profile_id) DO UPDATE SET score = excluded.score
+        "#,
+    )
+    .bind(id)
+    .bind(score as i64)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Delete a CF row. The `ON DELETE CASCADE` on `custom_format_scores`
+/// drops the score row automatically.
+pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM custom_formats WHERE id = ?")
+        .bind(id)
+        .execute(db)
+        .await?;
     Ok(())
 }
