@@ -101,7 +101,7 @@ pub async fn find_all_for_target(
     let aliases = collect_aliases(detail);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
-    let is_finished = detail.status == "FINISHED";
+    let is_finished = detail.is_finished();
     let finished_mode = quality::FinishedSeriesMode::from_str(&config.finished_series_quality);
     let preferred_source_enum = Source::from_str(&config.preferred_source);
     let preferred_resolution_enum = Resolution::from_str(&config.preferred_resolution);
@@ -191,7 +191,7 @@ pub async fn find_best_for_target(
     let aliases = collect_aliases(detail);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
-    let is_finished = detail.status == "FINISHED";
+    let is_finished = detail.is_finished();
     let finished_mode = quality::FinishedSeriesMode::from_str(&config.finished_series_quality);
     let preferred_source_enum = Source::from_str(&config.preferred_source);
     let preferred_resolution_enum = Resolution::from_str(&config.preferred_resolution);
@@ -344,6 +344,41 @@ struct InteractiveQueryCtx<'a> {
     season_year: Option<i32>,
 }
 
+/// Should this Nyaa result be dropped as a probable-sequel false positive?
+///
+/// For FINISHED series, any result uploaded 2+ years after the season aired
+/// is much more likely to be for a later season than the one we're
+/// searching (Nyaa listings aren't tagged with AniList IDs, so we have
+/// nothing else to distinguish them). Single-episode, non-BluRay releases
+/// are the only things this filter catches — BD packs legitimately show
+/// up years later, and batch releases are ambiguous enough that we let
+/// the rescore pass handle them.
+///
+/// Returns `true` to drop, `false` to keep. The BD check uses the cheap
+/// filename heuristic so this runs pre-classification without touching
+/// the DB.
+fn is_likely_sequel_leak(
+    result: &SearchResult,
+    is_finished: bool,
+    season_year: Option<i32>,
+) -> bool {
+    if !is_finished {
+        return false;
+    }
+    let Some(air_year) = season_year else {
+        return false;
+    };
+    if result.upload_timestamp <= 0 {
+        return false;
+    }
+    let Some(upload_year) = upload_year_of(result.upload_timestamp) else {
+        return false;
+    };
+    upload_year - air_year >= 2
+        && !source::looks_like_bluray_filename(&result.title)
+        && !result.is_batch
+}
+
 /// Run a set of queries against Nyaa page 1, collecting valid candidates.
 async fn run_queries(
     queries: &[String],
@@ -383,22 +418,8 @@ async fn run_queries(
                 if !matches_target(&result.title, ctx.aliases, ctx.target, ctx.expected_season, ctx.batch_episode_match && result.is_batch) {
                     continue;
                 }
-                // For FINISHED series, reject non-BD results uploaded 2+ years after airing.
-                // Uses a filename-only BD heuristic so we don't hit the DB here — full
-                // classification runs later in the rescore pass.
-                if ctx.is_finished {
-                    if let Some(air_year) = ctx.season_year {
-                        if result.upload_timestamp > 0 {
-                            if let Some(upload_year) = upload_year_of(result.upload_timestamp) {
-                                if upload_year - air_year >= 2
-                                    && !source::looks_like_bluray_filename(&result.title)
-                                    && !result.is_batch
-                                {
-                                    continue;
-                                }
-                            }
-                        }
-                    }
+                if is_likely_sequel_leak(&result, ctx.is_finished, ctx.season_year) {
+                    continue;
                 }
                 candidates.push(result);
             }
@@ -465,21 +486,8 @@ async fn run_queries_interactive(
                     }
                 }
             }
-            // For FINISHED series, reject non-BD results uploaded 2+ years after airing.
-            // Uses a filename-only BD heuristic so we don't hit the DB here.
-            if ctx.is_finished {
-                if let Some(air_year) = ctx.season_year {
-                    if result.upload_timestamp > 0 {
-                        if let Some(upload_year) = upload_year_of(result.upload_timestamp) {
-                            if upload_year - air_year >= 2
-                                && !source::looks_like_bluray_filename(&result.title)
-                                && !result.is_batch
-                            {
-                                continue;
-                            }
-                        }
-                    }
-                }
+            if is_likely_sequel_leak(&result, ctx.is_finished, ctx.season_year) {
+                continue;
             }
             candidates.push(result);
         }
@@ -604,10 +612,12 @@ pub fn resolve_existing_classification(
 ) -> ClassificationResult {
     if let Some(tag) = tag {
         if !tag.source.is_empty() || !tag.resolution.is_empty() {
-            return source::classification_from_stored(
+            return source::classification_from_stored_full(
                 &tag.source,
                 &tag.resolution,
                 tag.is_remux,
+                tag.is_bdmv,
+                source::WebKind::from_str(&tag.web_kind),
                 tag.classification_confidence,
                 tag.needs_review,
             );

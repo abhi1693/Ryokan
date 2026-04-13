@@ -24,6 +24,15 @@ static DUMMY_BCRYPT_HASH: LazyLock<String> = LazyLock::new(|| {
         .expect("bcrypt::hash of a fixed input should not fail")
 });
 
+/// Force the [`DUMMY_BCRYPT_HASH`] LazyLock to initialise. Call once during
+/// startup so the ~50ms `bcrypt::hash` cost is paid before the first login
+/// probe hits it — otherwise a cold process has a one-shot timing oracle on
+/// its first failed-username attempt (bcrypt::hash + bcrypt::verify ≈ 100ms
+/// vs the ~50ms of every subsequent attempt).
+pub fn warm_timing_equalizer() {
+    let _ = &*DUMMY_BCRYPT_HASH;
+}
+
 /// Check if any users exist (for first-run setup detection).
 pub async fn has_users(db: &SqlitePool) -> Result<bool, sqlx::Error> {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")

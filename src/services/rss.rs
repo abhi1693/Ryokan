@@ -1457,11 +1457,14 @@ fn decode_xml(value: &str) -> String {
             continue;
         }
         // Look for the terminating ';' within a reasonable distance.
-        // 10 is enough for `&quot;`, `&#x10FFFF;`, etc.; anything longer
-        // is almost certainly a literal ampersand with no entity.
+        // 16 comfortably covers every legal predefined-entity name plus
+        // the longest hex codepoint form (`&#x10FFFF;` is 9 bytes after
+        // the `&`) with margin for the occasional leading-zero or
+        // stray-whitespace oddball a lazy feed might emit; anything
+        // longer is almost certainly a literal ampersand with no entity.
         let end = bytes[i + 1..]
             .iter()
-            .take(10)
+            .take(16)
             .position(|&b| b == b';')
             .map(|p| i + 1 + p);
         let Some(end) = end else {

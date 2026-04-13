@@ -72,7 +72,13 @@ pub fn classify_temporal(
     // The finished-era rules need a known airing year.
     let year = season_year?;
 
-    let is_finished = matches!(status_norm.as_str(), "FINISHED" | "CANCELLED");
+    // AniList uses FINISHED / CANCELLED; Jikan normalizes "Finished Airing"
+    // to FINISHED_AIRING. Accept all three so the finished-era rules still
+    // fire when metadata fell back to Jikan.
+    let is_finished = matches!(
+        status_norm.as_str(),
+        "FINISHED" | "FINISHED_AIRING" | "CANCELLED"
+    );
     if !is_finished {
         return None;
     }
@@ -157,6 +163,16 @@ mod tests {
         // CANCELLED shows also get home-video releases (sometimes rushed
         // ones), and more importantly they're definitely not still airing.
         let ev = classify_temporal("CANCELLED", Some(2024), true, 2026).unwrap();
+        assert_eq!(ev.source, Source::BluRay);
+    }
+
+    #[test]
+    fn jikan_finished_airing_counts_as_finished() {
+        // When metadata fell back from AniList to Jikan, `status` comes in
+        // as "FINISHED_AIRING" (Jikan's normalized form of "Finished
+        // Airing"). The rules must fire or the entire classification path
+        // silently regresses on Jikan-fed series.
+        let ev = classify_temporal("FINISHED_AIRING", Some(2024), true, 2026).unwrap();
         assert_eq!(ev.source, Source::BluRay);
     }
 

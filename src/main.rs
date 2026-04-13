@@ -9,6 +9,7 @@ use axum::{
     Router,
 };
 use sqlx::SqlitePool;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
@@ -192,6 +193,14 @@ async fn main() {
 
     // Run migrations.
     models::migrate(&db).await.expect("Failed to run migrations");
+
+    // Warm the bcrypt dummy-hash LazyLock so the first failed-username login
+    // probe doesn't pay a cold-start ~50ms extra on top of the normal bcrypt
+    // cost — that extra delay on the very first probe would itself be a
+    // timing side channel distinguishing "cold process" from "warm process".
+    // Run it in a blocking task so the ~50ms bcrypt::hash doesn't stall the
+    // runtime worker during startup.
+    let _ = tokio::task::spawn_blocking(models::user::warm_timing_equalizer).await;
 
     // Build shared state.
     let state = AppState {
@@ -652,5 +661,15 @@ async fn main() {
         });
     }
 
-    axum::serve(listener, app).await.expect("Server error");
+    // Use `into_make_service_with_connect_info::<SocketAddr>()` so the auth
+    // handler can pull the true client socket address via
+    // `ConnectInfo<SocketAddr>`. This is the ground-truth IP the rate limiter
+    // uses whenever RYOKAN_TRUSTED_PROXY is unset — without it, the only
+    // source of an IP is the (spoofable) X-Forwarded-For / X-Real-IP headers.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("Server error");
 }

@@ -91,8 +91,66 @@ impl Source {
             "hdtv" => Source::Hdtv,
             "dvd" => Source::Dvd,
             "web" | "webdl" | "web-dl" | "webrip" => Source::Web,
-            "bluray" | "blu-ray" | "bd" | "bdrip" | "bdremux" => Source::BluRay,
+            "bluray" | "blu-ray" | "bd" | "bdrip" | "bdremux" | "bdmv" => Source::BluRay,
             _ => Source::Unknown,
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// WebKind — Sonarr-style sub-classification within the Web source family
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Distinguishes the two flavors of `Source::Web` that Sonarr's quality
+/// definitions treat separately:
+///
+/// - **WebDl** — direct download from the streaming platform's CDN (the
+///   stream's actual source file). Higher fidelity, no re-encode.
+/// - **WebRip** — captured/re-encoded from the streaming player. Lower
+///   fidelity than WebDl.
+///
+/// `Unknown` is the fallback when the release tag was just bare "WEB" with
+/// no further qualifier — common for older listings and a lot of fan
+/// releases. A bare-"WEB" release is treated as if neither variant is
+/// strongly indicated, so the rank tuple sees it slot between WebRip and
+/// WebDl rather than overriding either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+pub enum WebKind {
+    #[default]
+    Unknown,
+    WebRip,
+    WebDl,
+}
+
+impl WebKind {
+    /// Monotonic ordering: WebDl > WebRip > Unknown. Used by `rank()` so
+    /// the top-level ranking tuple can prefer a WEB-DL over a WEBRip when
+    /// both have the same `Source::Web`/resolution.
+    pub fn rank(self) -> u8 {
+        match self {
+            WebKind::Unknown => 0,
+            WebKind::WebRip => 1,
+            WebKind::WebDl => 2,
+        }
+    }
+
+    /// Display string used in episode labels and persisted to the DB.
+    /// Empty for `Unknown` so it doesn't pollute legacy bare-"WEB" labels.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebKind::Unknown => "",
+            WebKind::WebRip => "WEBRip",
+            WebKind::WebDl => "WEB-DL",
+        }
+    }
+
+    /// Parse from the string form stored in the DB. Accepts both the
+    /// canonical Sonarr forms and a few common variants.
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "webdl" | "web-dl" | "web.dl" => WebKind::WebDl,
+            "webrip" | "web-rip" | "web.rip" => WebKind::WebRip,
+            _ => WebKind::Unknown,
         }
     }
 }
@@ -210,7 +268,26 @@ impl SourceEvidence {
 pub struct ClassificationResult {
     pub source: Source,
     pub resolution: Resolution,
+    /// True for BluRay **Remux** releases — a lossless MKV-wrapped extract
+    /// of the disc's video+audio bitstreams with the BDMV container
+    /// stripped. Distinct from `is_bdmv`: a remux is the canonical
+    /// re-mux into MKV, while a BDMV/BD-Raw release ships the whole disc
+    /// structure intact. The two flags are mutually exclusive in the
+    /// label and are treated as different tiers by `rank()`.
     pub is_remux: bool,
+    /// Sub-classification within the Web source family (WebDl vs WebRip).
+    /// Always `WebKind::Unknown` when `source` isn't `Source::Web`.
+    #[serde(default)]
+    pub web_kind: WebKind,
+    /// True for raw BDMV / BD-RAW disc-structure releases — the actual
+    /// `BDMV/STREAM/*.m2ts` folder layout (or full ISO), with menus,
+    /// multi-track audio, and chapter info intact. Implies
+    /// `source == Source::BluRay`. **Distinct from `is_remux`**: a BDMV
+    /// release is the unaltered disc, while a Remux is a lossless
+    /// container-swap into MKV. They form three separate BluRay tiers:
+    /// plain encode < Remux < BDMV.
+    #[serde(default)]
+    pub is_bdmv: bool,
     /// Confidence of the winning source decision (0.0–1.0). This is either
     /// the confidence of the dominant single signal or, for multi-signal
     /// decisions, the fraction of total evidence mass backing the winner.
@@ -233,6 +310,8 @@ impl ClassificationResult {
             source: Source::Unknown,
             resolution: Resolution::Unknown,
             is_remux: false,
+            web_kind: WebKind::Unknown,
+            is_bdmv: false,
             confidence: 0.0,
             needs_review: true,
             evidence: Vec::new(),
@@ -240,24 +319,69 @@ impl ClassificationResult {
     }
 
     /// Ranking tuple for comparison. Higher = better quality. Resolution
-    /// dominates the ordering so a Web-1080p outranks a BluRay-720p, matching
-    /// the priorities of Ryokan's existing quality tier enum.
-    pub fn rank(&self) -> (u8, u8, u8) {
+    /// dominates the ordering so a Web-1080p outranks a BluRay-720p,
+    /// matching the priorities of Ryokan's existing quality tier enum.
+    ///
+    /// The fourth and fifth tuple slots break sub-source ties:
+    /// - `bluray_tier()` orders the three BluRay variants:
+    ///   plain encode (0) < Remux (1) < BDMV/BD-Raw (2). BDMV is the
+    ///   highest tier because it preserves the disc structure as
+    ///   shipped — Remux strips the BDMV container, and a plain encode
+    ///   transcodes the video.
+    /// - `web_kind.rank()` lets WEB-DL outrank WEBRip at the same
+    ///   resolution.
+    pub fn rank(&self) -> (u8, u8, u8, u8) {
         (
             self.resolution.rank(),
             self.source.rank(),
-            if self.is_remux { 1 } else { 0 },
+            self.bluray_tier(),
+            self.web_kind.rank(),
         )
     }
 
+    /// Combined BluRay sub-tier: 0 = plain encode, 1 = Remux, 2 = BDMV.
+    /// BDMV wins over Remux when both flags are set on the same row,
+    /// since the disc structure is strictly more information than the
+    /// MKV-wrapped extract.
+    pub fn bluray_tier(&self) -> u8 {
+        if self.is_bdmv {
+            2
+        } else if self.is_remux {
+            1
+        } else {
+            0
+        }
+    }
+
     /// Human-readable label for logs and UI.
+    ///
+    /// Source rendering is variant-aware:
+    /// - `Source::Web` with a known `web_kind` displays as "WEB-DL" or
+    ///   "WEBRip" instead of bare "Web".
+    /// - `Source::BluRay` picks **one** sub-label, mutually exclusive:
+    ///   "BluRay BDMV" if `is_bdmv` (highest tier — full disc), else
+    ///   "BluRay Remux" if `is_remux` (lossless MKV extract), else plain
+    ///   "BluRay" (encoded).
     pub fn label(&self) -> String {
-        let remux = if self.is_remux { " Remux" } else { "" };
-        match (self.source, self.resolution) {
-            (Source::Unknown, Resolution::Unknown) => "Unknown".to_string(),
-            (s, Resolution::Unknown) => s.as_str().to_string(),
-            (Source::Unknown, r) => r.as_str().to_string(),
-            (s, r) => format!("{}{} {}", s.as_str(), remux, r.as_str()),
+        let source_label: String = match self.source {
+            Source::Unknown => String::new(),
+            Source::Web if self.web_kind != WebKind::Unknown => self.web_kind.as_str().to_string(),
+            Source::BluRay => {
+                if self.is_bdmv {
+                    "BluRay BDMV".to_string()
+                } else if self.is_remux {
+                    "BluRay Remux".to_string()
+                } else {
+                    "BluRay".to_string()
+                }
+            }
+            other => other.as_str().to_string(),
+        };
+        match (source_label.as_str(), self.resolution) {
+            ("", Resolution::Unknown) => "Unknown".to_string(),
+            (s, Resolution::Unknown) => s.to_string(),
+            ("", r) => r.as_str().to_string(),
+            (s, r) => format!("{} {}", s, r.as_str()),
         }
     }
 }
@@ -282,12 +406,44 @@ const CONFLICT_THRESHOLD: f32 = 0.70;
 /// Minimum total evidence mass to avoid falling back to Unknown.
 const MIN_TOTAL: f32 = 0.50;
 
+/// Relative priority of a classification layer's origin string when
+/// breaking ties in the aggregator. Filename (Layer 1) sits at the top
+/// because the torrent title is the primary source of truth the user
+/// and the release group both stand behind — the post-download layers
+/// are ground-truth observations of the actual file bytes, but the
+/// design intent (see `source_filename`'s "confidence budget" docblock)
+/// is that filename drives the decision and the other layers
+/// *supplement* its verdict rather than replace it.
+///
+/// Used only by rule 1's tie-breaker today. Rule 2's per-source sum
+/// intentionally treats every origin equally so multiple weak
+/// corroborating signals can still outvote a single weak filename guess
+/// when filename didn't land a strong signal — that's the aggregator
+/// working as designed.
+fn origin_priority(origin: &str) -> u8 {
+    match origin {
+        "filename" => 5,
+        "ffprobe" => 4,
+        "dir" => 4,
+        "description" => 3,
+        "group" => 2,
+        "temporal" => 1,
+        _ => 0,
+    }
+}
+
 /// Fold a list of evidence into a final classification result.
 ///
 /// Rules, applied in order:
-/// 1. If any single evidence has `confidence >= STRONG_THRESHOLD (0.90)`,
-///    that source wins immediately. This lets high-confidence filename or
-///    ffprobe signals bypass the full aggregation path.
+/// 1. If all strong signals (confidence ≥ `STRONG_THRESHOLD`, 0.90) agree
+///    on a single source, pick the highest-confidence one. On exact ties,
+///    prefer filename (Layer 1) origin — the torrent title is the primary
+///    source of truth and other layers *supplement* it. If the strong
+///    signals disagree on source, fall through to rule 2 so rule 4 can
+///    detect the conflict and flag `needs_review`. Without this guard,
+///    two disagreeing strong signals (e.g. filename says WEB-DL at 0.95,
+///    directory walk found BDMV/ at 0.95) would be silently resolved by
+///    source rank alone, masking a conflict a human should see.
 /// 2. Otherwise, sum confidences per source across all evidence. The source
 ///    with the highest total is provisionally the winner.
 /// 3. If the total evidence mass for the best source is below `MIN_TOTAL
@@ -307,26 +463,44 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
         return ClassificationResult::unknown();
     }
 
-    // Rule 1: strong single-signal shortcut. Among strong signals, pick the
-    // highest-confidence one; ties broken by source rank.
-    if let Some(strong) = evidence
+    // Rule 1: strong single-signal shortcut. Only fires when every strong
+    // signal agrees on the same source — disagreement falls through to
+    // rule 2+4 so the conflict gets flagged rather than silently picked.
+    let strong: Vec<&SourceEvidence> = evidence
         .iter()
         .filter(|e| e.confidence >= STRONG_THRESHOLD)
-        .max_by(|a, b| {
-            a.confidence
-                .partial_cmp(&b.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.source.rank().cmp(&b.source.rank()))
-        })
-    {
-        return ClassificationResult {
-            source: strong.source,
-            resolution: Resolution::Unknown,
-            is_remux: false,
-            confidence: strong.confidence,
-            needs_review: false,
-            evidence: evidence.to_vec(),
-        };
+        .collect();
+    if !strong.is_empty() {
+        let first_source = strong[0].source;
+        let all_agree = strong.iter().all(|e| e.source == first_source);
+        if all_agree {
+            // All strong signals point at the same source. Pick the
+            // highest-confidence one; ties broken by origin priority so
+            // filename (L1) wins over other origins when equal. This
+            // makes the filename the effective tie-breaker — the
+            // "primary source of truth" in the user's mental model.
+            let winner = strong
+                .iter()
+                .max_by(|a, b| {
+                    a.confidence
+                        .partial_cmp(&b.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| origin_priority(a.origin).cmp(&origin_priority(b.origin)))
+                })
+                .expect("strong is non-empty");
+            return ClassificationResult {
+                source: winner.source,
+                resolution: Resolution::Unknown,
+                is_remux: false,
+                web_kind: WebKind::Unknown,
+                is_bdmv: false,
+                confidence: winner.confidence,
+                needs_review: false,
+                evidence: evidence.to_vec(),
+            };
+        }
+        // Strong signals disagree — fall through to rule 2 so per-source
+        // sums can pick a leader and rule 4 can flag the conflict.
     }
 
     // Rule 2: sum per source.
@@ -352,6 +526,8 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
             source: Source::Unknown,
             resolution: Resolution::Unknown,
             is_remux: false,
+            web_kind: WebKind::Unknown,
+            is_bdmv: false,
             confidence: leader_sum,
             needs_review: true,
             evidence: evidence.to_vec(),
@@ -371,6 +547,8 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
         source: leader,
         resolution: Resolution::Unknown,
         is_remux: false,
+        web_kind: WebKind::Unknown,
+        is_bdmv: false,
         // Normalize the confidence to a 0..1 range based on the leader's
         // share of total evidence mass. A leader with 1.5 out of 2.0 total
         // evidence gets 0.75; a dominant leader with 1.8 out of 2.0 gets 0.9.
@@ -512,8 +690,16 @@ pub async fn classify_release(
         Resolution::Unknown
     };
     result.is_remux = filename.is_remux;
+    result.is_bdmv = filename.is_bdmv;
+    // Web sub-classification only carries through when the aggregator
+    // also landed on Source::Web — propagating WebKind onto a BluRay
+    // verdict would be nonsensical.
+    if result.source == Source::Web {
+        result.web_kind = filename.web_kind;
+    }
 
     log_classification("classify_release", title, &result);
+    log_classification_to_db(db, "classify_release", title, &result).await;
 
     result
 }
@@ -606,8 +792,13 @@ pub async fn classify_post_download(
         Resolution::Unknown
     };
     result.is_remux = filename.is_remux;
+    result.is_bdmv = filename.is_bdmv;
+    if result.source == Source::Web {
+        result.web_kind = filename.web_kind;
+    }
 
     log_classification("classify_post_download", original_title, &result);
+    log_classification_to_db(db, "classify_post_download", original_title, &result).await;
 
     result
 }
@@ -622,7 +813,95 @@ pub async fn classify_post_download(
 /// [source] classify_release: "Foo" → BluRay/1080p (conf=0.92) [layer1:BluRay:0.95 "BD tag"] [group:BluRay:0.90 "SubsPlease"]
 /// ```
 fn log_classification(phase: &str, title: &str, result: &ClassificationResult) {
-    let trail: String = result
+    let trail = evidence_trail(result);
+    tracing::debug!(
+        target: "ryokan::source",
+        "[source] {}: {:?} → {} (conf={:.2}) [rule={}] {}",
+        phase,
+        title,
+        result.label(),
+        result.confidence,
+        decision_rule(result),
+        trail,
+    );
+    if result.needs_review {
+        tracing::info!(
+            target: "ryokan::source",
+            "[source] {}: {:?} needs review → {} (conf={:.2}) [rule={}] {}",
+            phase,
+            title,
+            result.label(),
+            result.confidence,
+            decision_rule(result),
+            trail,
+        );
+    }
+}
+
+/// Mirror of [`log_classification`] that writes through the DB-backed
+/// logger so per-decision traces show up in the UI logs page under the
+/// `Quality` category. Called by the orchestrating `classify_*`
+/// functions after they finalize a result. Always emits at the DEBUG
+/// level — confident classifications are noisy, so the user has to
+/// opt in by raising the log filter.
+///
+/// `needs_review` results additionally emit at INFO so they're visible
+/// without flipping debug on, mirroring the tracing behavior. The detail
+/// field carries the per-layer evidence breakdown formatted one entry
+/// per line so the logs page wraps it cleanly.
+async fn log_classification_to_db(
+    db: &SqlitePool,
+    phase: &str,
+    title: &str,
+    result: &ClassificationResult,
+) {
+    let detail = format!(
+        "phase={}\nrule={}\nlabel={}\nconfidence={:.2}\nresolution={}\nis_remux={}\nis_bdmv={}\nweb_kind={}\nevidence:\n{}",
+        phase,
+        decision_rule(result),
+        result.label(),
+        result.confidence,
+        result.resolution.as_str(),
+        result.is_remux,
+        result.is_bdmv,
+        result.web_kind.as_str(),
+        result
+            .evidence
+            .iter()
+            .map(|e| format!(
+                "  - {}: {} (conf={:.2}) — {}",
+                e.origin,
+                e.source.as_str(),
+                e.confidence,
+                e.detail
+            ))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let summary = format!("Classified \"{}\" → {}", title, result.label());
+    if result.needs_review {
+        crate::services::logger::info(
+            db,
+            crate::models::log::LogCategory::Quality,
+            &format!("Needs review: {}", summary),
+            &detail,
+        )
+        .await;
+    } else {
+        crate::services::logger::debug(
+            db,
+            crate::models::log::LogCategory::Quality,
+            &summary,
+            &detail,
+        )
+        .await;
+    }
+}
+
+/// Formatted single-line evidence trail. Shared by both the tracing
+/// logger and the DB logger so the on-disk format stays consistent.
+fn evidence_trail(result: &ClassificationResult) -> String {
+    result
         .evidence
         .iter()
         .map(|e| {
@@ -635,29 +914,39 @@ fn log_classification(phase: &str, title: &str, result: &ClassificationResult) {
             )
         })
         .collect::<Vec<_>>()
-        .join(" ");
-    tracing::debug!(
-        target: "ryokan::source",
-        "[source] {}: {:?} → {}/{} (conf={:.2}) {}",
-        phase,
-        title,
-        result.source.as_str(),
-        result.resolution.as_str(),
-        result.confidence,
-        trail,
-    );
-    if result.needs_review {
-        tracing::info!(
-            target: "ryokan::source",
-            "[source] {}: {:?} needs review → {}/{} (conf={:.2}) {}",
-            phase,
-            title,
-            result.source.as_str(),
-            result.resolution.as_str(),
-            result.confidence,
-            trail,
-        );
+        .join(" ")
+}
+
+/// Reverse-engineer which aggregator rule fired by inspecting the
+/// returned `ClassificationResult`. Cheaper than threading a "rule
+/// fired" field through the result struct, and accurate enough for
+/// debugging — the rules are mutually exclusive by construction.
+///
+/// - `empty` — no evidence at all (`ClassificationResult::unknown()`).
+/// - `rule1-strong` — at least one evidence ≥ `STRONG_THRESHOLD` agreed
+///   with the winning source.
+/// - `rule3-weak` — total mass below `MIN_TOTAL`, fell back to Unknown.
+/// - `rule4-conflict` — runner-up had a strong signal and the lead was
+///   smaller than `MIN_LEAD` (`needs_review = true` on a non-Unknown result).
+/// - `rule2-sum` — clean per-source sum win (the common case).
+fn decision_rule(result: &ClassificationResult) -> &'static str {
+    if result.evidence.is_empty() {
+        return "empty";
     }
+    if result.source == Source::Unknown {
+        return "rule3-weak";
+    }
+    let strong_for_winner = result
+        .evidence
+        .iter()
+        .any(|e| e.confidence >= STRONG_THRESHOLD && e.source == result.source);
+    if strong_for_winner {
+        return "rule1-strong";
+    }
+    if result.needs_review {
+        return "rule4-conflict";
+    }
+    "rule2-sum"
 }
 
 /// Current calendar year as an `i32`, injected into Layer 4 so the
@@ -692,6 +981,10 @@ pub fn classify_release_sync(title: &str, resolution_hint: Option<&str>) -> Clas
         Resolution::Unknown
     };
     result.is_remux = filename.is_remux;
+    result.is_bdmv = filename.is_bdmv;
+    if result.source == Source::Web {
+        result.web_kind = filename.web_kind;
+    }
     result
 }
 
@@ -703,10 +996,12 @@ pub fn classify_release_sync(title: &str, resolution_hint: Option<&str>) -> Clas
 /// The evidence trail is not stored in the DB, so the returned result has
 /// an empty `evidence` vec. That's fine for rank comparison — evidence is
 /// only consumed by auditing code paths.
-pub fn classification_from_stored(
+pub fn classification_from_stored_full(
     source: &str,
     resolution: &str,
     is_remux: bool,
+    is_bdmv: bool,
+    web_kind: WebKind,
     confidence: f32,
     needs_review: bool,
 ) -> ClassificationResult {
@@ -714,6 +1009,8 @@ pub fn classification_from_stored(
         source: Source::from_str(source),
         resolution: Resolution::from_str(resolution),
         is_remux,
+        web_kind,
+        is_bdmv,
         confidence,
         needs_review,
         evidence: Vec::new(),
@@ -728,6 +1025,8 @@ pub fn cutoff_classification(cutoff_source: Source, cutoff_resolution: Resolutio
         source: cutoff_source,
         resolution: cutoff_resolution,
         is_remux: false,
+        web_kind: WebKind::Unknown,
+        is_bdmv: false,
         confidence: 1.0,
         needs_review: false,
         evidence: Vec::new(),
@@ -836,12 +1135,32 @@ pub fn score_classification(
         score -= 5;
     }
 
-    // ── Remux premium ─────────────────────────────────────────────────────
-    // Remux is only a bonus when the user actually wants BluRay-grade
-    // fidelity. Penalizing it otherwise would be wrong (it's still a valid
-    // BluRay source, just overkill), so we simply don't reward it.
-    if c.is_remux && preferred_source.rank() >= Source::BluRay.rank() {
-        score += 5;
+    // ── Remux / BDMV premiums ─────────────────────────────────────────────
+    // Both are only a bonus when the user actually wants BluRay-grade
+    // fidelity. Penalizing them otherwise would be wrong (still valid
+    // BluRay sources, just overkill), so we simply don't reward them.
+    // BDMV gets a slightly larger bump than Remux because it's the
+    // higher-fidelity tier in the BluRay sub-ranking.
+    if preferred_source.rank() >= Source::BluRay.rank() {
+        if c.is_bdmv {
+            score += 7;
+        } else if c.is_remux {
+            score += 5;
+        }
+    }
+
+    // ── Web sub-tier preference ───────────────────────────────────────────
+    // When the user prefers WEB-grade quality, lightly favor WEB-DL over
+    // WEBRip — the underlying tier ordering already reflects this in
+    // `rank()`, but the score path is what `score_result` adds to, so we
+    // mirror it here so a WEB-DL release nudges ahead in mixed result
+    // sets sorted by score rather than by classification rank.
+    if c.source == Source::Web {
+        match c.web_kind {
+            WebKind::WebDl => score += 3,
+            WebKind::WebRip => score -= 1,
+            WebKind::Unknown => {}
+        }
     }
 
     // ── Needs-review penalty ──────────────────────────────────────────────
@@ -926,6 +1245,8 @@ mod tests {
             source: Source::Web,
             resolution: Resolution::R1080p,
             is_remux: false,
+            web_kind: WebKind::Unknown,
+            is_bdmv: false,
             confidence: 1.0,
             needs_review: false,
             evidence: vec![],
@@ -934,11 +1255,54 @@ mod tests {
             source: Source::BluRay,
             resolution: Resolution::R720p,
             is_remux: false,
+            web_kind: WebKind::Unknown,
+            is_bdmv: false,
             confidence: 1.0,
             needs_review: false,
             evidence: vec![],
         };
         assert!(web_1080.rank() > bd_720.rank());
+    }
+
+    #[test]
+    fn bluray_tier_orders_plain_lt_remux_lt_bdmv() {
+        let plain = ClassificationResult {
+            source: Source::BluRay,
+            resolution: Resolution::R1080p,
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: WebKind::Unknown,
+            confidence: 1.0,
+            needs_review: false,
+            evidence: vec![],
+        };
+        let remux = ClassificationResult { is_remux: true, ..plain.clone() };
+        let bdmv = ClassificationResult { is_bdmv: true, ..plain.clone() };
+        // Same source/resolution, the bluray_tier slot in rank() breaks the tie.
+        assert!(remux.rank() > plain.rank(), "remux > plain encode");
+        assert!(bdmv.rank() > remux.rank(), "BDMV > remux");
+        // BDMV wins even when both flags are set.
+        let both = ClassificationResult { is_remux: true, is_bdmv: true, ..plain.clone() };
+        assert_eq!(both.bluray_tier(), 2);
+        assert_eq!(both.label(), "BluRay BDMV 1080p");
+    }
+
+    #[test]
+    fn web_dl_outranks_webrip_at_same_resolution() {
+        let webrip = ClassificationResult {
+            source: Source::Web,
+            resolution: Resolution::R1080p,
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: WebKind::WebRip,
+            confidence: 1.0,
+            needs_review: false,
+            evidence: vec![],
+        };
+        let webdl = ClassificationResult { web_kind: WebKind::WebDl, ..webrip.clone() };
+        assert!(webdl.rank() > webrip.rank());
+        assert_eq!(webrip.label(), "WEBRip 1080p");
+        assert_eq!(webdl.label(), "WEB-DL 1080p");
     }
 
     #[test]
@@ -1013,5 +1377,42 @@ mod tests {
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::Web);
         assert!(!result.needs_review);
+    }
+
+    #[test]
+    fn aggregate_rule_1_filename_wins_tie_against_ffprobe() {
+        // Two strong signals agreeing on BluRay but tied at 0.95.
+        // Filename origin should win the tiebreaker — "filename is the
+        // primary source of truth."
+        let evidence = vec![
+            ev(Source::BluRay, 0.95, "ffprobe"),
+            ev(Source::BluRay, 0.95, "filename"),
+        ];
+        let result = aggregate(&evidence);
+        assert_eq!(result.source, Source::BluRay);
+        // Both strong signals agreed, so the short-circuit fires and
+        // the winner's confidence is the per-signal confidence, not a
+        // per-source sum.
+        assert!((result.confidence - 0.95).abs() < 1e-4);
+        assert!(!result.needs_review);
+    }
+
+    #[test]
+    fn aggregate_rule_1_disagreement_falls_through_and_flags_review() {
+        // Two strong signals disagreeing — filename says WEB-DL at 0.95,
+        // directory walk found BDMV/ at 0.95. Previously rule 1 silently
+        // picked BluRay via source-rank tiebreaker. Now it falls through
+        // to rule 2+4 so the conflict gets flagged.
+        let evidence = vec![
+            ev(Source::Web, 0.95, "filename"),
+            ev(Source::BluRay, 0.95, "dir"),
+        ];
+        let result = aggregate(&evidence);
+        // Rule 2 ties the sums, rule 4 detects the strong opposing
+        // signal with zero lead, and flags for review.
+        assert!(
+            result.needs_review,
+            "disagreeing strong signals must flag needs_review"
+        );
     }
 }

@@ -301,7 +301,7 @@
                         </button>
                         <button class="icon-btn btn-episode-isearch" type="button" onclick="openInteractiveSearch({{ ep.number }}, this)" title="Interactive search episode {{ ep.number }}" aria-label="Interactive search episode {{ ep.number }}" style="margin-right:4px">
                             <span class="icon-btn-inner">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="5"/><line x1="12" y1="12" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><line x1="13" y1="13" x2="20" y2="20"/></svg>
                             </span>
                         </button>
                         <button class="icon-btn btn-episode-override" type="button" onclick="openManualOverride({{ ep.number }}, '{{ ep.class_source }}', '{{ ep.class_resolution }}', {{ ep.class_is_remux }})" title="Override source/resolution tag" aria-label="Override source/resolution tag for episode {{ ep.number }}">
@@ -1068,7 +1068,7 @@ function addSeries() {
 }
 
 function removeSeries(dbId) {
-    if (!confirm('Remove from library?')) return;
+    if (!confirm('Remove from library?\n\nThis will also delete the series folder from disk and remove every torrent for this series from qBittorrent. Imported episodes and the Jellyfin folder will be gone.\n\nThis cannot be undone.')) return;
     const btn = document.getElementById('btn-track');
     btn.disabled = true;
     btn.textContent = '...';
@@ -1076,12 +1076,12 @@ function removeSeries(dbId) {
     fetch('/api/library/remove', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({id: dbId})
+        body: JSON.stringify({id: dbId, delete_files: true})
     })
     .then(async r => {
         let data = {};
         try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Add failed');
+        if (!r.ok) throw new Error(data.message || 'Remove failed');
         return data;
     })
     .then(() => {

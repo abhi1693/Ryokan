@@ -539,7 +539,14 @@ pub async fn fetch_episode_titles_for_detail(
     // what MAL has indexed). Accept a small gap so we don't re-fetch Jikan
     // on every page load just because the last 1-2 episodes haven't made it
     // into MAL's database yet.
-    const JIKAN_LAG_TOLERANCE: i32 = 10;
+    //
+    // Keep this tight. With tolerance=10 a 12-episode airing season with a
+    // 2-episode partial cache would happily satisfy the check (2 + 10 ≥ 12)
+    // and the background sweep would never refetch — the cache stayed pinned
+    // for the full 7-day TTL even though new episodes had aired. Tolerance=2
+    // still absorbs the normal 1-episode MAL indexing lag for long runners
+    // while forcing a refetch as soon as the gap grows beyond that.
+    const JIKAN_LAG_TOLERANCE: i32 = 2;
 
     if let Ok(Some(cached)) = get_cached_episodes(db, mal_id).await {
         let cached_count = cached.len() as i32;

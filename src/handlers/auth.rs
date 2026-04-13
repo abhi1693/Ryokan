@@ -1,7 +1,7 @@
 use askama::Template;
 use axum::{
     body::Body,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,17 +36,21 @@ static LOGIN_FAILURES: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> =
 
 /// Returns `Ok(())` if `key` is under the failure threshold, or
 /// `Err(())` if it is rate-limited right now. Always sweeps expired
-/// entries for `key` as a side effect.
+/// entries for `key` as a side effect, and drops the map entry entirely
+/// when its Vec empties out so rotated usernames / spoofed X-F-F values
+/// can't grow LOGIN_FAILURES unboundedly (one idle key per probe forever).
 fn login_check(key: &str) -> Result<(), ()> {
     let mut guard = LOGIN_FAILURES.lock().unwrap();
-    let entry = guard.entry(key.to_string()).or_default();
     let cutoff = Instant::now() - LOGIN_WINDOW;
-    entry.retain(|t| *t > cutoff);
-    if entry.len() >= LOGIN_MAX_FAILURES {
-        Err(())
-    } else {
-        Ok(())
+    let (allow, empty) = {
+        let entry = guard.entry(key.to_string()).or_default();
+        entry.retain(|t| *t > cutoff);
+        (entry.len() < LOGIN_MAX_FAILURES, entry.is_empty())
+    };
+    if empty {
+        guard.remove(key);
     }
+    if allow { Ok(()) } else { Err(()) }
 }
 
 /// Record a failed login attempt against `key`.
@@ -65,28 +70,65 @@ fn login_clear(key: &str) {
     guard.remove(key);
 }
 
-/// Best-effort client IP extraction. Prefers the leftmost entry of
-/// `X-Forwarded-For` (the address the reverse proxy saw from the
-/// outside world), falling back to `X-Real-IP`, and finally to the
-/// literal string `"unknown"` so the per-IP throttle key still exists
-/// when we can't pin down an address. Defaults are safe because we
-/// bucket by (username, ip) and the username bucket still works.
-fn client_ip_from_headers(headers: &HeaderMap) -> String {
-    if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = h.split(',').next() {
-            let trimmed = first.trim();
+/// Whether to honor `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Host`
+/// from the request, or ignore them entirely and use the TCP peer address
+/// as the ground truth. Read once at startup from `RYOKAN_TRUSTED_PROXY`
+/// (values `1`, `true`, `yes`, `on` enable it, case-insensitive). Default
+/// off because Ryokan's default bind is `0.0.0.0:8978` — a direct-exposure
+/// deploy (no reverse proxy) is a common self-hosted shape, and in that
+/// shape *any* HTTP client can set these headers freely. Trusting them by
+/// default would let an attacker spoof a fresh IP per attempt and defeat
+/// the per-IP login throttle. Flip this on only when Ryokan is behind a
+/// proxy that overwrites the headers on ingress.
+static TRUST_PROXY_HEADERS: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("RYOKAN_TRUSTED_PROXY")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+});
+
+/// Client IP extraction. When `RYOKAN_TRUSTED_PROXY` is set, prefers the
+/// leftmost `X-Forwarded-For` entry (the address the reverse proxy saw
+/// from the outside world), falling back to `X-Real-IP`, then to the TCP
+/// peer. When the flag is unset, ignores both headers and uses the TCP
+/// peer directly so a direct-exposure deploy can't be bypassed by a
+/// spoofed header.
+fn client_ip_from_request(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
+    if *TRUST_PROXY_HEADERS {
+        if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = h.split(',').next() {
+                let trimmed = first.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+        if let Some(h) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+            let trimmed = h.trim();
             if !trimmed.is_empty() {
                 return trimmed.to_string();
             }
         }
     }
-    if let Some(h) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let trimmed = h.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+    match peer {
+        Some(addr) => addr.ip().to_string(),
+        None => "unknown".to_string(),
     }
-    "unknown".to_string()
+}
+
+/// Strip control characters and cap length before embedding a piece of
+/// attacker-supplied text (e.g. `form.username`) in a log line. Keeps
+/// newlines / terminal escapes / multi-kilobyte probes from showing up
+/// in the auth_log table and the tracing stream.
+fn sanitize_for_log(s: &str) -> String {
+    let trimmed = s.trim();
+    trimmed
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect()
 }
 
 /// Whether to append `Secure` to the session cookie. Read once at startup
@@ -191,6 +233,34 @@ fn host_of(req: &Request<Body>) -> Option<String> {
     Some(host_only.to_ascii_lowercase())
 }
 
+/// Build the set of hosts that are acceptable matches for an Origin or
+/// Referer check. Always includes the `Host` header. When
+/// `RYOKAN_TRUSTED_PROXY` is set, also includes every entry in
+/// `X-Forwarded-Host` so a reverse proxy that rewrites the upstream Host
+/// header doesn't break every form POST — the browser sees the
+/// externally-visible host and sends it in Origin, while the backend sees
+/// the rewritten upstream name in Host, so without this check the two
+/// never match and every POST is rejected as "origin host mismatch".
+fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
+    let mut hosts = Vec::new();
+    if let Some(h) = host_of(req) {
+        hosts.push(h);
+    }
+    if *TRUST_PROXY_HEADERS {
+        if let Some(raw) = req.headers().get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
+            for part in raw.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let host_only = part.split_once(':').map(|(h, _)| h).unwrap_or(part);
+                hosts.push(host_only.to_ascii_lowercase());
+            }
+        }
+    }
+    hosts
+}
+
 /// Verify that a state-changing request came from the same origin this
 /// server is serving. Uses the Origin header if present (modern browsers
 /// set this on all POST/PUT/PATCH/DELETE requests, including cross-site
@@ -207,10 +277,10 @@ fn verify_same_origin(req: &Request<Body>) -> Result<(), &'static str> {
         _ => {}
     }
 
-    let host = match host_of(req) {
-        Some(h) => h,
-        None => return Err("missing Host header"),
-    };
+    let hosts = allowed_host_matches(req);
+    if hosts.is_empty() {
+        return Err("missing Host header");
+    }
 
     // Prefer Origin (always set by browsers on unsafe methods).
     if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
@@ -220,7 +290,7 @@ fn verify_same_origin(req: &Request<Body>) -> Result<(), &'static str> {
             return Err("null origin");
         }
         return match url_host(origin) {
-            Some(h) if h == host => Ok(()),
+            Some(h) if hosts.contains(&h) => Ok(()),
             Some(_) => Err("origin host mismatch"),
             None => Err("malformed Origin header"),
         };
@@ -231,7 +301,7 @@ fn verify_same_origin(req: &Request<Body>) -> Result<(), &'static str> {
     // browser at least one of them will be set.
     if let Some(referer) = req.headers().get(header::REFERER).and_then(|v| v.to_str().ok()) {
         return match url_host(referer) {
-            Some(h) if h == host => Ok(()),
+            Some(h) if hosts.contains(&h) => Ok(()),
             Some(_) => Err("referer host mismatch"),
             None => Err("malformed Referer header"),
         };
@@ -365,24 +435,38 @@ pub async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
 
 pub async fn login_submit(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
     // Resolve the bucket keys up front so we always rate-limit, even when
     // the incoming form has an empty username.
-    let ip = client_ip_from_headers(&headers);
+    let ip = client_ip_from_request(&headers, Some(peer_addr));
     let ip_key = format!("ip:{}", ip);
     let user_key = format!("u:{}", form.username.trim().to_ascii_lowercase());
+    let safe_username = sanitize_for_log(&form.username);
 
-    // Pre-check: if either bucket is already over the limit, reject the
-    // attempt without running bcrypt. The response is the same as a
-    // wrong-password failure on purpose — we don't want to leak to a
-    // probing attacker whether they're throttled vs. just wrong.
-    if login_check(&user_key).is_err() || login_check(&ip_key).is_err() {
+    // Pre-check: if either bucket is already over the limit, we still
+    // unconditionally run `verify_user` below and discard the result.
+    // Returning early without paying the bcrypt cost would leak to a
+    // probing attacker whether they're throttled (fast return) vs. just
+    // wrong (slow return after bcrypt::verify), which is enough to
+    // confirm that per-user throttling has tripped — i.e., that the
+    // username is worth pounding from another IP. Equalizing the wall
+    // time closes that timing oracle.
+    let rate_limited = login_check(&user_key).is_err() || login_check(&ip_key).is_err();
+
+    // Always run verify_user so every response path pays ~50ms of bcrypt,
+    // whether the attempt is a genuine wrong password, a failed username
+    // (handled inside verify_user by DUMMY_BCRYPT_HASH), or a throttled
+    // request. The result is only honored when we were not rate-limited.
+    let verify_result = user::verify_user(&state.db, &form.username, &form.password).await;
+
+    if rate_limited {
         logger::warn(
             &state.db,
             LogCategory::Auth,
-            &format!("Login rate-limited: {} from {}", form.username, ip),
+            &format!("Login rate-limited: {} from {}", safe_username, ip),
             "",
         )
         .await;
@@ -392,13 +476,13 @@ pub async fn login_submit(
         return Html(template.render().unwrap_or_default()).into_response();
     }
 
-    match user::verify_user(&state.db, &form.username, &form.password).await {
+    match verify_result {
         Ok(Some(u)) => {
             // Successful login — clear the counters so an honest user who
             // mistyped a few times isn't punished for their own typos.
             login_clear(&user_key);
             login_clear(&ip_key);
-            logger::info(&state.db, LogCategory::Auth, &format!("Login: {}", form.username), "").await;
+            logger::info(&state.db, LogCategory::Auth, &format!("Login: {}", safe_username), "").await;
             let token = session::create_session(&state.db, u.id)
                 .await
                 .unwrap_or_default();
@@ -414,7 +498,7 @@ pub async fn login_submit(
         _ => {
             login_record_failure(&user_key);
             login_record_failure(&ip_key);
-            logger::warn(&state.db, LogCategory::Auth, &format!("Failed login attempt: {}", form.username), "").await;
+            logger::warn(&state.db, LogCategory::Auth, &format!("Failed login attempt: {}", safe_username), "").await;
             let template = LoginTemplate {
                 error: Some("Invalid username or password.".into()),
             };

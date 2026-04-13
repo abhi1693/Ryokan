@@ -23,7 +23,7 @@
 
 use anitomy::{Anitomy, ElementCategory};
 
-use crate::services::source::{contains_word, Resolution, Source, SourceEvidence};
+use crate::services::source::{contains_word, Resolution, Source, SourceEvidence, WebKind};
 
 const ORIGIN: &str = "filename";
 
@@ -36,6 +36,16 @@ pub struct FilenameClassification {
     pub evidence: Vec<SourceEvidence>,
     pub resolution: Resolution,
     pub is_remux: bool,
+    /// True when the filename indicates a raw BDMV / BD-Raw release —
+    /// the actual disc structure rather than an MKV-wrapped remux. Set
+    /// when tokens like `BDMV`, `BD-RAW`, `BDRAW`, or `ISO` appear.
+    /// Distinct from `is_remux` and treated as a separate, higher tier.
+    pub is_bdmv: bool,
+    /// Distinguishes WEB-DL vs WEBRip when the filename is specific
+    /// enough to tell them apart. Bare "WEB" tokens leave this as
+    /// `WebKind::Unknown` so the aggregator doesn't claim certainty
+    /// the filename never indicated.
+    pub web_kind: WebKind,
     /// Release group extracted from the title, if any. Consumed by Layer 3
     /// (group identity table) downstream.
     pub release_group: Option<String>,
@@ -47,6 +57,8 @@ impl FilenameClassification {
             evidence: Vec::new(),
             resolution: Resolution::Unknown,
             is_remux: false,
+            is_bdmv: false,
+            web_kind: WebKind::Unknown,
             release_group: None,
         }
     }
@@ -110,6 +122,43 @@ pub fn classify_filename(title: &str) -> FilenameClassification {
     // into the VideoTerm; a direct substring check catches both.
     result.is_remux = title_lower.contains("remux");
 
+    // ── BDMV / BD-Raw detection ───────────────────────────────────────────
+    // BDMV releases ship the disc structure intact (folder layout or full
+    // ISO) instead of an MKV-wrapped remux. They're a distinct tier in the
+    // anime scene because of the audio-track and chapter fidelity, and
+    // because file sizes are dramatically larger. Match BDMV/BD-RAW/BDRAW
+    // and "Disc" / "Disk" only when accompanied by another BD signal — bare
+    // "Disc" is too noisy on its own.
+    let bdmv_keyword = contains_word(&title_lower, "bdmv")
+        || contains_word(&title_lower, "bd-raw")
+        || contains_word(&title_lower, "bdraw")
+        || contains_word(&title_lower, "bdiso");
+    if bdmv_keyword {
+        result.is_bdmv = true;
+        // BDMV implies a Remux-class container truth — the encode is the
+        // disc itself, not a re-encode. We still leave is_remux alone (the
+        // two flags are mutually exclusive at the label level), but we
+        // emit a strong BluRay evidence record so the aggregator commits
+        // to the right source even if no other BD token appears.
+    }
+
+    // ── WEB-DL vs WEBRip distinction ──────────────────────────────────────
+    // Sonarr's quality definitions split "WEB" into two tiers. Detect both
+    // up front so it's available regardless of which path emits the Web
+    // evidence below. Whole-word matching (with punctuation tolerance)
+    // ensures "WEBRip" inside a longer token doesn't false-match.
+    if contains_word(&title_lower, "web-dl")
+        || contains_word(&title_lower, "webdl")
+        || contains_word(&title_lower, "web.dl")
+    {
+        result.web_kind = WebKind::WebDl;
+    } else if contains_word(&title_lower, "webrip")
+        || contains_word(&title_lower, "web-rip")
+        || contains_word(&title_lower, "web.rip")
+    {
+        result.web_kind = WebKind::WebRip;
+    }
+
     // ── Explicit source keyword ───────────────────────────────────────────
     // Try anitomy's structured Source field first, then fall back to scanning
     // the raw title for source tokens. Anitomy's keyword list is good but
@@ -167,6 +216,24 @@ pub fn classify_filename(title: &str) -> FilenameClassification {
         ));
     }
 
+    // BDMV / BD-Raw is an even stronger BluRay signal than Remux — the
+    // release is literally the disc. Emit BluRay evidence if no source
+    // token has fired yet so the aggregator doesn't fall back to Unknown
+    // on a barebones "[group] Series Vol1 BDMV" title.
+    if result.is_bdmv
+        && !result
+            .evidence
+            .iter()
+            .any(|e| e.source == Source::BluRay)
+    {
+        result.evidence.push(SourceEvidence::new(
+            Source::BluRay,
+            0.95,
+            ORIGIN,
+            "BDMV keyword".to_string(),
+        ));
+    }
+
     // ── Streaming platform tag ────────────────────────────────────────────
     if let Some(platform) = detect_platform_tag(&title_lower) {
         result.evidence.push(SourceEvidence::new(
@@ -214,7 +281,9 @@ fn source_from_keyword(keyword: &str, res: Resolution) -> Option<(Source, f32, S
         .collect::<String>()
         .to_ascii_lowercase();
     let (src, detail) = match normalized.as_str() {
-        "bdrip" | "bluray" | "bd" | "bdremux" | "bdmv" => (Source::BluRay, "BD keyword"),
+        "bdrip" | "bluray" | "bd" | "bdremux" | "bdmv" | "bdraw" | "bdiso" => {
+            (Source::BluRay, "BD keyword")
+        }
         "remux" => (Source::BluRay, "Remux keyword"),
         "dvd" | "dvdrip" | "r2j" | "r2" => (Source::Dvd, "DVD keyword"),
         "webdl" | "web" | "webrip" => (Source::Web, "Web keyword"),
@@ -322,7 +391,9 @@ const WEB_AUDIO_TOKENS: &[&str] = &["ddp", "eac3", "e-ac-3"];
 /// source that hasn't already been emitted, so anitomy's stricter parse
 /// takes precedence when both agree.
 const SOURCE_FALLBACK_TOKENS: &[(&str, Source)] = &[
-    // BluRay variants
+    // BluRay variants — BDMV/BD-RAW/BDRAW are caught by the dedicated
+    // is_bdmv detector above and emit their own evidence record, so they
+    // don't need to appear here.
     ("bdrip", Source::BluRay),
     ("bdremux", Source::BluRay),
     ("bluray", Source::BluRay),
@@ -725,5 +796,77 @@ mod tests {
             "expected both Web and BluRay evidence, got {:?}",
             fc.evidence
         );
+    }
+
+    // ── Sonarr-parity sub-classification ─────────────────────────────────
+
+    #[test]
+    fn web_dl_filename_sets_webdl_kind() {
+        let fc = classify_filename(
+            "Sousou.no.Frieren.S01E01.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv",
+        );
+        assert_eq!(fc.web_kind, WebKind::WebDl);
+        assert!(!fc.is_bdmv);
+    }
+
+    #[test]
+    fn webrip_filename_sets_webrip_kind() {
+        let fc = classify_filename(
+            "Show.Name.S01E01.1080p.WEBRip.x264-XYZ.mkv",
+        );
+        assert_eq!(fc.web_kind, WebKind::WebRip);
+        assert!(!fc.is_bdmv);
+    }
+
+    #[test]
+    fn bare_web_keyword_leaves_kind_unknown() {
+        // A title that just says "WEB" without a -DL/-Rip qualifier should
+        // not commit to either variant. The Source::Web evidence still
+        // fires, but web_kind stays Unknown.
+        let fc = classify_filename(
+            "Show.Name.S01E01.1080p.WEB.x264-XYZ.mkv",
+        );
+        assert_eq!(fc.web_kind, WebKind::Unknown);
+    }
+
+    #[test]
+    fn bdmv_keyword_sets_is_bdmv_and_emits_bluray() {
+        let fc = classify_filename(
+            "[Group] Sousou no Frieren Vol.1 BDMV [Bluray ISO 1080p]",
+        );
+        assert!(fc.is_bdmv, "BDMV token should set is_bdmv");
+        // The dedicated BDMV emitter should fire so the aggregator commits
+        // to BluRay even on a barebones disc dump.
+        let result = aggregate(&fc.evidence);
+        assert_eq!(result.source, Source::BluRay);
+    }
+
+    #[test]
+    fn bdraw_token_sets_is_bdmv() {
+        let fc = classify_filename(
+            "[Group] Sousou no Frieren Vol.1 [BD-RAW 1080p]",
+        );
+        assert!(fc.is_bdmv);
+    }
+
+    #[test]
+    fn remux_does_not_set_is_bdmv() {
+        // Remux and BDMV are distinct release classes — a Remux is an
+        // MKV-wrapped extract, not the disc structure itself. Make sure
+        // the Remux detector doesn't accidentally trip the BDMV flag.
+        let fc = classify_filename(
+            "Sousou.no.Frieren.S01.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FGT.mkv",
+        );
+        assert!(fc.is_remux);
+        assert!(!fc.is_bdmv);
+    }
+
+    #[test]
+    fn bdmv_does_not_set_is_remux() {
+        let fc = classify_filename(
+            "[Group] Sousou no Frieren Vol.1 BDMV [1080p]",
+        );
+        assert!(fc.is_bdmv);
+        assert!(!fc.is_remux);
     }
 }

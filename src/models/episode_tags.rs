@@ -88,6 +88,14 @@ pub struct EpisodeQualityTag {
     /// Structured resolution label ("1080p", "720p", …, or empty).
     pub resolution: String,
     pub is_remux: bool,
+    /// Sonarr-parity: true when the release is a raw BDMV / BD-Raw
+    /// disc-structure release (distinct from `is_remux`). Mutually
+    /// exclusive with `is_remux` at the label level.
+    pub is_bdmv: bool,
+    /// Sonarr-parity: WEB-DL vs WEBRip sub-classification when the
+    /// filename was specific enough to tell. Empty string for legacy
+    /// bare-WEB rows or non-Web sources.
+    pub web_kind: String,
     pub classification_confidence: f32,
     pub needs_review: bool,
     /// True when the user has pinned this classification via the manual
@@ -117,6 +125,8 @@ pub async fn record_grab(
     let source_str = classification.source.as_str();
     let resolution_str = classification.resolution.as_str();
     let is_remux = if classification.is_remux { 1_i64 } else { 0_i64 };
+    let is_bdmv = if classification.is_bdmv { 1_i64 } else { 0_i64 };
+    let web_kind_str = classification.web_kind.as_str();
     let confidence = classification.confidence as f64;
     let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
 
@@ -144,9 +154,10 @@ pub async fn record_grab(
     sqlx::query(
         "INSERT INTO episode_quality_tags (
              series_id, episode_number, quality_tag, release_title, release_group, state,
-             source, resolution, is_remux, classification_confidence, needs_review
+             source, resolution, is_remux, is_bdmv, web_kind,
+             classification_confidence, needs_review
          )
-         VALUES (?, ?, ?, ?, ?, 'grabbed', ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, 'grabbed', ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(series_id, episode_number) DO UPDATE SET
              quality_tag = excluded.quality_tag,
              release_title = excluded.release_title,
@@ -155,6 +166,8 @@ pub async fn record_grab(
              source = excluded.source,
              resolution = excluded.resolution,
              is_remux = excluded.is_remux,
+             is_bdmv = excluded.is_bdmv,
+             web_kind = excluded.web_kind,
              classification_confidence = excluded.classification_confidence,
              needs_review = excluded.needs_review,
              updated_at = CURRENT_TIMESTAMP
@@ -168,6 +181,8 @@ pub async fn record_grab(
     .bind(source_str)
     .bind(resolution_str)
     .bind(is_remux)
+    .bind(is_bdmv)
+    .bind(web_kind_str)
     .bind(confidence)
     .bind(needs_review)
     .execute(db)
@@ -183,7 +198,10 @@ pub async fn get_for_series(
 ) -> Result<std::collections::HashMap<i32, EpisodeQualityTag>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT episode_number, quality_tag, release_title, release_group, state,
-                source, resolution, is_remux, classification_confidence, needs_review,
+                source, resolution, is_remux,
+                COALESCE(is_bdmv, 0) AS is_bdmv,
+                COALESCE(web_kind, '') AS web_kind,
+                classification_confidence, needs_review,
                 COALESCE(manual_override, 0) AS manual_override
          FROM episode_quality_tags WHERE series_id = ?",
     )
@@ -195,6 +213,7 @@ pub async fn get_for_series(
     for row in rows {
         let ep_num: i32 = row.get("episode_number");
         let is_remux_i: i64 = row.get("is_remux");
+        let is_bdmv_i: i64 = row.get("is_bdmv");
         let needs_review_i: i64 = row.get("needs_review");
         let manual_override_i: i64 = row.get("manual_override");
         let confidence: f64 = row.get("classification_confidence");
@@ -208,6 +227,8 @@ pub async fn get_for_series(
                 source: row.get("source"),
                 resolution: row.get("resolution"),
                 is_remux: is_remux_i != 0,
+                is_bdmv: is_bdmv_i != 0,
+                web_kind: row.get("web_kind"),
                 classification_confidence: confidence as f32,
                 needs_review: needs_review_i != 0,
                 manual_override: manual_override_i != 0,
@@ -267,6 +288,8 @@ pub async fn update_classification(
     let source_str = classification.source.as_str();
     let resolution_str = classification.resolution.as_str();
     let is_remux = if classification.is_remux { 1_i64 } else { 0_i64 };
+    let is_bdmv = if classification.is_bdmv { 1_i64 } else { 0_i64 };
+    let web_kind_str = classification.web_kind.as_str();
     let confidence = classification.confidence as f64;
     let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
 
@@ -276,6 +299,8 @@ pub async fn update_classification(
              source = ?,
              resolution = ?,
              is_remux = ?,
+             is_bdmv = ?,
+             web_kind = ?,
              classification_confidence = ?,
              needs_review = ?,
              updated_at = CURRENT_TIMESTAMP
@@ -287,6 +312,8 @@ pub async fn update_classification(
     .bind(source_str)
     .bind(resolution_str)
     .bind(is_remux)
+    .bind(is_bdmv)
+    .bind(web_kind_str)
     .bind(confidence)
     .bind(needs_review)
     .bind(series_id)
@@ -306,6 +333,7 @@ pub async fn update_classification(
 /// If `source` is empty, the override is removed: the row is updated with
 /// `manual_override = 0` and kept otherwise intact, so the next
 /// post-download classify pass is free to overwrite it.
+#[allow(clippy::too_many_arguments)]
 pub async fn set_manual_override(
     db: &SqlitePool,
     series_id: i64,
@@ -313,6 +341,8 @@ pub async fn set_manual_override(
     source: &str,
     resolution: &str,
     is_remux: bool,
+    is_bdmv: bool,
+    web_kind: &str,
 ) -> Result<(), sqlx::Error> {
     if source.is_empty() {
         // Clear override — leave the row and its current classification in
@@ -328,18 +358,27 @@ pub async fn set_manual_override(
         return Ok(());
     }
 
-    // Mirror `ClassificationResult::label()` so the UI shows the same text
-    // whether the classification came from the pipeline or from a manual
-    // override. Key detail: if resolution is empty, don't emit a trailing
-    // space — `"BluRay"` instead of `"BluRay "`, `"BluRay Remux"` instead of
-    // `"BluRay Remux "`.
-    let remux = if is_remux { " Remux" } else { "" };
-    let label = if resolution.is_empty() {
-        format!("{}{}", source, remux)
-    } else {
-        format!("{}{} {}", source, remux, resolution)
+    // Build a `ClassificationResult` from the manual fields and reuse its
+    // `label()` — keeps the rendering rules in exactly one place so the
+    // BDMV/Remux/WebKind precedence can't drift between automatic and
+    // manual paths.
+    let parsed_source = crate::services::source::Source::from_str(source);
+    let parsed_resolution = crate::services::source::Resolution::from_str(resolution);
+    let parsed_web_kind = crate::services::source::WebKind::from_str(web_kind);
+    let synthetic = crate::services::source::ClassificationResult {
+        source: parsed_source,
+        resolution: parsed_resolution,
+        is_remux,
+        is_bdmv,
+        web_kind: parsed_web_kind,
+        confidence: 1.0,
+        needs_review: false,
+        evidence: Vec::new(),
     };
+    let label = synthetic.label();
     let is_remux_i = if is_remux { 1_i64 } else { 0_i64 };
+    let is_bdmv_i = if is_bdmv { 1_i64 } else { 0_i64 };
+    let web_kind_str = parsed_web_kind.as_str();
 
     // Upsert: if the row doesn't exist yet (user tagging a file that the
     // classifier never saw), insert a fresh row with empty release metadata.
@@ -348,14 +387,17 @@ pub async fn set_manual_override(
     sqlx::query(
         "INSERT INTO episode_quality_tags (
              series_id, episode_number, quality_tag, release_title, release_group, state,
-             source, resolution, is_remux, classification_confidence, needs_review, manual_override
+             source, resolution, is_remux, is_bdmv, web_kind,
+             classification_confidence, needs_review, manual_override
          )
-         VALUES (?, ?, ?, '', '', 'completed', ?, ?, ?, 1.0, 0, 1)
+         VALUES (?, ?, ?, '', '', 'completed', ?, ?, ?, ?, ?, 1.0, 0, 1)
          ON CONFLICT(series_id, episode_number) DO UPDATE SET
              quality_tag = excluded.quality_tag,
              source = excluded.source,
              resolution = excluded.resolution,
              is_remux = excluded.is_remux,
+             is_bdmv = excluded.is_bdmv,
+             web_kind = excluded.web_kind,
              classification_confidence = 1.0,
              needs_review = 0,
              manual_override = 1,
@@ -367,6 +409,8 @@ pub async fn set_manual_override(
     .bind(source)
     .bind(resolution)
     .bind(is_remux_i)
+    .bind(is_bdmv_i)
+    .bind(web_kind_str)
     .execute(db)
     .await?;
     Ok(())

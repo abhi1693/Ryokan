@@ -1829,6 +1829,95 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     max-width: 980px;
 }
 
+/* --- Release Groups settings tab --- */
+.settings-subheading {
+    margin: 24px 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.settings-subheading:first-of-type {
+    margin-top: 0;
+}
+
+.group-source-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 16px;
+    font-size: 13px;
+}
+
+.group-source-table thead {
+    background: var(--bg-elevated);
+}
+
+.group-source-table th {
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border);
+}
+
+.group-source-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(42, 42, 58, 0.4);
+    vertical-align: middle;
+    color: var(--text);
+}
+
+.group-source-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.group-source-table tbody tr:hover {
+    background: rgba(124, 122, 255, 0.05);
+}
+
+.group-source-table td:last-child {
+    text-align: right;
+    white-space: nowrap;
+}
+
+/* The upsert/delete forms appear inline inside table cells; flatten the
+   default form-group stacking so the row stays one line tall. */
+.group-source-table .group-upsert-form,
+.group-source-table .group-delete-form {
+    margin: 0;
+    display: inline;
+}
+
+/* Standalone "Add or Update Group" form (outside the table) is a real
+   stacked form — restore the normal settings-form layout. */
+.settings-tab-panel .settings-form.group-upsert-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    max-width: 720px;
+    margin-bottom: 24px;
+}
+
+.settings-tab-panel .settings-form.group-upsert-form button[type="submit"] {
+    grid-column: 1 / -1;
+    justify-self: start;
+}
+
+@media (max-width: 720px) {
+    .settings-tab-panel .settings-form.group-upsert-form {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* Logs Toolbar */
 .logs-toolbar {
     display: flex;

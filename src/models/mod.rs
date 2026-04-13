@@ -777,6 +777,22 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Sonarr-parity sub-classification columns:
+    //  - is_bdmv: distinguishes BD-RAW / BDMV (full disc structure) from
+    //    a plain BluRay encode or a Remux. Mutually exclusive with
+    //    is_remux at the label level.
+    //  - web_kind: distinguishes WEB-DL from WEBRip when the filename was
+    //    specific enough to tell. Stored as the canonical string ("WEB-DL",
+    //    "WEBRip", or "" for legacy bare-WEB rows).
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN is_bdmv INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN web_kind TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
     // ── Phase 1b: split quality_profile/quality_cutoff into explicit source
     //             and resolution fields ──────────────────────────────────
     // preferred_resolution already exists and stores a bare resolution

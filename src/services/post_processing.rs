@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use crate::models::log::LogCategory;
-use crate::models::{artwork_cache, config, episode_tags, grabbed_torrents, local_metadata, series};
+use crate::models::{artwork_cache, config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series};
 use crate::services::source::{self, SeriesContext};
 use crate::services::{logger, media, nfo};
 use crate::AppState;
@@ -100,7 +100,11 @@ async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Copy the cached series poster to `dest` (always written as JPEG regardless
 /// of original extension — Jellyfin accepts it). Runs the copy under
 /// `spawn_blocking` so a slow/network-backed media root can't stall the
-/// runtime while moving a multi-MB poster.
+/// runtime while moving a multi-MB poster. A failure here is non-fatal
+/// (Jellyfin can still scrape its own poster), but silently swallowing
+/// the error left operators with an invisible "no poster in Jellyfin"
+/// symptom and nothing in the logs to point at — so every failure path
+/// now warns with enough detail to debug it.
 async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
     let cache_key = format!("series-{}-cover", series_id);
     let entry = match artwork_cache::get(db, &cache_key).await {
@@ -109,7 +113,29 @@ async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
     };
     let src = std::path::PathBuf::from(&entry.local_path);
     let dst = dest.to_path_buf();
-    let _ = tokio::task::spawn_blocking(move || std::fs::copy(src, dst)).await;
+    let src_display = src.display().to_string();
+    let dst_display = dst.display().to_string();
+    match tokio::task::spawn_blocking(move || std::fs::copy(src, dst)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => {
+            logger::warn(
+                db,
+                LogCategory::PostProcess,
+                &format!("Failed to copy series poster for series_id={}", series_id),
+                &format!("src={}, dst={}, error={}", src_display, dst_display, err),
+            )
+            .await;
+        }
+        Err(join_err) => {
+            logger::warn(
+                db,
+                LogCategory::PostProcess,
+                &format!("Poster copy task panicked for series_id={}", series_id),
+                &format!("src={}, dst={}, error={}", src_display, dst_display, join_err),
+            )
+            .await;
+        }
+    }
 }
 
 /// Process a single completed torrent. Returns `true` if at least one file was
@@ -166,6 +192,17 @@ async fn import_torrent(
     let ep_meta = local_metadata::get_episode_map_for_series(&state.db, series.id)
         .await
         .unwrap_or_default();
+
+    // Cached AniList detail. Used to enrich both series and episode NFOs
+    // (plot, year, rating, runtime, real genres) so Jellyfin doesn't have
+    // to scrape its own metadata. Optional — falls back to the minimal
+    // series-row-only NFO when the cache is empty.
+    let cached_detail = metadata_cache::get_by_series_id(&state.db, series.id)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.detail);
+    let runtime_minutes = cached_detail.as_ref().and_then(|d| d.duration);
 
     let series_title = nfo::best_title(&series);
     let season = 1_i32;
@@ -358,7 +395,15 @@ async fn import_torrent(
 
         match do_file_op(&cfg.post_processing_mode, &src, &dest_video).await {
             Ok(()) => {
-                let _ = nfo::write_episode_nfo(&dest_nfo, &series_title, season, ep_num, &ep_title, &aired);
+                let _ = nfo::write_episode_nfo(
+                    &dest_nfo,
+                    &series_title,
+                    season,
+                    ep_num,
+                    &ep_title,
+                    &aired,
+                    runtime_minutes,
+                );
                 imported_count += 1;
                 logger::info(
                     &state.db,
@@ -457,13 +502,16 @@ async fn import_torrent(
         return Ok(false);
     }
 
-    // Write series-level NFO once.
+    // Always (re)write series-level NFO so Jellyfin picks up refreshed
+    // metadata (status flips from RELEASING to FINISHED, plot updates,
+    // newly indexed genres). The previous "write once if missing" behavior
+    // meant any NFO written before metadata enrichment shipped never got
+    // upgraded. The file is small and the write is local; rewriting on
+    // every import run is cheap.
     let series_nfo = Path::new(&cfg.media_root)
         .join(&folder_name)
         .join("tvshow.nfo");
-    if !series_nfo.exists() {
-        let _ = nfo::write_series_nfo(&series_nfo, &series);
-    }
+    let _ = nfo::write_series_nfo(&series_nfo, &series, cached_detail.as_ref());
 
     // Copy poster once.
     let poster_dest = Path::new(&cfg.media_root)

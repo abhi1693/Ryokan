@@ -130,6 +130,13 @@ pub struct AddSeriesForm {
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct RemoveSeriesForm {
     id: i64,
+    /// When true (the default for the "Remove from Library" button), the
+    /// handler also tells qBittorrent to drop every torrent associated
+    /// with the series and removes the series media folder from disk.
+    /// Settable to false from API consumers (e.g. the Sonarr compat shim)
+    /// that want to delete *only* the database tracking row.
+    #[serde(default)]
+    delete_files: Option<bool>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -167,6 +174,14 @@ pub struct SetManualOverrideForm {
     resolution: String,
     #[serde(default)]
     is_remux: bool,
+    /// Sonarr-parity: BD-Raw / BDMV release flag, distinct from `is_remux`.
+    /// Mutually exclusive at the label level — when both are set, BDMV wins.
+    #[serde(default)]
+    is_bdmv: bool,
+    /// Sonarr-parity: WEB-DL vs WEBRip variant when `source == "Web"`.
+    /// Empty string for legacy bare-WEB rows or non-Web sources.
+    #[serde(default)]
+    web_kind: String,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -1388,11 +1403,164 @@ pub async fn remove_series(
     State(state): State<AppState>,
     Json(form): Json<RemoveSeriesForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    logger::info(&state.db, LogCategory::Library, &format!("Removed from library: id={}", form.id), "").await;
-    series::remove(&state.db, form.id)
+    let series_id = form.id;
+    let delete_files = form.delete_files.unwrap_or(true);
+
+    // Look up the series row up front so we have folder_name to delete on
+    // disk and a useful title for the log line. A missing row isn't fatal
+    // — the DB delete below is idempotent — but we have no folder/torrent
+    // cleanup work to do in that case.
+    let tracked = series::get_by_id(&state.db, series_id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({"ok": true})))
+
+    let mut torrents_removed: u64 = 0;
+    let mut torrent_failures: Vec<String> = Vec::new();
+    let mut folder_status: &'static str = "skipped";
+    let mut folder_detail: String = String::new();
+
+    if delete_files {
+        if let Some(ref tracked) = tracked {
+            // 1. Tell qBittorrent to drop every torrent (with files) we ever
+            //    grabbed for this series. A failure on one torrent is logged
+            //    but doesn't abort the rest of the cleanup — we'd rather end
+            //    in a partially-clean state than orphan the DB row.
+            let hashes = grabbed_torrents::get_all_for_series(&state.db, series_id)
+                .await
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            if !hashes.is_empty() {
+                let qbit_opt = state.qbit.read().await.clone();
+                if let Some(qbit) = qbit_opt {
+                    for (_id, hash) in &hashes {
+                        if hash.is_empty() {
+                            continue;
+                        }
+                        match qbit.delete_torrent(hash, true).await {
+                            Ok(()) => torrents_removed += 1,
+                            Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
+                        }
+                    }
+                } else {
+                    torrent_failures.push("qBittorrent client not configured".to_string());
+                }
+            }
+
+            // 2. Drop the grabbed_torrents rows for this series so the table
+            //    doesn't accumulate stale references to hashes qBit just
+            //    forgot about. Best-effort — failure is logged but doesn't
+            //    block the rest of cleanup.
+            if let Err(err) = grabbed_torrents::delete_all_for_series(&state.db, series_id).await {
+                torrent_failures.push(format!("clear grabbed_torrents: {}", err));
+            }
+
+            // 3. Delete the series media folder. Canonicalize the candidate
+            //    path and assert it still resolves under the configured
+            //    media root before recursing — a renamed/relocated
+            //    folder_name pointed at a symlink to /etc must not
+            //    accidentally remove anything outside the library. Async
+            //    fs to keep the runtime worker free on slow mounts.
+            let cfg_opt = config::get_config(&state.db).await.ok().flatten();
+            if let Some(cfg) = cfg_opt {
+                if !tracked.folder_name.trim().is_empty() && !cfg.media_root.trim().is_empty() {
+                    let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
+                    match tokio::fs::canonicalize(&cfg.media_root).await {
+                        Ok(media_root_canon) => {
+                            match tokio::fs::canonicalize(&series_dir).await {
+                                Ok(series_canon) if series_canon.starts_with(&media_root_canon) => {
+                                    match tokio::fs::remove_dir_all(&series_canon).await {
+                                        Ok(()) => {
+                                            folder_status = "removed";
+                                            folder_detail = series_canon.display().to_string();
+                                        }
+                                        Err(err) => {
+                                            folder_status = "error";
+                                            folder_detail = format!("{}: {}", series_canon.display(), err);
+                                        }
+                                    }
+                                }
+                                Ok(other) => {
+                                    folder_status = "refused";
+                                    folder_detail = format!(
+                                        "resolves outside media root: {} -> {}",
+                                        series_dir.display(),
+                                        other.display()
+                                    );
+                                }
+                                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                                    folder_status = "missing";
+                                    folder_detail = series_dir.display().to_string();
+                                }
+                                Err(err) => {
+                                    folder_status = "error";
+                                    folder_detail = format!("{}: {}", series_dir.display(), err);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            folder_status = "error";
+                            folder_detail = format!("media_root canonicalize: {}", err);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Remove the DB tracking rows. This is the irreversible step, so
+    //    do it last — if filesystem cleanup blew up the operator can
+    //    still inspect the half-cleaned state via the Library page.
+    series::remove(&state.db, series_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 5. Nudge Jellyfin to rescan so the now-deleted folder disappears
+    //    from its UI without waiting for the next scheduled sweep. Best
+    //    effort — Jellyfin not being configured or being unreachable is
+    //    not a reason to fail the removal.
+    let mut jellyfin_status: &'static str = "skipped";
+    if delete_files {
+        let jellyfin_opt = state.jellyfin.read().await.clone();
+        if let Some(jelly) = jellyfin_opt {
+            jellyfin_status = match jelly.refresh_library().await {
+                Ok(()) => "refreshed",
+                Err(_) => "error",
+            };
+        }
+    }
+
+    let series_label = tracked
+        .as_ref()
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| format!("id={}", series_id));
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!("Removed from library: {}", series_label),
+        &format!(
+            "id={}, delete_files={}, torrents_removed={}, folder={}{}{}, jellyfin={}",
+            series_id,
+            delete_files,
+            torrents_removed,
+            folder_status,
+            if folder_detail.is_empty() { String::new() } else { format!(" ({})", folder_detail) },
+            if torrent_failures.is_empty() {
+                String::new()
+            } else {
+                format!(", torrent_errors=[{}]", torrent_failures.join("; "))
+            },
+            jellyfin_status,
+        ),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "torrents_removed": torrents_removed,
+        "torrent_errors": torrent_failures,
+        "folder": folder_status,
+        "jellyfin": jellyfin_status,
+    })))
 }
 
 #[utoipa::path(
@@ -1573,6 +1741,8 @@ pub async fn set_manual_override(
         &form.source,
         &form.resolution,
         form.is_remux,
+        form.is_bdmv,
+        &form.web_kind,
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2242,14 +2412,19 @@ pub async fn delete_episode_file(
             // that the canonicalized target sits under it closes that
             // gap without breaking legitimate symlinks that still
             // resolve inside the library.
-            let media_root_canon = match std::fs::canonicalize(&cfg.media_root) {
+            // Use tokio::fs::canonicalize so the runtime worker isn't
+            // stalled while symlinks are walked on a potentially slow
+            // network mount (NFS/SMB). Doing the std::fs version here
+            // re-introduces the blocking-on-runtime class of bug the rest
+            // of this module was rewritten to avoid.
+            let media_root_canon = match tokio::fs::canonicalize(&cfg.media_root).await {
                 Ok(p) => p,
                 Err(e) => return json_err(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("Failed to resolve media root: {}", e),
                 ),
             };
-            let full_path_canon = match std::fs::canonicalize(&full_path) {
+            let full_path_canon = match tokio::fs::canonicalize(&full_path).await {
                 Ok(p) => p,
                 Err(e) => return json_err(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -2288,13 +2463,13 @@ pub async fn delete_episode_file(
 
             // Also remove the accompanying .nfo file if it exists. Same
             // canonicalize-and-check dance so a sibling symlink can't
-            // route the delete outside the media root either.
+            // route the delete outside the media root either. Use the
+            // async variant so the stat/readlink walk doesn't block the
+            // Tokio worker on a slow mount.
             let nfo_path = full_path_canon.with_extension("nfo");
-            if nfo_path.exists() {
-                if let Ok(nfo_canon) = std::fs::canonicalize(&nfo_path) {
-                    if nfo_canon.starts_with(&media_root_canon) {
-                        let _ = tokio::fs::remove_file(&nfo_canon).await;
-                    }
+            if let Ok(nfo_canon) = tokio::fs::canonicalize(&nfo_path).await {
+                if nfo_canon.starts_with(&media_root_canon) {
+                    let _ = tokio::fs::remove_file(&nfo_canon).await;
                 }
             }
 
@@ -2384,6 +2559,42 @@ pub async fn mark_episode_failed(
 
     if form.blocklist && !release_title.is_empty() {
         let _ = grabbed_torrents::mark_failed_by_name(&state.db, series_id, &release_title).await;
+    }
+
+    // Tell qBittorrent to drop the previously-imported torrent for this
+    // episode (if any) before we re-search. Without this, qBit keeps the
+    // old torrent seeding from its downloads-folder copy, and any new grab
+    // we hand it can hash-collide or stall at 0% because qBit thinks the
+    // file is already present. delete_files=true is safe because
+    // post-processing imports as a hardlink/copy/move — the library copy
+    // lives on a separate inode (or path) from the downloads-folder source.
+    // We deliberately leave the `grabbed_torrents` row in 'imported' state
+    // so post-processing's upgrade detection can still find it, remove the
+    // stale library file, and import the replacement cleanly.
+    if let Ok(old_grabs) =
+        grabbed_torrents::find_imported_for_episode(&state.db, series_id, episode_number).await
+    {
+        if !old_grabs.is_empty() {
+            let qbit = { state.qbit.read().await.as_ref().cloned() };
+            if let Some(qbit) = qbit {
+                for old in &old_grabs {
+                    if !old.hash.is_empty() {
+                        if let Err(e) = qbit.delete_torrent(&old.hash, true).await {
+                            crate::services::logger::warn(
+                                &state.db,
+                                crate::models::log::LogCategory::QBit,
+                                &format!(
+                                    "Failed to remove old torrent for S?E{:02} replacement: '{}'",
+                                    episode_number, old.torrent_name
+                                ),
+                                &e,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Re-trigger auto-search for this episode in the background so it completes

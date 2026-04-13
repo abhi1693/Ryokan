@@ -52,6 +52,10 @@ pub enum LogCategory {
     Auth,
     System,
     PostProcess,
+    /// Quality-tag classification pipeline (`source*` modules). Per-decision
+    /// debug records emit under this category so the logs page can be
+    /// filtered to just classification trace output.
+    Quality,
 }
 
 impl LogCategory {
@@ -70,6 +74,7 @@ impl LogCategory {
             LogCategory::Auth => "auth",
             LogCategory::System => "system",
             LogCategory::PostProcess => "post_process",
+            LogCategory::Quality => "quality",
         }
     }
 
@@ -89,6 +94,7 @@ impl LogCategory {
             "auth" => Some(LogCategory::Auth),
             "system" => Some(LogCategory::System),
             "post_process" => Some(LogCategory::PostProcess),
+            "quality" => Some(LogCategory::Quality),
             _ => None,
         }
     }
@@ -108,6 +114,7 @@ impl LogCategory {
             LogCategory::Auth => "Auth",
             LogCategory::System => "System",
             LogCategory::PostProcess => "Post-Process",
+            LogCategory::Quality => "Quality",
         }
     }
 }
