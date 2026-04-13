@@ -112,9 +112,19 @@ pub async fn find_all_for_target(
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
+    let ctx = InteractiveQueryCtx {
+        aliases: &aliases,
+        preferred_groups: &preferred_groups,
+        preferred_resolution: &preferred_res,
+        target,
+        expected_season,
+        is_finished,
+        season_year: detail.season_year,
+    };
+
     // Interactive search: allow batch results so user can see & pick them,
     // but filter by season and episode to avoid showing wrong-season results.
-    run_queries_interactive(&queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
+    run_queries_interactive(&queries, ctx, &mut seen, &mut candidates).await;
 
     // Try extended aliases if primary queries found nothing.
     if candidates.is_empty() {
@@ -122,13 +132,14 @@ pub async fn find_all_for_target(
         if !extended.is_empty() {
             let ext_queries = build_queries_from_aliases(&extended, target);
             let all_aliases = [aliases.clone(), extended].concat();
-            run_queries_interactive(&ext_queries, &all_aliases, &preferred_groups, &preferred_res, target, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
+            let ext_ctx = InteractiveQueryCtx { aliases: &all_aliases, ..ctx };
+            run_queries_interactive(&ext_queries, ext_ctx, &mut seen, &mut candidates).await;
         }
     }
 
     if !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries_interactive(&group_queries, &aliases, &preferred_groups, &preferred_res, target, expected_season, is_finished, detail.season_year, &mut seen, &mut candidates).await;
+        run_queries_interactive(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
     for c in &mut candidates {
@@ -193,8 +204,21 @@ pub async fn find_best_for_target(
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
 
+    let ctx = AutoQueryCtx {
+        aliases: &aliases,
+        preferred_groups: &preferred_groups,
+        preferred_resolution: &preferred_res,
+        target,
+        allow_batch,
+        expected_season,
+        is_finished,
+        season_year: detail.season_year,
+        categories: &categories,
+        batch_episode_match,
+    };
+
     // Phase 1: standard queries (primary aliases + episode variants).
-    run_queries(&queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
+    run_queries(&queries, ctx, &mut seen, &mut candidates).await;
 
     // Phase 1.5: if no candidates, try extended aliases (synonyms + decomposed sub-phrases).
     if candidates.is_empty() {
@@ -202,7 +226,8 @@ pub async fn find_best_for_target(
         if !extended.is_empty() {
             let ext_queries = build_queries_from_aliases(&extended, target);
             let all_aliases = [aliases.clone(), extended].concat();
-            run_queries(&ext_queries, &all_aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
+            let ext_ctx = AutoQueryCtx { aliases: &all_aliases, ..ctx };
+            run_queries(&ext_queries, ext_ctx, &mut seen, &mut candidates).await;
         }
     }
 
@@ -214,7 +239,7 @@ pub async fn find_best_for_target(
 
     if !has_preferred_hit && !preferred_groups.is_empty() {
         let group_queries = build_group_queries(detail, target, &preferred_groups);
-        run_queries(&group_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
+        run_queries(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
     // Phase 3: for finished series with BD preference, probe for BD releases.
@@ -227,7 +252,7 @@ pub async fn find_best_for_target(
 
         if !has_bd_candidate {
             let bd_queries = quality::bd_probe_queries(&aliases);
-            run_queries(&bd_queries, &aliases, &preferred_groups, &preferred_res, target, allow_batch, expected_season, is_finished, detail.season_year, &categories, &mut seen, &mut candidates, batch_episode_match).await;
+            run_queries(&bd_queries, ctx, &mut seen, &mut candidates).await;
         }
     }
 
@@ -283,31 +308,58 @@ pub async fn find_best_for_target(
     scored.into_iter().next()
 }
 
-/// Run a set of queries against Nyaa page 1, collecting valid candidates.
-async fn run_queries(
-    queries: &[String],
-    aliases: &[String],
-    preferred_groups: &[String],
-    preferred_resolution: &str,
-    target: &SearchTarget,
+/// Shared context for `run_queries` — everything that stays constant
+/// across the multi-phase query sweep inside `find_best_for_target`.
+/// Bundling these into a struct (and away from the positional arg list)
+/// closes a real foot-gun: the function used to take four back-to-back
+/// `&[String]` slices (queries, aliases, preferred_groups, categories)
+/// that the compiler would happily let you shuffle into the wrong
+/// order. Named fields make the swap impossible. Derive `Copy` so the
+/// Phase 1.5 alias override can reuse most fields via
+/// `AutoQueryCtx { aliases: &all_aliases, ..ctx }`.
+#[derive(Clone, Copy)]
+struct AutoQueryCtx<'a> {
+    aliases: &'a [String],
+    preferred_groups: &'a [String],
+    preferred_resolution: &'a str,
+    target: &'a SearchTarget,
     allow_batch: bool,
     expected_season: i32,
     is_finished: bool,
     season_year: Option<i32>,
-    categories: &[String],
+    categories: &'a [String],
+    batch_episode_match: bool,
+}
+
+/// Same idea, but for the interactive-search helper which has a
+/// smaller shared context and no category/batch override.
+#[derive(Clone, Copy)]
+struct InteractiveQueryCtx<'a> {
+    aliases: &'a [String],
+    preferred_groups: &'a [String],
+    preferred_resolution: &'a str,
+    target: &'a SearchTarget,
+    expected_season: i32,
+    is_finished: bool,
+    season_year: Option<i32>,
+}
+
+/// Run a set of queries against Nyaa page 1, collecting valid candidates.
+async fn run_queries(
+    queries: &[String],
+    ctx: AutoQueryCtx<'_>,
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
-    batch_episode_match: bool,
 ) {
-    for category in categories {
+    for category in ctx.categories {
         for query in queries {
             let opts = SearchOptions {
                 query: query.clone(),
                 category: category.clone(),
                 filter: "0".to_string(),
                 user: String::new(),
-                preferred_groups: preferred_groups.to_vec(),
-                preferred_resolution: preferred_resolution.to_string(),
+                preferred_groups: ctx.preferred_groups.to_vec(),
+                preferred_resolution: ctx.preferred_resolution.to_string(),
                 prefer_subs: true,
             };
 
@@ -325,17 +377,17 @@ async fn run_queries(
                 if !seen.insert(dedupe_key) {
                     continue;
                 }
-                if !allow_batch && result.is_batch {
+                if !ctx.allow_batch && result.is_batch {
                     continue;
                 }
-                if !matches_target(&result.title, aliases, target, expected_season, batch_episode_match && result.is_batch) {
+                if !matches_target(&result.title, ctx.aliases, ctx.target, ctx.expected_season, ctx.batch_episode_match && result.is_batch) {
                     continue;
                 }
                 // For FINISHED series, reject non-BD results uploaded 2+ years after airing.
                 // Uses a filename-only BD heuristic so we don't hit the DB here — full
                 // classification runs later in the rescore pass.
-                if is_finished {
-                    if let Some(air_year) = season_year {
+                if ctx.is_finished {
+                    if let Some(air_year) = ctx.season_year {
                         if result.upload_timestamp > 0 {
                             if let Some(upload_year) = upload_year_of(result.upload_timestamp) {
                                 if upload_year - air_year >= 2
@@ -360,13 +412,7 @@ async fn run_queries(
 /// results so users can see and pick them.
 async fn run_queries_interactive(
     queries: &[String],
-    aliases: &[String],
-    preferred_groups: &[String],
-    preferred_resolution: &str,
-    target: &SearchTarget,
-    expected_season: i32,
-    is_finished: bool,
-    season_year: Option<i32>,
+    ctx: InteractiveQueryCtx<'_>,
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
@@ -376,8 +422,8 @@ async fn run_queries_interactive(
             category: "1_0".to_string(),
             filter: "0".to_string(),
             user: String::new(),
-            preferred_groups: preferred_groups.to_vec(),
-            preferred_resolution: preferred_resolution.to_string(),
+            preferred_groups: ctx.preferred_groups.to_vec(),
+            preferred_resolution: ctx.preferred_resolution.to_string(),
             prefer_subs: true,
         };
 
@@ -398,7 +444,7 @@ async fn run_queries_interactive(
             // Relaxed alias matching: lower threshold than auto search
             let normalized_title = normalize_title(&result.title);
             let title_tokens = token_set(&normalized_title);
-            let alias_match = aliases.iter().any(|alias| {
+            let alias_match = ctx.aliases.iter().any(|alias| {
                 let normalized_alias = normalize_title(alias);
                 normalized_title.contains(&normalized_alias)
                     || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
@@ -407,11 +453,11 @@ async fn run_queries_interactive(
                 continue;
             }
             // Season check: reject results clearly from a different season
-            if season_mismatch(&result.title, expected_season) {
+            if season_mismatch(&result.title, ctx.expected_season) {
                 continue;
             }
             // Episode check for single-episode targets (allow batches through)
-            if let SearchTarget::Episode(target_ep) = target {
+            if let SearchTarget::Episode(target_ep) = ctx.target {
                 if !result.is_batch {
                     let parsed = parse_release_numbers(&result.title);
                     if !parsed.is_empty() && !parsed.contains(target_ep) {
@@ -421,8 +467,8 @@ async fn run_queries_interactive(
             }
             // For FINISHED series, reject non-BD results uploaded 2+ years after airing.
             // Uses a filename-only BD heuristic so we don't hit the DB here.
-            if is_finished {
-                if let Some(air_year) = season_year {
+            if ctx.is_finished {
+                if let Some(air_year) = ctx.season_year {
                     if result.upload_timestamp > 0 {
                         if let Some(upload_year) = upload_year_of(result.upload_timestamp) {
                             if upload_year - air_year >= 2

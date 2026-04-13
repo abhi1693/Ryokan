@@ -294,24 +294,27 @@ async fn refresh_series_metadata_inner(
     let stored_anilist_id = if authoritative_detail { detail.id } else { tracked.anilist_id };
 
     if authoritative_detail || allow_degraded_cache_rebuild {
+        let primary_title = if !detail.title_english.trim().is_empty() {
+            &detail.title_english
+        } else {
+            &detail.title_romaji
+        };
         series::refresh_core_metadata(
             db,
             tracked.id,
-            stored_anilist_id,
-            detail.id_mal,
-            if !detail.title_english.trim().is_empty() {
-                &detail.title_english
-            } else {
-                &detail.title_romaji
+            series::SeriesCore {
+                anilist_id: stored_anilist_id,
+                mal_id: detail.id_mal,
+                title: primary_title,
+                title_romaji: &detail.title_romaji,
+                title_english: &detail.title_english,
+                title_native: &detail.title_native,
+                cover_url: &detail.cover_url,
+                format: &detail.format,
+                status: &detail.status,
+                episodes: detail.episodes,
+                season_year: detail.season_year,
             },
-            &detail.title_romaji,
-            &detail.title_english,
-            &detail.title_native,
-            &detail.cover_url,
-            &detail.format,
-            &detail.status,
-            detail.episodes,
-            detail.season_year,
         )
         .await
         .map_err(|e| e.to_string())?;

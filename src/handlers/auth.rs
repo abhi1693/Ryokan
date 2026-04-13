@@ -171,7 +171,7 @@ fn url_host(value: &str) -> Option<String> {
     let after_scheme = value.split_once("://").map(|(_, rest)| rest)?;
     // Host ends at the first `/`, `?`, `#`, or end of string.
     let host_end = after_scheme
-        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let host_with_port = &after_scheme[..host_end];
     if host_with_port.is_empty() {

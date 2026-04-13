@@ -1,6 +1,36 @@
 use serde::Serialize;
 use sqlx::SqlitePool;
 
+// sqlx row-tuple shapes for the `rss_runs` and `rss_seen` SELECTs.
+// Aliased so the call-site annotations don't blow past Clippy's
+// `type_complexity` lint and — more importantly — so a schema change
+// has exactly one place to edit instead of two parallel tuple
+// declarations that have to stay in lock-step.
+type RssRunRow = (
+    i64,
+    String,
+    Option<String>,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    String,
+);
+
+type RssDecisionRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RssRun {
     pub id: i64,
@@ -38,15 +68,23 @@ pub async fn start_run(db: &SqlitePool, trigger_source: &str) -> Result<i64, sql
     Ok(result.last_insert_rowid())
 }
 
+/// Per-run counters that `finish_run` writes back to `rss_runs`. Named
+/// fields instead of four positional `i32`s so callers can't swap
+/// `matched` and `grabbed` (or similar) by mistake at the callsite —
+/// the compiler won't catch it when every slot is the same type.
+pub struct RunSummary<'a> {
+    pub status: &'a str,
+    pub items_seen: i32,
+    pub matched: i32,
+    pub grabbed: i32,
+    pub skipped: i32,
+    pub detail: &'a str,
+}
+
 pub async fn finish_run(
     db: &SqlitePool,
     id: i64,
-    status: &str,
-    items_seen: i32,
-    matched: i32,
-    grabbed: i32,
-    skipped: i32,
-    detail: &str,
+    summary: RunSummary<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"UPDATE rss_runs
@@ -59,12 +97,12 @@ pub async fn finish_run(
                detail = ?
          WHERE id = ?"#,
     )
-    .bind(status)
-    .bind(items_seen)
-    .bind(matched)
-    .bind(grabbed)
-    .bind(skipped)
-    .bind(detail)
+    .bind(summary.status)
+    .bind(summary.items_seen)
+    .bind(summary.matched)
+    .bind(summary.grabbed)
+    .bind(summary.skipped)
+    .bind(summary.detail)
     .bind(id)
     .execute(db)
     .await?;
@@ -79,18 +117,26 @@ pub async fn item_was_grabbed(db: &SqlitePool, item_key: &str) -> Result<bool, s
     Ok(row.is_some())
 }
 
+/// Payload for `record_decision`. Named fields instead of six `&str`s
+/// in a row — swapping `title`/`link` or `decision`/`reason` at a
+/// callsite was a silent-corruption risk the compiler couldn't catch,
+/// and Clippy was already complaining about the arg count.
+pub struct DecisionRecord<'a> {
+    pub item_key: &'a str,
+    pub title: &'a str,
+    pub link: &'a str,
+    pub series_id: Option<i64>,
+    pub series_title: &'a str,
+    pub group_name: &'a str,
+    pub is_batch: bool,
+    pub decision: &'a str,
+    pub reason: &'a str,
+    pub source: &'a str,
+}
+
 pub async fn record_decision(
     db: &SqlitePool,
-    item_key: &str,
-    title: &str,
-    link: &str,
-    series_id: Option<i64>,
-    series_title: &str,
-    group_name: &str,
-    is_batch: bool,
-    decision: &str,
-    reason: &str,
-    source: &str,
+    record: DecisionRecord<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO rss_seen
@@ -108,23 +154,23 @@ pub async fn record_decision(
                source = excluded.source,
                created_at = CURRENT_TIMESTAMP"#,
     )
-    .bind(item_key)
-    .bind(title)
-    .bind(link)
-    .bind(series_id)
-    .bind(series_title)
-    .bind(group_name)
-    .bind(if is_batch { 1_i64 } else { 0_i64 })
-    .bind(decision)
-    .bind(reason)
-    .bind(source)
+    .bind(record.item_key)
+    .bind(record.title)
+    .bind(record.link)
+    .bind(record.series_id)
+    .bind(record.series_title)
+    .bind(record.group_name)
+    .bind(i64::from(record.is_batch))
+    .bind(record.decision)
+    .bind(record.reason)
+    .bind(record.source)
     .execute(db)
     .await?;
     Ok(())
 }
 
 pub async fn latest_run(db: &SqlitePool) -> Result<Option<RssRun>, sqlx::Error> {
-    let row: Option<(i64, String, Option<String>, String, String, i64, i64, i64, i64, String)> = sqlx::query_as(
+    let row: Option<RssRunRow> = sqlx::query_as(
         r#"SELECT id, started_at, finished_at, trigger_source, status, items_seen, matched, grabbed, skipped, detail
            FROM rss_runs ORDER BY id DESC LIMIT 1"#,
     )
@@ -146,7 +192,7 @@ pub async fn latest_run(db: &SqlitePool) -> Result<Option<RssRun>, sqlx::Error> 
 }
 
 pub async fn recent_decisions(db: &SqlitePool, limit: i64) -> Result<Vec<RssDecision>, sqlx::Error> {
-    let rows: Vec<(i64, String, String, String, String, String, String, String, i64)> = sqlx::query_as(
+    let rows: Vec<RssDecisionRow> = sqlx::query_as(
         r#"SELECT id, created_at, title, series_title, group_name, decision, reason, source, is_batch
            FROM rss_seen ORDER BY id DESC LIMIT ?"#,
     )

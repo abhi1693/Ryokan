@@ -131,13 +131,15 @@ pub async fn cache_image(
     let last_write = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
     artwork_cache::upsert_ref(
         db,
-        &safe_key,
-        parent_kind,
-        parent_id,
-        image_kind,
-        source_url,
-        &blob_hash,
-        last_write,
+        artwork_cache::RefUpsert {
+            cache_key: &safe_key,
+            parent_kind,
+            parent_id,
+            image_kind,
+            source_url,
+            blob_hash: &blob_hash,
+            last_write,
+        },
     ).await.map_err(|e| e.to_string())?;
 
     Ok(Some(local_url(&safe_key, last_write)))

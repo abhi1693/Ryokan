@@ -217,16 +217,29 @@ pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, S
             let _ = rss::finish_run(
                 &state.db,
                 run_id,
-                "ok",
-                summary.items_seen,
-                summary.matched,
-                summary.grabbed,
-                summary.skipped,
-                &summary.detail,
+                rss::RunSummary {
+                    status: "ok",
+                    items_seen: summary.items_seen,
+                    matched: summary.matched,
+                    grabbed: summary.grabbed,
+                    skipped: summary.skipped,
+                    detail: &summary.detail,
+                },
             ).await;
         }
         Err(err) => {
-            let _ = rss::finish_run(&state.db, run_id, "error", 0, 0, 0, 0, err).await;
+            let _ = rss::finish_run(
+                &state.db,
+                run_id,
+                rss::RunSummary {
+                    status: "error",
+                    items_seen: 0,
+                    matched: 0,
+                    grabbed: 0,
+                    skipped: 0,
+                    detail: err,
+                },
+            ).await;
         }
     }
 
@@ -275,7 +288,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         let item_key = build_item_key(&item);
         if rss::item_was_grabbed(&state.db, &item_key).await.map_err(|e| e.to_string())? {
             skipped += 1;
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, None, "", &item.group, item.is_batch, "skipped", "Already grabbed earlier; skipping duplicate RSS item", "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: None,
+                series_title: "",
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "skipped",
+                reason: "Already grabbed earlier; skipping duplicate RSS item",
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -283,7 +307,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             skipped += 1;
             let diag = build_match_diag(&item, None, 0);
             let reason = format!("No tracked series match | {}", diag);
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, None, "", &item.group, item.is_batch, "skipped", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: None,
+                series_title: "",
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "skipped",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         };
 
@@ -292,7 +327,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if group_matches_blacklist(&item.group, &blacklist) {
             skipped += 1;
             let reason = format!("Blocked group: {} | {}", item.group, build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: Some(found.series.id),
+                series_title: &found.series.title,
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -303,7 +349,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             } else {
                 format!("Group not in whitelist: {} | {}", item.group, build_match_diag(&item, Some(&found), 0))
             };
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: Some(found.series.id),
+                series_title: &found.series.title,
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -341,7 +398,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if let Some(reason) = decision.reject_reason {
             skipped += 1;
             let reason = format!("{} | {}", reason, build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: Some(found.series.id),
+                series_title: &found.series.title,
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -349,7 +417,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if !canonical_key.is_empty() && canonical_history.contains(&canonical_key) {
             skipped += 1;
             let reason = format!("Logical episode is already queued or was grabbed earlier | {}", build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, &item_key, &item.title, &item.link, Some(found.series.id), &found.series.title, &item.group, item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &item_key,
+                title: &item.title,
+                link: &item.link,
+                series_id: Some(found.series.id),
+                series_title: &found.series.title,
+                group_name: &item.group,
+                is_batch: item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -383,7 +462,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         for cand in pending {
             skipped += 1;
             let reason = format!("qBittorrent is not configured | {}", build_match_diag(&cand.item, Some(&cand.found), cand.score));
-            let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &cand.item_key,
+                title: &cand.item.title,
+                link: &cand.item.link,
+                series_id: Some(cand.found.series.id),
+                series_title: &cand.found.series.title,
+                group_name: &cand.item.group,
+                is_batch: cand.item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
         }
         let detail = format!("Processed {} items • matched {} • grabbed {} • skipped {}", items_seen, matched, grabbed, skipped);
         logger::info(&state.db, LogCategory::System, "RSS sync finished", &detail).await;
@@ -398,7 +488,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 "Lower score than selected candidate for the same logical episode | {}",
                 build_match_diag(&cand.item, Some(&cand.found), cand.score)
             );
-            let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "rejected", &reason, "rss").await;
+            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                item_key: &cand.item_key,
+                title: &cand.item.title,
+                link: &cand.item.link,
+                series_id: Some(cand.found.series.id),
+                series_title: &cand.found.series.title,
+                group_name: &cand.item.group,
+                is_batch: cand.item.is_batch,
+                decision: "rejected",
+                reason: &reason,
+                source: "rss",
+            }).await;
             continue;
         }
 
@@ -420,7 +521,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     format!("Accepted best candidate ({}) for {} episode(s) | {}", action, cand.new_episode_count.max(1), build_match_diag(&cand.item, Some(&cand.found), cand.score))
                 };
                 canonical_history.insert(canonical_episode_key(&cand.found, cand.item.is_batch));
-                let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "grabbed", &reason, "rss").await;
+                let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                    item_key: &cand.item_key,
+                    title: &cand.item.title,
+                    link: &cand.item.link,
+                    series_id: Some(cand.found.series.id),
+                    series_title: &cand.found.series.title,
+                    group_name: &cand.item.group,
+                    is_batch: cand.item.is_batch,
+                    decision: "grabbed",
+                    reason: &reason,
+                    source: "rss",
+                }).await;
                 // Record for post-processing.
                 let ep_list: Vec<i32> = cand.found.resolved_eps.iter().copied().collect();
                 let _ = crate::models::grabbed_torrents::record_grab(
@@ -459,7 +571,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             Err(err) => {
                 skipped += 1;
                 let reason = format!("{} | {}", err, build_match_diag(&cand.item, Some(&cand.found), cand.score));
-                let _ = rss::record_decision(&state.db, &cand.item_key, &cand.item.title, &cand.item.link, Some(cand.found.series.id), &cand.found.series.title, &cand.item.group, cand.item.is_batch, "error", &reason, "rss").await;
+                let _ = rss::record_decision(&state.db, rss::DecisionRecord {
+                    item_key: &cand.item_key,
+                    title: &cand.item.title,
+                    link: &cand.item.link,
+                    series_id: Some(cand.found.series.id),
+                    series_title: &cand.found.series.title,
+                    group_name: &cand.item.group,
+                    is_batch: cand.item.is_batch,
+                    decision: "error",
+                    reason: &reason,
+                    source: "rss",
+                }).await;
             }
         }
     }
@@ -737,19 +860,23 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
 
     let mut best: Option<(f32, MatchResult)> = None;
 
+    let item_view = ItemView {
+        normalized: &parsed.normalized_title,
+        tokens: &item_tokens,
+        core: &parsed.core_title,
+        core_tokens: &item_core_tokens,
+        collapsed: &parsed.collapsed_title,
+        collapsed_core: &parsed.collapsed_core_title,
+    };
+
     for meta in all_meta {
-        let alias_score = score_alias_overlap(
-            &parsed.normalized_title,
-            &item_tokens,
-            &parsed.core_title,
-            &item_core_tokens,
-            &parsed.collapsed_title,
-            &parsed.collapsed_core_title,
-            &meta.aliases,
-            &meta.core_aliases,
-            &meta.collapsed_aliases,
-            &meta.collapsed_core_aliases,
-        );
+        let alias_set = AliasSet {
+            aliases: &meta.aliases,
+            core_aliases: &meta.core_aliases,
+            collapsed_aliases: &meta.collapsed_aliases,
+            collapsed_core_aliases: &meta.collapsed_core_aliases,
+        };
+        let alias_score = score_alias_overlap(&item_view, &alias_set);
         if alias_score < 0.82 {
             continue;
         }
@@ -877,46 +1004,60 @@ fn compare_series_meta(a: &SeriesMeta, b: &SeriesMeta) -> Ordering {
     }
 }
 
-fn score_alias_overlap(
-    normalized_item: &str,
-    item_tokens: &HashSet<String>,
-    item_core: &str,
-    item_core_tokens: &HashSet<String>,
-    collapsed_item: &str,
-    collapsed_item_core: &str,
-    aliases: &[String],
-    core_aliases: &[String],
-    collapsed_aliases: &[String],
-    collapsed_core_aliases: &[String],
-) -> f32 {
-    let alias_max = aliases.iter().map(|alias| {
+/// Four parallel views of an RSS item title — normalized, core-only,
+/// and a collapsed (alphanumeric-only) variant of each — grouped so
+/// `score_alias_overlap` can take a single bundle instead of six
+/// positional `&str`/`&HashSet` args. Four `&str`s that happen to be
+/// next to each other in a signature is exactly the kind of thing the
+/// compiler can't protect you from at the call site.
+struct ItemView<'a> {
+    normalized: &'a str,
+    tokens: &'a HashSet<String>,
+    core: &'a str,
+    core_tokens: &'a HashSet<String>,
+    collapsed: &'a str,
+    collapsed_core: &'a str,
+}
+
+/// The four parallel alias lists on a `SeriesMeta`, bundled together
+/// for the same reason as `ItemView`: four `&[String]` args in a row
+/// is a positional-swap hazard.
+struct AliasSet<'a> {
+    aliases: &'a [String],
+    core_aliases: &'a [String],
+    collapsed_aliases: &'a [String],
+    collapsed_core_aliases: &'a [String],
+}
+
+fn score_alias_overlap(item: &ItemView<'_>, meta: &AliasSet<'_>) -> f32 {
+    let alias_max = meta.aliases.iter().map(|alias| {
         let normalized_alias = auto_search::normalize_title(alias);
         let alias_tokens = auto_search::token_set(&normalized_alias);
         let mut score = 0.0f32;
-        if !normalized_alias.is_empty() && (normalized_item.contains(&normalized_alias) || normalized_alias.contains(normalized_item)) {
+        if !normalized_alias.is_empty() && (item.normalized.contains(&normalized_alias) || normalized_alias.contains(item.normalized)) {
             score = score.max(1.0);
         }
-        let overlap_ab = auto_search::token_overlap_ratio(item_tokens, &alias_tokens);
-        let overlap_ba = auto_search::token_overlap_ratio(&alias_tokens, item_tokens);
+        let overlap_ab = auto_search::token_overlap_ratio(item.tokens, &alias_tokens);
+        let overlap_ba = auto_search::token_overlap_ratio(&alias_tokens, item.tokens);
         score.max(overlap_ab.min(overlap_ba))
     }).fold(0.0f32, f32::max);
 
-    let core_max = core_aliases.iter().map(|alias_core| {
+    let core_max = meta.core_aliases.iter().map(|alias_core| {
         let core_tokens = auto_search::token_set(alias_core);
         let mut score = 0.0f32;
-        if !alias_core.is_empty() && !item_core.is_empty() && (item_core.contains(alias_core) || alias_core.contains(item_core)) {
+        if !alias_core.is_empty() && !item.core.is_empty() && (item.core.contains(alias_core) || alias_core.contains(item.core)) {
             score = score.max(1.0);
         }
-        let overlap_ab = auto_search::token_overlap_ratio(item_core_tokens, &core_tokens);
-        let overlap_ba = auto_search::token_overlap_ratio(&core_tokens, item_core_tokens);
+        let overlap_ab = auto_search::token_overlap_ratio(item.core_tokens, &core_tokens);
+        let overlap_ba = auto_search::token_overlap_ratio(&core_tokens, item.core_tokens);
         score.max(overlap_ab.min(overlap_ba))
     }).fold(0.0f32, f32::max);
 
-    let collapsed_max = collapsed_aliases.iter().chain(collapsed_core_aliases.iter()).map(|alias| {
+    let collapsed_max = meta.collapsed_aliases.iter().chain(meta.collapsed_core_aliases.iter()).map(|alias| {
         if alias.is_empty() {
             return 0.0;
         }
-        if collapsed_item == *alias || collapsed_item_core == *alias || collapsed_item.contains(alias) || alias.contains(collapsed_item_core) {
+        if item.collapsed == *alias || item.collapsed_core == *alias || item.collapsed.contains(alias) || alias.contains(item.collapsed_core) {
             1.0
         } else {
             0.0

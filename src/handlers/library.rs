@@ -231,19 +231,26 @@ async fn maybe_reconcile_mal_entry(
         Err(_) => return None,
     };
 
+    let primary_title = if !matched.title_english.is_empty() {
+        matched.title_english.clone()
+    } else {
+        matched.title_romaji.clone()
+    };
     if series::upsert(
         db,
-        matched.id,
-        matched.id_mal,
-        &(if !matched.title_english.is_empty() { matched.title_english.clone() } else { matched.title_romaji.clone() }),
-        &matched.title_romaji,
-        &matched.title_english,
-        &matched.title_native,
-        &matched.cover_url,
-        &matched.format,
-        &matched.status,
-        matched.episodes,
-        matched.season_year,
+        series::SeriesCore {
+            anilist_id: matched.id,
+            mal_id: matched.id_mal,
+            title: &primary_title,
+            title_romaji: &matched.title_romaji,
+            title_english: &matched.title_english,
+            title_native: &matched.title_native,
+            cover_url: &matched.cover_url,
+            format: &matched.format,
+            status: &matched.status,
+            episodes: matched.episodes,
+            season_year: matched.season_year,
+        },
     ).await.is_err() {
         return None;
     }
@@ -1268,17 +1275,19 @@ pub async fn add_series(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let (id, created) = series::upsert(
         &state.db,
-        form.anilist_id,
-        form.mal_id,
-        &form.title,
-        &form.title_romaji,
-        &form.title_english,
-        &form.title_native,
-        &form.cover_url,
-        &form.format,
-        &form.status,
-        form.episodes,
-        form.season_year,
+        series::SeriesCore {
+            anilist_id: form.anilist_id,
+            mal_id: form.mal_id,
+            title: &form.title,
+            title_romaji: &form.title_romaji,
+            title_english: &form.title_english,
+            title_native: &form.title_native,
+            cover_url: &form.cover_url,
+            format: &form.format,
+            status: &form.status,
+            episodes: form.episodes,
+            season_year: form.season_year,
+        },
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
