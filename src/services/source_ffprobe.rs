@@ -62,8 +62,19 @@ pub struct FfprobeClassification {
 /// missing binary, missing file, cache miss that then fails to spawn, probe
 /// timeout, malformed JSON — so the caller can always safely aggregate the
 /// result without null-checking.
+///
+/// Failure branches emit `tracing::warn!` with the offending path and the
+/// underlying error, so a silently missing-ffprobe install or a corrupt
+/// file is visible in the logs. Successful zero-evidence results (the
+/// "intentionally useless" fingerprints documented above) are not warned
+/// about — they're the happy path for audio-only or AV1/Opus files.
 pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassification {
     let Some(path_str) = path.to_str() else {
+        tracing::warn!(
+            target: "ryokan::source::ffprobe",
+            ?path,
+            "ffprobe: path contains non-UTF8 bytes; skipping probe"
+        );
         return FfprobeClassification::default();
     };
 
@@ -72,7 +83,15 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
     // treat it as "can't probe" rather than blindly going to the network.
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
-        Err(_) => return FfprobeClassification::default(),
+        Err(err) => {
+            tracing::warn!(
+                target: "ryokan::source::ffprobe",
+                path = path_str,
+                %err,
+                "ffprobe: stat failed; skipping probe"
+            );
+            return FfprobeClassification::default();
+        }
     };
     let size = meta.len() as i64;
     let mtime = meta
@@ -85,25 +104,31 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
     let cached = media_probe_cache::get(db, path_str, mtime, size).await;
     let probe_json = match cached {
         Some(j) => j,
-        None => {
-            let Some(j) = run_ffprobe(path).await else {
-                return FfprobeClassification::default();
-            };
-            media_probe_cache::upsert(db, path_str, mtime, size, &j).await;
-            j
-        }
+        None => match run_ffprobe(path).await {
+            Some(j) => {
+                media_probe_cache::upsert(db, path_str, mtime, size, &j).await;
+                j
+            }
+            None => return FfprobeClassification::default(),
+        },
     };
 
-    scan_ffprobe_json(&probe_json)
+    scan_ffprobe_json_logged(path_str, &probe_json)
 }
 
 /// Spawn `ffprobe` and capture its JSON output. Returns `None` on any
 /// failure including a missing binary. We pass `-v quiet` to suppress
 /// ffprobe's banner so cache hits compare byte-for-byte.
+///
+/// Each failure branch emits a targeted `warn!` so the user can see
+/// *why* ffprobe didn't contribute evidence: missing binary vs. probe
+/// refusal vs. non-UTF8 output are distinct failure modes with
+/// different remediation.
 async fn run_ffprobe(path: &Path) -> Option<String> {
-    let output = Command::new("ffprobe")
+    // Capture stderr so the non-zero-exit branch can surface the reason.
+    let spawn = Command::new("ffprobe")
         .arg("-v")
-        .arg("quiet")
+        .arg("error")
         .arg("-show_streams")
         .arg("-show_format")
         .arg("-show_chapters")
@@ -112,14 +137,75 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
         .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
-        .await
-        .ok()?;
+        .await;
+
+    let output = match spawn {
+        Ok(o) => o,
+        Err(err) => {
+            tracing::warn!(
+                target: "ryokan::source::ffprobe",
+                path = %path.display(),
+                %err,
+                "ffprobe spawn failed — is the `ffprobe` binary installed and on PATH?"
+            );
+            return None;
+        }
+    };
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            target: "ryokan::source::ffprobe",
+            path = %path.display(),
+            code = ?output.status.code(),
+            stderr = stderr.trim(),
+            "ffprobe exited non-zero"
+        );
         return None;
     }
-    String::from_utf8(output.stdout).ok()
+    match String::from_utf8(output.stdout) {
+        Ok(s) => Some(s),
+        Err(err) => {
+            tracing::warn!(
+                target: "ryokan::source::ffprobe",
+                path = %path.display(),
+                %err,
+                "ffprobe stdout was not valid UTF-8"
+            );
+            None
+        }
+    }
+}
+
+/// Thin wrapper around `scan_ffprobe_json` that adds path-aware warn
+/// logging on JSON parse failures and on the empty-video-stream branch.
+/// The pure scanner is kept free of I/O and logging so unit tests can
+/// keep calling it directly with canned fixtures.
+fn scan_ffprobe_json_logged(path: &str, json: &str) -> FfprobeClassification {
+    if serde_json::from_str::<Value>(json).is_err() {
+        tracing::warn!(
+            target: "ryokan::source::ffprobe",
+            path,
+            "ffprobe JSON parse failed; skipping probe"
+        );
+        return FfprobeClassification::default();
+    }
+    let out = scan_ffprobe_json(json);
+    if !out.evidence.is_empty() {
+        return out;
+    }
+    if out.resolution.is_none() {
+        // No video stream at all — log at debug since this is normal for
+        // audio-only files or probes of weird container formats, but
+        // still worth tracing when debugging.
+        tracing::debug!(
+            target: "ryokan::source::ffprobe",
+            path,
+            "ffprobe: no video stream present, no evidence emitted"
+        );
+    }
+    out
 }
 
 /// Pure scanner: takes a ffprobe JSON document as a string and emits
