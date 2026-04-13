@@ -465,8 +465,22 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Add the column under its old name for DBs that predate the Kitsu migration,
-    // then rename it to force_kitsu_fallback for DBs that still have the old name.
+    // Three-DB-states rename for `force_tmdb_fallback` → `force_kitsu_fallback`:
+    //
+    //   1. Fresh install — neither column exists. The ADD succeeds and creates
+    //      `force_tmdb_fallback`; the subsequent RENAME moves it to the new name.
+    //      End state: `force_kitsu_fallback` exists.
+    //   2. Legacy install — only `force_tmdb_fallback` exists. The ADD is a no-op
+    //      (`.ok()` swallows "duplicate column name"); the RENAME moves it to the
+    //      new name. End state: `force_kitsu_fallback` exists.
+    //   3. Post-migration install — only `force_kitsu_fallback` exists. The ADD
+    //      *creates* `force_tmdb_fallback` as a vestigial column because SQLite has
+    //      no IF NOT EXISTS check on column name alone; the RENAME then fails
+    //      because the target name is already taken (swallowed by `.ok()`). End
+    //      state: `force_kitsu_fallback` still exists, but so does a stray
+    //      `force_tmdb_fallback` column. This is harmless — nothing reads it — but
+    //      it's a cosmetic wart. If you're cleaning up, an `IF NOT EXISTS` guarded
+    //      by a `PRAGMA table_info` check would fix it.
     sqlx::query("ALTER TABLE config ADD COLUMN force_tmdb_fallback INTEGER NOT NULL DEFAULT 0")
         .execute(db)
         .await

@@ -76,7 +76,19 @@ pub fn score_result_with_sub_pref(r: &SearchResult, opts: &SearchOptions, prefer
     }
 
     // Dub vs Sub scoring.
-    let is_dual = lower.contains("dual audio") || lower.contains("dual.audio") || lower.contains("multi");
+    //
+    // Detecting the bare substring `"multi"` false-positived on titles
+    // that contained words like "multimedia" or group/release tags
+    // ending in "multi" — those got tagged as dual-audio and shifted
+    // under the sub/dub preference logic, nudging scoring in the wrong
+    // direction. Tighten to the actual release-naming conventions for
+    // multi-audio releases.
+    let is_dual = lower.contains("dual audio")
+        || lower.contains("dual.audio")
+        || lower.contains("multi audio")
+        || lower.contains("multi.audio")
+        || lower.contains("multi-audio")
+        || lower.contains("multiaudio");
     let is_dub = is_dual || lower.contains("dub") || lower.contains("dubbed") || lower.contains("english dub");
     if prefer_subs {
         // Penalize dub/dual audio releases when user prefers subs.

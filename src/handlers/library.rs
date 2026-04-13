@@ -2220,21 +2220,73 @@ pub async fn delete_episode_file(
     match target {
         None => json_err(axum::http::StatusCode::NOT_FOUND, "Episode file not found on disk"),
         Some(file) => {
-            let full_path = std::path::Path::new(&cfg.media_root)
-                .join(&tracked.folder_name)
-                .join(&file.filename);
+            let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
+            let full_path = series_dir.join(&file.filename);
 
-            if let Err(e) = std::fs::remove_file(&full_path) {
+            // Canonicalize and verify the resolved path is still inside
+            // the configured media root. `media::scan_series_folder` uses
+            // `std::fs::read_dir`, which silently follows directory
+            // symlinks — so a symlink inside a tracked series folder
+            // pointing at, say, `/etc` would show up in the scan, and a
+            // DELETE on that episode would then unlink a file outside
+            // the media root. Canonicalizing `media_root` and asserting
+            // that the canonicalized target sits under it closes that
+            // gap without breaking legitimate symlinks that still
+            // resolve inside the library.
+            let media_root_canon = match std::fs::canonicalize(&cfg.media_root) {
+                Ok(p) => p,
+                Err(e) => return json_err(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to resolve media root: {}", e),
+                ),
+            };
+            let full_path_canon = match std::fs::canonicalize(&full_path) {
+                Ok(p) => p,
+                Err(e) => return json_err(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to resolve file: {}", e),
+                ),
+            };
+            if !full_path_canon.starts_with(&media_root_canon) {
+                logger::warn(
+                    &state.db,
+                    LogCategory::Library,
+                    "Refused to delete file outside media root",
+                    &format!(
+                        "series_id={}, requested={}, resolved={}, media_root={}",
+                        tracked.id,
+                        full_path.display(),
+                        full_path_canon.display(),
+                        media_root_canon.display()
+                    ),
+                ).await;
+                return json_err(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "File resolves outside media root",
+                );
+            }
+
+            // tokio::fs::remove_file so the handler doesn't block a
+            // runtime worker on the (typically fast, but latency-sensitive
+            // on network mounts) unlink call. `exists()` is still sync but
+            // that's a cheap stat call.
+            if let Err(e) = tokio::fs::remove_file(&full_path_canon).await {
                 return json_err(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("Failed to delete file: {}", e),
                 );
             }
 
-            // Also remove the accompanying .nfo file if it exists.
-            let nfo_path = full_path.with_extension("nfo");
+            // Also remove the accompanying .nfo file if it exists. Same
+            // canonicalize-and-check dance so a sibling symlink can't
+            // route the delete outside the media root either.
+            let nfo_path = full_path_canon.with_extension("nfo");
             if nfo_path.exists() {
-                let _ = std::fs::remove_file(&nfo_path);
+                if let Ok(nfo_canon) = std::fs::canonicalize(&nfo_path) {
+                    if nfo_canon.starts_with(&media_root_canon) {
+                        let _ = tokio::fs::remove_file(&nfo_canon).await;
+                    }
+                }
             }
 
             // Clear the episode quality tag so it shows as missing again.
@@ -2244,7 +2296,7 @@ pub async fn delete_episode_file(
                 &state.db,
                 LogCategory::Library,
                 &format!("Deleted episode {} file: {}", episode_number, file.filename),
-                &format!("series_id={}, path={}", tracked.id, full_path.display()),
+                &format!("series_id={}, path={}", tracked.id, full_path_canon.display()),
             ).await;
 
             (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": file.filename})))

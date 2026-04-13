@@ -59,41 +59,57 @@ fn sanitize_filename(s: &str) -> String {
 }
 
 /// Hardlink → copy fallback. For "move" mode: rename → copy+delete fallback.
-fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
-    if let Some(p) = dst.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    match mode {
-        "move" => {
-            if std::fs::rename(src, dst).is_err() {
-                std::fs::copy(src, dst)?;
-                let _ = std::fs::remove_file(src);
+///
+/// Runs the whole operation under `spawn_blocking` because a Blu-ray
+/// episode cross-device copy can easily be 1–4 GB and blocks for
+/// multiple seconds; doing that on a tokio worker starves the RSS sync,
+/// HTTP handlers, and other background tasks sharing the same runtime.
+async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mode = mode.to_string();
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        if let Some(p) = dst.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        match mode.as_str() {
+            "move" => {
+                if std::fs::rename(&src, &dst).is_err() {
+                    std::fs::copy(&src, &dst)?;
+                    let _ = std::fs::remove_file(&src);
+                }
+                Ok(())
             }
-            Ok(())
-        }
-        "copy" => {
-            std::fs::copy(src, dst)?;
-            Ok(())
-        }
-        _ => {
-            // "hardlink" (default): hardlink preferred, copy on failure (cross-fs).
-            if std::fs::hard_link(src, dst).is_err() {
-                std::fs::copy(src, dst)?;
+            "copy" => {
+                std::fs::copy(&src, &dst)?;
+                Ok(())
             }
-            Ok(())
+            _ => {
+                // "hardlink" (default): hardlink preferred, copy on failure (cross-fs).
+                if std::fs::hard_link(&src, &dst).is_err() {
+                    std::fs::copy(&src, &dst)?;
+                }
+                Ok(())
+            }
         }
-    }
+    })
+    .await
+    .map_err(|e| std::io::Error::other(format!("join error: {}", e)))?
 }
 
 /// Copy the cached series poster to `dest` (always written as JPEG regardless
-/// of original extension — Jellyfin accepts it).
+/// of original extension — Jellyfin accepts it). Runs the copy under
+/// `spawn_blocking` so a slow/network-backed media root can't stall the
+/// runtime while moving a multi-MB poster.
 async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
     let cache_key = format!("series-{}-cover", series_id);
     let entry = match artwork_cache::get(db, &cache_key).await {
         Ok(Some(e)) => e,
         _ => return,
     };
-    let _ = std::fs::copy(&entry.local_path, dest);
+    let src = std::path::PathBuf::from(&entry.local_path);
+    let dst = dest.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || std::fs::copy(src, dst)).await;
 }
 
 /// Process a single completed torrent. Returns `true` if at least one file was
@@ -158,8 +174,13 @@ async fn import_torrent(
         .join(&folder_name)
         .join(format!("Season {:02}", season));
 
-    std::fs::create_dir_all(&season_dir)
-        .map_err(|e| format!("create season dir: {}", e))?;
+    {
+        let season_dir = season_dir.clone();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&season_dir))
+            .await
+            .map_err(|e| format!("create season dir join: {}", e))?
+            .map_err(|e| format!("create season dir: {}", e))?;
+    }
 
     let mut imported_count = 0_usize;
 
@@ -247,22 +268,34 @@ async fn import_torrent(
         // episode title changed in AniList between the original grab and the
         // upgrade (e.g. a translated title was added later).
         let ep_tag = format!("S{:02}E{:02}", season, ep_num);
-        let existing_for_ep: Vec<PathBuf> = std::fs::read_dir(&season_dir)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.contains(&ep_tag))
-                    .unwrap_or(false)
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e != "nfo")
-                        .unwrap_or(false)
+        // Walk the season directory off the runtime — a big season pack on
+        // an NFS mount can make the sync read_dir/stat calls block for
+        // hundreds of ms. The filter logic is cheap CPU, so we also move
+        // it into the spawned task.
+        let existing_for_ep: Vec<PathBuf> = {
+            let season_dir = season_dir.clone();
+            let ep_tag = ep_tag.clone();
+            tokio::task::spawn_blocking(move || -> Vec<PathBuf> {
+                std::fs::read_dir(&season_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.contains(&ep_tag))
+                            .unwrap_or(false)
+                            && p.extension()
+                                .and_then(|e| e.to_str())
+                                .map(|e| e != "nfo")
+                                .unwrap_or(false)
+                    })
+                    .collect()
             })
-            .collect();
+            .await
+            .unwrap_or_default()
+        };
 
         if !existing_for_ep.is_empty() {
             // Check if this is an upgrade replacing a previously imported file.
@@ -282,8 +315,10 @@ async fn import_torrent(
             }
 
             // Remove old file(s) and their NFOs to make way for the upgrade.
+            // unlinks are wrapped in tokio::fs so a slow filesystem doesn't
+            // stall the runtime during the upgrade path.
             for old_file in &existing_for_ep {
-                if let Err(e) = std::fs::remove_file(old_file) {
+                if let Err(e) = tokio::fs::remove_file(old_file).await {
                     logger::error(
                         &state.db,
                         LogCategory::PostProcess,
@@ -295,7 +330,7 @@ async fn import_torrent(
                 // Remove corresponding NFO (old stem may differ from new dest_stem
                 // if the episode title changed between grabs).
                 if let Some(stem) = old_file.file_stem().and_then(|s| s.to_str()) {
-                    let _ = std::fs::remove_file(season_dir.join(format!("{}.nfo", stem)));
+                    let _ = tokio::fs::remove_file(season_dir.join(format!("{}.nfo", stem))).await;
                 }
             }
 
@@ -307,18 +342,21 @@ async fn import_torrent(
             )
             .await;
 
-            // Clean up old torrents from qBittorrent and mark old grabs as replaced.
+            // Clean up old torrents from qBittorrent and mark old grabs as
+            // replaced. Reuse the `qbit` binding cloned at the top of this
+            // function instead of re-taking `state.qbit.read()` each
+            // iteration — under a big upgrade with many old grabs the
+            // per-iteration lock acquire was serializing against any other
+            // task touching `state.qbit`.
             for old_grab in &old_grabs {
                 if !old_grab.hash.is_empty() {
-                    if let Some(ref qbit_client) = state.qbit.read().await.clone() {
-                        let _ = qbit_client.delete_torrent(&old_grab.hash, true).await;
-                    }
+                    let _ = qbit.delete_torrent(&old_grab.hash, true).await;
                 }
                 let _ = grabbed_torrents::mark_removed(&state.db, old_grab.id).await;
             }
         }
 
-        match do_file_op(&cfg.post_processing_mode, &src, &dest_video) {
+        match do_file_op(&cfg.post_processing_mode, &src, &dest_video).await {
             Ok(()) => {
                 let _ = nfo::write_episode_nfo(&dest_nfo, &series_title, season, ep_num, &ep_title, &aired);
                 imported_count += 1;

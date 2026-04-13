@@ -126,6 +126,49 @@ impl FromRef<AppState> for SqlitePool {
     }
 }
 
+/// Run a supervising loop around a background tick future.
+///
+/// `make_fut` is called once per respawn. The returned future is run on
+/// its own nested `tokio::spawn`, so if the inner task panics tokio
+/// catches the unwind at the task boundary and surfaces it as a
+/// `JoinError` — we log it, sleep briefly, and respawn. Without this
+/// supervising layer a stray `.unwrap()` or overflow inside any one
+/// background task would silently kill the task for the rest of the
+/// process lifetime, leaving the operator with a "task X stopped firing
+/// three days ago" mystery bug.
+///
+/// `name` is used purely in the log line so the operator can tell which
+/// task misbehaved.
+async fn supervise<F, Fut>(name: &'static str, mut make_fut: F) -> !
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    loop {
+        let handle = tokio::spawn(make_fut());
+        match handle.await {
+            Err(e) if e.is_panic() => {
+                tracing::error!(
+                    "Background task '{}' panicked, restarting in 5s: {:?}",
+                    name,
+                    e
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Background task '{}' join error, restarting in 5s: {:?}",
+                    name,
+                    e
+                );
+            }
+            Ok(()) => {
+                tracing::warn!("Background task '{}' exited normally, restarting", name);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize tracing.
@@ -177,10 +220,14 @@ async fn main() {
         }
     }
 
-    // Routes that don't require auth.
+    // Routes that don't require auth. The CSRF layer applies to POSTs here
+    // so a drive-by cross-origin /setup or /login submission is rejected
+    // before touching the handler — the GET paths skip the check because
+    // safe methods return Ok(()) from verify_same_origin.
     let public_routes = Router::new()
         .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
         .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
+        .layer(middleware::from_fn(handlers::auth::csrf_public))
         .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Routes that require auth.
@@ -319,57 +366,64 @@ async fn main() {
     )
     .await;
 
-    // Background task: RSS auto-sync.
+    // Background task: RSS auto-sync. Wrapped in `supervise` so a panic
+    // inside sync_once is logged and the loop restarts rather than going
+    // silent for the rest of the process lifetime.
     {
         let rss_state = state.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            let mut minutes_since_last: i64 = 10_000;
-            let mut consecutive_errors: i64 = 0;
-            loop {
-                interval.tick().await;
-                minutes_since_last += 1;
+            supervise("rss_sync", move || {
+                let inner_state = rss_state.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    let mut minutes_since_last: i64 = 10_000;
+                    let mut consecutive_errors: i64 = 0;
+                    loop {
+                        interval.tick().await;
+                        minutes_since_last += 1;
 
-                let cfg = match models::config::get_config(&rss_state.db).await {
-                    Ok(Some(cfg)) => cfg,
-                    _ => continue,
-                };
+                        let cfg = match models::config::get_config(&inner_state.db).await {
+                            Ok(Some(cfg)) => cfg,
+                            _ => continue,
+                        };
 
-                let _ = models::scheduled_tasks::touch_definition(&rss_state.db, "rss_sync", "RSS sync", &format!("Every {} minutes", cfg.rss_interval_minutes.clamp(1, 60)), cfg.rss_enabled).await;
-                if !cfg.rss_enabled {
-                    continue;
-                }
+                        let _ = models::scheduled_tasks::touch_definition(&inner_state.db, "rss_sync", "RSS sync", &format!("Every {} minutes", cfg.rss_interval_minutes.clamp(1, 60)), cfg.rss_enabled).await;
+                        if !cfg.rss_enabled {
+                            continue;
+                        }
 
-                let every = (cfg.rss_interval_minutes as i64).clamp(1, 60);
-                // Exponential backoff on consecutive errors: skip 2^errors extra intervals (capped at 32)
-                let backoff = if consecutive_errors > 0 {
-                    every * (1i64 << consecutive_errors.min(5))
-                } else {
-                    every
-                };
-                if minutes_since_last < backoff {
-                    continue;
-                }
+                        let every = (cfg.rss_interval_minutes as i64).clamp(1, 60);
+                        // Exponential backoff on consecutive errors: skip 2^errors extra intervals (capped at 32)
+                        let backoff = if consecutive_errors > 0 {
+                            every * (1i64 << consecutive_errors.min(5))
+                        } else {
+                            every
+                        };
+                        if minutes_since_last < backoff {
+                            continue;
+                        }
 
-                minutes_since_last = 0;
-                let _ = models::scheduled_tasks::mark_started(&rss_state.db, "rss_sync", "Automatic RSS sync started").await;
-                match services::rss::sync_once(&rss_state, "auto").await {
-                    Ok(summary) => {
-                        consecutive_errors = 0;
-                        let _ = models::scheduled_tasks::mark_finished(&rss_state.db, "rss_sync", "ok", &summary.detail).await;
+                        minutes_since_last = 0;
+                        let _ = models::scheduled_tasks::mark_started(&inner_state.db, "rss_sync", "Automatic RSS sync started").await;
+                        match services::rss::sync_once(&inner_state, "auto").await {
+                            Ok(summary) => {
+                                consecutive_errors = 0;
+                                let _ = models::scheduled_tasks::mark_finished(&inner_state.db, "rss_sync", "ok", &summary.detail).await;
+                            }
+                            Err(err) => {
+                                consecutive_errors += 1;
+                                let _ = models::scheduled_tasks::mark_finished(&inner_state.db, "rss_sync", "error", &err).await;
+                                services::logger::error(
+                                    &inner_state.db,
+                                    models::log::LogCategory::System,
+                                    "Auto RSS sync failed",
+                                    &format!("{} (backoff: {} consecutive errors)", err, consecutive_errors),
+                                ).await;
+                            }
+                        }
                     }
-                    Err(err) => {
-                        consecutive_errors += 1;
-                        let _ = models::scheduled_tasks::mark_finished(&rss_state.db, "rss_sync", "error", &err).await;
-                        services::logger::error(
-                            &rss_state.db,
-                            models::log::LogCategory::System,
-                            "Auto RSS sync failed",
-                            &format!("{} (backoff: {} consecutive errors)", err, consecutive_errors),
-                        ).await;
-                    }
                 }
-            }
+            }).await;
         });
     }
 
@@ -378,15 +432,20 @@ async fn main() {
     {
         let metadata_db = db.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(12 * 60 * 60));
-            loop {
-                interval.tick().await;
-                let _ = models::scheduled_tasks::mark_started(&metadata_db, "metadata_refresh", "Refreshing tracked series metadata").await;
-                let (refreshed, failed) = services::metadata_sync::refresh_all_series_metadata(&metadata_db).await;
-                let status = if failed > 0 { "warn" } else { "ok" };
-                let detail = format!("refreshed={}, failed={}", refreshed, failed);
-                let _ = models::scheduled_tasks::mark_finished(&metadata_db, "metadata_refresh", status, &detail).await;
-            }
+            supervise("metadata_refresh", move || {
+                let db = metadata_db.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(12 * 60 * 60));
+                    loop {
+                        interval.tick().await;
+                        let _ = models::scheduled_tasks::mark_started(&db, "metadata_refresh", "Refreshing tracked series metadata").await;
+                        let (refreshed, failed) = services::metadata_sync::refresh_all_series_metadata(&db).await;
+                        let status = if failed > 0 { "warn" } else { "ok" };
+                        let detail = format!("refreshed={}, failed={}", refreshed, failed);
+                        let _ = models::scheduled_tasks::mark_finished(&db, "metadata_refresh", status, &detail).await;
+                    }
+                }
+            }).await;
         });
     }
 
@@ -394,6 +453,9 @@ async fn main() {
     {
         let cleanup_db = db.clone();
         tokio::spawn(async move {
+            supervise("cleanup", move || {
+                let cleanup_db = cleanup_db.clone();
+                async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
             loop {
                 interval.tick().await;
@@ -450,10 +512,26 @@ async fn main() {
                     }
                     _ => {}
                 }
+                // Prune expired session rows. `validate_session` already
+                // rejects rows older than 7 days, but without this sweep
+                // the sessions table grows unbounded — every login leaves
+                // a permanent row. 7 days matches the cookie Max-Age.
+                match models::session::cleanup(&cleanup_db, 7).await {
+                    Ok(deleted) if deleted > 0 => {
+                        tracing::debug!("Cleaned up {} expired session rows", deleted);
+                    }
+                    Err(e) => {
+                        cleanup_errors.push(format!("sessions: {}", e));
+                        tracing::error!("Session cleanup failed: {}", e);
+                    }
+                    _ => {}
+                }
                 let status = if cleanup_errors.is_empty() { "ok" } else { "warn" };
                 let detail = if cleanup_errors.is_empty() { "Cleanup completed".to_string() } else { cleanup_errors.join("; ") };
                 let _ = models::scheduled_tasks::mark_finished(&cleanup_db, "cleanup", status, &detail).await;
             }
+                }
+            }).await;
         });
     }
 
@@ -461,29 +539,34 @@ async fn main() {
     {
         let pp_state = state.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                let enabled = models::config::get_config(&pp_state.db)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|c| c.post_processing_enabled)
-                    .unwrap_or(false);
-                let _ = models::scheduled_tasks::touch_definition(
-                    &pp_state.db,
-                    "post_processing",
-                    "Post-processing",
-                    "Every 1 minute (when enabled)",
-                    enabled,
-                ).await;
-                if !enabled {
-                    continue;
+            supervise("post_processing", move || {
+                let pp_state = pp_state.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    loop {
+                        interval.tick().await;
+                        let enabled = models::config::get_config(&pp_state.db)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|c| c.post_processing_enabled)
+                            .unwrap_or(false);
+                        let _ = models::scheduled_tasks::touch_definition(
+                            &pp_state.db,
+                            "post_processing",
+                            "Post-processing",
+                            "Every 1 minute (when enabled)",
+                            enabled,
+                        ).await;
+                        if !enabled {
+                            continue;
+                        }
+                        let _ = models::scheduled_tasks::mark_started(&pp_state.db, "post_processing", "Checking for completed downloads").await;
+                        services::post_processing::run_once(&pp_state).await;
+                        let _ = models::scheduled_tasks::mark_finished(&pp_state.db, "post_processing", "ok", "").await;
+                    }
                 }
-                let _ = models::scheduled_tasks::mark_started(&pp_state.db, "post_processing", "Checking for completed downloads").await;
-                services::post_processing::run_once(&pp_state).await;
-                let _ = models::scheduled_tasks::mark_finished(&pp_state.db, "post_processing", "ok", "").await;
-            }
+            }).await;
         });
     }
 
@@ -491,53 +574,58 @@ async fn main() {
     {
         let upgrade_state = state.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-            loop {
-                interval.tick().await;
-                let enabled = models::config::get_config(&upgrade_state.db)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|c| c.upgrade_search_enabled)
-                    .unwrap_or(false);
-                let _ = models::scheduled_tasks::touch_definition(
-                    &upgrade_state.db,
-                    "upgrade_search",
-                    "Quality upgrade search",
-                    "Every 24 hours (when enabled)",
-                    enabled,
-                ).await;
-                if !enabled {
-                    continue;
-                }
-                let _ = models::scheduled_tasks::mark_started(&upgrade_state.db, "upgrade_search", "Searching for quality upgrades").await;
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(30 * 60),
-                    services::upgrade::run_once(&upgrade_state),
-                ).await {
-                    Ok(Ok(summary)) => {
-                        let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "ok", &summary.detail).await;
-                    }
-                    Ok(Err(err)) => {
-                        let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", &err).await;
-                        services::logger::error(
+            supervise("upgrade_search", move || {
+                let upgrade_state = upgrade_state.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+                    loop {
+                        interval.tick().await;
+                        let enabled = models::config::get_config(&upgrade_state.db)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|c| c.upgrade_search_enabled)
+                            .unwrap_or(false);
+                        let _ = models::scheduled_tasks::touch_definition(
                             &upgrade_state.db,
-                            models::log::LogCategory::System,
-                            "Upgrade search failed",
-                            &err,
+                            "upgrade_search",
+                            "Quality upgrade search",
+                            "Every 24 hours (when enabled)",
+                            enabled,
                         ).await;
-                    }
-                    Err(_) => {
-                        let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", "Timed out after 30 minutes").await;
-                        services::logger::error(
-                            &upgrade_state.db,
-                            models::log::LogCategory::System,
-                            "Upgrade search timed out",
-                            "Exceeded 30-minute limit",
-                        ).await;
+                        if !enabled {
+                            continue;
+                        }
+                        let _ = models::scheduled_tasks::mark_started(&upgrade_state.db, "upgrade_search", "Searching for quality upgrades").await;
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(30 * 60),
+                            services::upgrade::run_once(&upgrade_state),
+                        ).await {
+                            Ok(Ok(summary)) => {
+                                let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "ok", &summary.detail).await;
+                            }
+                            Ok(Err(err)) => {
+                                let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", &err).await;
+                                services::logger::error(
+                                    &upgrade_state.db,
+                                    models::log::LogCategory::System,
+                                    "Upgrade search failed",
+                                    &err,
+                                ).await;
+                            }
+                            Err(_) => {
+                                let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", "Timed out after 30 minutes").await;
+                                services::logger::error(
+                                    &upgrade_state.db,
+                                    models::log::LogCategory::System,
+                                    "Upgrade search timed out",
+                                    "Exceeded 30-minute limit",
+                                ).await;
+                            }
+                        }
                     }
                 }
-            }
+            }).await;
         });
     }
 
@@ -545,17 +633,22 @@ async fn main() {
     {
         let anibridge_db = db.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-            interval.tick().await; // skip immediate tick — initial load happens on first use
-            loop {
-                interval.tick().await;
-                let _ = models::scheduled_tasks::mark_started(&anibridge_db, "anibridge_refresh", "Refreshing anibridge mappings").await;
-                if services::anibridge::reload().await {
-                    let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "ok", "Mappings refreshed").await;
-                } else {
-                    let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "error", "Failed to download mappings").await;
+            supervise("anibridge_refresh", move || {
+                let anibridge_db = anibridge_db.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+                    interval.tick().await; // skip immediate tick — initial load happens on first use
+                    loop {
+                        interval.tick().await;
+                        let _ = models::scheduled_tasks::mark_started(&anibridge_db, "anibridge_refresh", "Refreshing anibridge mappings").await;
+                        if services::anibridge::reload().await {
+                            let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "ok", "Mappings refreshed").await;
+                        } else {
+                            let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "error", "Failed to download mappings").await;
+                        }
+                    }
                 }
-            }
+            }).await;
         });
     }
 

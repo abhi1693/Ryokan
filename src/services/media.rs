@@ -1,6 +1,28 @@
 use regex_lite::Regex;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::LazyLock;
+
+// ── Pre-compiled regexes for episode-number parsing ───────────────────────
+// Lifted to LazyLock statics — `parse_episode_number` runs once per video
+// file during every library scan, RSS sync, auto-search, and upgrade
+// sweep. A ~200-series library with ~12 eps each running under a 1-minute
+// RSS loop was paying four Regex::new compiles per call and blowing
+// through the CPU budget of the hot path for no reason.
+
+static RE_SXEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"s(\d{1,2})e(\d{1,4})").expect("RE_SXEX compiles")
+});
+static RE_DASH_EP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r" - (\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)").expect("RE_DASH_EP compiles")
+});
+static RE_E_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[\s._\-])e(?:p\.?)?(\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)")
+        .expect("RE_E_PREFIX compiles")
+});
+static RE_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"episode\s*(\d{1,4})").expect("RE_EPISODE compiles")
+});
 
 /// Sanitize a string for use as a folder name on disk.
 /// Replaces filesystem-unsafe characters and trims leading/trailing dots and whitespace.
@@ -143,30 +165,26 @@ fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
 /// - `Episode 05`
 pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // SxxExx pattern — most reliable.
-    let re_sxex = Regex::new(r"s(\d{1,2})e(\d{1,4})").unwrap();
-    if let Some(caps) = re_sxex.captures(lower) {
+    if let Some(caps) = RE_SXEX.captures(lower) {
         let s: i32 = caps.get(1)?.as_str().parse().ok()?;
         let e: i32 = caps.get(2)?.as_str().parse().ok()?;
         return Some((Some(s), e));
     }
 
     // " - 05" pattern (common in anime releases from SubsPlease, Erai, etc).
-    let re_dash = Regex::new(r" - (\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)").unwrap();
-    if let Some(caps) = re_dash.captures(lower) {
+    if let Some(caps) = RE_DASH_EP.captures(lower) {
         let e: i32 = caps.get(1)?.as_str().parse().ok()?;
         return Some((None, e));
     }
 
     // "E05" or "EP05" or "Ep.05" pattern.
-    let re_ep = Regex::new(r"(?:^|[\s._\-])e(?:p\.?)?(\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)").unwrap();
-    if let Some(caps) = re_ep.captures(lower) {
+    if let Some(caps) = RE_E_PREFIX.captures(lower) {
         let e: i32 = caps.get(1)?.as_str().parse().ok()?;
         return Some((None, e));
     }
 
     // "Episode 05" pattern.
-    let re_episode = Regex::new(r"episode\s*(\d{1,4})").unwrap();
-    if let Some(caps) = re_episode.captures(lower) {
+    if let Some(caps) = RE_EPISODE.captures(lower) {
         let e: i32 = caps.get(1)?.as_str().parse().ok()?;
         return Some((None, e));
     }

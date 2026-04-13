@@ -192,6 +192,9 @@ pub async fn cached_or_source_url(db: &SqlitePool, cache_key: &str, source_url: 
 
 pub async fn load_bytes(db: &SqlitePool, cache_key: &str) -> Option<(Vec<u8>, String)> {
     let entry = artwork_cache::get(db, cache_key).await.ok().flatten()?;
-    let bytes = std::fs::read(Path::new(&entry.local_path)).ok()?;
+    // Use tokio::fs::read so the artwork serving path doesn't block a
+    // runtime worker — Seerr does a lot of artwork lookups during
+    // discovery scans and the sync read would stack up behind itself.
+    let bytes = tokio::fs::read(Path::new(&entry.local_path)).await.ok()?;
     Some((bytes, entry.content_type))
 }

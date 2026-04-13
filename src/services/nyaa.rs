@@ -1,7 +1,34 @@
 use scraper::{Html, Selector};
 use serde::Serialize;
+use std::sync::LazyLock;
+use std::time::Duration;
 
 const NYAA_BASE: &str = "https://nyaa.si";
+
+/// Process-global `reqwest::Client` for Nyaa search requests. A fresh
+/// `Client` per search throws away keep-alive connections and forces a
+/// new TLS handshake every call — Nyaa gets hit many times a minute
+/// between RSS sync, auto-search, upgrade sweeps, and interactive
+/// search, and the per-request client was needless overhead. A 30-second
+/// per-call timeout caps the damage from a single hung connection so
+/// the outer RSS/upgrade-search timeouts aren't the only backstop.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("Ryokan/0.1")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("building the Nyaa search reqwest client should not fail")
+});
+
+/// Pre-compiled scraper selectors for Nyaa search result rows. The old
+/// code re-parsed these three strings per `parse_results` call.
+static SEL_ROW: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("table.torrent-list tbody tr").expect("SEL_ROW parses"));
+static SEL_TD: LazyLock<Selector> = LazyLock::new(|| Selector::parse("td").expect("SEL_TD parses"));
+static SEL_A: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a").expect("SEL_A parses"));
+static SEL_NEXT: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("ul.pagination li.next:not(.disabled)").expect("SEL_NEXT parses")
+});
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct SearchResult {
@@ -80,10 +107,8 @@ pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, S
         );
     }
 
-    let client = reqwest::Client::new();
-    let html = client
+    let html = HTTP_CLIENT
         .get(&url)
-        .header("User-Agent", "Ryokan/0.1")
         .send()
         .await
         .map_err(|e| format!("Nyaa request failed: {}", e))?
@@ -97,21 +122,18 @@ pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, S
 
 fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) {
     let document = Html::parse_document(html);
-    let row_sel = Selector::parse("table.torrent-list tbody tr").unwrap();
-    let td_sel = Selector::parse("td").unwrap();
-    let a_sel = Selector::parse("a").unwrap();
 
     let mut results = Vec::new();
 
-    for row in document.select(&row_sel) {
-        let tds: Vec<_> = row.select(&td_sel).collect();
+    for row in document.select(&SEL_ROW) {
+        let tds: Vec<_> = row.select(&SEL_TD).collect();
         if tds.len() < 8 {
             continue;
         }
 
         // Category td is index 0, name td is index 1.
         let name_td = tds[1];
-        let links: Vec<_> = name_td.select(&a_sel).collect();
+        let links: Vec<_> = name_td.select(&SEL_A).collect();
 
         // Find the last non-comment link as the title link.
         let title_link = links.iter().rev().find(|a| {
@@ -133,7 +155,7 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
 
         // Torrent and magnet links (td index 2).
         let link_td = tds[2];
-        let link_anchors: Vec<_> = link_td.select(&a_sel).collect();
+        let link_anchors: Vec<_> = link_td.select(&SEL_A).collect();
         let torrent = link_anchors
             .iter()
             .find_map(|a| {
@@ -211,8 +233,7 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
 
     // Detect if there's a next page.
     let has_next = {
-        let next_sel = Selector::parse("ul.pagination li.next:not(.disabled)").unwrap();
-        let pagination_exists = document.select(&next_sel).next().is_some();
+        let pagination_exists = document.select(&SEL_NEXT).next().is_some();
         // Fallback: if we got 75 results (full page), assume there might be more.
         pagination_exists || results.len() >= 75
     };
@@ -282,18 +303,26 @@ fn parse_int(s: &str) -> i32 {
 
 /// Try to parse a Nyaa date string into a Unix timestamp.
 /// Handles formats like "2024-01-15 12:34" (common on Nyaa).
+///
+/// Uses `chrono` so leap years are handled correctly — the old code
+/// open-coded `(year - 1970) * 31_536_000`, which drifts by one day per
+/// leap year and, when the fallback kicked in (`data-timestamp` missing),
+/// could push a timestamp into the wrong calendar year near year
+/// boundaries. That in turn confused the "finished series + 2 years"
+/// filter in `auto_search`.
 fn parse_date_text(text: &str) -> i64 {
     let trimmed = text.trim();
-    // Try "YYYY-MM-DD HH:MM" format — extract just the year for a rough timestamp.
-    if trimmed.len() >= 10 {
-        if let Ok(year) = trimmed[..4].parse::<i64>() {
-            if (2000..=2100).contains(&year) {
-                // Approximate: seconds since epoch for Jan 1 of that year.
-                // Good enough for year-level comparisons.
-                let month: i64 = trimmed.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(1);
-                return (year - 1970) * 31_536_000 + (month - 1) * 2_592_000;
-            }
-        }
+    if trimmed.len() < 10 {
+        return 0;
     }
-    0
+    let Ok(year) = trimmed[..4].parse::<i32>() else { return 0; };
+    if !(2000..=2100).contains(&year) {
+        return 0;
+    }
+    let month: u32 = trimmed.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let day: u32 = trimmed.get(8..10).and_then(|s| s.parse().ok()).unwrap_or(1);
+    chrono::NaiveDate::from_ymd_opt(year, month.clamp(1, 12), day.clamp(1, 28))
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc().timestamp())
+        .unwrap_or(0)
 }
