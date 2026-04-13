@@ -1,0 +1,146 @@
+[
+  {
+    "name": "SeaDex best",
+    "trash_id": null,
+    "score": 10000,
+    "specifications": [
+      {
+        "name": "SeaDex best",
+        "implementation": "Ryokan.SeaDexBestSpecification",
+        "negate": false,
+        "required": true,
+        "fields": []
+      }
+    ]
+  },
+  {
+    "name": "Tier S BD groups (MTBB, Yūrei, Arukoru, Bakemono-Kami, Sephirotic)",
+    "trash_id": null,
+    "score": 1200,
+    "specifications": [
+      {
+        "name": "Tier S BD groups",
+        "implementation": "ReleaseGroupSpecification",
+        "negate": false,
+        "required": false,
+        "fields": [
+          { "name": "value", "value": "^(MTBB|Yūrei|Yurei|Arukoru|Bakemono-Kami|Sephirotic)$" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Prefer BluRay source",
+    "trash_id": null,
+    "score": 600,
+    "specifications": [
+      {
+        "name": "Bluray",
+        "implementation": "SourceSpecification",
+        "negate": false,
+        "required": false,
+        "fields": [
+          { "name": "value", "value": 6 }
+        ]
+      },
+      {
+        "name": "Bluray Raw",
+        "implementation": "SourceSpecification",
+        "negate": false,
+        "required": false,
+        "fields": [
+          { "name": "value", "value": 7 }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Prefer WEB release groups (SubsPlease, Judas)",
+    "trash_id": null,
+    "score": 400,
+    "specifications": [
+      {
+        "name": "Preferred WEB groups",
+        "implementation": "ReleaseGroupSpecification",
+        "negate": false,
+        "required": false,
+        "fields": [
+          { "name": "value", "value": "^(SubsPlease|Judas)$" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Prefer 10-bit / x265 / HEVC encoding",
+    "trash_id": null,
+    "score": 300,
+    "specifications": [
+      {
+        "name": "10-bit / x265 / HEVC",
+        "implementation": "ReleaseTitleSpecification",
+        "negate": false,
+        "required": false,
+        "fields": [
+          { "name": "value", "value": "(10[.\\-]?bit|hi10p?|x[.\\-]?265|hevc)" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Prefer FLAC / Opus audio",
+    "trash_id": null,
+    "score": 150,
+    "specifications": [
+      {
+        "name": "FLAC / Opus",
+        "implementation": "ReleaseTitleSpecification",
+        "negate": false,
+        "required": false,
+        "fields": [
+          { "name": "value", "value": "(flac|opus)" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Penalize 8-bit mp4 combo",
+    "trash_id": null,
+    "score": -500,
+    "specifications": [
+      {
+        "name": "No 10-bit marker",
+        "implementation": "ReleaseTitleSpecification",
+        "negate": true,
+        "required": true,
+        "fields": [
+          { "name": "value", "value": "10[.\\-]?bit|hi10p?" }
+        ]
+      },
+      {
+        "name": ".mp4 extension",
+        "implementation": "ReleaseTitleSpecification",
+        "negate": false,
+        "required": true,
+        "fields": [
+          { "name": "value", "value": "\\.mp4\\b" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Penalize casual groups (NoobSubs, HorribleSubs)",
+    "trash_id": null,
+    "score": -1000,
+    "specifications": [
+      {
+        "name": "Casual groups",
+        "implementation": "ReleaseGroupSpecification",
+        "negate": false,
+        "required": false,
+        "fields": [
+          { "name": "value", "value": "^(NoobSubs|HorribleSubs)$" }
+        ]
+      }
+    ]
+  }
+]

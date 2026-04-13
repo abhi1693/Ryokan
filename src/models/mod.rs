@@ -764,6 +764,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // profile_id = 1 everywhere.
     custom_formats::migrate(db).await?;
 
+    // Origin column on custom_formats: records where the row came from
+    // so the settings table can surface a "Source" badge and the Reset
+    // to Defaults button can target just the `defaults`-origin rows
+    // without clobbering user-authored CFs. Legal values: `manual`,
+    // `import`, `defaults`. Pre-existing rows default to `manual` on
+    // first migration — anyone who already installed defaults before
+    // this column shipped can use the Reset button to relabel them.
+    sqlx::query("ALTER TABLE custom_formats ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'")
+        .execute(db)
+        .await
+        .ok();
+
     // ── Phase 1b: classification columns on episode_quality_tags ─────────
     // These record the ClassificationResult at grab time so later scoring,
     // upgrade detection, and UI review workflows can read structured source

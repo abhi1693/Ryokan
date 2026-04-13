@@ -56,6 +56,11 @@ pub enum LogCategory {
     /// debug records emit under this category so the logs page can be
     /// filtered to just classification trace output.
     Quality,
+    /// Per-candidate release scoring breakdown (`services/auto_search.rs`).
+    /// Emits one debug row per scored candidate with the CF breakdown so
+    /// users can introspect "why did release X win over release Y" — see
+    /// plan §6.3 of `ryokan-custom-formats.md`.
+    Scoring,
 }
 
 impl LogCategory {
@@ -75,6 +80,7 @@ impl LogCategory {
             LogCategory::System => "system",
             LogCategory::PostProcess => "post_process",
             LogCategory::Quality => "quality",
+            LogCategory::Scoring => "scoring",
         }
     }
 
@@ -95,6 +101,7 @@ impl LogCategory {
             "system" => Some(LogCategory::System),
             "post_process" => Some(LogCategory::PostProcess),
             "quality" => Some(LogCategory::Quality),
+            "scoring" => Some(LogCategory::Scoring),
             _ => None,
         }
     }
@@ -115,6 +122,7 @@ impl LogCategory {
             LogCategory::System => "System",
             LogCategory::PostProcess => "Post-Process",
             LogCategory::Quality => "Quality",
+            LogCategory::Scoring => "Scoring",
         }
     }
 }

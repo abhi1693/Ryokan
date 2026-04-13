@@ -134,6 +134,7 @@ rss::recent_decisions(&state.db, 500).await.unwrap_or_default()
         ("auth", LogCategory::Auth.label()),
         ("system", LogCategory::System.label()),
         ("post_process", LogCategory::PostProcess.label()),
+        ("scoring", LogCategory::Scoring.label()),
     ];
 
     let template = SystemTemplate {
@@ -220,6 +221,7 @@ pub async fn debug_settings_submit(
             ("auth", LogCategory::Auth.label()),
             ("system", LogCategory::System.label()),
             ("post_process", LogCategory::PostProcess.label()),
+            ("scoring", LogCategory::Scoring.label()),
         ],
         rss_enabled: cfg.rss_enabled,
         rss_interval_minutes: cfg.rss_interval_minutes,

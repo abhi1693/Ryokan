@@ -74,6 +74,9 @@ use services::{
         handlers::settings::settings_custom_formats_delete,
         handlers::settings::settings_custom_formats_minimum_score,
         handlers::settings::settings_custom_formats_import,
+        handlers::settings::settings_custom_formats_import_resolve,
+        handlers::settings::settings_custom_formats_install_defaults,
+        handlers::settings::settings_custom_formats_reset_defaults,
         handlers::settings::settings_custom_formats_export,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
@@ -313,6 +316,9 @@ async fn main() {
         .route("/settings/custom-formats/delete", post(handlers::settings::settings_custom_formats_delete))
         .route("/settings/custom-formats/minimum-score", post(handlers::settings::settings_custom_formats_minimum_score))
         .route("/settings/custom-formats/import", post(handlers::settings::settings_custom_formats_import))
+        .route("/settings/custom-formats/import-resolve", post(handlers::settings::settings_custom_formats_import_resolve))
+        .route("/settings/custom-formats/install-defaults", post(handlers::settings::settings_custom_formats_install_defaults))
+        .route("/settings/custom-formats/reset-defaults", post(handlers::settings::settings_custom_formats_reset_defaults))
         .route("/settings/custom-formats/export", get(handlers::settings::settings_custom_formats_export))
         .route("/api/qbit/test", post(handlers::settings::qbit_test))
         .route("/api/jellyfin/test", post(handlers::settings::jellyfin_test))

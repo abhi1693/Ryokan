@@ -32,6 +32,12 @@ pub struct CustomFormatRow {
     pub trash_id: Option<String>,
     pub json: String,
     pub score: i64,
+    /// Provenance of this row. One of `manual` (created via the upsert
+    /// form), `import` (pasted into the Sonarr-export import box), or
+    /// `defaults` (installed via the "Install Defaults" button). Used
+    /// by the settings table to show a Source badge and by Reset to
+    /// Defaults to target just the `defaults`-origin rows.
+    pub origin: String,
     // Persisted timestamps. Not shown in the current UI but kept on the
     // struct so a future "sort by recently edited" view has the data
     // without a schema migration.
@@ -40,6 +46,14 @@ pub struct CustomFormatRow {
     #[allow(dead_code)]
     pub updated_at: i64,
 }
+
+/// Legal values for the `origin` column. Kept as bare &str rather
+/// than an enum because the three values are only meaningful at the
+/// handler boundary — the model layer just echoes the string into the
+/// database.
+pub const ORIGIN_MANUAL: &str = "manual";
+pub const ORIGIN_IMPORT: &str = "import";
+pub const ORIGIN_DEFAULTS: &str = "defaults";
 
 pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -88,6 +102,7 @@ pub async fn list_with_scores(db: &SqlitePool) -> Result<Vec<CustomFormatRow>, s
         r#"
         SELECT cf.id, cf.name, cf.trash_id, cf.json,
                COALESCE(cfs.score, 0) AS score,
+               cf.origin,
                cf.created_at, cf.updated_at
         FROM custom_formats cf
         LEFT JOIN custom_format_scores cfs
@@ -107,6 +122,7 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<CustomFormatRo
         r#"
         SELECT cf.id, cf.name, cf.trash_id, cf.json,
                COALESCE(cfs.score, 0) AS score,
+               cf.origin,
                cf.created_at, cf.updated_at
         FROM custom_formats cf
         LEFT JOIN custom_format_scores cfs
@@ -122,25 +138,28 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<CustomFormatRo
 
 /// Insert a new CF row and its V1-profile score in a single transaction.
 /// Returns the newly-assigned row id so the caller can redirect straight
-/// to the edit view.
+/// to the edit view. `origin` records provenance — callers should pass
+/// one of the `ORIGIN_*` constants.
 pub async fn insert(
     db: &SqlitePool,
     name: &str,
     trash_id: Option<&str>,
     json: &str,
     score: i32,
+    origin: &str,
 ) -> Result<i64, sqlx::Error> {
     let now = now_unix();
     let mut tx = db.begin().await?;
     let res = sqlx::query(
         r#"
-        INSERT INTO custom_formats (name, trash_id, json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO custom_formats (name, trash_id, json, origin, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(name)
     .bind(trash_id)
     .bind(json)
+    .bind(origin)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -216,4 +235,17 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Delete every CF row whose origin is `defaults`. Used by the Reset
+/// to Defaults button to wipe just the bundled set before reinstalling
+/// from disk. User-authored (`manual`) and imported (`import`) rows
+/// are left untouched — that's the whole point of the origin column.
+/// Returns the number of rows that were dropped.
+pub async fn delete_defaults(db: &SqlitePool) -> Result<u64, sqlx::Error> {
+    let res = sqlx::query("DELETE FROM custom_formats WHERE origin = ?")
+        .bind(ORIGIN_DEFAULTS)
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected())
 }

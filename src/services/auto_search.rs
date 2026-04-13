@@ -5,11 +5,14 @@ use regex_lite::Regex;
 use sqlx::SqlitePool;
 
 use crate::models::config::Config;
+use crate::models::log::LogCategory;
 use crate::services::custom_formats::{
     self, CompiledCustomFormat, EvalContext,
 };
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
-use crate::services::{anilist::AnimeDetail, media, nyaa::{self, SearchOptions, SearchResult}, quality, seadex};
+use crate::services::{
+    anilist::AnimeDetail, logger, media, nyaa::{self, SearchOptions, SearchResult}, quality, seadex,
+};
 
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
 static RE_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
@@ -217,6 +220,7 @@ pub async fn find_all_for_target(
         );
         // No CF floor on the interactive path — see comment above.
         if let Some(final_score) = apply_cf_seadex_overlay(
+            db,
             base,
             &c,
             &classification,
@@ -224,7 +228,9 @@ pub async fn find_all_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             i32::MIN,
-        ) {
+        )
+        .await
+        {
             c.score = final_score;
             scored.push(c);
         }
@@ -395,6 +401,7 @@ pub async fn collect_scored_batches_for_target(
             cutoff_resolution_enum,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
+            db,
             base,
             &c,
             &classification,
@@ -402,7 +409,9 @@ pub async fn collect_scored_batches_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             config.custom_format_minimum_score,
-        ) {
+        )
+        .await
+        {
             c.score = final_score;
             scored.push(c);
         }
@@ -553,6 +562,7 @@ async fn collect_scored_for_target(
             cutoff_resolution_enum,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
+            db,
             base,
             &c,
             &classification,
@@ -560,7 +570,9 @@ async fn collect_scored_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             config.custom_format_minimum_score,
-        ) {
+        )
+        .await
+        {
             c.score = final_score;
             scored.push(c);
         }
@@ -1056,7 +1068,14 @@ async fn fetch_seadex_hashes(seadex_enabled: bool, anilist_id: i64) -> HashSet<S
 /// score bump is suppressed whenever the compiled CF set contains a
 /// `SeaDexBestSpecification` — the user has taken ownership of that
 /// number and double-counting would be a silent regression.
-fn apply_cf_seadex_overlay(
+///
+/// On the way through, emits one `LogCategory::Scoring` debug row per
+/// candidate with a CF-aware breakdown line (plan §6.3). Dropped
+/// candidates are logged too so the user can introspect "why did this
+/// candidate get cut from the results" in addition to "why did X win."
+#[allow(clippy::too_many_arguments)]
+async fn apply_cf_seadex_overlay(
+    db: &SqlitePool,
     base: i32,
     result: &SearchResult,
     classification: &ClassificationResult,
@@ -1070,10 +1089,11 @@ fn apply_cf_seadex_overlay(
         classification,
         seadex_hashes,
     };
-    let cf = custom_formats::total_cf_score(cfs, &ctx);
-    if cf < minimum_score {
-        return None;
-    }
+    // Use the breakdown variant so the log line can name which CFs
+    // contributed. Per plan §6.3, production scoring normally uses the
+    // scalar `total_cf_score`; the cost of the `Vec<(String, i32)>`
+    // allocation is absorbed here because we're about to log anyway.
+    let (cf, breakdown) = custom_formats::total_cf_score_with_breakdown(cfs, &ctx);
     let seadex_bonus = if seadex_boost_enabled
         && !result.info_hash.is_empty()
         && seadex_hashes.contains(&result.info_hash.to_ascii_lowercase())
@@ -1082,7 +1102,56 @@ fn apply_cf_seadex_overlay(
     } else {
         0
     };
-    Some(base + cf + seadex_bonus)
+
+    let below_floor = cf < minimum_score;
+    let final_score = base + cf + seadex_bonus;
+
+    let detail = format_scoring_detail(base, cf, &breakdown, seadex_bonus, final_score, below_floor);
+    logger::debug(db, LogCategory::Scoring, &result.title, &detail).await;
+
+    if below_floor {
+        None
+    } else {
+        Some(final_score)
+    }
+}
+
+/// Build the structured scoring detail string that lands in the
+/// `logs.detail` column. Factored out of `apply_cf_seadex_overlay` so
+/// the format is in one place and unit-testable. Matches the shape
+/// documented in plan §6.3:
+///
+/// `base=85, cf=+420 [10bit x265 +200, FLAC audio +120, Preferred Groups: MTBB +100], seadex=0, final=505`
+///
+/// Negative contributions include the sign. An empty breakdown drops
+/// the bracket section entirely ("cf=+0" with nothing inside would be
+/// noisy). Candidates dropped by the CF minimum-score floor get a
+/// trailing ` DROPPED(floor=N)` marker so log readers can tell filtered
+/// candidates apart from surviving ones.
+fn format_scoring_detail(
+    base: i32,
+    cf: i32,
+    breakdown: &[(String, i32)],
+    seadex_bonus: i32,
+    final_score: i32,
+    below_floor: bool,
+) -> String {
+    let cf_section = if breakdown.is_empty() {
+        format!("cf={cf:+}")
+    } else {
+        let parts: Vec<String> = breakdown
+            .iter()
+            .map(|(name, score)| format!("{name} {score:+}"))
+            .collect();
+        format!("cf={:+} [{}]", cf, parts.join(", "))
+    };
+    let mut out = format!(
+        "base={base}, {cf_section}, seadex={seadex_bonus}, final={final_score}"
+    );
+    if below_floor {
+        out.push_str(" DROPPED(below minimum_score floor)");
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1604,5 +1673,57 @@ mod tests {
             0,
             false,
         ));
+    }
+
+    #[test]
+    fn format_scoring_detail_matches_plan_docs_example() {
+        // Shape documented in plan §6.3 — the scoring log entry should
+        // read like this exact format so users grepping the logs can
+        // rely on a stable column layout. The CF names below ("10bit
+        // x265", "FLAC audio", "Preferred Groups: MTBB") are reproduced
+        // verbatim from the plan doc example; they're opaque label
+        // strings passed through by the formatter, not claims about
+        // any release group's actual naming scheme.
+        let breakdown = vec![
+            ("10bit x265".to_string(), 200),
+            ("FLAC audio".to_string(), 120),
+            ("Preferred Groups: MTBB".to_string(), 100),
+        ];
+        let s = format_scoring_detail(85, 420, &breakdown, 0, 505, false);
+        assert_eq!(
+            s,
+            "base=85, cf=+420 [10bit x265 +200, FLAC audio +120, Preferred Groups: MTBB +100], seadex=0, final=505"
+        );
+    }
+
+    #[test]
+    fn format_scoring_detail_empty_breakdown_drops_bracket_section() {
+        // No CFs matched → the bracket section is noise. Just show the
+        // scalar cf= total.
+        let s = format_scoring_detail(50, 0, &[], 0, 50, false);
+        assert_eq!(s, "base=50, cf=+0, seadex=0, final=50");
+    }
+
+    #[test]
+    fn format_scoring_detail_negative_cf_has_sign_and_marks_drop() {
+        let breakdown = vec![("Casual group penalty".to_string(), -1000)];
+        let s = format_scoring_detail(20, -1000, &breakdown, 0, -980, true);
+        assert_eq!(
+            s,
+            "base=20, cf=-1000 [Casual group penalty -1000], seadex=0, final=-980 DROPPED(below minimum_score floor)"
+        );
+    }
+
+    #[test]
+    fn format_scoring_detail_surfaces_seadex_bonus() {
+        // SeaDex bonus is the only non-CF overlay; make sure it shows
+        // up in the final line so the log reader can tell "SeaDex hit"
+        // apart from "CF scoring pushed this above everything else."
+        let breakdown = vec![("x265".to_string(), 300)];
+        let s = format_scoring_detail(60, 300, &breakdown, 10000, 10360, false);
+        assert_eq!(
+            s,
+            "base=60, cf=+300 [x265 +300], seadex=10000, final=10360"
+        );
     }
 }

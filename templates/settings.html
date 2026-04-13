@@ -406,34 +406,40 @@
         </form>
 
         <h3 class="settings-subheading">
-            {% if let Some(edit) = custom_format_edit %}Edit Custom Format #{{ edit.id }}{% else %}Add Custom Format{% endif %}
+            {% if let Some(edit) = custom_format_edit %}Edit Custom Format #{{ edit.row.id }}{% else %}Add Custom Format{% endif %}
         </h3>
         <form method="post" action="/settings/custom-formats/upsert" class="settings-form">
             {% if let Some(edit) = custom_format_edit %}
-            <input type="hidden" name="id" value="{{ edit.id }}">
+            <input type="hidden" name="id" value="{{ edit.row.id }}">
+            {% if let Some(desc) = edit.trash_description.as_ref() %}
+            <div class="cf-trash-description" style="margin-bottom: 12px; padding: 10px 12px; border-left: 3px solid var(--accent, #5b9bd5); background: var(--subtle-bg, #f5f7fa);">
+                <strong>Trash Guides description:</strong>
+                <div style="margin-top: 4px; white-space: pre-wrap;">{{ desc }}</div>
+            </div>
+            {% endif %}
             {% endif %}
             <div class="form-row">
                 <div class="form-group">
                     <label for="cf_name">Name</label>
                     <input type="text" name="name" id="cf_name" required
-                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.name }}{% endif %}">
+                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.name }}{% endif %}">
                 </div>
                 <div class="form-group">
                     <label for="cf_score">Score</label>
                     <input type="number" name="score" id="cf_score" required
-                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.score }}{% else %}0{% endif %}">
+                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.score }}{% else %}0{% endif %}">
                 </div>
                 <div class="form-group">
                     <label for="cf_trash_id">Trash ID (optional)</label>
                     <input type="text" name="trash_id" id="cf_trash_id" placeholder="e.g. ed38b0b3..."
-                        value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
+                        value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.row.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
                 </div>
             </div>
             <div class="form-group">
                 <label for="cf_json">Sonarr v4 Custom Format JSON</label>
                 <textarea name="json" id="cf_json" rows="16" required spellcheck="false"
-                    placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.json }}{% endif %}</textarea>
-                <span class="form-hint">Full Sonarr v4 CF object. Supported spec implementations: <code>ReleaseTitleSpecification</code>, <code>SourceSpecification</code>, <code>ResolutionSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>LanguageSpecification</code>, <code>SeaDexBestSpecification</code>. The compiler runs before saving, so invalid JSON is rejected with an error message.</span>
+                    placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.row.json }}{% endif %}</textarea>
+                <span class="form-hint">Full Sonarr v4 CF object. Supported spec implementations: <code>ReleaseTitleSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>ResolutionSpecification</code>, <code>SourceSpecification</code>, <code>Ryokan.SeaDexBestSpecification</code>. The compiler runs before saving, so invalid JSON is rejected with an error message. A top-level <code>trash_description</code> field is preserved verbatim and shown above when editing.</span>
             </div>
             <div class="settings-inline-actions">
                 <button type="submit" class="btn btn-primary">
@@ -455,6 +461,7 @@
                     <th>Name</th>
                     <th>Score</th>
                     <th>Specs</th>
+                    <th>Source</th>
                     <th>Trash ID</th>
                     <th></th>
                 </tr>
@@ -469,6 +476,15 @@
                         <span class="tag tag-res" title="{{ err }}">parse error</span>
                         {% else %}
                         {{ cf.specs_count }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if cf.row.origin == "defaults" %}
+                        <span class="tag tag-source" title="Installed from the bundled default set">default</span>
+                        {% else if cf.row.origin == "import" %}
+                        <span class="tag tag-source" title="Imported from a Sonarr v4 JSON export">import</span>
+                        {% else %}
+                        <span class="tag tag-res" title="Created via the Add Custom Format form">manual</span>
                         {% endif %}
                     </td>
                     <td>
@@ -489,17 +505,82 @@
         </table>
         {% endif %}
 
+        <h3 class="settings-subheading">Defaults</h3>
+        <div class="settings-inline-actions" style="margin-bottom: 12px;">
+            <form method="post" action="/settings/custom-formats/install-defaults" onsubmit="return confirm('Install the bundled default Custom Formats? CFs whose name already exists will be skipped.');">
+                <button type="submit" class="btn btn-primary">Install Defaults</button>
+            </form>
+            <form method="post" action="/settings/custom-formats/reset-defaults" onsubmit="return confirm('Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched.');">
+                <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
+            </form>
+            <span class="form-hint">
+                <strong>Install Defaults</strong> imports the bundled anime-tuned CF set (SeaDex best, Tier S BD groups, BluRay source, WEB groups, 10-bit/x265, FLAC/Opus, plus the 8-bit mp4 and casual-group penalties) — CFs whose name already exists are skipped so repeat clicks are safe.
+                <strong>Reset to Defaults</strong> drops every row whose Source column shows <em>default</em> and re-installs them from the bundled file — use this after you've edited a default CF and want the original back.
+            </span>
+        </div>
+
         <h3 class="settings-subheading">Import / Export</h3>
         <div class="settings-inline-actions" style="margin-bottom: 12px;">
             <a href="/settings/custom-formats/export" class="btn btn-secondary">Export All as JSON</a>
-            <span class="form-hint">Downloads every saved CF (with persisted scores) as a JSON array. Round-trips into Sonarr or another Ryokan instance.</span>
+            <a href="/settings/custom-formats/export?mode=sonarr-safe" class="btn btn-secondary">Export (Sonarr-safe)</a>
+            <span class="form-hint">
+                <strong>Export All</strong> keeps every saved CF verbatim (including Ryokan-only specs like <code>Ryokan.SeaDexBestSpecification</code>) and round-trips into another Ryokan instance.
+                <strong>Sonarr-safe</strong> drops whole CFs that contain Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance — dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
+            </span>
         </div>
+        {% if let Some(review) = custom_format_import_review %}
+        <div class="cf-import-review" style="margin: 12px 0; padding: 14px; border: 1px solid var(--accent, #5b9bd5); background: var(--subtle-bg, #f5f7fa); border-radius: 6px;">
+            <h4 style="margin-top: 0;">Review Import Collisions</h4>
+            <p class="form-hint">
+                {{ review.collisions.len() }} Custom Format(s) in your import share a name with an existing row.
+                Pick an action per collision. Entries with no collision will import as new rows regardless of these choices.
+            </p>
+            <form method="post" action="/settings/custom-formats/import-resolve" class="settings-form"
+                  onsubmit="return buildCfImportResolvePayload(this);">
+                <input type="hidden" name="payload" value="{{ review.payload }}">
+                <input type="hidden" name="decisions" id="cf_import_resolve_decisions" value="">
+                <input type="hidden" name="renames" id="cf_import_resolve_renames" value="">
+                <table class="group-source-table">
+                    <thead>
+                        <tr>
+                            <th>Existing name</th>
+                            <th>Action</th>
+                            <th>New name (for rename)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for c in review.collisions %}
+                        <tr data-cf-collision-idx="{{ c.index }}">
+                            <td><strong>{{ c.name }}</strong></td>
+                            <td>
+                                <label><input type="radio" name="cf_action_{{ c.index }}" value="skip" checked> Skip</label>
+                                <label style="margin-left: 8px;"><input type="radio" name="cf_action_{{ c.index }}" value="overwrite"> Overwrite</label>
+                                <label style="margin-left: 8px;"><input type="radio" name="cf_action_{{ c.index }}" value="rename"> Rename</label>
+                            </td>
+                            <td>
+                                <input type="text" name="cf_rename_{{ c.index }}" placeholder="New unique name">
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div class="settings-inline-actions" style="margin-top: 12px;">
+                    <button type="submit" class="btn btn-primary">Apply &amp; Import</button>
+                    <a href="/settings?tab=custom_formats" class="btn btn-secondary">Cancel</a>
+                </div>
+            </form>
+        </div>
+        {% endif %}
+
         <form method="post" action="/settings/custom-formats/import" class="settings-form">
             <div class="form-group">
-                <label for="cf_import_payload">Paste Sonarr v4 CF Export (object or array)</label>
+                <label for="cf_import_payload">Paste Sonarr v4 CF Export (single object, array, or <code>{"custom_formats":[…]}</code> wrapper)</label>
                 <textarea name="payload" id="cf_import_payload" rows="10" spellcheck="false"
                     placeholder='[{"name": "...", "specifications": [...], "score": 100}, ...]'></textarea>
-                <span class="form-hint">Each entry is compiled via the same parser as the create form. Per-entry failures are counted and the first error is reported, but valid entries still import.</span>
+                <span class="form-hint">
+                    Each entry is compiled via the same parser as the create form. Per-entry failures are counted and the first error is reported.
+                    CFs whose name matches an existing row trigger a review page where you can pick <em>overwrite</em>, <em>rename</em>, or <em>skip</em> per conflict before anything is written.
+                </span>
             </div>
             <button type="submit" class="btn btn-primary">Import</button>
         </form>
@@ -528,6 +609,33 @@ function generateRadarrApiKey() {
 
 function syncTitleLanguagePreview(lang) {
     localStorage.setItem('titleLanguage', lang);
+}
+
+// Gather the per-collision radio selections and rename text fields
+// into the two newline-delimited hidden inputs that the import-resolve
+// handler expects. See plan §6.2 — each line is "<index>:<action>".
+function buildCfImportResolvePayload(form) {
+    const rows = form.querySelectorAll('tr[data-cf-collision-idx]');
+    const decisions = [];
+    const renames = [];
+    for (const row of rows) {
+        const idx = row.getAttribute('data-cf-collision-idx');
+        const chosen = row.querySelector('input[name="cf_action_' + idx + '"]:checked');
+        const action = chosen ? chosen.value : 'skip';
+        decisions.push(idx + ':' + action);
+        if (action === 'rename') {
+            const input = row.querySelector('input[name="cf_rename_' + idx + '"]');
+            const newName = input ? input.value.trim() : '';
+            if (!newName) {
+                alert('Collision ' + idx + ': pick a new name or choose a different action.');
+                return false;
+            }
+            renames.push(idx + ':' + newName);
+        }
+    }
+    form.querySelector('#cf_import_resolve_decisions').value = decisions.join('\n');
+    form.querySelector('#cf_import_resolve_renames').value = renames.join('\n');
+    return true;
 }
 
 function testQbit(btn) {

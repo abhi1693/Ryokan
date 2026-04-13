@@ -1,5 +1,9 @@
 use askama::Template;
-use axum::{extract::{Query, State}, response::{Html, Redirect}, Form, Json};
+use axum::{
+    extract::{Query, State},
+    response::{Html, IntoResponse, Redirect, Response},
+    Form, Json,
+};
 use serde::Deserialize;
 
 use crate::models::{config, custom_formats as cf_model, group_source_map};
@@ -20,6 +24,31 @@ pub struct CustomFormatView {
     pub parse_error: Option<String>,
 }
 
+/// View-model wrapper rendered when the Custom Formats tab is in edit
+/// mode. Holds the full row plus any `trash_description` extracted
+/// from the row's JSON body. Plan §5.7.6 wants descriptions to persist
+/// through round-trips and surface in the edit drawer so the user
+/// keeps the Trash Guides context that originally shipped the CF.
+pub struct CustomFormatEditView {
+    pub row: cf_model::CustomFormatRow,
+    pub trash_description: Option<String>,
+}
+
+/// Parse a stored CF's JSON body and return the `trash_description`
+/// string if it's present, non-empty, and a string. Silently returns
+/// `None` on parse error — the row itself still renders via the raw
+/// `edit.json` textarea, so the description is a nice-to-have, not a
+/// blocker.
+fn extract_trash_description(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let desc = value.get("trash_description")?.as_str()?.trim();
+    if desc.is_empty() {
+        None
+    } else {
+        Some(desc.to_string())
+    }
+}
+
 #[derive(Template)]
 #[template(path = "settings.html")]
 struct SettingsTemplate {
@@ -29,13 +58,34 @@ struct SettingsTemplate {
     groups: Vec<group_source_map::GroupSourceEntry>,
     suggestions: Vec<group_source_map::GroupSuggestion>,
     custom_formats: Vec<CustomFormatView>,
-    custom_format_edit: Option<cf_model::CustomFormatRow>,
+    custom_format_edit: Option<CustomFormatEditView>,
     /// Pre-rendered string for the minimum-score input. Empty when the
     /// floor is the `i32::MIN` "no floor" sentinel. Computed here so the
     /// Askama template doesn't need to compare against an integer path.
     custom_format_min_score_display: String,
+    /// Populated when the import flow hit a name collision. The CF tab
+    /// renders a review block with per-collision radio buttons so the
+    /// user can pick overwrite/rename/skip for each conflicting CF.
+    /// See plan §6.2.
+    custom_format_import_review: Option<ImportReviewView>,
     message: Option<String>,
     error: Option<String>,
+}
+
+/// Per-collision entry shown on the import review block. `index` is
+/// the position of the CF inside the parsed payload so the resolve
+/// handler can find the right entry after re-parsing the payload.
+pub struct ImportCollision {
+    pub index: usize,
+    pub name: String,
+}
+
+/// View model for the import review block. Holds the original payload
+/// (echoed back into a hidden field so the resolve handler can re-parse
+/// it) plus the list of collisions the user needs to act on.
+pub struct ImportReviewView {
+    pub payload: String,
+    pub collisions: Vec<ImportCollision>,
 }
 
 fn min_score_display(score: i32) -> String {
@@ -197,10 +247,21 @@ fn validate_resolution(value: &str, default: &str) -> String {
     }
 }
 
-pub async fn settings_page(
-    State(state): State<AppState>,
-    Query(params): Query<SettingsQuery>,
-) -> Html<String> {
+/// Build a fully-populated `SettingsTemplate` with the same loading
+/// logic the main settings page uses. Extracted so the CF import
+/// handler can re-render the settings page in place on a name
+/// collision without duplicating every DB query the normal page
+/// renderer runs. Callers override the `tab`, `edit_id`, `msg`, `err`,
+/// and optional import-review fields to tailor the resulting page.
+#[allow(clippy::too_many_arguments)]
+async fn build_settings_template(
+    state: &AppState,
+    tab: Option<String>,
+    edit_id: Option<i64>,
+    msg: Option<String>,
+    err: Option<String>,
+    import_review: Option<ImportReviewView>,
+) -> SettingsTemplate {
     let cfg = config::get_config(&state.db)
         .await
         .ok()
@@ -214,24 +275,50 @@ pub async fn settings_page(
     // Prefill the CF edit form only when the query param points at a row
     // that actually exists — stale edit links just fall through to the
     // "Add new" form, which is the safer default.
-    let custom_format_edit = match params.edit_id {
-        Some(id) => cf_model::get_by_id(&state.db, id).await.ok().flatten(),
+    let custom_format_edit = match edit_id {
+        Some(id) => cf_model::get_by_id(&state.db, id)
+            .await
+            .ok()
+            .flatten()
+            .map(|row| {
+                let trash_description = extract_trash_description(&row.json);
+                CustomFormatEditView {
+                    row,
+                    trash_description,
+                }
+            }),
         None => None,
     };
 
     let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
-    let template = SettingsTemplate {
+    SettingsTemplate {
         page: "settings".to_string(),
-        tab: normalize_settings_tab(params.tab),
+        tab: normalize_settings_tab(tab),
         config: cfg,
         groups,
         suggestions,
         custom_formats,
         custom_format_edit,
         custom_format_min_score_display,
-        message: params.msg,
-        error: params.err,
-    };
+        custom_format_import_review: import_review,
+        message: msg,
+        error: err,
+    }
+}
+
+pub async fn settings_page(
+    State(state): State<AppState>,
+    Query(params): Query<SettingsQuery>,
+) -> Html<String> {
+    let template = build_settings_template(
+        &state,
+        params.tab,
+        params.edit_id,
+        params.msg,
+        params.err,
+        None,
+    )
+    .await;
     Html(template.render().unwrap_or_default())
 }
 
@@ -353,6 +440,7 @@ pub async fn settings_submit(
             custom_formats,
             custom_format_edit: None,
             custom_format_min_score_display,
+            custom_format_import_review: None,
             message: None,
             error: Some(format!("Failed to save: {}", e)),
         };
@@ -425,6 +513,7 @@ pub async fn settings_submit(
         custom_formats,
         custom_format_edit: None,
         custom_format_min_score_display,
+        custom_format_import_review: None,
         message: Some(notices.join("<br>")),
         error: None,
     };
@@ -605,7 +694,15 @@ pub async fn settings_custom_formats_upsert(
             .await
             .map(|_| id)
     } else {
-        cf_model::insert(&state.db, name, trash_id, json_trimmed, form.score).await
+        cf_model::insert(
+            &state.db,
+            name,
+            trash_id,
+            json_trimmed,
+            form.score,
+            cf_model::ORIGIN_MANUAL,
+        )
+        .await
     };
 
     match save_result {
@@ -737,65 +834,41 @@ pub async fn settings_custom_formats_minimum_score(
     }
 }
 
-/// Import a Sonarr v4 CF JSON export. Accepts either a single object
-/// or an array of them; per-entry parse / insert failures are counted
-/// and reported but don't abort the whole import. After a successful
-/// run the compiled cache is rebuilt so the imported CFs are live on
-/// the next scoring pass.
-#[utoipa::path(
-    post,
-    path = "/settings/custom-formats/import",
-    tag = "Settings",
-    summary = "Import Custom Formats from Sonarr v4 JSON",
-    description = "Import one or more Custom Formats from a Sonarr v4 JSON export. Accepts either a single object or an array. Each entry is compiled via the standard CF parser; per-entry failures are counted and the first error is surfaced in the flash message, but valid entries still import. Rebuilds the compiled-CF cache on success. Redirects back to the Custom Formats settings tab.",
-    request_body(content = CustomFormatImportForm, content_type = "application/x-www-form-urlencoded"),
-    responses(
-        (status = 303, description = "Redirect back to the Custom Formats settings tab"),
-    ),
-)]
-pub async fn settings_custom_formats_import(
-    State(state): State<AppState>,
-    Form(form): Form<CustomFormatImportForm>,
-) -> Redirect {
-    let payload = form.payload.trim();
-    if payload.is_empty() {
-        return Redirect::to(&cf_redirect(None, None, Some("Import payload is empty.")));
-    }
+/// Per-import decision on a name collision (plan §6.2). Derived from
+/// the review form's radio-button values. `Skip` keeps the existing
+/// row untouched; `Overwrite` replaces it in place; `Rename` writes a
+/// new row under the user-supplied rename_to value.
+#[derive(Clone, Debug)]
+enum CollisionDecision {
+    Skip,
+    Overwrite,
+    Rename(String),
+}
 
-    let value: serde_json::Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(e) => {
-            return Redirect::to(&cf_redirect(
-                None,
-                None,
-                Some(&format!("Import failed: invalid JSON ({e})")),
-            ));
-        }
-    };
-
-    // Normalize single-object imports into a one-element array so the
-    // loop below handles both shapes identically.
-    let entries: Vec<serde_json::Value> = match value {
-        serde_json::Value::Array(items) => items,
-        serde_json::Value::Object(_) => vec![value],
-        _ => {
-            return Redirect::to(&cf_redirect(
-                None,
-                None,
-                Some("Import failed: top-level must be an object or array."),
-            ));
-        }
-    };
-
+/// Loop body shared between the no-collision fast path and the resolve
+/// handler. Takes a set of (entry, decision) pairs plus the existing
+/// name → id map, and performs the insert / update / skip for each.
+/// Returns (imported, skipped_for_collision, failed, first_error).
+async fn apply_import_entries(
+    state: &AppState,
+    entries: Vec<(serde_json::Value, CollisionDecision)>,
+    existing_by_name: &std::collections::HashMap<String, i64>,
+) -> (usize, usize, usize, Option<String>) {
     let mut imported = 0usize;
+    let mut skipped = 0usize;
     let mut failed = 0usize;
     let mut first_error: Option<String> = None;
 
-    for entry in entries {
+    for (mut entry, decision) in entries {
         // Pull out the Sonarr-shape fields we care about. `specifications`
         // lives inside the same blob we'll persist, so we re-serialize
         // the whole object verbatim to keep round-trip exports faithful.
-        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let original_name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let trash_id = entry
             .get("trash_id")
             .and_then(|v| v.as_str())
@@ -810,7 +883,7 @@ pub async fn settings_custom_formats_import(
             .or_else(|| entry.get("trash_score").and_then(|v| v.as_i64()))
             .unwrap_or(0) as i32;
 
-        if name.is_empty() {
+        if original_name.is_empty() {
             failed += 1;
             if first_error.is_none() {
                 first_error = Some("one entry is missing a `name` field".to_string());
@@ -818,43 +891,401 @@ pub async fn settings_custom_formats_import(
             continue;
         }
 
+        // Determine the effective name + the existing-row id (if any)
+        // we should target based on the user's decision.
+        let (effective_name, existing_id) = match decision {
+            CollisionDecision::Skip => {
+                // User chose to keep the existing row. Count it toward
+                // the skipped tally and move on.
+                skipped += 1;
+                continue;
+            }
+            CollisionDecision::Overwrite => {
+                let id = existing_by_name.get(&original_name).copied();
+                (original_name.clone(), id)
+            }
+            CollisionDecision::Rename(new_name) => {
+                let trimmed = new_name.trim();
+                if trimmed.is_empty() {
+                    failed += 1;
+                    if first_error.is_none() {
+                        first_error = Some(format!(
+                            "'{original_name}': rename target is empty"
+                        ));
+                    }
+                    continue;
+                }
+                if existing_by_name.contains_key(trimmed) {
+                    failed += 1;
+                    if first_error.is_none() {
+                        first_error = Some(format!(
+                            "'{original_name}': rename target '{trimmed}' also collides"
+                        ));
+                    }
+                    continue;
+                }
+                // Mutate the in-memory JSON so the new name is persisted
+                // into both the `name` column and the `json` column —
+                // plan §6.2 requires that exports after a rename reflect
+                // the new name, not the upstream one.
+                if let serde_json::Value::Object(ref mut map) = entry {
+                    map.insert(
+                        "name".to_string(),
+                        serde_json::Value::String(trimmed.to_string()),
+                    );
+                }
+                (trimmed.to_string(), None)
+            }
+        };
+
         let raw_json = entry.to_string();
         if let Err(e) = cf_service::compile_from_json(&raw_json, score, 0) {
             failed += 1;
             if first_error.is_none() {
-                first_error = Some(format!("'{name}': {e}"));
+                first_error = Some(format!("'{effective_name}': {e}"));
             }
             continue;
         }
 
-        match cf_model::insert(&state.db, &name, trash_id.as_deref(), &raw_json, score).await {
+        let save_result = if let Some(id) = existing_id {
+            cf_model::update(
+                &state.db,
+                id,
+                &effective_name,
+                trash_id.as_deref(),
+                &raw_json,
+                score,
+            )
+            .await
+            .map(|_| id)
+        } else {
+            cf_model::insert(
+                &state.db,
+                &effective_name,
+                trash_id.as_deref(),
+                &raw_json,
+                score,
+                cf_model::ORIGIN_IMPORT,
+            )
+            .await
+        };
+
+        match save_result {
             Ok(_) => imported += 1,
             Err(e) => {
                 failed += 1;
                 if first_error.is_none() {
-                    first_error = Some(format!("'{name}': {e}"));
+                    first_error = Some(format!("'{effective_name}': {e}"));
                 }
             }
         }
     }
 
+    (imported, skipped, failed, first_error)
+}
+
+/// Build a summary flash message from the four counters produced by
+/// `apply_import_entries`.
+fn import_summary(
+    imported: usize,
+    skipped: usize,
+    failed: usize,
+    first_error: Option<String>,
+) -> String {
+    match (imported, skipped, failed) {
+        (0, 0, 0) => "Nothing to import.".to_string(),
+        (n, 0, 0) => format!("Imported {n} Custom Format(s)."),
+        (n, s, 0) => format!("Imported {n}, skipped {s} on collision."),
+        (0, _, f) => format!(
+            "Import failed ({f} rejected). First error: {}",
+            first_error.unwrap_or_default()
+        ),
+        (n, s, f) => format!(
+            "Imported {n}, skipped {s}, failed {f}. First error: {}",
+            first_error.unwrap_or_default()
+        ),
+    }
+}
+
+/// Import a Sonarr v4 CF JSON export. Accepts a single object, a bare
+/// array, or a `{custom_formats: [...]}` wrapper (plan §6.2). On a
+/// name collision the handler re-renders the settings page with an
+/// inline review block so the user can pick overwrite / rename / skip
+/// per conflicting CF. With no collisions it commits the full batch
+/// and redirects back with a flash summary.
+#[utoipa::path(
+    post,
+    path = "/settings/custom-formats/import",
+    tag = "Settings",
+    summary = "Import Custom Formats from Sonarr v4 JSON",
+    description = "Import one or more Custom Formats from a Sonarr v4 JSON export. Accepts a single object, an array, or a `{custom_formats:[…]}` wrapper. On a name collision the page re-renders with an inline review block; the user picks overwrite/rename/skip per conflict and submits to the resolve endpoint. Rebuilds the compiled-CF cache on success.",
+    request_body(content = CustomFormatImportForm, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 200, description = "Review page rendered (collisions exist)"),
+        (status = 303, description = "Redirect back to the Custom Formats settings tab (no collisions)"),
+    ),
+)]
+pub async fn settings_custom_formats_import(
+    State(state): State<AppState>,
+    Form(form): Form<CustomFormatImportForm>,
+) -> Response {
+    let payload = form.payload.trim();
+    if payload.is_empty() {
+        return Redirect::to(&cf_redirect(None, None, Some("Import payload is empty.")))
+            .into_response();
+    }
+
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            return Redirect::to(&cf_redirect(
+                None,
+                None,
+                Some(&format!("Import failed: invalid JSON ({e})")),
+            ))
+            .into_response();
+        }
+    };
+
+    let entries: Vec<serde_json::Value> = match normalize_cf_import_entries(value) {
+        Ok(entries) => entries,
+        Err(msg) => {
+            return Redirect::to(&cf_redirect(None, None, Some(&msg))).into_response();
+        }
+    };
+
+    // Build the name → id map once up-front so both the collision
+    // scan and the apply loop can read from it without re-querying.
+    let existing_rows = match cf_model::list_with_scores(&state.db).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Redirect::to(&cf_redirect(
+                None,
+                None,
+                Some(&format!("Failed to read existing CFs: {e}")),
+            ))
+            .into_response();
+        }
+    };
+    let existing_by_name: std::collections::HashMap<String, i64> = existing_rows
+        .into_iter()
+        .map(|r| (r.name, r.id))
+        .collect();
+
+    // Scan for collisions before touching the database. If any exist,
+    // render the review page inline — the user picks a decision per
+    // conflict and submits the resolve form.
+    let mut collisions: Vec<ImportCollision> = Vec::new();
+    for (idx, entry) in entries.iter().enumerate() {
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !name.is_empty() && existing_by_name.contains_key(&name) {
+            collisions.push(ImportCollision { index: idx, name });
+        }
+    }
+
+    if !collisions.is_empty() {
+        // Re-render the settings page with the review block populated.
+        // The original payload rides along in a hidden form field so the
+        // resolve handler can re-parse it without server-side state.
+        let review = ImportReviewView {
+            payload: payload.to_string(),
+            collisions,
+        };
+        let template = build_settings_template(
+            &state,
+            Some("custom_formats".to_string()),
+            None,
+            None,
+            None,
+            Some(review),
+        )
+        .await;
+        return Html(template.render().unwrap_or_default()).into_response();
+    }
+
+    // No collisions — every entry defaults to Overwrite semantics,
+    // but since no existing row shares the name, the overwrite branch
+    // falls through to a plain insert.
+    let decisions: Vec<(serde_json::Value, CollisionDecision)> = entries
+        .into_iter()
+        .map(|e| (e, CollisionDecision::Overwrite))
+        .collect();
+    let (imported, skipped, failed, first_error) =
+        apply_import_entries(&state, decisions, &existing_by_name).await;
+
     if imported > 0 {
         cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
     }
 
-    let summary = match (imported, failed) {
-        (0, 0) => "Nothing to import.".to_string(),
-        (n, 0) => format!("Imported {n} Custom Format(s)."),
-        (0, m) => format!(
-            "Import failed ({m} rejected). First error: {}",
-            first_error.unwrap_or_default()
-        ),
-        (n, m) => format!(
-            "Imported {n}, skipped {m}. First error: {}",
-            first_error.unwrap_or_default()
-        ),
+    let summary = import_summary(imported, skipped, failed, first_error);
+    if imported == 0 && failed > 0 {
+        Redirect::to(&cf_redirect(None, None, Some(&summary))).into_response()
+    } else {
+        Redirect::to(&cf_redirect(None, Some(&summary), None)).into_response()
+    }
+}
+
+/// Form for the import-resolve step. Carries the original payload
+/// verbatim (echoed from a hidden field) plus two parallel lists of
+/// actions and rename targets, each keyed by the collision's entry
+/// index inside the parsed payload.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct CustomFormatImportResolveForm {
+    payload: String,
+    /// One entry per collision: `"<index>:<action>"` where action is
+    /// `skip`, `overwrite`, or `rename`. Serialized as a newline-
+    /// delimited string to avoid the axum Form-extractor's complicated
+    /// multi-value handling.
+    decisions: String,
+    /// One entry per rename collision: `"<index>:<new_name>"`. Only
+    /// read when the corresponding `decisions` line has action `rename`.
+    /// Also newline-delimited.
+    renames: String,
+}
+
+/// Parse the newline-delimited decisions string into a HashMap keyed
+/// by entry index. Unknown actions are mapped to `Skip` (the safest
+/// default) and unknown indices are silently dropped.
+fn parse_collision_decisions(
+    decisions: &str,
+    renames: &str,
+) -> std::collections::HashMap<usize, CollisionDecision> {
+    let mut rename_map: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
+    for line in renames.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((idx_str, new_name)) = line.split_once(':') {
+            if let Ok(idx) = idx_str.trim().parse::<usize>() {
+                rename_map.insert(idx, new_name.trim().to_string());
+            }
+        }
+    }
+
+    let mut out: std::collections::HashMap<usize, CollisionDecision> =
+        std::collections::HashMap::new();
+    for line in decisions.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((idx_str, action)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(idx) = idx_str.trim().parse::<usize>() else {
+            continue;
+        };
+        let decision = match action.trim() {
+            "overwrite" => CollisionDecision::Overwrite,
+            "rename" => {
+                let new_name = rename_map
+                    .get(&idx)
+                    .cloned()
+                    .unwrap_or_default();
+                CollisionDecision::Rename(new_name)
+            }
+            _ => CollisionDecision::Skip,
+        };
+        out.insert(idx, decision);
+    }
+    out
+}
+
+/// Resolve a staged CF import by applying the user's per-collision
+/// decisions to the original payload. The handler re-parses the
+/// payload from the hidden form field, looks up each collision's
+/// decision by entry index, and runs the same `apply_import_entries`
+/// loop as the fast path.
+#[utoipa::path(
+    post,
+    path = "/settings/custom-formats/import-resolve",
+    tag = "Settings",
+    summary = "Resolve a staged CF import with per-collision decisions",
+    description = "Second step of the CF import flow: re-parses the original payload (echoed from a hidden field) and applies the user's overwrite/rename/skip decision for each name collision. Entries with no collision default to plain insert. Rebuilds the compiled-CF cache and redirects back to the Custom Formats settings tab.",
+    request_body(content = CustomFormatImportResolveForm, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 303, description = "Redirect back to the Custom Formats settings tab"),
+    ),
+)]
+pub async fn settings_custom_formats_import_resolve(
+    State(state): State<AppState>,
+    Form(form): Form<CustomFormatImportResolveForm>,
+) -> Redirect {
+    let payload = form.payload.trim();
+    if payload.is_empty() {
+        return Redirect::to(&cf_redirect(
+            None,
+            None,
+            Some("Import resolve: payload is empty."),
+        ));
+    }
+
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            return Redirect::to(&cf_redirect(
+                None,
+                None,
+                Some(&format!("Import resolve: invalid JSON ({e})")),
+            ));
+        }
     };
 
+    let entries: Vec<serde_json::Value> = match normalize_cf_import_entries(value) {
+        Ok(entries) => entries,
+        Err(msg) => {
+            return Redirect::to(&cf_redirect(None, None, Some(&msg)));
+        }
+    };
+
+    let existing_rows = match cf_model::list_with_scores(&state.db).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Redirect::to(&cf_redirect(
+                None,
+                None,
+                Some(&format!("Failed to read existing CFs: {e}")),
+            ));
+        }
+    };
+    let existing_by_name: std::collections::HashMap<String, i64> = existing_rows
+        .into_iter()
+        .map(|r| (r.name, r.id))
+        .collect();
+
+    let decisions_map = parse_collision_decisions(&form.decisions, &form.renames);
+
+    // Attach a decision to every entry. Entries that aren't in the
+    // decisions map weren't collisions in the first place — default
+    // them to Overwrite, which falls through to a plain insert since
+    // no existing row shares the name.
+    let decisions: Vec<(serde_json::Value, CollisionDecision)> = entries
+        .into_iter()
+        .enumerate()
+        .map(|(idx, entry)| {
+            let decision = decisions_map
+                .get(&idx)
+                .cloned()
+                .unwrap_or(CollisionDecision::Overwrite);
+            (entry, decision)
+        })
+        .collect();
+
+    let (imported, skipped, failed, first_error) =
+        apply_import_entries(&state, decisions, &existing_by_name).await;
+
+    if imported > 0 {
+        cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
+    }
+
+    let summary = import_summary(imported, skipped, failed, first_error);
     if imported == 0 && failed > 0 {
         Redirect::to(&cf_redirect(None, None, Some(&summary)))
     } else {
@@ -862,15 +1293,330 @@ pub async fn settings_custom_formats_import(
     }
 }
 
-/// Export every Custom Format as a JSON array download. The payload
-/// keeps each row's raw `json` column verbatim so re-importing the
-/// file into Sonarr (or another Ryokan instance) round-trips cleanly.
+/// Counts returned by `install_default_cfs_core`. Shared between the
+/// install-defaults and reset-defaults handlers so the summary-string
+/// construction can live in one place.
+struct InstallDefaultsReport {
+    installed: usize,
+    skipped: usize,
+    failed: usize,
+    first_error: Option<String>,
+}
+
+/// Do the heavy lifting of loading the bundled defaults file, looping
+/// over entries, and inserting each one with `ORIGIN_DEFAULTS`. Returns
+/// either counts (even when `installed == 0` — e.g. the user clicked
+/// install-defaults a second time) or a fatal error string that the
+/// caller should surface as a flash message. The caller is responsible
+/// for rebuilding the compiled-CF cache if `installed > 0`.
+async fn install_default_cfs_core(state: &AppState) -> Result<InstallDefaultsReport, String> {
+    // Baked into the binary at compile time via `include_str!` so the
+    // handler can't ever fail to find the file at runtime. Parsing is
+    // still done once per click rather than at startup — the defaults
+    // payload is a few KB, the user rarely clicks this, and
+    // compile-time validation doesn't catch field-level typos anyway.
+    const DEFAULTS_JSON: &str = include_str!("../../static/default_custom_formats.json");
+
+    let value: serde_json::Value = serde_json::from_str(DEFAULTS_JSON)
+        .map_err(|e| format!("Defaults file is malformed: {e}"))?;
+    let entries = match value {
+        serde_json::Value::Array(items) => items,
+        _ => return Err("Defaults file is not a JSON array.".to_string()),
+    };
+
+    // Collect existing names so we can skip conflicts without a
+    // per-entry SELECT round-trip.
+    let existing: std::collections::HashSet<String> = cf_model::list_with_scores(&state.db)
+        .await
+        .map_err(|e| format!("Failed to read existing CFs: {e}"))?
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+
+    let mut report = InstallDefaultsReport {
+        installed: 0,
+        skipped: 0,
+        failed: 0,
+        first_error: None,
+    };
+
+    for entry in entries {
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            report.failed += 1;
+            if report.first_error.is_none() {
+                report.first_error = Some("defaults entry missing `name`".to_string());
+            }
+            continue;
+        }
+        if existing.contains(&name) {
+            report.skipped += 1;
+            continue;
+        }
+        let trash_id = entry
+            .get("trash_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let score = entry
+            .get("score")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+
+        let raw_json = entry.to_string();
+        if let Err(e) = cf_service::compile_from_json(&raw_json, score, 0) {
+            report.failed += 1;
+            if report.first_error.is_none() {
+                report.first_error = Some(format!("'{name}': {e}"));
+            }
+            continue;
+        }
+
+        match cf_model::insert(
+            &state.db,
+            &name,
+            trash_id.as_deref(),
+            &raw_json,
+            score,
+            cf_model::ORIGIN_DEFAULTS,
+        )
+        .await
+        {
+            Ok(_) => report.installed += 1,
+            Err(e) => {
+                report.failed += 1;
+                if report.first_error.is_none() {
+                    report.first_error = Some(format!("'{name}': {e}"));
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+/// Install the bundled default Custom Format set (plan §7.2). The JSON
+/// file lives at `static/default_custom_formats.json` and is embedded in
+/// the binary via `include_str!` so the handler doesn't touch the
+/// filesystem at runtime — the file is baked at compile time like every
+/// other `static/` asset in Ryokan. Existing CFs with the same name are
+/// skipped (not overwritten), so clicking the button twice is a no-op
+/// on the second click. Installing is opt-in: the defaults ship dormant,
+/// the user has to click through on the settings page to get them.
+#[utoipa::path(
+    post,
+    path = "/settings/custom-formats/install-defaults",
+    tag = "Settings",
+    summary = "Install the bundled default Custom Format set",
+    description = "One-click install for the bundled anime-tuned default CF set (see plan §7.2). Reads from the compile-time embedded `static/default_custom_formats.json`. CFs whose name already exists are skipped (not overwritten), so repeated clicks are idempotent. Rebuilds the compiled-CF cache on success. Redirects back to the Custom Formats settings tab with a flash message.",
+    responses(
+        (status = 303, description = "Redirect back to the Custom Formats settings tab"),
+    ),
+)]
+pub async fn settings_custom_formats_install_defaults(
+    State(state): State<AppState>,
+) -> Redirect {
+    let report = match install_default_cfs_core(&state).await {
+        Ok(r) => r,
+        Err(msg) => return Redirect::to(&cf_redirect(None, None, Some(&msg))),
+    };
+
+    if report.installed > 0 {
+        cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
+        logger::info(
+            &state.db,
+            LogCategory::System,
+            &format!(
+                "Installed {} default Custom Format(s)",
+                report.installed
+            ),
+            &format!("skipped={}, failed={}", report.skipped, report.failed),
+        )
+        .await;
+    }
+
+    let summary = match (report.installed, report.skipped, report.failed) {
+        (0, _, 0) => "All defaults already present — nothing to install.".to_string(),
+        (n, 0, 0) => format!("Installed {n} default Custom Format(s)."),
+        (n, s, 0) => format!("Installed {n}, skipped {s} already-present."),
+        (0, _, f) => format!(
+            "Install failed ({f} rejected). First error: {}",
+            report.first_error.unwrap_or_default()
+        ),
+        (n, s, f) => format!(
+            "Installed {n}, skipped {s}, failed {f}. First error: {}",
+            report.first_error.unwrap_or_default()
+        ),
+    };
+
+    if report.installed == 0 && report.failed > 0 {
+        Redirect::to(&cf_redirect(None, None, Some(&summary)))
+    } else {
+        Redirect::to(&cf_redirect(None, Some(&summary), None))
+    }
+}
+
+/// Reset the bundled default Custom Format set. Deletes every row whose
+/// origin is `defaults` (leaving `manual` and `import` rows untouched),
+/// then re-runs the install-defaults body so the bundled set lands on
+/// disk in its current shape. This is the user's escape hatch if they
+/// changed a default CF and want the original score/spec list back.
+#[utoipa::path(
+    post,
+    path = "/settings/custom-formats/reset-defaults",
+    tag = "Settings",
+    summary = "Reset the bundled default Custom Format set",
+    description = "Drops every CF row whose origin is `defaults` and reinstalls the bundled set from `static/default_custom_formats.json`. User-authored (`manual`) and imported (`import`) rows are left untouched. Rebuilds the compiled-CF cache on success. Redirects back to the Custom Formats settings tab with a flash message.",
+    responses(
+        (status = 303, description = "Redirect back to the Custom Formats settings tab"),
+    ),
+)]
+pub async fn settings_custom_formats_reset_defaults(
+    State(state): State<AppState>,
+) -> Redirect {
+    let deleted = match cf_model::delete_defaults(&state.db).await {
+        Ok(n) => n,
+        Err(e) => {
+            return Redirect::to(&cf_redirect(
+                None,
+                None,
+                Some(&format!("Reset failed (delete step): {e}")),
+            ));
+        }
+    };
+
+    let report = match install_default_cfs_core(&state).await {
+        Ok(r) => r,
+        Err(msg) => return Redirect::to(&cf_redirect(None, None, Some(&msg))),
+    };
+
+    // Always rebuild the cache here — either a row was dropped or a
+    // fresh one was inserted, and in the edge case where both are
+    // zero (a user with an empty database hit the button), rebuilding
+    // a cache over zero rows is effectively free.
+    cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        &format!(
+            "Reset defaults: dropped {} old, installed {} fresh",
+            deleted, report.installed
+        ),
+        &format!(
+            "skipped={}, failed={}",
+            report.skipped, report.failed
+        ),
+    )
+    .await;
+
+    let summary = if report.failed > 0 {
+        format!(
+            "Reset: dropped {}, installed {}, failed {}. First error: {}",
+            deleted,
+            report.installed,
+            report.failed,
+            report.first_error.unwrap_or_default()
+        )
+    } else {
+        format!(
+            "Reset complete: dropped {} old default(s), installed {} fresh.",
+            deleted, report.installed
+        )
+    };
+
+    if report.failed > 0 && report.installed == 0 {
+        Redirect::to(&cf_redirect(None, None, Some(&summary)))
+    } else {
+        Redirect::to(&cf_redirect(None, Some(&summary), None))
+    }
+}
+
+/// Query parameters for the CF export endpoint. `mode` selects between
+/// the default Ryokan-compatible export (keeps `Ryokan.`-namespaced
+/// specs verbatim) and the Sonarr-safe variant (drops entire CFs that
+/// contain any Ryokan-only spec so the file imports cleanly into a
+/// vanilla Sonarr v4 instance). See plan §5.7.5.
+#[derive(Deserialize)]
+pub struct CfExportQuery {
+    /// `"sonarr-safe"` triggers the Sonarr-safe branch; anything else
+    /// (or absent) falls through to the default Ryokan-compatible mode.
+    mode: Option<String>,
+}
+
+/// Normalize a parsed CF import payload into a flat list of per-CF
+/// entries. Plan §6.2 requires that every shape Sonarr v4 might emit
+/// imports cleanly:
+///
+/// - `[{…}, {…}]`         — bare array (what Sonarr's "Export" emits)
+/// - `{…}`                 — bare single object
+/// - `{"custom_formats": [{…}, {…}]}` — wrapped array (some third-party tools)
+/// - `{"custom_formats": {…}}`        — wrapped single object (paranoid fallback)
+///
+/// Returns a human-readable error string that can be surfaced as a
+/// flash message on the settings redirect.
+fn normalize_cf_import_entries(
+    value: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, String> {
+    match value {
+        serde_json::Value::Array(items) => Ok(items),
+        serde_json::Value::Object(ref map) => {
+            if let Some(inner) = map.get("custom_formats") {
+                match inner {
+                    serde_json::Value::Array(items) => Ok(items.clone()),
+                    serde_json::Value::Object(_) => Ok(vec![inner.clone()]),
+                    _ => Err(
+                        "Import failed: `custom_formats` must be an object or array."
+                            .to_string(),
+                    ),
+                }
+            } else {
+                // Bare single-CF object (legacy shape).
+                Ok(vec![value])
+            }
+        }
+        _ => Err("Import failed: top-level must be an object or array.".to_string()),
+    }
+}
+
+/// Returns `true` if this CF's `specifications` array contains any spec
+/// whose `implementation` begins with `"Ryokan."` — i.e. a Ryokan-only
+/// kind that a vanilla Sonarr v4 install wouldn't recognize.
+fn cf_has_ryokan_spec(cf: &serde_json::Value) -> bool {
+    let Some(specs) = cf.get("specifications").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    specs.iter().any(|spec| {
+        spec.get("implementation")
+            .and_then(|v| v.as_str())
+            .map(|s| s.starts_with("Ryokan."))
+            .unwrap_or(false)
+    })
+}
+
+/// Export every Custom Format as a JSON array download. Supports two
+/// modes via the `mode` query parameter:
+///
+/// - **Ryokan-compatible** (default): keeps each row's raw `json`
+///   column verbatim, so the file round-trips into another Ryokan
+///   instance with `Ryokan.`-namespaced specs intact.
+/// - **Sonarr-safe** (`?mode=sonarr-safe`): drops any CF containing a
+///   `Ryokan.`-prefixed spec so the remainder imports cleanly into a
+///   vanilla Sonarr v4 instance. Dropped CF names are written to the
+///   System log category so the user can see what was stripped.
 #[utoipa::path(
     get,
     path = "/settings/custom-formats/export",
     tag = "Settings",
     summary = "Export all Custom Formats as JSON",
-    description = "Download every saved Custom Format as a JSON array. Each row's raw Sonarr v4 object is merged with the persisted V1-profile score, so the export round-trips cleanly into Sonarr or another Ryokan instance. Served with `Content-Disposition: attachment; filename=\"ryokan-custom-formats.json\"`.",
+    description = "Download every saved Custom Format as a JSON array. Default mode keeps Ryokan-namespaced specs verbatim; `?mode=sonarr-safe` drops entire CFs containing `Ryokan.`-only specs so the file imports into vanilla Sonarr v4. Each row's persisted V1-profile score is merged into the exported object.",
+    params(
+        ("mode" = Option<String>, Query, description = "`sonarr-safe` to drop Ryokan-only CFs"),
+    ),
     responses(
         (status = 200, description = "JSON array of Custom Formats", body = serde_json::Value, content_type = "application/json"),
         (status = 500, description = "Database error"),
@@ -878,7 +1624,14 @@ pub async fn settings_custom_formats_import(
 )]
 pub async fn settings_custom_formats_export(
     State(state): State<AppState>,
+    Query(query): Query<CfExportQuery>,
 ) -> Result<(axum::http::HeaderMap, String), (axum::http::StatusCode, String)> {
+    let sonarr_safe = query
+        .mode
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("sonarr-safe"))
+        .unwrap_or(false);
+
     let rows = cf_model::list_with_scores(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -888,9 +1641,20 @@ pub async fn settings_custom_formats_export(
     // are skipped — they wouldn't import cleanly into a target Sonarr
     // anyway, and logging the skip is enough of a breadcrumb.
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    let mut dropped_for_sonarr: Vec<String> = Vec::new();
     for row in rows {
         match serde_json::from_str::<serde_json::Value>(&row.json) {
             Ok(mut v) => {
+                // In Sonarr-safe mode, drop the whole CF if any spec
+                // uses a `Ryokan.`-prefixed implementation. This is the
+                // conservative reading of plan §5.7.5 — partial strips
+                // would change the CF's semantics silently, so whole-CF
+                // drops are safer even if they produce a smaller file.
+                if sonarr_safe && cf_has_ryokan_spec(&v) {
+                    dropped_for_sonarr.push(row.name.clone());
+                    continue;
+                }
+
                 // Merge the persisted score into the exported object so
                 // the importer doesn't have to re-key scores by name.
                 // Sonarr ignores unknown fields on import, so this is
@@ -914,6 +1678,23 @@ pub async fn settings_custom_formats_export(
         }
     }
 
+    // Surface dropped CFs to the Logs tab (System category) so the user
+    // can see what was stripped. The export response itself is a file
+    // download, so there's no flash-message slot to use here — the log
+    // entry + the form-hint on the settings page is the whole UX path.
+    if sonarr_safe && !dropped_for_sonarr.is_empty() {
+        logger::info(
+            &state.db,
+            LogCategory::System,
+            &format!(
+                "Sonarr-safe CF export dropped {} CF(s) containing Ryokan-only specs",
+                dropped_for_sonarr.len()
+            ),
+            &dropped_for_sonarr.join(", "),
+        )
+        .await;
+    }
+
     let body = serde_json::to_string_pretty(&serde_json::Value::Array(out))
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -922,11 +1703,14 @@ pub async fn settings_custom_formats_export(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
     );
+    let disposition = if sonarr_safe {
+        "attachment; filename=\"ryokan-custom-formats-sonarr-safe.json\""
+    } else {
+        "attachment; filename=\"ryokan-custom-formats.json\""
+    };
     headers.insert(
         axum::http::header::CONTENT_DISPOSITION,
-        axum::http::HeaderValue::from_static(
-            "attachment; filename=\"ryokan-custom-formats.json\"",
-        ),
+        axum::http::HeaderValue::from_static(disposition),
     );
     Ok((headers, body))
 }
@@ -1087,4 +1871,265 @@ pub async fn jellyfin_refresh(
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
     Ok(Json(serde_json::json!({"ok": true, "message": "Jellyfin library refresh queued"})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A CF whose specs are all vanilla Sonarr v4 implementations must
+    /// be kept in Sonarr-safe mode (plan §5.7.5).
+    #[test]
+    fn cf_has_ryokan_spec_returns_false_for_pure_sonarr_cf() {
+        let cf = serde_json::json!({
+            "name": "Synthetic BluRay CF",
+            "specifications": [
+                {
+                    "name": "Is BluRay",
+                    "implementation": "SourceSpecification",
+                    "negate": false,
+                    "required": true,
+                    "fields": [{"name": "value", "value": 6}]
+                }
+            ]
+        });
+        assert!(!cf_has_ryokan_spec(&cf));
+    }
+
+    /// Any `Ryokan.`-prefixed `implementation` must flip the flag so
+    /// the whole CF gets dropped from a Sonarr-safe export.
+    #[test]
+    fn cf_has_ryokan_spec_returns_true_when_any_spec_is_ryokan_only() {
+        let cf = serde_json::json!({
+            "name": "SeaDex Best",
+            "specifications": [
+                {
+                    "name": "Is BluRay",
+                    "implementation": "SourceSpecification",
+                    "negate": false,
+                    "required": false,
+                    "fields": [{"name": "value", "value": 6}]
+                },
+                {
+                    "name": "SeaDex best",
+                    "implementation": "Ryokan.SeaDexBestSpecification",
+                    "negate": false,
+                    "required": true,
+                    "fields": []
+                }
+            ]
+        });
+        assert!(cf_has_ryokan_spec(&cf));
+    }
+
+    /// Guard against CFs with an empty or missing `specifications`
+    /// array — the helper must default to `false` rather than panic.
+    #[test]
+    fn cf_has_ryokan_spec_handles_missing_or_empty_specs() {
+        let empty = serde_json::json!({ "name": "Empty", "specifications": [] });
+        assert!(!cf_has_ryokan_spec(&empty));
+
+        let missing = serde_json::json!({ "name": "Missing" });
+        assert!(!cf_has_ryokan_spec(&missing));
+    }
+
+    /// Case sensitivity: `Ryokan.` is the exact namespace prefix.
+    /// A spec named `ryokan.…` (lowercase) shouldn't match and
+    /// neither should a spec that merely contains `Ryokan` somewhere
+    /// in the middle of the string.
+    #[test]
+    fn cf_has_ryokan_spec_requires_exact_prefix() {
+        let cf = serde_json::json!({
+            "name": "Edge",
+            "specifications": [
+                {
+                    "implementation": "ryokan.SeaDexBestSpecification",
+                    "fields": []
+                },
+                {
+                    "implementation": "SomeRyokanThing",
+                    "fields": []
+                }
+            ]
+        });
+        assert!(!cf_has_ryokan_spec(&cf));
+    }
+
+    /// A bare array of CF objects should pass through untouched — this
+    /// is the exact shape Sonarr v4's "Export" button emits.
+    #[test]
+    fn normalize_cf_import_entries_accepts_bare_array() {
+        let input = serde_json::json!([
+            {"name": "First", "specifications": []},
+            {"name": "Second", "specifications": []},
+        ]);
+        let entries = normalize_cf_import_entries(input).expect("array shape must be accepted");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "First");
+        assert_eq!(entries[1]["name"], "Second");
+    }
+
+    /// A bare single object should be wrapped in a one-element vec so
+    /// the caller loop handles it identically to the array shape.
+    #[test]
+    fn normalize_cf_import_entries_wraps_bare_single_object() {
+        let input = serde_json::json!({"name": "Solo", "specifications": []});
+        let entries = normalize_cf_import_entries(input).expect("object shape must be accepted");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "Solo");
+    }
+
+    /// The `{custom_formats: [...]}` wrapper is what some third-party
+    /// export tools emit. It must be unwrapped transparently.
+    #[test]
+    fn normalize_cf_import_entries_unwraps_custom_formats_wrapper() {
+        let input = serde_json::json!({
+            "custom_formats": [
+                {"name": "Wrapped One", "specifications": []},
+                {"name": "Wrapped Two", "specifications": []},
+            ]
+        });
+        let entries = normalize_cf_import_entries(input).expect("wrapper shape must be accepted");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "Wrapped One");
+        assert_eq!(entries[1]["name"], "Wrapped Two");
+    }
+
+    /// The wrapper shape with a single-object inner value should also
+    /// unwrap and wrap-as-vec in one step.
+    #[test]
+    fn normalize_cf_import_entries_unwraps_single_object_inside_wrapper() {
+        let input = serde_json::json!({
+            "custom_formats": {"name": "Wrapped Solo", "specifications": []}
+        });
+        let entries = normalize_cf_import_entries(input).expect("wrapped object must be accepted");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "Wrapped Solo");
+    }
+
+    /// Scalar top-level values (string, number, bool, null) must be
+    /// rejected with a human-readable error string.
+    #[test]
+    fn normalize_cf_import_entries_rejects_scalar_top_level() {
+        let err = normalize_cf_import_entries(serde_json::json!("not a cf"))
+            .expect_err("scalar must be rejected");
+        assert!(err.contains("top-level"), "got error: {err}");
+    }
+
+    /// If the wrapper's inner value is a scalar, that's a malformed
+    /// payload — report it rather than silently treating it as empty.
+    #[test]
+    fn normalize_cf_import_entries_rejects_scalar_inner_wrapper() {
+        let input = serde_json::json!({"custom_formats": 42});
+        let err =
+            normalize_cf_import_entries(input).expect_err("scalar inside wrapper must be rejected");
+        assert!(err.contains("custom_formats"), "got error: {err}");
+    }
+
+    /// A Sonarr/Trash Guides CF that carries a `trash_description`
+    /// should be surfaced verbatim so the edit drawer can render it.
+    #[test]
+    fn extract_trash_description_returns_string_when_present() {
+        let json = serde_json::json!({
+            "name": "Example",
+            "trash_description": "This CF matches high-quality BluRay releases.",
+            "specifications": []
+        })
+        .to_string();
+        assert_eq!(
+            extract_trash_description(&json),
+            Some("This CF matches high-quality BluRay releases.".to_string())
+        );
+    }
+
+    /// Absent, empty, whitespace-only, wrong-typed, or unparseable
+    /// payloads should all return `None` so the template simply
+    /// doesn't render the description block.
+    #[test]
+    fn extract_trash_description_returns_none_for_missing_or_invalid() {
+        let no_field = serde_json::json!({"name": "X", "specifications": []}).to_string();
+        assert_eq!(extract_trash_description(&no_field), None);
+
+        let empty = serde_json::json!({"trash_description": ""}).to_string();
+        assert_eq!(extract_trash_description(&empty), None);
+
+        let whitespace = serde_json::json!({"trash_description": "   "}).to_string();
+        assert_eq!(extract_trash_description(&whitespace), None);
+
+        let wrong_type = serde_json::json!({"trash_description": 42}).to_string();
+        assert_eq!(extract_trash_description(&wrong_type), None);
+
+        assert_eq!(extract_trash_description("not json at all"), None);
+    }
+
+    /// A well-formed decisions string with all three action types
+    /// should round-trip into the expected `CollisionDecision` enum
+    /// values keyed by index.
+    #[test]
+    fn parse_collision_decisions_handles_all_three_actions() {
+        let decisions = "0:skip\n1:overwrite\n2:rename";
+        let renames = "2:My New Name";
+        let out = parse_collision_decisions(decisions, renames);
+
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out.get(&0), Some(CollisionDecision::Skip)));
+        assert!(matches!(out.get(&1), Some(CollisionDecision::Overwrite)));
+        match out.get(&2) {
+            Some(CollisionDecision::Rename(name)) => assert_eq!(name, "My New Name"),
+            other => panic!("expected Rename, got {other:?}"),
+        }
+    }
+
+    /// Unknown action strings should fall back to `Skip` — the safest
+    /// default, since `Skip` never touches the existing row.
+    #[test]
+    fn parse_collision_decisions_treats_unknown_actions_as_skip() {
+        let out = parse_collision_decisions("7:nonsense", "");
+        assert!(matches!(out.get(&7), Some(CollisionDecision::Skip)));
+    }
+
+    /// Malformed lines (missing colon, non-numeric index, blank) must
+    /// be silently dropped so a malformed hidden field doesn't blow
+    /// up the whole resolve handler.
+    #[test]
+    fn parse_collision_decisions_drops_malformed_lines() {
+        let decisions = "\n  \nnot_a_number:skip\nmissing_colon\n3:overwrite";
+        let out = parse_collision_decisions(decisions, "");
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out.get(&3), Some(CollisionDecision::Overwrite)));
+    }
+
+    /// If the user picks `rename` but the renames block is missing
+    /// the corresponding entry, the resolved `Rename` value should
+    /// carry an empty string — the apply loop then records an
+    /// actionable error and the user can fix it.
+    #[test]
+    fn parse_collision_decisions_rename_without_entry_has_empty_name() {
+        let out = parse_collision_decisions("5:rename", "");
+        match out.get(&5) {
+            Some(CollisionDecision::Rename(name)) => assert!(name.is_empty()),
+            other => panic!("expected Rename with empty name, got {other:?}"),
+        }
+    }
+
+    /// Summary line shape for the common counter combinations. Keeping
+    /// these in tests because the summary is user-visible flash text
+    /// and regressions here show up as confusing UI.
+    #[test]
+    fn import_summary_shapes_by_counter_combinations() {
+        assert_eq!(import_summary(0, 0, 0, None), "Nothing to import.");
+        assert_eq!(import_summary(3, 0, 0, None), "Imported 3 Custom Format(s).");
+        assert_eq!(
+            import_summary(2, 1, 0, None),
+            "Imported 2, skipped 1 on collision."
+        );
+        assert_eq!(
+            import_summary(0, 0, 2, Some("oops".to_string())),
+            "Import failed (2 rejected). First error: oops"
+        );
+        assert_eq!(
+            import_summary(1, 1, 1, Some("bad".to_string())),
+            "Imported 1, skipped 1, failed 1. First error: bad"
+        );
+    }
 }

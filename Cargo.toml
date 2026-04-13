@@ -45,6 +45,13 @@ chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 urlencoding = "2"
 regex-lite = "0.1"
+# fancy-regex is used only by the Custom Formats parser (Sonarr-v4
+# compat). Trash-guides anime CFs rely on look-around and nested
+# character classes, which regex-lite (and even the main `regex` crate)
+# do not support — fancy-regex adds PCRE-style backtracking. We keep
+# regex-lite as the default for Ryokan's own internal regexes because
+# they don't need look-around and we want the linear-time guarantee.
+fancy-regex = "0.14"
 sha2 = "0.10"
 ammonia = "4"
 
