@@ -254,6 +254,10 @@ pub async fn settings_submit(
             .as_ref()
             .map(|c| c.custom_format_minimum_score)
             .unwrap_or(i32::MIN),
+        seadex_enabled: existing_cfg
+            .as_ref()
+            .map(|c| c.seadex_enabled)
+            .unwrap_or(false),
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());

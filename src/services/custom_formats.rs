@@ -18,12 +18,11 @@
 //! with a subtle required-hard-fail rule. See [`evaluate`] and the
 //! worked examples in its unit tests for the exact semantics.
 
-// Phase 4 lands the module in isolation; Phases 5–6 wire the caller
-// (AppState, startup load, auto_search integration). Until those
-// phases land, `load_compiled_cfs` and `total_cf_score` are referenced
-// only by unit tests, which trips `-D warnings` dead-code errors in
-// clippy. Scope the allow to this file so the warnings come back the
-// moment a caller goes missing later.
+// A handful of spec fields (negate, required, source's raw Sonarr int)
+// are parsed but not read by the current evaluator path — they're
+// preserved so round-trip export matches Sonarr byte-for-byte and the
+// semantics stay visible in the debugger. Scope the allow narrowly to
+// this file rather than annotating each struct field.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashSet};
@@ -434,6 +433,27 @@ pub async fn load_compiled_cfs(db: &SqlitePool) -> Vec<CompiledCustomFormat> {
             }
         })
         .collect()
+}
+
+/// Re-run `load_compiled_cfs` and atomically swap the compiled set into
+/// the shared `CompiledCfCache`. Callers take the write lock only long
+/// enough to replace the inner `Arc`; readers on the scoring hot path
+/// clone the `Arc` out under the read lock and never contend with the
+/// swap after that. Used by the Custom Formats settings page after any
+/// create / update / delete / import.
+pub async fn rebuild_cf_cache(cache: &CompiledCfCache, db: &SqlitePool) {
+    let fresh = Arc::new(load_compiled_cfs(db).await);
+    *cache.write().await = fresh;
+}
+
+/// `true` if any compiled CF contains a `SeaDexBest` spec. Used to
+/// suppress the hardcoded SeaDex score boost when the user has opted
+/// into controlling that boost themselves through a Custom Format —
+/// otherwise a candidate on SeaDex would earn both the CF score and
+/// the hardcoded `SEADEX_SCORE_BOOST` bump, which is double counting.
+pub fn has_seadex_cf(cfs: &[CompiledCustomFormat]) -> bool {
+    cfs.iter()
+        .any(|cf| cf.specs.iter().any(|s| matches!(s.kind, SpecKind::SeaDexBest)))
 }
 
 // ───────────────────────────────────────────────────────────────────────────

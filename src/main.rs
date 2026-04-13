@@ -17,7 +17,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use services::{jellyfin::JellyfinClient, qbit::QbitClient};
+use services::{
+    custom_formats::{self, CompiledCfCache},
+    jellyfin::JellyfinClient,
+    qbit::QbitClient,
+};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -120,6 +124,12 @@ pub struct AppState {
     pub db: SqlitePool,
     pub qbit: Arc<RwLock<Option<QbitClient>>>,
     pub jellyfin: Arc<RwLock<Option<JellyfinClient>>>,
+    /// Compiled Custom Formats, loaded once at startup and rebuilt on
+    /// CF create/update/delete via `custom_formats::rebuild_cf_cache`.
+    /// Outer `RwLock` owns swap; the inner `Arc<Vec<_>>` is cheap-cloned
+    /// out on the scoring hot path so the read lock releases before the
+    /// per-candidate evaluation loop begins.
+    pub custom_formats: CompiledCfCache,
 }
 
 // Allow handlers to extract SqlitePool directly from AppState.
@@ -204,11 +214,18 @@ async fn main() {
     // runtime worker during startup.
     let _ = tokio::task::spawn_blocking(models::user::warm_timing_equalizer).await;
 
+    // Warm the Custom Formats cache from disk. Parse failures are logged
+    // inside `load_compiled_cfs` and skipped — startup never aborts over
+    // a bad CF row, so a corrupted import can't take the server down.
+    let cf_cache: CompiledCfCache =
+        Arc::new(RwLock::new(Arc::new(custom_formats::load_compiled_cfs(&db).await)));
+
     // Build shared state.
     let state = AppState {
         db: db.clone(),
         qbit: Arc::new(RwLock::new(None)),
         jellyfin: Arc::new(RwLock::new(None)),
+        custom_formats: cf_cache,
     };
 
     // Initialize qBittorrent client from saved config if available.

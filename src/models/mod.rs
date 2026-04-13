@@ -849,6 +849,15 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // SeaDex "best release" boost toggle. Default OFF so upgrades don't
+    // kick in silently for existing installs on first run after the
+    // feature ships. Suppressed at scoring time when the user already
+    // has a SeaDexBestSpecification CF (avoids double-counting).
+    sqlx::query("ALTER TABLE config ADD COLUMN seadex_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query("ALTER TABLE config ADD COLUMN preferred_source TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
