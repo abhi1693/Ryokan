@@ -30,6 +30,7 @@ pub mod anibridge;
 pub mod upgrade;
 
 pub mod seadex;
+pub mod custom_formats;
 
 // Classification pipeline (Phase 1a foundations).
 pub mod source;
