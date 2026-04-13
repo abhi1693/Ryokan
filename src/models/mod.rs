@@ -711,6 +711,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // end_year lets Layer 4 (temporal inference) reason about how long a
+    // *finished* series has been off-air, rather than treating season_year
+    // (the start year) as the finish proxy. Long-running shows can finish
+    // years after their season_year; without end_year the "finished 1+
+    // year ago" rule would fire immediately for every ep of a decade-long
+    // run. Populated from AniList's endDate.year where available.
+    sqlx::query("ALTER TABLE series ADD COLUMN end_year INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
     // Phase 4: per-series upgrade toggle. When 0, the upgrade scanner
     // skips this series entirely — user opts out of re-grabs even if a
     // higher-quality release appears. Default 1 preserves prior behavior.

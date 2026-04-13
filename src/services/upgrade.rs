@@ -170,6 +170,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 Some(source::SeriesContext {
                     status: &row.status,
                     season_year: row.season_year,
+                    end_year: row.end_year,
                 }),
             )
             .await;

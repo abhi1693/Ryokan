@@ -156,6 +156,7 @@ pub async fn find_all_for_target(
             Some(source::SeriesContext {
                 status: &detail.status,
                 season_year: detail.season_year,
+                end_year: detail.end_year,
             }),
         )
         .await;
@@ -275,6 +276,7 @@ pub async fn find_best_for_target(
             Some(source::SeriesContext {
                 status: &detail.status,
                 season_year: detail.season_year,
+                end_year: detail.end_year,
             }),
         )
         .await;

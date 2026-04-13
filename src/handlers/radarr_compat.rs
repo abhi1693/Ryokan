@@ -462,6 +462,7 @@ pub async fn add_movie(
             status: &detail.status,
             episodes: detail.episodes,
             season_year: detail.season_year,
+            end_year: detail.end_year,
         },
     )
     .await

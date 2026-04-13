@@ -29,6 +29,7 @@ struct Candidate {
     episode_count: Option<i32>,
     episode_length: Option<i32>,
     start_date: Option<String>,
+    end_date: Option<String>,
     average_rating: Option<String>,
 }
 
@@ -72,6 +73,7 @@ struct AnimeAttributes {
     episode_count: Option<i32>,
     episode_length: Option<i32>,
     start_date: Option<String>,
+    end_date: Option<String>,
     average_rating: Option<String>,
 }
 
@@ -223,6 +225,7 @@ fn to_candidate(resource: Resource<AnimeAttributes>) -> Option<Candidate> {
         episode_count: attrs.episode_count,
         episode_length: attrs.episode_length,
         start_date: attrs.start_date,
+        end_date: attrs.end_date,
         average_rating: attrs.average_rating,
     })
 }
@@ -328,6 +331,7 @@ fn to_anime_detail(item: Candidate) -> AnimeDetail {
         duration: item.episode_length,
         season: String::new(),
         season_year: parse_year(item.start_date.as_deref()),
+        end_year: parse_year(item.end_date.as_deref()),
         description: sanitize_rich_description(&item.synopsis, false),
         genres: Vec::new(),
         average_score: score,

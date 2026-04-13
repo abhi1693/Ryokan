@@ -198,6 +198,15 @@ struct NamedItem {
 #[derive(Debug, Deserialize)]
 struct AiredInfo {
     from: Option<String>,
+    to: Option<String>,
+}
+
+/// Parse the year out of a Jikan ISO-8601 air date (`YYYY-MM-DDT...`).
+/// Used to populate `end_year` from `aired.to` for finished shows so
+/// Layer 4 temporal inference can distinguish "finished last year" from
+/// "started years ago, still airing."
+fn parse_air_year(value: Option<&str>) -> Option<i32> {
+    value.and_then(|s| s.get(0..4)).and_then(|y| y.parse::<i32>().ok())
 }
 
 pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
@@ -413,6 +422,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
     let description = build_description(&anime.synopsis, &anime.background);
     let duration = parse_duration_minutes(anime.duration.as_deref());
     let next_airing = estimate_next_airing(&anime.status, anime.aired.as_ref().and_then(|a| a.from.as_deref()));
+    let end_year = parse_air_year(anime.aired.as_ref().and_then(|a| a.to.as_deref()));
     let (format, _) = normalize_enum_label(anime.anime_type.clone());
     let (status, status_display) = normalize_enum_label(anime.status.clone());
     let relations = fetch_relations(anime.mal_id).await;
@@ -437,6 +447,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
         duration,
         season: anime.season.unwrap_or_default().to_uppercase(),
         season_year: anime.year,
+        end_year,
         description,
         genres,
         average_score: anime.score.map(|s| s.round() as i32),

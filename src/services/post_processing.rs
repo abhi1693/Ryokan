@@ -432,6 +432,7 @@ async fn import_torrent(
                     Some(SeriesContext {
                         status: &series.status,
                         season_year: series.season_year,
+                        end_year: series.end_year,
                     }),
                     grab.is_batch,
                 )
@@ -706,6 +707,7 @@ struct PendingClassification {
     series_id: i64,
     series_status: String,
     series_season_year: Option<i32>,
+    series_end_year: Option<i32>,
     series_root: std::path::PathBuf,
     file_path: std::path::PathBuf,
     episode_number: i32,
@@ -831,6 +833,7 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                     series_id: row.id,
                     series_status: row.status.clone(),
                     series_season_year: row.season_year,
+                    series_end_year: row.end_year,
                     series_root: series_root.clone(),
                     file_path,
                     episode_number: file.episode_number,
@@ -869,6 +872,7 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             Some(SeriesContext {
                 status: &item.series_status,
                 season_year: item.series_season_year,
+                end_year: item.series_end_year,
             }),
             is_batch,
         )

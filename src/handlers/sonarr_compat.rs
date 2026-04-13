@@ -544,6 +544,7 @@ pub async fn add_series(
             status: &detail.status,
             episodes: detail.episodes,
             season_year: detail.season_year,
+            end_year: detail.end_year,
         },
     )
     .await

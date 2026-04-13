@@ -560,6 +560,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     Some(crate::services::source::SeriesContext {
                         status: &cand.found.series.status,
                         season_year: cand.found.series.season_year,
+                        end_year: cand.found.series.end_year,
                     }),
                 ).await;
                 for ep_num in &ep_list {
@@ -703,6 +704,7 @@ async fn score_candidate(
         Some(source::SeriesContext {
             status: &found.status,
             season_year: found.season_year,
+            end_year: found.end_year,
         }),
     )
     .await;

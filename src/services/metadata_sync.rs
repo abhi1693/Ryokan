@@ -314,6 +314,7 @@ async fn refresh_series_metadata_inner(
                 status: &detail.status,
                 episodes: detail.episodes,
                 season_year: detail.season_year,
+                end_year: detail.end_year,
             },
         )
         .await

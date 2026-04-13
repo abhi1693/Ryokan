@@ -255,6 +255,11 @@ pub struct AnimeDetail {
     pub duration: Option<i32>,
     pub season: String,
     pub season_year: Option<i32>,
+    /// AniList `endDate.year` when the show has finished. `#[serde(default)]`
+    /// so cached JSON blobs from before this field existed deserialize
+    /// cleanly to `None`. Consumed by Layer 4 temporal inference.
+    #[serde(default)]
+    pub end_year: Option<i32>,
     pub description: String,
     pub genres: Vec<String>,
     pub average_score: Option<i32>,
@@ -391,6 +396,7 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
                     duration
                     season
                     seasonYear
+                    endDate { year }
                     description(asHtml: true)
                     genres
                     averageScore
@@ -513,6 +519,7 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         duration: m["duration"].as_i64().map(|d| d as i32),
         season: m["season"].as_str().unwrap_or("").to_string(),
         season_year: m["seasonYear"].as_i64().map(|y| y as i32),
+        end_year: m["endDate"]["year"].as_i64().map(|y| y as i32),
         description: sanitize_rich_description(m["description"].as_str().unwrap_or(""), true),
         genres: m["genres"]
             .as_array()

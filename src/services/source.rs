@@ -719,10 +719,17 @@ pub struct SeriesContext<'a> {
     /// `"CANCELLED"`, `"NOT_YET_RELEASED"`, `"HIATUS"`. Match is
     /// case-insensitive inside the layer.
     pub status: &'a str,
-    /// Year the series started airing. Ryokan doesn't carry an explicit
-    /// end date, so this doubles as a coarse "how long ago did this
-    /// finish" proxy for the finished-era rules.
+    /// Year the series started airing — used as a coarse fallback when
+    /// `end_year` is not populated (e.g. currently-airing shows or
+    /// providers that don't carry an end date).
     pub season_year: Option<i32>,
+    /// Year the series finished airing, when known. Layer 4's
+    /// "finished 1+ year ago" rules prefer this over `season_year` so a
+    /// series that started in 2015 but only wrapped last year isn't
+    /// treated as if it's been off the air for a decade. `None` for
+    /// currently-airing shows and any metadata provider that doesn't
+    /// expose an end date.
+    pub end_year: Option<i32>,
 }
 
 /// Run the pre-download classification pipeline against a release title.
@@ -778,9 +785,13 @@ pub async fn classify_release(
     if let Some(series_ctx) = series {
         let is_batch = nyaa.map(|n| n.is_batch).unwrap_or(false);
         let today_year = current_year();
-        if let Some(temporal_ev) =
-            classify_temporal(series_ctx.status, series_ctx.season_year, is_batch, today_year)
-        {
+        if let Some(temporal_ev) = classify_temporal(
+            series_ctx.status,
+            series_ctx.season_year,
+            series_ctx.end_year,
+            is_batch,
+            today_year,
+        ) {
             evidence.push(temporal_ev);
         }
     }
@@ -904,6 +915,7 @@ pub async fn classify_post_download(
         if let Some(temporal_ev) = classify_temporal(
             series_ctx.status,
             series_ctx.season_year,
+            series_ctx.end_year,
             is_batch,
             current_year(),
         ) {

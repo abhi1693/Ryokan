@@ -269,6 +269,7 @@ async fn maybe_reconcile_mal_entry(
             status: &matched.status,
             episodes: matched.episodes,
             season_year: matched.season_year,
+            end_year: detail.end_year,
         },
     ).await.is_err() {
         return None;
@@ -1314,6 +1315,11 @@ pub async fn add_series(
             status: &form.status,
             episodes: form.episodes,
             season_year: form.season_year,
+            // AddSeriesForm comes from the search result card which doesn't
+            // carry an end date — leave null and let the metadata sync pass
+            // populate it via refresh_core_metadata when the full detail
+            // fetch lands.
+            end_year: None,
         },
     )
     .await
@@ -1891,6 +1897,7 @@ async fn run_auto_search_targets_with_upgrades(
                     Some(crate::services::source::SeriesContext {
                         status: &detail.status,
                         season_year: detail.season_year,
+                        end_year: detail.end_year,
                     }),
                 ).await;
 
@@ -2244,6 +2251,7 @@ pub async fn search_batch_releases(
                 Some(crate::services::source::SeriesContext {
                     status: &detail.status,
                     season_year: detail.season_year,
+                    end_year: detail.end_year,
                 }),
             ).await;
             let tier_label = classification.label();
@@ -2372,6 +2380,7 @@ pub async fn grab_interactive_result(
         .map(|s| crate::services::source::SeriesContext {
             status: &s.status,
             season_year: s.season_year,
+            end_year: s.end_year,
         });
     let classification = crate::services::source::classify_release(
         &state.db,
