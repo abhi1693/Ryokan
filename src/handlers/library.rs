@@ -1830,6 +1830,254 @@ pub async fn list_folders(
     Ok(Json(folders))
 }
 
+/// Phase 2: sibling auto-expansion for multi-series batch releases.
+///
+/// Called after a successful grab when the user targeted a series
+/// that belongs to a franchise. Detects sibling entries
+/// (sequels, prequels, side stories, etc.) in the torrent's file
+/// list, upserts each detected sibling into the tracked series
+/// table, and writes `grabbed_torrent_series` route rows so
+/// post-processing can move each file into the correct sibling's
+/// media folder.
+///
+/// Gated on AniList provenance (enforced inside
+/// [`auto_search::detect_sibling_entries_in_pack`]) — Jikan-sourced
+/// details are skipped to avoid duplicate library rows from MAL's
+/// finer-grained splits (e.g. JoJo Stone Ocean, which MAL splits
+/// into 3 cours but AL keeps as a single entry). When AL is down at
+/// grab time the grab itself still succeeds; sibling detection just
+/// returns an empty vec and the 12h metadata refresh can
+/// retroactively run detection later if needed.
+///
+/// Errors here are soft: the grab has already completed and
+/// post-processing's legacy fallback (no route rows → route
+/// everything to `parent_series_id`) keeps the grab functional even
+/// when auto-expand fails partway through. Any failures get logged
+/// at warn level.
+///
+/// Returns the number of siblings *newly added* to the library
+/// (upserts that hit an existing row don't count).
+#[allow(clippy::too_many_arguments)]
+async fn auto_expand_library_from_pack(
+    db: &SqlitePool,
+    qbit: &crate::services::qbit::QbitClient,
+    info_hash: &str,
+    parent_detail: &anilist::AnimeDetail,
+    parent_series_id: i64,
+    parent_episode_numbers: &[i32],
+    grab_id: i64,
+    torrent_title: &str,
+) -> usize {
+    if parent_detail.id <= 0 || info_hash.is_empty() {
+        return 0;
+    }
+
+    // Wait for qBit metadata before asking for the file list. Fresh
+    // grabs via `add_torrent` don't block on metadata discovery, so
+    // a naive `get_torrent_files` right after add returns empty.
+    // The 60s ceiling matches `add_torrent_with_file_filter`.
+    let files = match qbit
+        .wait_for_metadata(info_hash, std::time::Duration::from_secs(60))
+        .await
+    {
+        Ok(files) => files,
+        Err(e) => {
+            logger::warn(
+                db,
+                LogCategory::Library,
+                &format!(
+                    "auto-expand: metadata wait failed for '{}', skipping sibling detection",
+                    torrent_title
+                ),
+                &e,
+            )
+            .await;
+            return 0;
+        }
+    };
+    let filenames: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+
+    let siblings = auto_search::detect_sibling_entries_in_pack(&filenames, parent_detail);
+    if siblings.is_empty() {
+        return 0;
+    }
+
+    let mut added = 0_usize;
+    let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut routes: Vec<grabbed_torrents::GrabSeriesRoute> = Vec::new();
+
+    for sibling in siblings {
+        let primary_title = if !sibling.title_english.is_empty() {
+            sibling.title_english.clone()
+        } else {
+            sibling.title_romaji.clone()
+        };
+
+        // Upsert dedups by mal_id then anilist_id, so reconciled
+        // entries that already have both IDs populated update
+        // in place instead of duplicating.
+        let upsert_result = series::upsert(
+            db,
+            series::SeriesCore {
+                anilist_id: sibling.anilist_id,
+                mal_id: sibling.mal_id,
+                title: &primary_title,
+                title_romaji: &sibling.title_romaji,
+                title_english: &sibling.title_english,
+                title_native: &sibling.title_native,
+                cover_url: &sibling.cover_url,
+                format: &sibling.format,
+                status: &sibling.status,
+                episodes: sibling.episodes,
+                season_year: sibling.season_year,
+                // Relation cards don't carry end_year — the
+                // background metadata refresh populates it.
+                end_year: None,
+            },
+        )
+        .await;
+        let (sibling_id, created) = match upsert_result {
+            Ok(pair) => pair,
+            Err(e) => {
+                logger::warn(
+                    db,
+                    LogCategory::Library,
+                    &format!("auto-expand: failed to upsert sibling '{}'", primary_title),
+                    &e.to_string(),
+                )
+                .await;
+                continue;
+            }
+        };
+
+        if created {
+            added += 1;
+            logger::info(
+                db,
+                LogCategory::Library,
+                &format!(
+                    "Auto-expand: added sibling '{}' from batch '{}'",
+                    primary_title, torrent_title
+                ),
+                &format!(
+                    "anilist_id={}, matched_subtitle={:?}, files={}",
+                    sibling.anilist_id,
+                    sibling.matched_subtitle,
+                    sibling.file_indices.len()
+                ),
+            )
+            .await;
+
+            // Kick off a background metadata refresh so the full
+            // detail (description, artwork, end_year, etc.) gets
+            // hydrated for the UI. Fire-and-forget — the route is
+            // already recorded below either way.
+            let db_clone = db.clone();
+            tokio::spawn(async move {
+                if let Ok(Some(tracked)) = series::get_by_id(&db_clone, sibling_id).await {
+                    let force_fallback = config::get_config(&db_clone)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.force_mal_fallback)
+                        .unwrap_or(false);
+                    let _ = metadata_sync::refresh_series_metadata(
+                        &db_clone,
+                        &tracked,
+                        force_fallback,
+                    )
+                    .await;
+                }
+            });
+        }
+
+        // Derive episode numbers per sibling so
+        // find_imported_for_episode can locate this route when
+        // an upgrade later targets one of the sibling's episodes.
+        let mut ep_nums: Vec<i32> = Vec::new();
+        for &file_idx in &sibling.file_indices {
+            if let Some(name) = filenames.get(file_idx) {
+                if let Some((_, n)) = media::parse_episode_number(&name.to_lowercase()) {
+                    ep_nums.push(n);
+                }
+            }
+        }
+        ep_nums.sort_unstable();
+        ep_nums.dedup();
+
+        for &i in &sibling.file_indices {
+            claimed.insert(i);
+        }
+        routes.push(grabbed_torrents::GrabSeriesRoute {
+            grab_id,
+            series_id: sibling_id,
+            file_indices: sibling.file_indices,
+            episode_numbers: ep_nums,
+            matched_subtitle: sibling.matched_subtitle,
+        });
+    }
+
+    // Parent route: every media file not claimed by a sibling
+    // routes to the parent series. Unclaimed files are expected for
+    // franchise-root grabs (JoJo S1 in a S1-S5 pack won't match any
+    // sibling subtitle) but can also indicate extras or a missed
+    // sibling — log a warn either way so the operator can spot
+    // regressions.
+    let parent_file_indices: Vec<usize> = (0..filenames.len())
+        .filter(|i| {
+            filenames
+                .get(*i)
+                .map(|n| auto_search::is_media_filename(n))
+                .unwrap_or(false)
+                && !claimed.contains(i)
+        })
+        .collect();
+
+    if !routes.is_empty() && !parent_file_indices.is_empty() {
+        logger::warn(
+            db,
+            LogCategory::Library,
+            &format!(
+                "Auto-expand: {} unclaimed file(s) in batch '{}' routed to parent series",
+                parent_file_indices.len(),
+                torrent_title,
+            ),
+            &format!(
+                "parent_id={}, siblings_added={}, unclaimed_count={}",
+                parent_series_id,
+                added,
+                parent_file_indices.len()
+            ),
+        )
+        .await;
+
+        routes.push(grabbed_torrents::GrabSeriesRoute {
+            grab_id,
+            series_id: parent_series_id,
+            file_indices: parent_file_indices,
+            episode_numbers: parent_episode_numbers.to_vec(),
+            matched_subtitle: String::new(),
+        });
+    }
+
+    if !routes.is_empty() {
+        if let Err(e) = grabbed_torrents::record_grab_series_routes(db, &routes).await {
+            logger::warn(
+                db,
+                LogCategory::Library,
+                &format!(
+                    "auto-expand: failed to write route rows for '{}'",
+                    torrent_title
+                ),
+                &e.to_string(),
+            )
+            .await;
+        }
+    }
+
+    added
+}
+
 async fn run_auto_search_targets(
     state: &AppState,
     request_id: i64,
@@ -1917,19 +2165,74 @@ async fn run_auto_search_targets_with_upgrades(
                         logger::info(&state.db, LogCategory::AutoSearch, &format!("{}: upgrading from {} to {}", label, existing.label(), incoming_classification.label()), &result.title).await;
                     }
                 }
-                let url = if !result.magnet.is_empty() { result.magnet.clone() } else { result.torrent.clone() };
+                // For selective downloads, prefer the `.torrent` URL
+                // over the magnet: qBit can parse metadata straight
+                // from the file instead of waiting on DHT/trackers.
+                let wants_selective = !result.info_hash.is_empty()
+                    && auto_search::has_selective_discriminator(&detail);
+                let url = if wants_selective && !result.torrent.is_empty() {
+                    result.torrent.clone()
+                } else if !result.magnet.is_empty() {
+                    result.magnet.clone()
+                } else {
+                    result.torrent.clone()
+                };
                 if url.is_empty() {
                     logger::warn(&state.db, LogCategory::AutoSearch, &format!("{}: no magnet/torrent URL", label), &result.title).await;
                     skipped.push(format!("{}: no magnet/torrent URL", label));
                     continue;
                 }
-                match qbit.add_torrent(&url).await {
-                    Ok(_) => {
+                // Selective-file path for multi-part / multi-season
+                // packs. `pick_wanted_file_indices` narrows by part
+                // number (Kizumonogatari II in a Monogatari megapack)
+                // or positive subtitle match (Stardust Crusaders in a
+                // JoJo S1–S5 pack). The gate only runs this branch
+                // when the detail has an actual discriminator to try,
+                // so single-entry series fall through to the plain
+                // add. Franchise roots without their own subtitle
+                // (JoJo S1) also fall through — they're handled by
+                // the multi-series auto-expand path below, which
+                // downloads the full pack and routes each sibling's
+                // files to its own library entry. On filter error,
+                // fall back to a full add rather than dropping the
+                // grab entirely.
+                let selective_outcome: Result<Option<Vec<usize>>, String> = if wants_selective {
+                    let detail_clone = detail.clone();
+                    let info_hash_clone = result.info_hash.clone();
+                    match qbit
+                        .add_torrent_with_file_filter(&url, &info_hash_clone, move |files| {
+                            auto_search::pick_wanted_file_indices(files, &detail_clone)
+                        })
+                        .await
+                    {
+                        Ok(crate::services::qbit::SelectiveOutcome::Filtered(kept)) => Ok(Some(kept)),
+                        Ok(crate::services::qbit::SelectiveOutcome::FullDownload) => Ok(None),
+                        Err(e) => {
+                            logger::warn(
+                                &state.db,
+                                LogCategory::Grab,
+                                &format!("{}: selective download failed, falling back to full grab", label),
+                                &e,
+                            )
+                            .await;
+                            qbit.add_torrent(&url).await.map(|_| None)
+                        }
+                    }
+                } else {
+                    qbit.add_torrent(&url).await.map(|_| None)
+                };
+                match selective_outcome {
+                    Ok(kept) => {
+                        let selective_suffix = match (&kept, wants_selective) {
+                            (Some(ids), _) => format!(", selective={}", ids.len()),
+                            (None, true) => ", selective=full(timeout)".to_string(),
+                            (None, false) => String::new(),
+                        };
                         logger::info(
                             &state.db,
                             LogCategory::Grab,
                             &format!("Grabbed: {}", result.title),
-                            &format!("target={}, group={}, score={}, tier={}, batch={}", label, result.group, result.score, incoming_classification.label(), result.is_batch),
+                            &format!("target={}, group={}, score={}, tier={}, batch={}{}", label, result.group, result.score, incoming_classification.label(), result.is_batch, selective_suffix),
                         ).await;
                         // Record for post-processing and episode quality tags.
                         if let Some(sid) = series_id {
@@ -1946,14 +2249,14 @@ async fn run_auto_search_targets_with_upgrades(
                                     ep_nums.sort_unstable();
                                 }
                             }
-                            let _ = crate::models::grabbed_torrents::record_grab(
+                            let grab_id = crate::models::grabbed_torrents::record_grab(
                                 &state.db,
                                 &result.info_hash,
                                 &result.title,
                                 sid,
                                 &ep_nums,
                                 result.is_batch,
-                            ).await;
+                            ).await.ok().flatten();
                             for ep_num in &ep_nums {
                                 let _ = episode_tags::record_grab(
                                     &state.db,
@@ -1963,6 +2266,28 @@ async fn run_auto_search_targets_with_upgrades(
                                     &result.title,
                                     &result.group,
                                 ).await;
+                            }
+                            // Phase 2 sibling auto-expand: when the
+                            // grab is a batch covering a franchise
+                            // (e.g. JoJo S1-S5), detect sibling
+                            // entries in the file list and add them
+                            // to the library so post-processing can
+                            // route each file to the correct series.
+                            // Only runs on fresh grabs (existing
+                            // grab_id skips the route-write path).
+                            if result.is_batch {
+                                if let Some(grab_id) = grab_id {
+                                    let _ = auto_expand_library_from_pack(
+                                        &state.db,
+                                        &qbit,
+                                        &result.info_hash,
+                                        &detail,
+                                        sid,
+                                        &ep_nums,
+                                        grab_id,
+                                        &result.title,
+                                    ).await;
+                                }
                             }
                         }
                     }
@@ -2433,8 +2758,43 @@ pub async fn grab_batch_result(
             .clone()
     };
 
-    qbit.add_torrent(&url).await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    // Same selective-file path as `grab_interactive_result`: narrow
+    // a megapack to just the target if it has its own subtitle or
+    // part number. Franchise roots (JoJo S1) deliberately fall
+    // through so the multi-series auto-expand path below can route
+    // each sibling's files into its own library entry instead.
+    let wants_selective = !info_hash.is_empty()
+        && auto_search::has_selective_discriminator(&detail);
+    let selective_outcome: Option<Vec<usize>> = if wants_selective {
+        let detail_clone = detail.clone();
+        match qbit
+            .add_torrent_with_file_filter(&url, &info_hash, move |files| {
+                auto_search::pick_wanted_file_indices(files, &detail_clone)
+            })
+            .await
+        {
+            Ok(crate::services::qbit::SelectiveOutcome::Filtered(kept)) => Some(kept),
+            Ok(crate::services::qbit::SelectiveOutcome::FullDownload) => None,
+            Err(e) => {
+                logger::warn(
+                    &state.db,
+                    LogCategory::Grab,
+                    &format!("Selective batch download failed, falling back to full grab: {}", title),
+                    &e,
+                )
+                .await;
+                qbit.add_torrent(&url)
+                    .await
+                    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+                None
+            }
+        }
+    } else {
+        qbit.add_torrent(&url)
+            .await
+            .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+        None
+    };
 
     // Classify so the log line carries the actual quality tier. Pass the
     // chosen release as a batch in NyaaContext (Layer 4 uses this for the
@@ -2455,20 +2815,44 @@ pub async fn grab_batch_result(
         }),
     ).await;
 
+    let selective_suffix = match (&selective_outcome, wants_selective) {
+        (Some(kept), _) => format!(", selective={}", kept.len()),
+        (None, true) => ", selective=full(timeout)".to_string(),
+        (None, false) => String::new(),
+    };
     logger::info(
         &state.db,
         LogCategory::Grab,
         &format!("Grabbed batch (interactive): {}", title),
-        &format!("group={}, tier={}", group, classification.label()),
+        &format!("group={}, tier={}{}", group, classification.label(), selective_suffix),
     ).await;
 
     if let Some(sid) = series_id {
-        let _ = crate::models::grabbed_torrents::record_grab(
+        let grab_id = crate::models::grabbed_torrents::record_grab(
             &state.db, &info_hash, &title, sid, &[], true,
-        ).await;
+        ).await.ok().flatten();
+        // Phase 2 sibling auto-expand. Always true here because this
+        // is the batch-grab path.
+        if let Some(grab_id) = grab_id {
+            let _ = auto_expand_library_from_pack(
+                &state.db,
+                &qbit,
+                &info_hash,
+                &detail,
+                sid,
+                &[],
+                grab_id,
+                &title,
+            ).await;
+        }
     }
 
-    Ok(Json(serde_json::json!({"ok": true, "title": title, "tier": classification.label()})))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "title": title,
+        "tier": classification.label(),
+        "selective_files": selective_outcome,
+    })))
 }
 
 /// Grab a specific release chosen from the interactive search.
@@ -2494,7 +2878,7 @@ pub async fn grab_interactive_result(
     Path((request_id, episode_number)): Path<(i64, i32)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let (tracked_row, _, _detail) = resolve_series_context(&state.db, request_id)
+    let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
@@ -2516,8 +2900,45 @@ pub async fn grab_interactive_result(
             .clone()
     };
 
-    qbit.add_torrent(&url).await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    // If the target is a multi-part entry ("Kizumonogatari II") OR a
+    // subtitled season of a franchise ("Stardust Crusaders"), try the
+    // selective-file download path so a megapack release only pulls
+    // the files the user is tracking. Franchise roots without their
+    // own subtitle return `false` here and fall through to the plain
+    // `add_torrent` path — interactive single-episode grabs don't
+    // auto-expand the library (that's `grab_batch_result`'s job).
+    let wants_selective = !info_hash.is_empty()
+        && auto_search::has_selective_discriminator(&detail);
+    let selective_outcome: Option<Vec<usize>> = if wants_selective {
+        let detail_clone = detail.clone();
+        match qbit
+            .add_torrent_with_file_filter(&url, &info_hash, move |files| {
+                auto_search::pick_wanted_file_indices(files, &detail_clone)
+            })
+            .await
+        {
+            Ok(crate::services::qbit::SelectiveOutcome::Filtered(kept)) => Some(kept),
+            Ok(crate::services::qbit::SelectiveOutcome::FullDownload) => None,
+            Err(e) => {
+                logger::warn(
+                    &state.db,
+                    LogCategory::Grab,
+                    &format!("Selective download failed, falling back to full grab: {}", title),
+                    &e,
+                )
+                .await;
+                qbit.add_torrent(&url)
+                    .await
+                    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+                None
+            }
+        }
+    } else {
+        qbit.add_torrent(&url)
+            .await
+            .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+        None
+    };
 
     // Interactive grab: the frontend doesn't currently round-trip the Nyaa
     // view URL, so Layer 2 is skipped here. These grabs are user-initiated
@@ -2538,11 +2959,19 @@ pub async fn grab_interactive_result(
         None,
         series_ctx,
     ).await;
+    let selective_suffix = match (&selective_outcome, wants_selective) {
+        (Some(kept), _) => format!(", selective={}", kept.len()),
+        (None, true) => ", selective=full(timeout)".to_string(),
+        (None, false) => String::new(),
+    };
     logger::info(
         &state.db,
         LogCategory::Grab,
         &format!("Interactive grab: {}", title),
-        &format!("episode={}, group={}, tier={}", episode_number, group, classification.label()),
+        &format!(
+            "episode={}, group={}, tier={}{}",
+            episode_number, group, classification.label(), selective_suffix
+        ),
     ).await;
 
     if let Some(sid) = series_id {
@@ -2555,7 +2984,10 @@ pub async fn grab_interactive_result(
         ).await;
     }
 
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "selective_files": selective_outcome,
+    })))
 }
 
 /// Delete an episode file from disk.

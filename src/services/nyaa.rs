@@ -30,6 +30,25 @@ static SEL_NEXT: LazyLock<Selector> = LazyLock::new(|| {
     Selector::parse("ul.pagination li.next:not(.disabled)").expect("SEL_NEXT parses")
 });
 
+/// Pre-compiled selectors for the single-torrent view page
+/// (`/view/<id>`). Used by [`fetch_view_result`] for the SeaDex-bypass
+/// path that ingests curated torrents directly from their view URLs
+/// instead of going through the text search.
+static SEL_VIEW_TITLE: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("div.panel h3.panel-title").expect("SEL_VIEW_TITLE parses")
+});
+static SEL_VIEW_ROW: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("div.panel-body div.row").expect("SEL_VIEW_ROW parses"));
+static SEL_VIEW_COL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("div").expect("SEL_VIEW_COL parses"));
+static SEL_VIEW_MAGNET: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("a.card-footer-item[href^='magnet:']").expect("SEL_VIEW_MAGNET parses")
+});
+static SEL_VIEW_TORRENT: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("a.card-footer-item[href$='.torrent']")
+        .expect("SEL_VIEW_TORRENT parses")
+});
+
 /// Episode range like "01-12", "01~24", "1 - 24". Broader than the old
 /// `01[-~]\d{2,3}` hard-coded form so releases that start at a non-01
 /// episode (sequels, cour splits) still register as batches.
@@ -333,4 +352,238 @@ fn parse_size(s: &str) -> i64 {
 
 fn parse_int(s: &str) -> i32 {
     s.trim().parse().unwrap_or(0)
+}
+
+/// Fetch a single Nyaa view page by URL and return a populated
+/// [`SearchResult`]. Used by the SeaDex bypass path in auto-search:
+/// SeaDex tells us the curated torrent's info hash and view URL for a
+/// given AniList ID, but the torrent's title may not contain any of
+/// the query tokens (smol's Kizumonogatari pack is titled
+/// `[smol] Monogatari (Season 9) ...` so searches for "Kizumonogatari
+/// II: Nekketsu-hen" never surface it). Going direct to the view page
+/// sidesteps the whole text-match problem.
+///
+/// The parser extracts the same fields `parse_results` extracts from a
+/// search-listing row: title, seeders/leechers/completed, size,
+/// magnet, torrent file URL, info hash. `group`, `resolution`, and
+/// `is_batch` are derived from the title exactly the same way as in
+/// `parse_results`. `score` is computed with the passed options so the
+/// caller can merge these into the normal candidate pool seamlessly.
+pub async fn fetch_view_result(
+    view_url: &str,
+    opts: &SearchOptions,
+) -> Result<SearchResult, String> {
+    let html = HTTP_CLIENT
+        .get(view_url)
+        .send()
+        .await
+        .map_err(|e| format!("Nyaa view fetch failed: {}", e))?
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read view body: {}", e))?;
+
+    parse_view_page(&html, view_url, opts)
+        .ok_or_else(|| "Nyaa view page parse failed".to_string())
+}
+
+fn parse_view_page(
+    html: &str,
+    view_url: &str,
+    opts: &SearchOptions,
+) -> Option<SearchResult> {
+    let document = Html::parse_document(html);
+
+    // Title is the first `<h3 class="panel-title">` under the first
+    // `.panel` — the second instance is the "File list" header.
+    let title = document
+        .select(&SEL_VIEW_TITLE)
+        .next()?
+        .text()
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        return None;
+    }
+
+    // Scrape the labelled key/value rows in the header panel. Nyaa lays
+    // them out as `<div class="row"><div class="col-md-1">Label:</div>
+    // <div class="col-md-5">value</div> …</div>`, with a second
+    // (label, value) pair on the same row for Leechers/Completed/etc.
+    let mut seeders = 0i32;
+    let mut leechers = 0i32;
+    let mut downloads = 0i32;
+    let mut size = String::new();
+    for row in document.select(&SEL_VIEW_ROW) {
+        let cols: Vec<_> = row
+            .select(&SEL_VIEW_COL)
+            .map(|el| el.text().collect::<String>().trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // We want pairs: each "Label:" should be followed by its value.
+        let mut i = 0;
+        while i + 1 < cols.len() {
+            let label = cols[i].trim_end_matches(':').trim().to_ascii_lowercase();
+            let value = cols[i + 1].trim().to_string();
+            match label.as_str() {
+                "seeders" => seeders = parse_int(&value),
+                "leechers" => leechers = parse_int(&value),
+                "completed" => downloads = parse_int(&value),
+                "file size" => size = value,
+                _ => {}
+            }
+            i += 2;
+        }
+    }
+
+    let size_bytes = parse_size(&size);
+
+    // Magnet: first `a.card-footer-item` with a `magnet:` href. Info
+    // hash comes from the same magnet via `extract_hash`.
+    let magnet = document
+        .select(&SEL_VIEW_MAGNET)
+        .next()
+        .and_then(|a| a.value().attr("href"))
+        .unwrap_or("")
+        .to_string();
+    let info_hash = extract_hash(&magnet);
+
+    // Torrent file URL: sibling `.card-footer-item` ending in .torrent.
+    // Paths on nyaa.si are relative, so prefix NYAA_BASE when needed.
+    let torrent = document
+        .select(&SEL_VIEW_TORRENT)
+        .next()
+        .and_then(|a| a.value().attr("href"))
+        .map(|href| {
+            if href.starts_with("http") {
+                href.to_string()
+            } else {
+                format!("{}{}", NYAA_BASE, href)
+            }
+        })
+        .unwrap_or_default();
+
+    let group = extract_group(&title);
+    let resolution = extract_resolution(&title);
+    let is_batch = detect_batch(&title);
+
+    let mut result = SearchResult {
+        title,
+        link: view_url.to_string(),
+        magnet,
+        torrent,
+        size,
+        size_bytes,
+        seeders,
+        leechers,
+        downloads,
+        group,
+        resolution,
+        is_batch,
+        // We don't get the row-class `success` tag from a view page, so
+        // the trusted flag stays false. Not a problem for the SeaDex
+        // path because the SeaDex boost dominates any trusted bonus.
+        is_trusted: false,
+        score: 0,
+        info_hash,
+    };
+
+    result.score = crate::services::scoring::score_result_with_sub_pref(
+        &result,
+        opts,
+        opts.prefer_subs,
+    );
+
+    Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal fixture mirroring the real Nyaa view page structure we
+    /// saw for the smol Kizumonogatari megapack (`/view/1713886`). This
+    /// keeps `parse_view_page` tied to the actual DOM shape rather than
+    /// the assumptions the parser makes in isolation. If Nyaa ever
+    /// renumbers the column layout, this test fails loudly.
+    const SMOL_VIEW_FIXTURE: &str = r#"
+<html><body>
+<div class="panel panel-default">
+  <div class="panel-heading">
+    <h3 class="panel-title">
+      [smol] Monogatari (Season 9) (BD 1080p 1920x816 HEVC Opus) | Kizumonogatari | Monogatari Series | Kizumonogatari: Tekketsu-hen | Kizumonogatari: Nekketsu-hen | Kizumonogatari: Reiketsu-hen
+    </h3>
+  </div>
+  <div class="panel-body">
+    <div class="row">
+      <div class="col-md-1">Category:</div>
+      <div class="col-md-5"><a href="/?c=1_0">Anime</a> - <a href="/?c=1_2">English-translated</a></div>
+      <div class="col-md-1">Date:</div>
+      <div class="col-md-5" data-timestamp="1694025140">2023-09-06 18:32 UTC</div>
+    </div>
+    <div class="row">
+      <div class="col-md-1">Submitter:</div>
+      <div class="col-md-5"><a class="text-default" href="/user/smol">smol</a></div>
+      <div class="col-md-1">Seeders:</div>
+      <div class="col-md-5"><span style="color: green;">51</span></div>
+    </div>
+    <div class="row">
+      <div class="col-md-1">Information:</div>
+      <div class="col-md-5"><a href="https://anidb.net/anime/8357">https://anidb.net/anime/8357</a></div>
+      <div class="col-md-1">Leechers:</div>
+      <div class="col-md-5"><span style="color: red;">0</span></div>
+    </div>
+    <div class="row">
+      <div class="col-md-1">File size:</div>
+      <div class="col-md-5">23.8 GiB</div>
+      <div class="col-md-1">Completed:</div>
+      <div class="col-md-5">2286</div>
+    </div>
+    <div class="row">
+      <div class="col-md-offset-6 col-md-1">Info hash:</div>
+      <div class="col-md-5"><kbd>0f8ee3286d768fb53ae593f10155a5077e38e893</kbd></div>
+    </div>
+  </div>
+  <div class="panel-footer clearfix">
+    <a href="/download/1713886.torrent" class="card-footer-item">Download Torrent</a>
+    or
+    <a href="magnet:?xt=urn:btih:0f8ee3286d768fb53ae593f10155a5077e38e893&amp;dn=smol+pack" class="card-footer-item">Magnet</a>
+  </div>
+</div>
+</body></html>
+"#;
+
+    #[test]
+    fn parse_view_page_extracts_smol_pack_metadata() {
+        let opts = SearchOptions::default();
+        let result = parse_view_page(SMOL_VIEW_FIXTURE, "https://nyaa.si/view/1713886", &opts)
+            .expect("parser should succeed on a well-formed view page");
+
+        assert!(
+            result.title.contains("smol") && result.title.contains("Kizumonogatari"),
+            "title should be scraped from the header panel, got {:?}",
+            result.title
+        );
+        assert_eq!(result.seeders, 51);
+        assert_eq!(result.leechers, 0);
+        assert_eq!(result.downloads, 2286);
+        assert_eq!(result.size, "23.8 GiB");
+        assert!(result.size_bytes > 20 * 1024 * 1024 * 1024, "size_bytes should parse to GiB range");
+        assert_eq!(
+            result.info_hash,
+            "0f8ee3286d768fb53ae593f10155a5077e38e893",
+            "info_hash should be extracted from the magnet link"
+        );
+        assert!(
+            result.magnet.starts_with("magnet:?"),
+            "magnet link should be captured, got {:?}",
+            result.magnet
+        );
+        assert_eq!(result.torrent, "https://nyaa.si/download/1713886.torrent");
+        assert_eq!(result.link, "https://nyaa.si/view/1713886");
+        // `detect_batch` fires on the season marker in the title.
+        assert!(result.is_batch, "smol pack titled with Season N should be flagged as batch");
+        assert_eq!(result.resolution, "1080");
+        assert_eq!(result.group, "smol");
+    }
 }

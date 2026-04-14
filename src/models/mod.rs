@@ -546,6 +546,37 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
 
+    // Per-file series routing for multi-series batch releases. A
+    // megapack that covers e.g. JoJo S1-S5 gets one row per sibling
+    // in this table, each carrying the file indices (into the
+    // torrent's canonical file list) that belong to that sibling and
+    // the episode numbers those files represent. The parent series
+    // (the one the user actually searched for) also gets a row here
+    // covering unclaimed files. Legacy single-series grabs that
+    // predate Phase 2 have no row here and are handled by a
+    // fall-through path in post_processing that treats the
+    // grabbed_torrents.series_id as the sole route.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS grabbed_torrent_series (
+            grab_id INTEGER NOT NULL,
+            series_id INTEGER NOT NULL,
+            file_indices TEXT NOT NULL DEFAULT '[]',
+            episode_numbers TEXT NOT NULL DEFAULT '[]',
+            matched_subtitle TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (grab_id, series_id),
+            FOREIGN KEY (grab_id) REFERENCES grabbed_torrents(id) ON DELETE CASCADE,
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_grabbed_torrent_series_series ON grabbed_torrent_series (series_id)")
+        .execute(db)
+        .await?;
+
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.
     sqlx::query("ALTER TABLE series ADD COLUMN tmdb_id INTEGER")

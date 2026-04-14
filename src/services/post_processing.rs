@@ -138,19 +138,39 @@ async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
     }
 }
 
-/// Process a single completed torrent. Returns `true` if at least one file was
-/// imported, `false` if there was nothing to do yet.
-async fn import_torrent(
+/// Per-series derived state used during an import. Built once per target
+/// series_id on demand inside [`import_torrent`] so a multi-series batch
+/// grab doesn't re-fetch the same rows or re-create the same directories
+/// for every file. The single-series case fills exactly one entry; a
+/// Phase 2 auto-expanded batch fills one entry per sibling touched.
+struct SeriesImportCtx {
+    series: series::Series,
+    folder_name: String,
+    series_title: String,
+    season_dir: PathBuf,
+    ep_meta: HashMap<i32, local_metadata::CachedEpisodeMetadata>,
+    /// Cached AniList detail used to enrich episode + series NFOs with
+    /// plot, genres, runtime, etc. `None` when the per-series metadata
+    /// cache is empty — the NFO writers fall back to the minimal
+    /// series-row-only shape.
+    cached_detail: Option<crate::services::anilist::AnimeDetail>,
+    runtime_minutes: Option<i32>,
+}
+
+/// Resolve the [`SeriesImportCtx`] for `series_id`: loads the series
+/// row, materializes its folder name + season directory, and warms up
+/// the episode metadata and AniList detail caches. Split out of
+/// [`import_torrent`] so a multi-series routed batch can reuse the same
+/// context across files without re-running the expensive preamble.
+async fn load_series_import_ctx(
     state: &AppState,
     cfg: &config::Config,
-    grab: &grabbed_torrents::GrabbedTorrent,
-    torrent_hash: &str,
-    torrent_save_path: &str,
-) -> Result<bool, String> {
-    let series = series::get_by_id(&state.db, grab.series_id)
+    series_id: i64,
+) -> Result<SeriesImportCtx, String> {
+    let series = series::get_by_id(&state.db, series_id)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("series {} not found", grab.series_id))?;
+        .ok_or_else(|| format!("series {} not found", series_id))?;
 
     // Auto-generate folder_name from the best title if it was never set.
     let folder_name = if series.folder_name.is_empty() {
@@ -168,25 +188,17 @@ async fn import_torrent(
         series.folder_name.clone()
     };
 
-    let qbit = state
-        .qbit
-        .read()
-        .await
-        .clone()
-        .ok_or("qBittorrent not configured")?;
+    let series_title = nfo::best_title(&series);
+    let season_dir = Path::new(&cfg.media_root)
+        .join(&folder_name)
+        .join(format!("Season {:02}", 1_i32));
 
-    let files = qbit
-        .get_torrent_files(torrent_hash)
-        .await
-        .map_err(|e| format!("get torrent files: {}", e))?;
-
-    let video_files: Vec<_> = files
-        .iter()
-        .filter(|f| f.progress >= 1.0 && is_video_file(&f.name))
-        .collect();
-
-    if video_files.is_empty() {
-        return Ok(false);
+    {
+        let season_dir = season_dir.clone();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&season_dir))
+            .await
+            .map_err(|e| format!("create season dir join: {}", e))?
+            .map_err(|e| format!("create season dir: {}", e))?;
     }
 
     let ep_meta = local_metadata::get_episode_map_for_series(&state.db, series.id)
@@ -204,22 +216,76 @@ async fn import_torrent(
         .map(|c| c.detail);
     let runtime_minutes = cached_detail.as_ref().and_then(|d| d.duration);
 
-    let series_title = nfo::best_title(&series);
-    let season = 1_i32;
+    Ok(SeriesImportCtx {
+        series,
+        folder_name,
+        series_title,
+        season_dir,
+        ep_meta,
+        cached_detail,
+        runtime_minutes,
+    })
+}
 
-    let season_dir = Path::new(&cfg.media_root)
-        .join(&folder_name)
-        .join(format!("Season {:02}", season));
+/// Process a single completed torrent. Returns `true` if at least one file was
+/// imported, `false` if there was nothing to do yet.
+///
+/// Phase 2: if the grab has routing rows in `grabbed_torrent_series`
+/// (written by the auto-expand path when a megapack contained sibling
+/// entries), each file is routed to the sibling's own library folder
+/// instead of the parent's. Grabs without routes fall through to the
+/// legacy single-series behavior where every file targets
+/// `grab.series_id`.
+async fn import_torrent(
+    state: &AppState,
+    cfg: &config::Config,
+    grab: &grabbed_torrents::GrabbedTorrent,
+    torrent_hash: &str,
+    torrent_save_path: &str,
+) -> Result<bool, String> {
+    // Phase 2: look up per-file routing rows written by the auto-expand
+    // path. A non-empty result means this grab was an auto-expanded
+    // batch and each file is tagged with the sibling series_id it
+    // belongs to; an empty result is the legacy path where every file
+    // routes to `grab.series_id` (pre-Phase-2 grabs, or Phase-2 grabs
+    // where sibling detection returned nothing).
+    let routes = grabbed_torrents::get_series_routes(&state.db, grab.id)
+        .await
+        .unwrap_or_default();
 
-    {
-        let season_dir = season_dir.clone();
-        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&season_dir))
-            .await
-            .map_err(|e| format!("create season dir join: {}", e))?
-            .map_err(|e| format!("create season dir: {}", e))?;
+    // file_idx → target series_id, flattened from the routes table.
+    let routes_by_file: HashMap<usize, i64> = routes
+        .iter()
+        .flat_map(|r| r.file_indices.iter().map(move |i| (*i, r.series_id)))
+        .collect();
+
+    let qbit = state
+        .qbit
+        .read()
+        .await
+        .clone()
+        .ok_or("qBittorrent not configured")?;
+
+    let files = qbit
+        .get_torrent_files(torrent_hash)
+        .await
+        .map_err(|e| format!("get torrent files: {}", e))?;
+
+    // Preserve the canonical qBit file index alongside each entry so
+    // completed files can be correlated back to their route row. qBit
+    // returns files in a deterministic order keyed by file index, so
+    // `enumerate()` applied to the untouched `files` vec yields the
+    // same indices that `detect_sibling_entries_in_pack` recorded at
+    // grab time.
+    let video_files: Vec<(usize, &crate::services::qbit::TorrentFile)> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.progress >= 1.0 && is_video_file(&f.name))
+        .collect();
+
+    if video_files.is_empty() {
+        return Ok(false);
     }
-
-    let mut imported_count = 0_usize;
 
     // Determine the source base path. If qbit_download_path is configured, use
     // that instead of qBit's internal save_path — this handles Docker path
@@ -230,7 +296,50 @@ async fn import_torrent(
         torrent_save_path.to_string()
     };
 
-    for file in &video_files {
+    // Lazily-loaded per-series context cache. The single-series case
+    // fills exactly one entry; a multi-series routed batch fills one
+    // entry per sibling touched.
+    let mut series_ctx_cache: HashMap<i64, SeriesImportCtx> = HashMap::new();
+    // Unique series_ids that had at least one file successfully
+    // imported — drives the per-series NFO/poster write after the loop.
+    let mut touched_series: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let mut imported_count = 0_usize;
+
+    for (file_idx, file) in &video_files {
+        // Route this file: prefer the routes table (Phase 2 batch
+        // auto-expansion), fall back to `grab.series_id` for legacy
+        // grabs and for any completed video file whose index wasn't
+        // covered by a route (e.g. extension mismatch between
+        // `auto_search::is_media_filename` and [`is_video_file`]).
+        let target_series_id = routes_by_file
+            .get(file_idx)
+            .copied()
+            .unwrap_or(grab.series_id);
+
+        if !series_ctx_cache.contains_key(&target_series_id) {
+            match load_series_import_ctx(state, cfg, target_series_id).await {
+                Ok(ctx) => {
+                    series_ctx_cache.insert(target_series_id, ctx);
+                }
+                Err(e) => {
+                    logger::error(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!(
+                            "Failed to load series context for id={}",
+                            target_series_id
+                        ),
+                        &e,
+                    )
+                    .await;
+                    continue;
+                }
+            }
+        }
+        let ctx = series_ctx_cache
+            .get(&target_series_id)
+            .expect("ctx just inserted");
+
         let src: PathBuf = Path::new(&source_base).join(&file.name);
 
         let filename_only = Path::new(&file.name)
@@ -238,12 +347,19 @@ async fn import_torrent(
             .and_then(|n| n.to_str())
             .unwrap_or(&file.name);
 
-        // Parse episode number from the filename.
+        // Parse episode number from the filename. The `grab.episode_numbers`
+        // fallback only makes sense for the legacy single-series path —
+        // in a routed batch the routes rows already carry per-sibling
+        // episode numbers and the parent grab's list doesn't apply to
+        // sibling files.
         let ep_num = media::parse_episode_number(&filename_only.to_lowercase())
             .map(|(_, ep)| ep)
             .or_else(|| {
-                // Fall back to the first episode number recorded at grab time.
-                grab.episode_numbers.first().copied()
+                if routes_by_file.is_empty() {
+                    grab.episode_numbers.first().copied()
+                } else {
+                    None
+                }
             });
 
         let Some(ep_num) = ep_num else {
@@ -251,13 +367,14 @@ async fn import_torrent(
                 &state.db,
                 LogCategory::PostProcess,
                 &format!("Could not parse episode number from '{}'", filename_only),
-                &format!("series={}", series.title),
+                &format!("series={}", ctx.series.title),
             )
             .await;
             continue;
         };
 
-        let ep_title = ep_meta
+        let ep_title = ctx
+            .ep_meta
             .get(&ep_num)
             .map(|m| {
                 if !m.title_english.is_empty() {
@@ -270,7 +387,8 @@ async fn import_torrent(
             })
             .unwrap_or_default();
 
-        let aired = ep_meta
+        let aired = ctx
+            .ep_meta
             .get(&ep_num)
             .map(|m| m.aired.clone())
             .unwrap_or_default();
@@ -280,25 +398,26 @@ async fn import_torrent(
             .and_then(|e| e.to_str())
             .unwrap_or("mkv");
 
+        let season = 1_i32;
         let dest_stem = if ep_title.is_empty() {
             format!(
                 "{} - S{:02}E{:02}",
-                sanitize_filename(&series_title),
+                sanitize_filename(&ctx.series_title),
                 season,
                 ep_num
             )
         } else {
             format!(
                 "{} - S{:02}E{:02} - {}",
-                sanitize_filename(&series_title),
+                sanitize_filename(&ctx.series_title),
                 season,
                 ep_num,
                 sanitize_filename(&ep_title)
             )
         };
 
-        let dest_video = season_dir.join(format!("{}.{}", dest_stem, ext));
-        let dest_nfo = season_dir.join(format!("{}.nfo", dest_stem));
+        let dest_video = ctx.season_dir.join(format!("{}.{}", dest_stem, ext));
+        let dest_nfo = ctx.season_dir.join(format!("{}.nfo", dest_stem));
 
         // Check for existing files with the same SxxExx tag (any extension).
         // Matching by episode tag instead of full stem handles cases where the
@@ -310,7 +429,7 @@ async fn import_torrent(
         // hundreds of ms. The filter logic is cheap CPU, so we also move
         // it into the spawned task.
         let existing_for_ep: Vec<PathBuf> = {
-            let season_dir = season_dir.clone();
+            let season_dir = ctx.season_dir.clone();
             let ep_tag = ep_tag.clone();
             tokio::task::spawn_blocking(move || -> Vec<PathBuf> {
                 std::fs::read_dir(&season_dir)
@@ -338,9 +457,16 @@ async fn import_torrent(
             // Check if this is an upgrade replacing a previously imported file.
             // If an older imported grab exists for this episode, this is an
             // upgrade — remove the old file and old torrent, then import the new one.
+            //
+            // Using `target_series_id` (the routed sibling) rather than
+            // `grab.series_id` (the parent) is what makes per-sibling
+            // upgrade detection work: `find_imported_for_episode`
+            // unions across the legacy grabbed_torrents column and the
+            // routes table, so a prior sibling-routed import still
+            // surfaces here.
             let old_grabs = grabbed_torrents::find_imported_for_episode(
                 &state.db,
-                grab.series_id,
+                target_series_id,
                 ep_num,
             )
             .await
@@ -367,14 +493,17 @@ async fn import_torrent(
                 // Remove corresponding NFO (old stem may differ from new dest_stem
                 // if the episode title changed between grabs).
                 if let Some(stem) = old_file.file_stem().and_then(|s| s.to_str()) {
-                    let _ = tokio::fs::remove_file(season_dir.join(format!("{}.nfo", stem))).await;
+                    let _ = tokio::fs::remove_file(ctx.season_dir.join(format!("{}.nfo", stem))).await;
                 }
             }
 
             logger::info(
                 &state.db,
                 LogCategory::PostProcess,
-                &format!("Replacing S{:02}E{:02} of '{}' with upgraded release", season, ep_num, series.title),
+                &format!(
+                    "Replacing S{:02}E{:02} of '{}' with upgraded release",
+                    season, ep_num, ctx.series.title
+                ),
                 &format!("old_grabs={}", old_grabs.len()),
             )
             .await;
@@ -397,19 +526,27 @@ async fn import_torrent(
             Ok(()) => {
                 let _ = nfo::write_episode_nfo(
                     &dest_nfo,
-                    &series_title,
+                    &ctx.series_title,
                     season,
                     ep_num,
                     &ep_title,
                     &aired,
-                    runtime_minutes,
+                    ctx.runtime_minutes,
                 );
                 imported_count += 1;
+                touched_series.insert(target_series_id);
                 logger::info(
                     &state.db,
                     LogCategory::PostProcess,
-                    &format!("Imported S{:02}E{:02} of '{}'", season, ep_num, series.title),
-                    &format!("mode={} dest={}", cfg.post_processing_mode, dest_video.display()),
+                    &format!(
+                        "Imported S{:02}E{:02} of '{}'",
+                        season, ep_num, ctx.series.title
+                    ),
+                    &format!(
+                        "mode={} dest={}",
+                        cfg.post_processing_mode,
+                        dest_video.display()
+                    ),
                 )
                 .await;
 
@@ -418,8 +555,8 @@ async fn import_torrent(
                 // artifacts, then updates episode_quality_tags in place.
                 // Rows with manual_override = 1 are left alone by the DB
                 // helper so user tags stick.
-                let series_root = Path::new(&cfg.media_root).join(&folder_name);
-                let pre_source = episode_tags::get_for_series(&state.db, series.id)
+                let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
+                let pre_source = episode_tags::get_for_series(&state.db, ctx.series.id)
                     .await
                     .ok()
                     .and_then(|m| m.get(&ep_num).map(|t| t.source.clone()))
@@ -430,16 +567,16 @@ async fn import_torrent(
                     Some(&series_root),
                     &grab.torrent_name,
                     Some(SeriesContext {
-                        status: &series.status,
-                        season_year: series.season_year,
-                        end_year: series.end_year,
+                        status: &ctx.series.status,
+                        season_year: ctx.series.season_year,
+                        end_year: ctx.series.end_year,
                     }),
                     grab.is_batch,
                 )
                 .await;
                 if let Err(e) = episode_tags::update_classification(
                     &state.db,
-                    series.id,
+                    ctx.series.id,
                     ep_num,
                     &post,
                 )
@@ -477,7 +614,7 @@ async fn import_torrent(
                             LogCategory::PostProcess,
                             &format!(
                                 "Needs review: {} S{:02}E{:02}",
-                                series.title, season, ep_num
+                                ctx.series.title, season, ep_num
                             ),
                             &format!(
                                 "post-download classification {} flagged for review",
@@ -504,23 +641,55 @@ async fn import_torrent(
         return Ok(false);
     }
 
-    // Always (re)write series-level NFO so Jellyfin picks up refreshed
+    // Series-level artifacts (tvshow.nfo + poster) run once per unique
+    // series actually touched, not once total. A multi-series routed
+    // batch now maintains the correct per-sibling artifacts instead of
+    // dumping everything into the parent's folder.
+    //
+    // Always (re)write tvshow.nfo so Jellyfin picks up refreshed
     // metadata (status flips from RELEASING to FINISHED, plot updates,
-    // newly indexed genres). The previous "write once if missing" behavior
-    // meant any NFO written before metadata enrichment shipped never got
-    // upgraded. The file is small and the write is local; rewriting on
-    // every import run is cheap.
-    let series_nfo = Path::new(&cfg.media_root)
-        .join(&folder_name)
-        .join("tvshow.nfo");
-    let _ = nfo::write_series_nfo(&series_nfo, &series, cached_detail.as_ref());
+    // newly indexed genres). The previous "write once if missing"
+    // behavior meant any NFO written before metadata enrichment shipped
+    // never got upgraded. The file is small and the write is local;
+    // rewriting on every import run is cheap.
+    for series_id in &touched_series {
+        let Some(ctx) = series_ctx_cache.get(series_id) else {
+            continue;
+        };
+        let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
+        let series_nfo = series_root.join("tvshow.nfo");
+        let _ = nfo::write_series_nfo(&series_nfo, &ctx.series, ctx.cached_detail.as_ref());
 
-    // Copy poster once.
-    let poster_dest = Path::new(&cfg.media_root)
-        .join(&folder_name)
-        .join("poster.jpg");
-    if !poster_dest.exists() {
-        copy_poster(&state.db, series.id, &poster_dest).await;
+        let poster_dest = series_root.join("poster.jpg");
+        if !poster_dest.exists() {
+            copy_poster(&state.db, ctx.series.id, &poster_dest).await;
+        }
+    }
+
+    // Flip episode tag rows from "grabbed" to "completed" per target
+    // series. For a routed batch each sibling route gets its own
+    // `mark_completed` call with the per-sibling episode numbers the
+    // auto-expand path wrote into the routes table; the legacy path
+    // falls through to the grab's parent series and episode list.
+    if routes.is_empty() {
+        let _ = episode_tags::mark_completed(
+            &state.db,
+            grab.series_id,
+            &grab.episode_numbers,
+        )
+        .await;
+    } else {
+        for route in &routes {
+            if route.episode_numbers.is_empty() {
+                continue;
+            }
+            let _ = episode_tags::mark_completed(
+                &state.db,
+                route.series_id,
+                &route.episode_numbers,
+            )
+            .await;
+        }
     }
 
     Ok(true)
@@ -643,13 +812,12 @@ pub async fn run_once(state: &AppState) {
             Ok(true) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
-                // Update episode quality tags from "grabbed" to "completed" so the UI
-                // shows the quality label instead of a stale progress bar on revisit.
-                let _ = episode_tags::mark_completed(
-                    &state.db,
-                    grab.series_id,
-                    &grab.episode_numbers,
-                ).await;
+                // Episode tag "grabbed → completed" flips happen inside
+                // `import_torrent` itself so a Phase 2 routed batch can
+                // mark each sibling's tags under the sibling's own
+                // series_id + per-route episode numbers. Legacy grabs
+                // still get the same flip as before via the
+                // `routes.is_empty()` fallback there.
             }
             Ok(false) => {
                 // Torrent complete but no video files yet — leave as pending.

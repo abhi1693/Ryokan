@@ -11,7 +11,7 @@ use crate::services::custom_formats::{
 };
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
 use crate::services::{
-    anilist::AnimeDetail, logger, media, nyaa::{self, SearchOptions, SearchResult}, quality, seadex,
+    anilist::{AnimeDetail, RelatedEntry}, logger, media, nyaa::{self, SearchOptions, SearchResult}, quality, seadex,
 };
 
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
@@ -145,11 +145,36 @@ pub async fn find_all_for_target(
     // it's suppressed automatically when the user has a
     // `SeaDexBestSpecification` CF to avoid double counting.
     let (seadex_needs_lookup, seadex_boost_enabled) = seadex_gates(config, cfs);
-    let seadex_hashes = fetch_seadex_hashes(seadex_needs_lookup, detail.id).await;
+    let seadex_payload = fetch_seadex_payload(
+        db,
+        seadex_needs_lookup,
+        detail.id,
+        display_title(detail),
+        &preferred_groups,
+        &preferred_res,
+        true,
+    )
+    .await;
+    let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
+
+    // Seed the candidate pool with SeaDex-curated releases so they're
+    // guaranteed to show up in the interactive search UI even when
+    // Nyaa's text search would miss them entirely (smol-style
+    // megapacks titled by season rather than entry).
+    for result in seadex_payload.candidates {
+        let dedupe_key = if !result.info_hash.is_empty() {
+            result.info_hash.clone()
+        } else {
+            result.title.to_lowercase()
+        };
+        if seen.insert(dedupe_key) {
+            candidates.push(result);
+        }
+    }
 
     let ctx = InteractiveQueryCtx {
         aliases: &aliases,
@@ -157,6 +182,7 @@ pub async fn find_all_for_target(
         preferred_resolution: &preferred_res,
         target,
         expected_season,
+        seadex_hashes: &seadex_hashes,
     };
 
     // Interactive search: allow batch results so user can see & pick them,
@@ -307,11 +333,36 @@ pub async fn collect_scored_batches_for_target(
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
     let (seadex_needs_lookup, seadex_boost_enabled) = seadex_gates(config, cfs);
-    let seadex_hashes = fetch_seadex_hashes(seadex_needs_lookup, detail.id).await;
+    let seadex_payload = fetch_seadex_payload(
+        db,
+        seadex_needs_lookup,
+        detail.id,
+        display_title(detail),
+        &preferred_groups,
+        &preferred_res,
+        true,
+    )
+    .await;
+    let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
+
+    // Seed with SeaDex-curated candidates fetched directly from their
+    // view URLs. See `find_all_for_target` for the rationale — the
+    // text-query sweep can't find batches whose titles don't carry
+    // the target's alias tokens.
+    for result in seadex_payload.candidates {
+        let dedupe_key = if !result.info_hash.is_empty() {
+            result.info_hash.clone()
+        } else {
+            result.title.to_lowercase()
+        };
+        if seen.insert(dedupe_key) {
+            candidates.push(result);
+        }
+    }
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
 
@@ -324,6 +375,7 @@ pub async fn collect_scored_batches_for_target(
         expected_season,
         categories: &categories,
         batch_episode_match: false,
+        seadex_hashes: &seadex_hashes,
     };
 
     // Standard query sweep — picks up any batches that happen to surface
@@ -446,11 +498,39 @@ async fn collect_scored_for_target(
     let cutoff_resolution_enum = Resolution::from_str(&config.cutoff_resolution);
 
     let (seadex_needs_lookup, seadex_boost_enabled) = seadex_gates(config, cfs);
-    let seadex_hashes = fetch_seadex_hashes(seadex_needs_lookup, detail.id).await;
+    let seadex_payload = fetch_seadex_payload(
+        db,
+        seadex_needs_lookup,
+        detail.id,
+        display_title(detail),
+        &preferred_groups,
+        &preferred_res,
+        true,
+    )
+    .await;
+    let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
+
+    // Seed with SeaDex-curated candidates fetched directly from their
+    // view URLs — this is how the smol Kizumonogatari pack (titled
+    // `[smol] Monogatari (Season 9) ...`) gets into the pool for a
+    // Kizumonogatari Part 2 target whose text queries would never
+    // match the smol filename. The batch filter at `run_queries`
+    // already has a SeaDex-match bypass so `allow_batch=false` targets
+    // still see SeaDex-curated megapacks.
+    for result in seadex_payload.candidates {
+        let dedupe_key = if !result.info_hash.is_empty() {
+            result.info_hash.clone()
+        } else {
+            result.title.to_lowercase()
+        };
+        if seen.insert(dedupe_key) {
+            candidates.push(result);
+        }
+    }
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
 
@@ -463,6 +543,7 @@ async fn collect_scored_for_target(
         expected_season,
         categories: &categories,
         batch_episode_match,
+        seadex_hashes: &seadex_hashes,
     };
 
     // Phase 1: standard queries (primary aliases + episode variants).
@@ -589,6 +670,16 @@ struct AutoQueryCtx<'a> {
     expected_season: i32,
     categories: &'a [String],
     batch_episode_match: bool,
+    /// Lowercase info hashes SeaDex has flagged as "best" for this
+    /// target's AniList ID. A candidate whose hash is in this set
+    /// bypasses the title/season/episode heuristic filters — SeaDex
+    /// has already confirmed the release by AniList ID, so any
+    /// title-based check is strictly inferior. Without this bypass,
+    /// a smol/neoDESU-style release titled `Monogatari (Season 9)`
+    /// would be rejected for a Kizumonogatari Part 2 target because
+    /// `parse_release_season` would see "Season 9" and disagree
+    /// with the Part-2 expected season.
+    seadex_hashes: &'a HashSet<String>,
 }
 
 /// Same idea, but for the interactive-search helper which has a
@@ -600,6 +691,15 @@ struct InteractiveQueryCtx<'a> {
     preferred_resolution: &'a str,
     target: &'a SearchTarget,
     expected_season: i32,
+    /// See the note on `AutoQueryCtx::seadex_hashes`. The interactive
+    /// path's consequences for failing the bypass are more severe
+    /// than the auto path: `run_queries_interactive` applies
+    /// `season_mismatch` *unconditionally*, including for Single
+    /// (movie) targets, where the auto path's `matches_target`
+    /// skips it. That's why the smol Kizumonogatari II release
+    /// vanished from interactive search even though auto search
+    /// surfaced it.
+    seadex_hashes: &'a HashSet<String>,
 }
 
 /// Run a set of queries against Nyaa page 1, collecting valid candidates.
@@ -635,11 +735,27 @@ async fn run_queries(
                 if !seen.insert(dedupe_key) {
                     continue;
                 }
-                if !ctx.allow_batch && result.is_batch {
-                    continue;
-                }
-                if !matches_target(&result.title, ctx.aliases, ctx.target, ctx.expected_season, ctx.batch_episode_match && result.is_batch) {
-                    continue;
+                // SeaDex trusts its AniList-ID-based curation over any
+                // title heuristic. A hash match here means the release
+                // is the community-curated best for this series, even
+                // if its Nyaa title carries a season marker that would
+                // otherwise fail `matches_target` (e.g. smol's
+                // `Monogatari (Season 9)` release for a Kizumonogatari
+                // Part 2 target).
+                let is_seadex_best = is_seadex_match(&result.info_hash, ctx.seadex_hashes);
+                if !is_seadex_best {
+                    if !ctx.allow_batch && result.is_batch {
+                        continue;
+                    }
+                    if !matches_target(&result.title, ctx.aliases, ctx.target, ctx.expected_season, ctx.batch_episode_match && result.is_batch) {
+                        continue;
+                    }
+                } else {
+                    tracing::debug!(
+                        "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
+                        result.title,
+                        result.info_hash
+                    );
                 }
                 candidates.push(result);
             }
@@ -680,6 +796,22 @@ async fn run_queries_interactive(
                 result.title.to_lowercase()
             };
             if !seen.insert(dedupe_key) {
+                continue;
+            }
+            // SeaDex trusts its AniList-ID-based curation over any
+            // title heuristic. If this hash is in the set, skip all
+            // alias / season / episode checks below — the unconditional
+            // `season_mismatch` in particular drops releases like
+            // smol's `Monogatari (Season 9)` for a Kizumonogatari Part
+            // 2 target, even though SeaDex has already confirmed the
+            // AniList ID match.
+            if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
+                tracing::debug!(
+                    "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
+                    result.title,
+                    result.info_hash
+                );
+                candidates.push(result);
                 continue;
             }
             // Relaxed alias matching: lower threshold than auto search
@@ -1039,13 +1171,158 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, ex
 /// usable "best" info hashes. Disabled (or lookup-failed) returns an
 /// empty set, which causes the scoring-time SeaDex bonus and any
 /// `SeaDexBest` Custom Format spec to harmlessly contribute zero.
-async fn fetch_seadex_hashes(seadex_enabled: bool, anilist_id: i64) -> HashSet<String> {
-    if !seadex_enabled || anilist_id <= 0 {
-        return HashSet::new();
+///
+/// Emits both `tracing::debug!` lines (for `RUST_LOG=ryokan=debug`
+/// console readers) and `LogCategory::AutoSearch` rows (for the
+/// in-app Log Viewer) for every call — skip, hit, miss, and error.
+/// The previous version silently swallowed errors into
+/// `HashSet::new()`, which made a dead releases.moe indistinguishable
+/// from "SeaDex not configured" or "this title isn't on SeaDex."
+/// Everything the auto-search pipeline needs from one SeaDex lookup:
+/// the set of "best" info hashes (for the filter bypass and score
+/// overlay) and fully-populated `SearchResult` candidates built
+/// directly from each curated torrent's Nyaa view page.
+///
+/// The pre-fetched candidates are the key to surfacing SeaDex releases
+/// whose Nyaa titles don't overlap with the target's AniList aliases
+/// (smol's `Monogatari (Season 9)` megapack for Kizumonogatari Part 2
+/// is the canonical example). The text-query sweep can't find them;
+/// we go direct to `/view/<id>` and inject the result ourselves.
+#[derive(Default)]
+struct SeaDexPayload {
+    hashes: HashSet<String>,
+    /// Synthetic candidates fetched directly from each SeaDex-curated
+    /// torrent's Nyaa view URL. Empty when the lookup is skipped or
+    /// fails, or when every fetch fails. Merged into the candidate
+    /// pool by the caller before the text-query sweep runs.
+    candidates: Vec<SearchResult>,
+}
+
+async fn fetch_seadex_payload(
+    db: &SqlitePool,
+    seadex_enabled: bool,
+    anilist_id: i64,
+    series_title: &str,
+    preferred_groups: &[String],
+    preferred_resolution: &str,
+    prefer_subs: bool,
+) -> SeaDexPayload {
+    if !seadex_enabled {
+        tracing::debug!(
+            "seadex: skipping lookup — gate off (seadex_enabled=false and no SeaDex CF installed)"
+        );
+        // Intentionally no DB log row for the "gate off" path — this
+        // would spam the Log Viewer with one line per search for every
+        // user who hasn't turned SeaDex on.
+        return SeaDexPayload::default();
     }
+    if anilist_id <= 0 {
+        tracing::debug!(
+            "seadex: skipping lookup — no AniList ID on target (anilist_id={anilist_id})"
+        );
+        logger::debug(
+            db,
+            LogCategory::AutoSearch,
+            &format!("SeaDex lookup skipped for {series_title}"),
+            &format!("no AniList ID (anilist_id={anilist_id})"),
+        )
+        .await;
+        return SeaDexPayload::default();
+    }
+    tracing::debug!("seadex: fetching releases.moe entry for anilist_id={anilist_id}");
     match seadex::lookup(anilist_id).await {
-        Ok(Some(entry)) => seadex::best_hashes(&entry),
-        _ => HashSet::new(),
+        Ok(Some(entry)) => {
+            let hashes = seadex::best_hashes(&entry);
+            tracing::debug!(
+                "seadex: releases.moe returned {} usable hash(es) for anilist_id={}",
+                hashes.len(),
+                anilist_id
+            );
+            logger::debug(
+                db,
+                LogCategory::AutoSearch,
+                &format!(
+                    "SeaDex lookup: {} usable hash(es) for {series_title}",
+                    hashes.len()
+                ),
+                &format!("anilist_id={anilist_id}"),
+            )
+            .await;
+
+            // Fetch each usable torrent's view page so we have a real
+            // SearchResult to inject into the candidate list. This is
+            // what keeps SeaDex-curated releases discoverable even when
+            // the text-query sweep can't find them by title. Failures
+            // are non-fatal: we log and move on to the next torrent.
+            let opts_for_score = nyaa::SearchOptions {
+                query: series_title.to_string(),
+                category: "1_0".to_string(),
+                filter: "0".to_string(),
+                user: String::new(),
+                preferred_groups: preferred_groups.to_vec(),
+                preferred_resolution: preferred_resolution.to_string(),
+                prefer_subs,
+            };
+            let mut candidates = Vec::new();
+            for torrent in entry.torrents.iter() {
+                if !seadex::is_usable(torrent, &entry.notes) {
+                    continue;
+                }
+                let view_url = seadex::to_nyaa_view_url(torrent);
+                match nyaa::fetch_view_result(view_url, &opts_for_score).await {
+                    Ok(result) => {
+                        tracing::debug!(
+                            "seadex: injected curated candidate from view url={} title={:?} hash={}",
+                            view_url,
+                            result.title,
+                            result.info_hash
+                        );
+                        candidates.push(result);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "seadex: failed to fetch view page for {}: {}",
+                            view_url,
+                            e
+                        );
+                        logger::warn(
+                            db,
+                            LogCategory::AutoSearch,
+                            &format!("SeaDex view-page fetch failed for {series_title}"),
+                            &format!("url={view_url}, error={e}"),
+                        )
+                        .await;
+                    }
+                }
+            }
+            SeaDexPayload { hashes, candidates }
+        }
+        Ok(None) => {
+            tracing::debug!(
+                "seadex: releases.moe has no entry for anilist_id={anilist_id}"
+            );
+            logger::debug(
+                db,
+                LogCategory::AutoSearch,
+                &format!("SeaDex has no entry for {series_title}"),
+                &format!("anilist_id={anilist_id}"),
+            )
+            .await;
+            SeaDexPayload::default()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "seadex: releases.moe lookup failed for anilist_id={anilist_id}: {e}"
+            );
+            logger::warn(
+                db,
+                LogCategory::AutoSearch,
+                &format!("SeaDex lookup failed for {series_title}"),
+                &format!("anilist_id={anilist_id}, error={e}"),
+            )
+            .await;
+            SeaDexPayload::default()
+        }
     }
 }
 
@@ -1064,6 +1341,31 @@ fn seadex_gates(
     let needs_lookup = config.seadex_enabled || has_cf;
     let boost_enabled = config.seadex_enabled && !has_cf;
     (needs_lookup, boost_enabled)
+}
+
+/// True if `info_hash` (non-empty) is in the SeaDex best-hashes set.
+/// Comparison is case-insensitive via lowercase normalization — the
+/// hash set is populated with lowercase hashes by `seadex::best_hashes`,
+/// and Nyaa-scraped hashes come through `extract_hash` already
+/// lowercased, but the explicit `to_ascii_lowercase` here keeps the
+/// contract obvious at the call sites.
+fn is_seadex_match(info_hash: &str, seadex_hashes: &HashSet<String>) -> bool {
+    if info_hash.is_empty() || seadex_hashes.is_empty() {
+        return false;
+    }
+    seadex_hashes.contains(&info_hash.to_ascii_lowercase())
+}
+
+/// Human-readable short label for a series, used in SeaDex lookup log
+/// rows. Prefers the English title and falls back to romaji so users
+/// browsing the Log Viewer see the same title the Auto Search banner
+/// uses.
+fn display_title(detail: &AnimeDetail) -> &str {
+    if !detail.title_english.is_empty() {
+        &detail.title_english
+    } else {
+        &detail.title_romaji
+    }
 }
 
 /// Apply the Custom Format + SeaDex overlay to a base score.
@@ -1418,6 +1720,550 @@ pub fn parse_release_season(title: &str) -> i32 {
     0
 }
 
+// ── Pre-compiled regexes for extract_part_number ───────────────────────────
+//
+// `extract_part_number` recovers the "which entry in a multi-part release"
+// number from an AniList title so the selective-download path can match
+// it against per-file episode numbers inside a megapack. This is distinct
+// from `infer_season_from_detail`, which is about season/cour indexing
+// for the *query* sweep. A movie trilogy like Kizumonogatari I/II/III
+// has no season at all, just parts.
+static RE_PART_N: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"(?i)\b(?:part|chapter|movie|film)\s*(\d{1,2})\b").unwrap()
+);
+
+/// Bare Roman numeral at a word boundary. Covers the I–X range, which
+/// spans every multi-part anime film series we care about. Matches at
+/// end of string or before common separators (`:` for subtitle, space,
+/// `-`) so titles like "Kizumonogatari II: Nekketsu-hen" and
+/// "Rebuild of Evangelion III" both resolve cleanly.
+static RE_ROMAN_PART: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"(?i)\b(i{1,3}|iv|v|vi{1,3}|ix|x)\b(?:\s*[:\-]|$|\s)").unwrap()
+);
+
+/// Extract the "part number" from an AniList detail's titles. Returns
+/// `None` when the title carries no such marker — the common case for
+/// single-film works and standalone TV seasons.
+///
+/// This is used by the selective-file download path: when the user
+/// grabs a megapack (e.g. the smol Monogatari pack containing Kizumo
+/// I, II, III as separate files), we need to know "the target is part
+/// 2" so `pick_wanted_file_indices` can match it against the E02 file.
+///
+/// Matching order (first hit wins):
+///   1. Explicit `Part N` / `Chapter N` / `Movie N` / `Film N`
+///   2. Roman numeral I–X at a word boundary
+///
+/// We check all three alias titles (romaji, english, native). Native
+/// is unlikely to fire the English regexes but it's cheap to include.
+pub fn extract_part_number(detail: &AnimeDetail) -> Option<i32> {
+    let titles = [
+        detail.title_english.as_str(),
+        detail.title_romaji.as_str(),
+        detail.title_native.as_str(),
+    ];
+    for title in titles.iter().filter(|t| !t.is_empty()) {
+        if let Some(caps) = RE_PART_N.captures(title) {
+            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+                if (1..=20).contains(&n) {
+                    return Some(n);
+                }
+            }
+        }
+        if let Some(caps) = RE_ROMAN_PART.captures(title) {
+            if let Some(m) = caps.get(1) {
+                let n = roman_to_int(m.as_str());
+                if (1..=10).contains(&n) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Convert a Roman numeral in the I–X range to its integer value.
+/// Returns 0 on anything outside that range so the caller's bounds
+/// check can cleanly reject it.
+fn roman_to_int(s: &str) -> i32 {
+    match s.to_ascii_uppercase().as_str() {
+        "I" => 1,
+        "II" => 2,
+        "III" => 3,
+        "IV" => 4,
+        "V" => 5,
+        "VI" => 6,
+        "VII" => 7,
+        "VIII" => 8,
+        "IX" => 9,
+        "X" => 10,
+        _ => 0,
+    }
+}
+
+/// Given the file list of a multi-entry pack torrent and the AniList
+/// detail of the user's target, return the indices of the files that
+/// correspond to the target. Returns `None` when we can't narrow the
+/// selection — the safe default is "keep everything" rather than
+/// guessing wrong and skipping the one file the user wanted.
+///
+/// Two narrowing strategies are tried in order:
+///
+/// 1. **Part number** via [`extract_part_number`]. Handles trilogies
+///    and multi-part OVAs where AniList titles end in "II", "III",
+///    "Part 2", etc. File selection is done by parsing episode-like
+///    numbers from each filename (via [`parse_release_numbers`]) and
+///    keeping files whose numbers contain the target part.
+///
+/// 2. **Positive subtitle match** via [`extract_season_subtitle`].
+///    Handles franchise megapacks where the target itself carries a
+///    distinguishing suffix after `:` or ` - ` — e.g. "JoJo's Bizarre
+///    Adventure: Stardust Crusaders" inside a JoJo S1–S5 pack. The
+///    filename must contain the normalized subtitle.
+///
+/// Non-media files (NFO, TXT, subtitles) are ignored so they don't
+/// dilute the selection. In both strategies, the result must fall
+/// within the target's expected episode count (×1.5 + 2 for slack)
+/// or we return `None` — guards against positive matches that
+/// accidentally sweep in bonus features or siblings that share a
+/// subtitle substring.
+///
+/// Note: **franchise roots without their own subtitle** (e.g. JoJo S1
+/// = "JoJo's Bizarre Adventure") are intentionally NOT narrowed here.
+/// They're handled by the higher-level multi-series pack detection
+/// path which downloads the full pack and auto-adds detected sibling
+/// entries to the library instead — a cleaner answer than
+/// filename-based negative matching, which is prone to partial
+/// coverage when AniList relations don't include every sibling.
+pub fn pick_wanted_file_indices(
+    filenames: &[String],
+    detail: &AnimeDetail,
+) -> Option<Vec<usize>> {
+    if let Some(part) = extract_part_number(detail) {
+        if let Some(ids) = pick_by_part_number(filenames, part, detail) {
+            return Some(ids);
+        }
+    }
+    if let Some(subtitle) = extract_season_subtitle(detail) {
+        if let Some(ids) = pick_by_subtitle_include(filenames, &subtitle, detail) {
+            return Some(ids);
+        }
+    }
+    None
+}
+
+fn pick_by_part_number(
+    filenames: &[String],
+    part: i32,
+    detail: &AnimeDetail,
+) -> Option<Vec<usize>> {
+    let mut matches: Vec<usize> = Vec::new();
+    let mut media_count = 0usize;
+    for (idx, name) in filenames.iter().enumerate() {
+        if !is_media_filename(name) {
+            continue;
+        }
+        media_count += 1;
+        if parse_release_numbers(name).contains(&part) {
+            matches.push(idx);
+        }
+    }
+    if matches.is_empty() || matches.len() >= media_count {
+        return None;
+    }
+    if !within_expected_episode_count(matches.len(), detail) {
+        return None;
+    }
+    Some(matches)
+}
+
+fn pick_by_subtitle_include(
+    filenames: &[String],
+    subtitle: &str,
+    detail: &AnimeDetail,
+) -> Option<Vec<usize>> {
+    let needle = normalize_subtitle(subtitle);
+    if needle.is_empty() {
+        return None;
+    }
+    let mut matches: Vec<usize> = Vec::new();
+    let mut media_count = 0usize;
+    for (idx, name) in filenames.iter().enumerate() {
+        if !is_media_filename(name) {
+            continue;
+        }
+        media_count += 1;
+        if normalize_subtitle(name).contains(&needle) {
+            matches.push(idx);
+        }
+    }
+    if matches.is_empty() || matches.len() >= media_count {
+        return None;
+    }
+    if !within_expected_episode_count(matches.len(), detail) {
+        return None;
+    }
+    Some(matches)
+}
+
+/// Sanity-cap the narrowed selection against the target's expected
+/// episode count. Rejects selections that are implausibly larger than
+/// the target's own season (×1.5 slack plus 2 for rounding / bonus
+/// features / BD extras). Without this guard, a positive subtitle
+/// match could accidentally sweep in files for a longer sibling that
+/// shares a subtitle substring, and the selective log line would
+/// mask the overshoot as a successful narrowing.
+///
+/// Shows that are still airing report `episodes: None` from AniList;
+/// in that case `effective_episode_count()` falls back to
+/// `nextAiringEpisode - 1`, which is 0 during the week-0 pre-airing
+/// window. Returning `true` unconditionally for 0-count targets keeps
+/// the cap disabled for airing shows and lets the strategy's own
+/// `matches.len() < media_count` guard carry the safety load.
+fn within_expected_episode_count(matches_len: usize, detail: &AnimeDetail) -> bool {
+    within_episode_slack(matches_len, detail.effective_episode_count())
+}
+
+/// Raw-count version of [`within_expected_episode_count`]. Shared with
+/// [`detect_sibling_entries_in_pack`], where the "expected" value comes
+/// from a `RelatedEntry` card that doesn't carry `next_airing_episode`
+/// and therefore can't use `effective_episode_count`.
+fn within_episode_slack(matches_len: usize, expected: i32) -> bool {
+    if expected <= 0 {
+        return true;
+    }
+    let slack = (expected as f32 * 1.5).ceil() as usize + 2;
+    matches_len <= slack
+}
+
+/// Extract a season "subtitle" — the trailing portion of the target's
+/// title after a delimiter like `: ` or ` - `. For example:
+/// * "JoJo no Kimyou na Bouken: Stardust Crusaders" → `Some("Stardust Crusaders")`
+/// * "Fate/stay night: Unlimited Blade Works" → `Some("Unlimited Blade Works")`
+/// * "Fullmetal Alchemist: Brotherhood" → `None` (single-token subtitle)
+/// * "JoJo's Bizarre Adventure" → `None` (no delimiter)
+/// * "Monogatari Series: Second Season" → `None` (generic ordinal)
+///
+/// Prefers the English title, falls back to romaji. Rejects single-token
+/// subtitles because they substring-match too aggressively, and rejects
+/// pure ordinal "Nth Season" phrasings because release filenames almost
+/// always carry "S02" / "2nd" rather than the English rendering, so
+/// matching on them yields zero hits and forces the full-pack fallback
+/// anyway.
+pub fn extract_season_subtitle(detail: &AnimeDetail) -> Option<String> {
+    let titles = [
+        detail.title_english.as_str(),
+        detail.title_romaji.as_str(),
+    ];
+    for title in titles.iter().filter(|t| !t.is_empty()) {
+        if let Some(sub) = trailing_subtitle_of(title) {
+            return Some(sub);
+        }
+    }
+    None
+}
+
+fn trailing_subtitle_of(title: &str) -> Option<String> {
+    // Normalize CJK/en/em dashes and colon-space to a common delimiter.
+    // Preserving "Re:" / "Fate/" (no space after) means "Re:Zero kara..."
+    // and "Fate/stay night" stay intact and only the trailing "`: Sub`"
+    // portion gets split off.
+    let normalized = title
+        .replace(['–', '—'], "|")
+        .replace(": ", "|")
+        .replace('：', "|")
+        .replace(" - ", "|");
+    // Take the LAST segment so "A: B: C" resolves to the innermost "C".
+    let last = normalized.rsplit('|').next()?.trim();
+    if last.is_empty() || last.eq_ignore_ascii_case(title.trim()) {
+        return None;
+    }
+    // Require ≥ 2 whitespace tokens. Single-word subtitles like
+    // "Brotherhood" are too generic to reliably narrow a filename list
+    // without false positives on unrelated entries in the same pack.
+    if last.split_whitespace().count() < 2 {
+        return None;
+    }
+    let lower = last.to_ascii_lowercase();
+    if is_generic_season_subtitle(&lower) {
+        return None;
+    }
+    Some(last.to_string())
+}
+
+/// Returns true for subtitle phrases that are pure ordinal/numeric
+/// season markers (e.g. "Second Season", "2nd Season", "Part 3"). These
+/// are rejected by [`extract_season_subtitle`] because release filenames
+/// overwhelmingly carry "S02" / "2nd" rather than the English rendering,
+/// so substring-matching them produces zero hits and falls back to a
+/// full-pack download anyway. Better to skip the selective path.
+fn is_generic_season_subtitle(lower: &str) -> bool {
+    matches!(
+        lower,
+        "first season"
+            | "second season"
+            | "third season"
+            | "fourth season"
+            | "fifth season"
+            | "sixth season"
+            | "seventh season"
+            | "eighth season"
+            | "ninth season"
+            | "tenth season"
+            | "1st season"
+            | "2nd season"
+            | "3rd season"
+            | "4th season"
+            | "5th season"
+            | "6th season"
+            | "7th season"
+            | "8th season"
+            | "9th season"
+            | "10th season"
+    ) || lower.starts_with("part ")
+        || lower.starts_with("chapter ")
+}
+
+/// True when the target has a discriminator that [`pick_wanted_file_indices`]
+/// can use to narrow a megapack — part number or own subtitle. Gate at
+/// the call sites so the expensive metadata-wait path is only entered
+/// when it has a chance of actually narrowing the file list.
+///
+/// Franchise roots without their own subtitle (JoJo S1 = "JoJo's
+/// Bizarre Adventure") deliberately return `false` here — they're
+/// handled by the higher-level multi-series pack auto-expansion path,
+/// not by filename-based negative matching, which produces silent
+/// wrong-selections when AniList relations only list direct siblings.
+pub fn has_selective_discriminator(detail: &AnimeDetail) -> bool {
+    extract_part_number(detail).is_some() || extract_season_subtitle(detail).is_some()
+}
+
+/// A sibling anime entry detected in the filename list of a megapack
+/// torrent — i.e. a related series (sequel, prequel, side story, …)
+/// of the parent target whose own files are also present in the pack.
+///
+/// Produced by [`detect_sibling_entries_in_pack`] and consumed by the
+/// library auto-expand path in `handlers::library`, which upserts each
+/// sibling into the tracked series table and records per-file routing
+/// so post-processing can move each file into the correct media
+/// folder.
+///
+/// All title / cover / format fields come straight from the parent
+/// detail's `relations` card so `series::upsert` has enough to
+/// populate a complete row without a second metadata fetch.
+#[derive(Debug, Clone)]
+pub struct SiblingMatch {
+    pub anilist_id: i64,
+    pub mal_id: Option<i64>,
+    pub title_romaji: String,
+    pub title_english: String,
+    pub title_native: String,
+    pub cover_url: String,
+    pub format: String,
+    pub status: String,
+    pub episodes: Option<i32>,
+    pub season_year: Option<i32>,
+    /// The subtitle that produced the match (e.g. "Stardust
+    /// Crusaders"). Logged at grab time so the operator can see *why*
+    /// a sibling was picked up.
+    pub matched_subtitle: String,
+    /// Indices into the torrent's file list of files that belong to
+    /// this sibling. Each file index is unique across the full return
+    /// value — [`detect_sibling_entries_in_pack`] resolves overlaps by
+    /// longest-subtitle-wins.
+    pub file_indices: Vec<usize>,
+}
+
+/// Relation types we'll consider in-pack candidates when scanning an
+/// AniList relation graph for siblings. Excludes source material
+/// (`ADAPTATION`, `SOURCE`, `COMPILATION`, `CONTAINS`) because those
+/// point at manga / LN / book entries that will never appear in an
+/// anime torrent. Everything else — `SEQUEL`, `PREQUEL`, `SIDE_STORY`,
+/// `PARENT`, `ALTERNATIVE`, `SPIN_OFF`, `CHARACTER`, `SUMMARY`,
+/// `OTHER` — passes through because the downstream subtitle-match +
+/// episode-count cap are already doing the real false-positive
+/// filtering. This gate is just a performance filter that avoids
+/// normalizing obvious non-anime titles against every filename.
+fn is_pack_candidate_relation(relation_type: &str) -> bool {
+    !matches!(
+        relation_type,
+        "ADAPTATION" | "SOURCE" | "COMPILATION" | "CONTAINS"
+    )
+}
+
+/// Detect sibling anime entries (sequel / prequel / side story /
+/// etc. of the parent) whose own episodes are present in a megapack
+/// release's file list.
+///
+/// **Provenance gate:** returns an empty `Vec` when
+/// `parent_detail.id <= 0`. Negative IDs are the Jikan fallback
+/// sentinel (`-mal_id`) and non-positive IDs are not AniList entries.
+/// Jikan's relations scrape reflects MAL's graph, and MAL splits
+/// sagas that AniList merges (Stone Ocean is 3 MAL entries vs 1 AL
+/// entry), so auto-adding MAL siblings against an AL-sourced parent
+/// would duplicate library rows. When AL is down, the grab still
+/// proceeds — it just skips sibling expansion — and the background
+/// 12h metadata refresh will retroactively run detection the next
+/// time AL returns the relation list.
+///
+/// **Overlap resolution:** when a filename matches more than one
+/// sibling subtitle (e.g. "Stardust" ⊂ "Stardust Crusaders", or a
+/// freak collision between two unrelated sibling titles), the longer
+/// normalized subtitle wins. Each file index appears in exactly one
+/// `SiblingMatch::file_indices` across the return value.
+///
+/// **Episode-count cap:** each sibling's match set is rejected if it
+/// overshoots the sibling's own AniList `episodes` count by ×1.5 + 2.
+/// Matches with `episodes: None` bypass the cap (airing series, which
+/// the downstream grab path handles anyway).
+///
+/// Callers get a best-effort list — siblings whose title has no
+/// trailing subtitle (e.g. a franchise root like "Naruto Shippuden")
+/// are silently skipped, matching the conservative behavior of
+/// `pick_wanted_file_indices`.
+pub fn detect_sibling_entries_in_pack(
+    filenames: &[String],
+    parent_detail: &AnimeDetail,
+) -> Vec<SiblingMatch> {
+    if parent_detail.id <= 0 {
+        return Vec::new();
+    }
+
+    // Candidates: one entry per relation that produced a usable
+    // subtitle. Stored by index into `parent_detail.relations` to
+    // avoid borrowing complications during the materialize pass.
+    let mut candidates: Vec<(usize, String, String)> = Vec::new(); // (rel_idx, raw subtitle, normalized needle)
+    for (rel_idx, rel) in parent_detail.relations.iter().enumerate() {
+        if !rel.media_type.eq_ignore_ascii_case("ANIME") {
+            continue;
+        }
+        if !is_pack_candidate_relation(&rel.relation_type) {
+            continue;
+        }
+        let sibling_title = if !rel.title_english.is_empty() {
+            rel.title_english.as_str()
+        } else if !rel.title_romaji.is_empty() {
+            rel.title_romaji.as_str()
+        } else {
+            continue;
+        };
+        let Some(subtitle) = trailing_subtitle_of(sibling_title) else {
+            continue;
+        };
+        let needle = normalize_subtitle(&subtitle);
+        if needle.is_empty() {
+            continue;
+        }
+        candidates.push((rel_idx, subtitle, needle));
+    }
+
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // First pass: for each media file, pick the candidate with the
+    // LONGEST normalized needle that substring-matches the filename.
+    // Longest-wins handles the Stardust ⊂ Stardust Crusaders case
+    // without ever double-counting a file.
+    let mut winner_by_file: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::new(); // file_idx → (candidate_idx, needle_len)
+    for (file_idx, name) in filenames.iter().enumerate() {
+        if !is_media_filename(name) {
+            continue;
+        }
+        let normalized = normalize_subtitle(name);
+        let mut best: Option<(usize, usize)> = None; // (candidate_idx, needle_len)
+        for (cand_idx, (_, _, needle)) in candidates.iter().enumerate() {
+            if !normalized.contains(needle) {
+                continue;
+            }
+            match best {
+                Some((_, cur_len)) if cur_len >= needle.len() => {}
+                _ => best = Some((cand_idx, needle.len())),
+            }
+        }
+        if let Some(pick) = best {
+            winner_by_file.insert(file_idx, pick);
+        }
+    }
+
+    // Bucket files by winning candidate.
+    let mut per_candidate: Vec<Vec<usize>> = vec![Vec::new(); candidates.len()];
+    for (file_idx, (cand_idx, _)) in winner_by_file {
+        per_candidate[cand_idx].push(file_idx);
+    }
+    for list in per_candidate.iter_mut() {
+        list.sort_unstable();
+    }
+
+    // Materialize results. Drop candidates with no files and enforce
+    // the per-sibling episode-count sanity cap.
+    let mut out: Vec<SiblingMatch> = Vec::new();
+    for (cand_idx, (rel_idx, subtitle, _)) in candidates.into_iter().enumerate() {
+        let file_indices = std::mem::take(&mut per_candidate[cand_idx]);
+        if file_indices.is_empty() {
+            continue;
+        }
+        let rel: &RelatedEntry = &parent_detail.relations[rel_idx];
+        if !within_episode_slack(file_indices.len(), rel.episodes.unwrap_or(0)) {
+            continue;
+        }
+        out.push(SiblingMatch {
+            anilist_id: rel.id,
+            mal_id: rel.id_mal,
+            title_romaji: rel.title_romaji.clone(),
+            title_english: rel.title_english.clone(),
+            title_native: rel.title_native.clone(),
+            cover_url: rel.cover_url.clone(),
+            format: rel.format.clone(),
+            status: rel.status.clone(),
+            episodes: rel.episodes,
+            season_year: rel.season_year,
+            matched_subtitle: subtitle,
+            file_indices,
+        });
+    }
+
+    out
+}
+
+/// Lowercase ASCII-alphanumeric chars and collapse non-alphanumeric
+/// runs to single spaces. Used to make subtitle-vs-filename comparisons
+/// robust to punctuation differences like "JoJo's" vs "JoJos",
+/// "Stardust-Crusaders" vs "Stardust Crusaders", or brackets.
+fn normalize_subtitle(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = true;
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_space = false;
+        } else if !prev_space {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Is this filename likely a media file that `parse_release_numbers`
+/// should even be run against? Used by [`pick_wanted_file_indices`] to
+/// stop non-media files (NFOs, subtitles, samples) from inflating the
+/// media count or being accidentally kept/skipped.
+pub(crate) fn is_media_filename(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.rsplit('.').next(),
+        Some("mkv")
+            | Some("mp4")
+            | Some("avi")
+            | Some("m2ts")
+            | Some("ts")
+            | Some("mov")
+            | Some("wmv")
+    )
+}
+
 /// Check if a release's season conflicts with the expected season.
 /// Returns true if there is a definite mismatch.
 fn season_mismatch(release_title: &str, expected_season: i32) -> bool {
@@ -1719,6 +2565,145 @@ mod tests {
         );
     }
 
+    // ── extract_part_number / pick_wanted_file_indices ────────────────────
+    //
+    // These cover the selective-file download path that lets Ryokan grab
+    // just one entry out of a multi-part megapack (Kizumonogatari I/II/III
+    // in a single smol release, Rebuild of Evangelion 1.0/2.0/3.0, etc.).
+
+    fn detail_with_titles(english: &str, romaji: &str) -> AnimeDetail {
+        AnimeDetail {
+            id: 1,
+            id_mal: None,
+            title_romaji: romaji.to_string(),
+            title_english: english.to_string(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            banner_url: String::new(),
+            format: "MOVIE".to_string(),
+            status: String::new(),
+            status_display: String::new(),
+            episodes: Some(1),
+            duration: None,
+            season: String::new(),
+            season_year: None,
+            end_year: None,
+            description: String::new(),
+            genres: Vec::new(),
+            average_score: None,
+            average_score_display: None,
+            score_is_ten_point: false,
+            score_class: String::new(),
+            next_airing_episode: None,
+            next_airing_at: None,
+            synonyms: Vec::new(),
+            streaming_episodes: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_part_number_parses_roman_ii() {
+        let d = detail_with_titles("Kizumonogatari II: Nekketsu-hen", "Kizumonogatari II: Nekketsu-hen");
+        assert_eq!(extract_part_number(&d), Some(2));
+    }
+
+    #[test]
+    fn extract_part_number_parses_roman_iii() {
+        let d = detail_with_titles("Kizumonogatari III: Reiketsu-hen", "Kizumonogatari III: Reiketsu-hen");
+        assert_eq!(extract_part_number(&d), Some(3));
+    }
+
+    #[test]
+    fn extract_part_number_parses_explicit_part_n() {
+        let d = detail_with_titles("Some Show Part 2", "Some Show Part 2");
+        assert_eq!(extract_part_number(&d), Some(2));
+    }
+
+    #[test]
+    fn extract_part_number_returns_none_for_single_entry() {
+        // A standalone film with no part marker at all.
+        let d = detail_with_titles("A Silent Voice", "Koe no Katachi");
+        assert_eq!(extract_part_number(&d), None);
+    }
+
+    #[test]
+    fn extract_part_number_ignores_roman_i_alone() {
+        // "Part I" is a part marker, but ambiguous bare Roman numeral
+        // "I" at the end of a title still resolves to 1 — the Roman
+        // regex accepts it. That's intentional: a trilogy's first
+        // entry is titled "Kizumonogatari I: Tekketsu-hen", and the
+        // user may want to grab that part specifically.
+        let d = detail_with_titles("Kizumonogatari I: Tekketsu-hen", "Kizumonogatari I: Tekketsu-hen");
+        assert_eq!(extract_part_number(&d), Some(1));
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_narrows_smol_monogatari_pack() {
+        // Simulates the smol Monogatari megapack. The filenames carry
+        // standard S09EXX numbering that `parse_release_numbers` picks
+        // up, and the target's part number (from the AniList title's
+        // Roman numeral) selects the right file.
+        let files = vec![
+            "[smol] Monogatari - S09E01 - Kizumonogatari Tekketsu-hen.mkv".to_string(),
+            "[smol] Monogatari - S09E02 - Kizumonogatari Nekketsu-hen.mkv".to_string(),
+            "[smol] Monogatari - S09E03 - Kizumonogatari Reiketsu-hen.mkv".to_string(),
+        ];
+        let d = detail_with_titles("Kizumonogatari II: Nekketsu-hen", "Kizumonogatari II");
+        let picked = pick_wanted_file_indices(&files, &d).expect("should narrow");
+        assert_eq!(picked, vec![1]);
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_returns_none_when_target_has_no_part() {
+        // Standalone single-file release — nothing to narrow against.
+        let files = vec!["[Group] Some Film (BD 1080p).mkv".to_string()];
+        let d = detail_with_titles("A Silent Voice", "Koe no Katachi");
+        assert_eq!(pick_wanted_file_indices(&files, &d), None);
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_returns_none_when_no_match() {
+        // Target is part 2 but the pack doesn't contain an E02 file.
+        // Safer to keep everything than to skip every file.
+        let files = vec![
+            "[Group] Show - 01.mkv".to_string(),
+            "[Group] Show - 03.mkv".to_string(),
+        ];
+        let d = detail_with_titles("Show II", "Show II");
+        assert_eq!(pick_wanted_file_indices(&files, &d), None);
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_ignores_non_media_files() {
+        let files = vec![
+            "[Group] Pack - 01.mkv".to_string(),
+            "[Group] Pack - 02.mkv".to_string(),
+            "[Group] Pack - 02.nfo".to_string(),
+            "[Group] Pack - 02.txt".to_string(),
+        ];
+        let d = detail_with_titles("Show II", "Show II");
+        let picked = pick_wanted_file_indices(&files, &d).expect("should narrow");
+        // Only the E02 .mkv survives — the .nfo and .txt with "02"
+        // in their names are discarded before matching.
+        assert_eq!(picked, vec![1]);
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_returns_none_when_every_media_file_matches() {
+        // Not actually a megapack — every media file carries the target
+        // number (e.g. a single-movie torrent with sample + main file).
+        // Don't mess with priorities.
+        let files = vec![
+            "[Group] Show II (BD 1080p).mkv".to_string(),
+            "[Group] Show II (BD 1080p) - sample.mkv".to_string(),
+        ];
+        let d = detail_with_titles("Show II", "Show II");
+        // Neither file carries an episode number, so parse_release_numbers
+        // returns an empty set — no matches, None returned.
+        assert_eq!(pick_wanted_file_indices(&files, &d), None);
+    }
+
     #[test]
     fn format_scoring_detail_surfaces_seadex_bonus() {
         // SeaDex bonus is the only non-CF overlay; make sure it shows
@@ -1730,5 +2715,395 @@ mod tests {
             s,
             "base=60, cf=+300 [x265 +300], seadex=10000, final=10360"
         );
+    }
+
+    // ── extract_season_subtitle / positive subtitle match ────────────────
+    //
+    // Covers the second narrowing strategy in `pick_wanted_file_indices` —
+    // positive subtitle match for titles with a distinguishing suffix.
+    // Franchise roots without their own subtitle (JoJo S1) are NOT
+    // narrowed here; they flow through to the multi-series pack
+    // auto-expansion path instead.
+
+    #[test]
+    fn extract_season_subtitle_pulls_named_season() {
+        // Positive case: the English title ends in `: Stardust Crusaders`,
+        // which is a distinctive multi-token phrase.
+        let d = detail_with_titles(
+            "JoJo's Bizarre Adventure: Stardust Crusaders",
+            "JoJo no Kimyou na Bouken: Stardust Crusaders",
+        );
+        assert_eq!(extract_season_subtitle(&d).as_deref(), Some("Stardust Crusaders"));
+    }
+
+    #[test]
+    fn extract_season_subtitle_pulls_from_dash_delimited_title() {
+        // En-dash / hyphen-space delimiter also produces a subtitle.
+        let d = detail_with_titles("Fate/stay night - Unlimited Blade Works", "");
+        assert_eq!(extract_season_subtitle(&d).as_deref(), Some("Unlimited Blade Works"));
+    }
+
+    #[test]
+    fn extract_season_subtitle_rejects_single_token_suffix() {
+        // "Brotherhood" alone is too generic — it could substring-match
+        // an unrelated filename fragment. The 2-token minimum blocks it.
+        let d = detail_with_titles("Fullmetal Alchemist: Brotherhood", "");
+        assert_eq!(extract_season_subtitle(&d), None);
+    }
+
+    #[test]
+    fn extract_season_subtitle_rejects_generic_ordinal_season() {
+        // "Second Season" is a pure ordinal marker — release filenames
+        // carry "S02" / "2nd" rather than the English spelling, so
+        // matching on this would yield zero hits and fall back to the
+        // full pack anyway. Skip it upfront.
+        let d = detail_with_titles("Monogatari Series: Second Season", "");
+        assert_eq!(extract_season_subtitle(&d), None);
+    }
+
+    #[test]
+    fn extract_season_subtitle_returns_none_without_delimiter() {
+        // Franchise root with no subtitle — handled by the
+        // multi-series pack auto-expansion path, not here.
+        let d = detail_with_titles("JoJo's Bizarre Adventure", "JoJo no Kimyou na Bouken");
+        assert_eq!(extract_season_subtitle(&d), None);
+    }
+
+    #[test]
+    fn extract_season_subtitle_preserves_re_zero_style_colon() {
+        // "Re:Zero kara Hajimeru Isekai Seikatsu" — the `:` has no
+        // following space, so it should NOT be split. The trailing
+        // segment rule returns the whole title, which equals the
+        // original → None.
+        let d = detail_with_titles("Re:Zero kara Hajimeru Isekai Seikatsu", "");
+        assert_eq!(extract_season_subtitle(&d), None);
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_narrows_by_subtitle_positive_match() {
+        // Simulates a JoJo franchise megapack. The target carries its
+        // own distinguishing subtitle ("Stardust Crusaders") that
+        // appears in the S2 filenames but not in the S1 / S3 / S4 ones.
+        let files = vec![
+            "[Group] JoJo's Bizarre Adventure - 01.mkv".to_string(),
+            "[Group] JoJo's Bizarre Adventure - 26.mkv".to_string(),
+            "[Group] JoJo's Bizarre Adventure - Stardust Crusaders - 01.mkv".to_string(),
+            "[Group] JoJo's Bizarre Adventure - Stardust Crusaders - 48.mkv".to_string(),
+            "[Group] JoJo's Bizarre Adventure - Diamond is Unbreakable - 01.mkv".to_string(),
+            "[Group] JoJo's Bizarre Adventure - Golden Wind - 01.mkv".to_string(),
+        ];
+        let mut d = detail_with_titles(
+            "JoJo's Bizarre Adventure: Stardust Crusaders",
+            "JoJo no Kimyou na Bouken: Stardust Crusaders",
+        );
+        // JoJo S2 is 48 episodes — sanity cap (×1.5 + 2 = 74) passes.
+        d.episodes = Some(48);
+        let picked = pick_wanted_file_indices(&files, &d).expect("should narrow");
+        assert_eq!(picked, vec![2, 3]);
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_returns_none_for_subtitleless_franchise_root() {
+        // JoJo S1 — no subtitle, no part number. The selective path is
+        // intentionally not used here. The grab handler's multi-series
+        // auto-expansion (Phase 2) is what handles this case.
+        let files = vec![
+            "[Group] JoJo's Bizarre Adventure - 01.mkv".to_string(),
+            "[Group] JoJo's Bizarre Adventure - Stardust Crusaders - 01.mkv".to_string(),
+        ];
+        let d = detail_with_titles("JoJo's Bizarre Adventure", "JoJo no Kimyou na Bouken");
+        assert_eq!(pick_wanted_file_indices(&files, &d), None);
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_rejects_overshoot_via_episode_cap() {
+        // Contrived pathological case: the target's subtitle is a
+        // prefix of every file in a much larger pack. Episode count
+        // says 12 but the match set is 50 — the cap fires and we
+        // return None rather than producing a wildly-wrong narrowing.
+        let files: Vec<String> = (1..=50)
+            .map(|i| format!("[Group] Show - Alpha Beta Ep{:02}.mkv", i))
+            .collect();
+        let mut d = detail_with_titles("Show: Alpha Beta", "");
+        d.episodes = Some(12);
+        assert_eq!(pick_wanted_file_indices(&files, &d), None);
+    }
+
+    #[test]
+    fn has_selective_discriminator_true_for_part_number_title() {
+        let d = detail_with_titles("Kizumonogatari II: Nekketsu-hen", "");
+        assert!(has_selective_discriminator(&d));
+    }
+
+    #[test]
+    fn has_selective_discriminator_true_for_subtitle_title() {
+        let d = detail_with_titles("JoJo's Bizarre Adventure: Stardust Crusaders", "");
+        assert!(has_selective_discriminator(&d));
+    }
+
+    #[test]
+    fn has_selective_discriminator_false_for_standalone_single() {
+        // No part number, no subtitle — selective path skipped.
+        let d = detail_with_titles("A Silent Voice", "Koe no Katachi");
+        assert!(!has_selective_discriminator(&d));
+    }
+
+    #[test]
+    fn has_selective_discriminator_false_for_franchise_root() {
+        // Franchise root without its own subtitle — selective path
+        // skipped on purpose. Multi-series auto-expansion handles it.
+        let d = detail_with_titles("JoJo's Bizarre Adventure", "JoJo no Kimyou na Bouken");
+        assert!(!has_selective_discriminator(&d));
+    }
+
+    // ── detect_sibling_entries_in_pack ──────────────────────────────
+
+    fn related(
+        id: i64,
+        english: &str,
+        romaji: &str,
+        relation_type: &str,
+        episodes: Option<i32>,
+    ) -> RelatedEntry {
+        RelatedEntry {
+            id,
+            id_mal: None,
+            title_romaji: romaji.to_string(),
+            title_english: english.to_string(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            format: "TV".to_string(),
+            status: "FINISHED".to_string(),
+            status_display: "Finished".to_string(),
+            episodes,
+            relation_type: relation_type.to_string(),
+            season_year: None,
+            media_type: "ANIME".to_string(),
+        }
+    }
+
+    #[test]
+    fn detect_siblings_finds_named_seasons_in_jojo_pack() {
+        // Parent: JoJo S1 (franchise root, no subtitle of its own).
+        // Pack contains files for S1 (no subtitle), S3 Stardust
+        // Crusaders, and S4 Diamond is Unbreakable. Detection should
+        // return two sibling matches (Stardust + Diamond) with only
+        // their own files; S1 files stay unclaimed.
+        let mut parent = detail_with_titles("JoJo's Bizarre Adventure", "JoJo no Kimyou na Bouken");
+        parent.id = 14719; // AL id
+        parent.episodes = Some(26);
+        parent.relations = vec![
+            related(
+                20800,
+                "JoJo's Bizarre Adventure: Stardust Crusaders",
+                "JoJo no Kimyou na Bouken: Stardust Crusaders",
+                "SEQUEL",
+                Some(24),
+            ),
+            related(
+                31292,
+                "JoJo's Bizarre Adventure: Diamond is Unbreakable",
+                "JoJo no Kimyou na Bouken: Diamond wa Kudakenai",
+                "SEQUEL",
+                Some(39),
+            ),
+        ];
+
+        let files: Vec<String> = vec![
+            // S1 files (unclaimed)
+            "[Group] JoJo no Kimyou na Bouken - 01.mkv".to_string(),
+            "[Group] JoJo no Kimyou na Bouken - 02.mkv".to_string(),
+            // Stardust Crusaders (24 eps, we include just 3 for brevity)
+            "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 01.mkv".to_string(),
+            "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 02.mkv".to_string(),
+            "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 03.mkv".to_string(),
+            // Diamond is Unbreakable
+            "[Group] JoJo no Kimyou na Bouken - Diamond is Unbreakable - 01.mkv".to_string(),
+            "[Group] JoJo no Kimyou na Bouken - Diamond is Unbreakable - 02.mkv".to_string(),
+        ];
+
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 2, "expected Stardust + Diamond matches");
+
+        let stardust = siblings
+            .iter()
+            .find(|s| s.anilist_id == 20800)
+            .expect("stardust sibling present");
+        assert_eq!(stardust.file_indices, vec![2, 3, 4]);
+        assert!(
+            stardust.matched_subtitle.to_lowercase().contains("stardust"),
+            "matched_subtitle should reference Stardust, got {:?}",
+            stardust.matched_subtitle
+        );
+
+        let diamond = siblings
+            .iter()
+            .find(|s| s.anilist_id == 31292)
+            .expect("diamond sibling present");
+        assert_eq!(diamond.file_indices, vec![5, 6]);
+    }
+
+    #[test]
+    fn detect_siblings_returns_empty_for_jikan_sourced_detail() {
+        // Provenance gate: Jikan-sourced details have id < 0. Even
+        // if relations look plausible, we must not run sibling
+        // detection against them — MAL splits sagas AL merges, which
+        // would duplicate library rows.
+        let mut parent = detail_with_titles("JoJo's Bizarre Adventure", "JoJo no Kimyou na Bouken");
+        parent.id = -1; // Jikan sentinel
+        parent.relations = vec![related(
+            -20800,
+            "JoJo's Bizarre Adventure: Stardust Crusaders",
+            "",
+            "SEQUEL",
+            Some(24),
+        )];
+        let files: Vec<String> = vec![
+            "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 01.mkv".to_string(),
+        ];
+        assert!(detect_sibling_entries_in_pack(&files, &parent).is_empty());
+    }
+
+    #[test]
+    fn detect_siblings_resolves_overlap_by_longest_subtitle() {
+        // Two siblings whose subtitles form a prefix relationship. A
+        // filename containing the longer subtitle matches both
+        // normalized needles, but the longer one must win — otherwise
+        // we'd double-count the file.
+        let mut parent = detail_with_titles("Franchise", "Franchise");
+        parent.id = 100;
+        parent.relations = vec![
+            related(201, "Franchise: Alpha", "", "SEQUEL", Some(12)),
+            related(202, "Franchise: Alpha Prime", "", "SEQUEL", Some(12)),
+        ];
+        let files: Vec<String> = vec![
+            "[Group] Franchise - Alpha Prime - 01.mkv".to_string(),
+            "[Group] Franchise - Alpha Prime - 02.mkv".to_string(),
+        ];
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 1);
+        assert_eq!(siblings[0].anilist_id, 202);
+        assert_eq!(siblings[0].file_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn detect_siblings_skips_relations_without_own_subtitle() {
+        // "Naruto Shippuden" has no trailing delimiter so
+        // trailing_subtitle_of returns None and the sibling gets
+        // silently dropped. This is intentional — without a
+        // subtitle we can't safely narrow a filename list, so
+        // conservative over-skipping is the right call.
+        let mut parent = detail_with_titles("Naruto", "Naruto");
+        parent.id = 20;
+        parent.relations = vec![related(1735, "Naruto Shippuden", "", "SEQUEL", Some(500))];
+        let files: Vec<String> = vec!["[Group] Naruto Shippuden - 01.mkv".to_string()];
+        assert!(detect_sibling_entries_in_pack(&files, &parent).is_empty());
+    }
+
+    #[test]
+    fn detect_siblings_rejects_episode_count_overshoot() {
+        // A sibling with episodes=12 whose subtitle accidentally
+        // matches 50 files in the pack. The episode-count cap
+        // (×1.5 + 2 = 20) fires and drops the sibling entirely
+        // rather than emitting a wildly-wrong routing.
+        let mut parent = detail_with_titles("Franchise", "Franchise");
+        parent.id = 100;
+        parent.relations = vec![related(201, "Franchise: Alpha Beta", "", "SEQUEL", Some(12))];
+        let files: Vec<String> = (1..=50)
+            .map(|i| format!("[Group] Franchise - Alpha Beta - {:02}.mkv", i))
+            .collect();
+        assert!(detect_sibling_entries_in_pack(&files, &parent).is_empty());
+    }
+
+    #[test]
+    fn detect_siblings_filters_out_source_material_relations() {
+        // ADAPTATION / SOURCE / COMPILATION / CONTAINS relations
+        // point at manga / LN / book entries that will never appear
+        // in an anime torrent. Even if one happened to share a
+        // substring with a filename, the relation-type gate must
+        // drop it before we waste cycles on string matching.
+        let mut parent = detail_with_titles("JoJo's Bizarre Adventure", "");
+        parent.id = 14719;
+        parent.relations = vec![related(
+            2,
+            "JoJo's Bizarre Adventure: Stardust Crusaders",
+            "",
+            "SOURCE",
+            Some(1),
+        )];
+        let files: Vec<String> = vec![
+            "[Group] JoJo - Stardust Crusaders - 01.mkv".to_string(),
+        ];
+        assert!(detect_sibling_entries_in_pack(&files, &parent).is_empty());
+    }
+
+    #[test]
+    fn detect_siblings_ignores_non_anime_media_types() {
+        // AL returns the parent manga via a relation edge with
+        // media_type="MANGA". Never an anime torrent candidate.
+        let mut parent = detail_with_titles("Show", "");
+        parent.id = 10;
+        let mut manga_rel = related(
+            5,
+            "Show: Spinoff Arc",
+            "",
+            "SIDE_STORY",
+            Some(10),
+        );
+        manga_rel.media_type = "MANGA".to_string();
+        parent.relations = vec![manga_rel];
+        let files: Vec<String> = vec!["[Group] Show - Spinoff Arc - 01.mkv".to_string()];
+        assert!(detect_sibling_entries_in_pack(&files, &parent).is_empty());
+    }
+
+    #[test]
+    fn detect_siblings_passes_through_spin_off_and_summary_relations() {
+        // Niche relation types (SPIN_OFF, SUMMARY, CHARACTER,
+        // ALTERNATIVE) are included in the filter — the subtitle
+        // match and episode-count cap do the downstream filtering.
+        let mut parent = detail_with_titles("Show", "");
+        parent.id = 10;
+        parent.relations = vec![
+            related(11, "Show: Recap Arc", "", "SUMMARY", Some(4)),
+            related(12, "Show: Extra Chapter", "", "SPIN_OFF", Some(6)),
+        ];
+        let files: Vec<String> = vec![
+            "[Group] Show - Recap Arc - 01.mkv".to_string(),
+            "[Group] Show - Recap Arc - 02.mkv".to_string(),
+            "[Group] Show - Extra Chapter - 01.mkv".to_string(),
+        ];
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 2);
+        let recap = siblings
+            .iter()
+            .find(|s| s.anilist_id == 11)
+            .expect("recap sibling present");
+        assert_eq!(recap.file_indices, vec![0, 1]);
+        let extra = siblings
+            .iter()
+            .find(|s| s.anilist_id == 12)
+            .expect("extra sibling present");
+        assert_eq!(extra.file_indices, vec![2]);
+    }
+
+    #[test]
+    fn detect_siblings_ignores_non_media_files_in_match_set() {
+        // Subtitles, NFOs, samples etc. must not count toward the
+        // episode cap or get routed. Only .mkv/.mp4/... files pass
+        // through is_media_filename.
+        let mut parent = detail_with_titles("Show", "");
+        parent.id = 10;
+        parent.relations = vec![related(11, "Show: Alpha Beta", "", "SEQUEL", Some(12))];
+        let files: Vec<String> = vec![
+            "[Group] Show - Alpha Beta - 01.mkv".to_string(),
+            "[Group] Show - Alpha Beta - 01.srt".to_string(),
+            "[Group] Show - Alpha Beta - readme.nfo".to_string(),
+        ];
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 1);
+        // Only the .mkv file routes — the .srt and .nfo are filtered
+        // out by is_media_filename before they can inflate the match
+        // set.
+        assert_eq!(siblings[0].file_indices, vec![0]);
     }
 }

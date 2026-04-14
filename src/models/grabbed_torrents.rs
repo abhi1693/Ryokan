@@ -18,12 +18,17 @@ pub struct GrabbedTorrent {
     pub is_batch: bool,
 }
 
-/// Record a torrent grab for post-processing. Skips silently if we already
-/// have a pending or imported record with the same (non-empty) hash.
+/// Record a torrent grab for post-processing. Skips silently if we
+/// already have a pending or imported record with the same (non-empty)
+/// hash, in which case `Ok(None)` is returned. On a fresh insert,
+/// returns `Ok(Some(id))` so the Phase 2 multi-series routing path can
+/// attach `grabbed_torrent_series` rows via
+/// [`record_grab_series_routes`] without re-querying.
 ///
-/// `is_batch` is the caller's view (from the Nyaa listing or search hit)
-/// of whether the release is a batch/season pack. Persisted so the
-/// post-download classifier can feed the same flag back into Layer 4.
+/// `is_batch` is the caller's view (from the Nyaa listing or search
+/// hit) of whether the release is a batch/season pack. Persisted so
+/// the post-download classifier can feed the same flag back into
+/// Layer 4.
 pub async fn record_grab(
     db: &SqlitePool,
     hash: &str,
@@ -31,7 +36,7 @@ pub async fn record_grab(
     series_id: i64,
     episode_numbers: &[i32],
     is_batch: bool,
-) -> Result<(), sqlx::Error> {
+) -> Result<Option<i64>, sqlx::Error> {
     let eps_json = serde_json::to_string(episode_numbers).unwrap_or_else(|_| "[]".to_string());
 
     if !hash.is_empty() {
@@ -42,12 +47,12 @@ pub async fn record_grab(
         .fetch_optional(db)
         .await?;
         if existing.is_some() {
-            return Ok(());
+            return Ok(None);
         }
     }
 
     let is_batch_i = if is_batch { 1_i64 } else { 0_i64 };
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO grabbed_torrents (hash, torrent_name, series_id, episode_numbers, state, is_batch) VALUES (?, ?, ?, ?, 'pending', ?)",
     )
     .bind(hash)
@@ -58,7 +63,100 @@ pub async fn record_grab(
     .execute(db)
     .await?;
 
+    Ok(Some(result.last_insert_rowid()))
+}
+
+/// Per-file routing row for a grabbed torrent. Used to drive
+/// post-processing for multi-series batch releases: when a Phase 2
+/// grab detects sibling series in a megapack, one of these gets
+/// written per sibling (plus one for the parent, covering unclaimed
+/// files). Post-processing iterates the torrent's video files and
+/// consults the routes to decide which series' media folder each file
+/// belongs to.
+///
+/// `file_indices` are zero-based indices into the torrent's canonical
+/// file list as returned by qBit's `torrents/files` endpoint — the
+/// same ordering the detection function saw at grab time.
+///
+/// `episode_numbers` is pre-parsed at grab time so post-processing
+/// doesn't have to re-derive episode numbers from filenames (and so
+/// we can record them on the parent `grabbed_torrents` row for the
+/// existing `find_imported_for_episode` lookup to keep working).
+#[derive(Debug, Clone)]
+pub struct GrabSeriesRoute {
+    pub grab_id: i64,
+    pub series_id: i64,
+    pub file_indices: Vec<usize>,
+    pub episode_numbers: Vec<i32>,
+    pub matched_subtitle: String,
+}
+
+/// Write one or more `grabbed_torrent_series` rows for a freshly
+/// recorded grab. Used by the Phase 2 auto-expand path in
+/// `handlers::library` to persist per-sibling file routing. Single-
+/// series grabs don't need to call this — post-processing falls
+/// through to `grab.series_id` when no route rows exist.
+pub async fn record_grab_series_routes(
+    db: &SqlitePool,
+    routes: &[GrabSeriesRoute],
+) -> Result<(), sqlx::Error> {
+    for route in routes {
+        let file_idx_i64: Vec<i64> = route.file_indices.iter().map(|i| *i as i64).collect();
+        let file_indices_json =
+            serde_json::to_string(&file_idx_i64).unwrap_or_else(|_| "[]".to_string());
+        let eps_json = serde_json::to_string(&route.episode_numbers)
+            .unwrap_or_else(|_| "[]".to_string());
+        sqlx::query(
+            r#"INSERT OR REPLACE INTO grabbed_torrent_series
+               (grab_id, series_id, file_indices, episode_numbers, matched_subtitle)
+               VALUES (?, ?, ?, ?, ?)"#,
+        )
+        .bind(route.grab_id)
+        .bind(route.series_id)
+        .bind(&file_indices_json)
+        .bind(&eps_json)
+        .bind(&route.matched_subtitle)
+        .execute(db)
+        .await?;
+    }
     Ok(())
+}
+
+/// Fetch every route row for a grab. Returns an empty vec for legacy
+/// single-series grabs that predate Phase 2 — post-processing treats
+/// an empty result as "route all files to grab.series_id" in that
+/// case.
+pub async fn get_series_routes(
+    db: &SqlitePool,
+    grab_id: i64,
+) -> Result<Vec<GrabSeriesRoute>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT grab_id, series_id, file_indices, episode_numbers, matched_subtitle
+           FROM grabbed_torrent_series
+           WHERE grab_id = ?"#,
+    )
+    .bind(grab_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let file_idx_json: String = row.get("file_indices");
+            let file_idx: Vec<i64> =
+                serde_json::from_str(&file_idx_json).unwrap_or_default();
+            let eps_json: String = row.get("episode_numbers");
+            let episode_numbers: Vec<i32> =
+                serde_json::from_str(&eps_json).unwrap_or_default();
+            GrabSeriesRoute {
+                grab_id: row.get("grab_id"),
+                series_id: row.get("series_id"),
+                file_indices: file_idx.into_iter().map(|i| i as usize).collect(),
+                episode_numbers,
+                matched_subtitle: row.get("matched_subtitle"),
+            }
+        })
+        .collect())
 }
 
 /// Look up the stored `is_batch` flag for a grab by its torrent name.
@@ -226,18 +324,44 @@ pub async fn mark_failed_by_name(db: &SqlitePool, series_id: i64, torrent_name: 
 
 /// Find previously imported grabs for a series that cover a given episode.
 /// Used by post-processing to identify old torrents to clean up during upgrades.
+///
+/// Unions two paths so Phase 2 sibling-routed imports get found
+/// correctly: (1) legacy path — grab rows where `series_id` is the
+/// primary and the episode appears in `grabbed_torrents.episode_numbers`;
+/// (2) routes path — grab rows where the series appears in
+/// `grabbed_torrent_series` (as a sibling of a batch torrent) and the
+/// episode appears in the route row's `episode_numbers`. Without the
+/// second path, upgrades for a sibling series would never find the
+/// batch import to clean up.
 pub async fn find_imported_for_episode(
     db: &SqlitePool,
     series_id: i64,
     episode_number: i32,
 ) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
-    // episode_numbers is stored as a JSON array, so we search with json_each.
+    // episode_numbers is stored as a JSON array, so we search with
+    // json_each on both the legacy column and the routes column.
+    // UNION dedups grabs where the same series matches through both
+    // paths (parent of a single-series grab).
     let rows = sqlx::query(
-        r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.grabbed_at
-           FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
-           WHERE g.series_id = ? AND je.value = ? AND g.state = 'imported'
-           ORDER BY g.grabbed_at DESC"#,
+        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at FROM (
+             SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
+                    g.series_id AS series_id, g.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at
+             FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
+             WHERE g.series_id = ? AND je.value = ? AND g.state = 'imported'
+             UNION
+             SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
+                    g.series_id AS series_id, g.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at
+             FROM grabbed_torrents g
+             JOIN grabbed_torrent_series r ON r.grab_id = g.id
+             , json_each(r.episode_numbers) AS je
+             WHERE r.series_id = ? AND je.value = ? AND g.state = 'imported'
+           )
+           ORDER BY grabbed_at DESC"#,
     )
+    .bind(series_id)
+    .bind(episode_number)
     .bind(series_id)
     .bind(episode_number)
     .fetch_all(db)

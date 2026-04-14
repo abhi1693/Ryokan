@@ -34,6 +34,31 @@ pub struct TorrentFile {
     pub name: String,
     pub size: i64,
     pub progress: f64,
+    /// qBit file priority: 0 = skip, 1 = normal, 6 = high, 7 = max.
+    /// Defaulted to `1` (normal) on the off chance qBit omits the
+    /// field — safer than defaulting to 0 "skip", which our
+    /// additive-merge logic interprets as "this torrent has been
+    /// narrowed before".
+    #[serde(default = "default_file_priority")]
+    pub priority: i32,
+}
+
+fn default_file_priority() -> i32 {
+    1
+}
+
+/// Outcome of an `add_torrent_with_file_filter` call.
+#[derive(Debug)]
+pub enum SelectiveOutcome {
+    /// Filter narrowed the torrent to specific files. Contains the
+    /// kept file indices (always a strict subset of the file list).
+    Filtered(Vec<usize>),
+    /// No filter applied — the torrent is downloading all files.
+    /// Used when the caller's `pick` returned `None`, when the pick
+    /// matched every file (not a megapack after all), or when qBit
+    /// metadata fetch timed out and we resumed the already-added
+    /// torrent unchanged instead of leaving it stuck paused.
+    FullDownload,
 }
 
 impl QbitClient {
@@ -146,6 +171,182 @@ impl QbitClient {
         Ok(())
     }
 
+    /// Set the download priority for a list of file indices inside a
+    /// single torrent. `priority` meanings:
+    ///   0 = do not download (skip)
+    ///   1 = normal
+    ///   6 = high
+    ///   7 = maximum
+    ///
+    /// qBit expects the file ids joined with `|`.
+    pub async fn set_file_priority(
+        &self,
+        hash: &str,
+        file_ids: &[usize],
+        priority: i32,
+    ) -> Result<(), String> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        let id_str = file_ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("|");
+        let prio_str = priority.to_string();
+        let form = [
+            ("hash", hash),
+            ("id", id_str.as_str()),
+            ("priority", prio_str.as_str()),
+        ];
+        let resp = self.do_post_form("/api/v2/torrents/filePrio", &form).await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("qbit filePrio failed: {} {}", status, body.trim()));
+        }
+        Ok(())
+    }
+
+    /// Poll the torrent's file list until qBit has fetched metadata and
+    /// knows the contents, or `timeout` elapses. For magnet links added
+    /// paused, the file list is not immediately available — qBit has to
+    /// hit trackers and pull the metadata first. Returns the final file
+    /// list on success.
+    pub async fn wait_for_metadata(
+        &self,
+        hash: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<TorrentFile>, String> {
+        let start = std::time::Instant::now();
+        let mut delay = std::time::Duration::from_millis(500);
+        loop {
+            match self.get_torrent_files(hash).await {
+                Ok(files) if !files.is_empty() => return Ok(files),
+                Ok(_) => {}
+                Err(e) => {
+                    // 404 while qBit is still discovering the torrent —
+                    // treat as "not ready yet" until the timeout expires.
+                    if start.elapsed() >= timeout {
+                        return Err(format!(
+                            "qbit metadata fetch error after {:?}: {}",
+                            timeout, e
+                        ));
+                    }
+                }
+            }
+            if start.elapsed() >= timeout {
+                return Err(format!(
+                    "qbit metadata fetch timed out after {:?}",
+                    timeout
+                ));
+            }
+            tokio::time::sleep(delay).await;
+            // Gentle backoff, capped at 2s per poll.
+            delay = (delay * 2).min(std::time::Duration::from_secs(2));
+        }
+    }
+
+    /// Add a torrent, wait for qBit to know its file list, invoke `pick`
+    /// to select which files to keep, and mark the rest as skip. On
+    /// metadata-fetch timeout, or when `pick` returns `None` / an empty
+    /// list / a set that covers every file, the torrent is left
+    /// downloading unfiltered so the user still gets a full grab.
+    ///
+    /// Notably: we do **not** add paused. qBit 5.x renamed pause/resume
+    /// to stop/start and — more importantly — a torrent added in
+    /// stopped state doesn't publish its file list through
+    /// `/torrents/files`, so the old "add paused → wait metadata → set
+    /// priorities → resume" flow hangs forever on 5.x. Instead we add
+    /// unpaused and race `filePrio` against qBit's peer-discovery
+    /// startup. For a `.torrent` URL add, qBit parses the file list
+    /// within a couple of seconds — well before any real data transfer
+    /// begins — so the window where unwanted pieces might be requested
+    /// is small and bounded. An explicit `resume_torrent` call after
+    /// the add handles the dedup case where qBit already has the same
+    /// info hash sitting in stopped state from an earlier failed grab.
+    ///
+    /// **Additive merge**: when a second selective grab lands on a
+    /// torrent that's already been narrowed by an earlier grab (e.g.
+    /// the user grabbed Kizu 2 from a Monogatari megapack, then grabs
+    /// Kizu 1 from the same pack), we only bump the *new* wanted
+    /// files from skip → normal. We do **not** re-skip everything
+    /// outside the new keep set, because that would silently clobber
+    /// files that earlier grabs deliberately enabled. Detection is by
+    /// looking at current file priorities in the qBit file list: if
+    /// any file is currently at priority 0, the torrent has been
+    /// narrowed before and we take the merge branch.
+    pub async fn add_torrent_with_file_filter<F>(
+        &self,
+        url: &str,
+        info_hash: &str,
+        pick: F,
+    ) -> Result<SelectiveOutcome, String>
+    where
+        F: FnOnce(&[String]) -> Option<Vec<usize>>,
+    {
+        if info_hash.is_empty() {
+            return Err("selective download requires a known info hash".into());
+        }
+        let hash_lc = info_hash.to_ascii_lowercase();
+
+        self.add_torrent(url).await?;
+
+        // If qBit already had this hash sitting in stopped state from
+        // a prior failed attempt, the add above is a dedupe no-op and
+        // the torrent is still stopped. Explicitly start it so
+        // metadata starts flowing and the file list becomes visible.
+        // Fresh adds are already running, so this is a no-op for them.
+        self.resume_torrent(&hash_lc).await?;
+
+        // With a `.torrent` URL qBit has the file list within 1-3
+        // seconds; 60s is a generous ceiling. On timeout we give up
+        // on narrowing and let the full download proceed — the
+        // torrent is running, not stuck.
+        let files = match self
+            .wait_for_metadata(&hash_lc, std::time::Duration::from_secs(60))
+            .await
+        {
+            Ok(files) => files,
+            Err(_) => return Ok(SelectiveOutcome::FullDownload),
+        };
+
+        let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+        let keep = pick(&names);
+
+        let new_keep_ids = match keep {
+            Some(ids) if !ids.is_empty() && ids.len() < files.len() => ids,
+            _ => return Ok(SelectiveOutcome::FullDownload),
+        };
+
+        // Has an earlier grab already narrowed this torrent? Any file
+        // currently at priority 0 proves yes — qBit only sets 0 when
+        // something explicitly skipped it, not as a default.
+        let already_narrowed = files.iter().any(|f| f.priority == 0);
+
+        if already_narrowed {
+            // Merge branch: only bump new keeps that are currently at
+            // skip. Files already > 0 stay untouched so previous
+            // grabs on this megapack keep downloading.
+            let to_bump: Vec<usize> = new_keep_ids
+                .iter()
+                .copied()
+                .filter(|&i| files.get(i).map(|f| f.priority == 0).unwrap_or(false))
+                .collect();
+            if !to_bump.is_empty() {
+                self.set_file_priority(&hash_lc, &to_bump, 1).await?;
+            }
+        } else {
+            // Fresh branch: apply the full skip/keep split.
+            let skip_ids: Vec<usize> = (0..files.len())
+                .filter(|i| !new_keep_ids.contains(i))
+                .collect();
+            self.set_file_priority(&hash_lc, &skip_ids, 0).await?;
+            self.set_file_priority(&hash_lc, &new_keep_ids, 1).await?;
+        }
+        Ok(SelectiveOutcome::Filtered(new_keep_ids))
+    }
+
     /// Get all torrents, optionally filtered by category.
     pub async fn get_torrents(&self) -> Result<Vec<Torrent>, String> {
         let endpoint = if self.category.is_empty() {
@@ -174,24 +375,42 @@ impl QbitClient {
         Ok(files)
     }
 
-    /// Pause a torrent by hash.
+    /// Pause a torrent by hash. qBit 5.x renamed `/torrents/pause` to
+    /// `/torrents/stop`; we try the new name first and fall back to the
+    /// old one so both generations work without a version probe.
     pub async fn pause_torrent(&self, hash: &str) -> Result<(), String> {
         let form = [("hashes", hash)];
-        let resp = self.do_post_form("/api/v2/torrents/pause", &form).await?;
-        if !resp.status().is_success() {
-            return Err("Failed to pause torrent".into());
+        let resp = self.do_post_form("/api/v2/torrents/stop", &form).await?;
+        if resp.status().is_success() {
+            return Ok(());
         }
-        Ok(())
+        // Fallback for qBit ≤ 4.x.
+        let resp = self.do_post_form("/api/v2/torrents/pause", &form).await?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("qbit pause failed: {} {}", status, body.trim()))
     }
 
-    /// Resume a torrent by hash.
+    /// Resume a torrent by hash. qBit 5.x renamed `/torrents/resume` to
+    /// `/torrents/start`; we try the new name first and fall back to
+    /// the old one so the 4.x → 5.x transition is transparent.
     pub async fn resume_torrent(&self, hash: &str) -> Result<(), String> {
         let form = [("hashes", hash)];
-        let resp = self.do_post_form("/api/v2/torrents/resume", &form).await?;
-        if !resp.status().is_success() {
-            return Err("Failed to resume torrent".into());
+        let resp = self.do_post_form("/api/v2/torrents/start", &form).await?;
+        if resp.status().is_success() {
+            return Ok(());
         }
-        Ok(())
+        // Fallback for qBit ≤ 4.x.
+        let resp = self.do_post_form("/api/v2/torrents/resume", &form).await?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("qbit resume failed: {} {}", status, body.trim()))
     }
 
     /// Delete a torrent by hash (optionally delete files).
