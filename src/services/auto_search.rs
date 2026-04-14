@@ -1199,7 +1199,7 @@ struct SeaDexPayload {
     candidates: Vec<SearchResult>,
 }
 
-/// 5-minute in-memory cache for SeaDex lookups, keyed by AniList ID.
+/// 24-hour in-memory cache for SeaDex lookups, keyed by AniList ID.
 ///
 /// A single auto-search sweep across a multi-target batch (`find_all_for_target`,
 /// `collect_scored_batches_for_target`, `collect_scored_for_target`)
@@ -1208,11 +1208,18 @@ struct SeaDexPayload {
 /// JoJo S1–S5 sweep that's up to ~5 × (1 + N) HTTP requests — enough
 /// to throttle both releases.moe and Nyaa on a cold start.
 ///
-/// The cache amortizes the cost to one round-trip per target per
-/// 5-minute window. Config changes (preferred groups, resolution)
+/// SeaDex is a curated dataset that updates on the order of days, not
+/// minutes — once the community picks a "best" release for a title it
+/// rarely churns — so a 24h TTL amortizes the cost down to ~1 lookup
+/// per target per day while still catching the occasional revision.
+/// Anything shorter burns network round-trips for no observable
+/// correctness benefit. Config changes (preferred groups, resolution)
 /// affect how candidates get *scored* downstream, not what SeaDex
 /// returns, so keying by anilist_id alone is correct.
-const SEADEX_CACHE_TTL: Duration = Duration::from_secs(300);
+///
+/// The cache lives for the lifetime of the process, so a restart is
+/// the operator's escape hatch if they ever need to force-refresh.
+const SEADEX_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 static SEADEX_CACHE: LazyLock<StdMutex<HashMap<i64, (Instant, SeaDexPayload)>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
