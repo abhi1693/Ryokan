@@ -139,7 +139,8 @@ body {
 }
 
 .form-group input,
-.form-group select {
+.form-group select,
+.form-group textarea {
     padding: 10px 12px;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -151,9 +152,26 @@ body {
 }
 
 .form-group input:focus,
-.form-group select:focus {
+.form-group select:focus,
+.form-group textarea:focus {
     outline: none;
     border-color: var(--accent);
+}
+
+.form-group textarea {
+    resize: vertical;
+    min-height: 120px;
+    line-height: 1.5;
+}
+
+/* JSON / Sonarr-export textareas land here via `spellcheck="false"` — the
+   monospace font plus tab-size makes pasted multi-line JSON readable
+   instead of wrapping into a blob. */
+.form-group textarea[spellcheck="false"] {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    tab-size: 2;
+    -moz-tab-size: 2;
 }
 
 .form-hint {
@@ -1941,6 +1959,182 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     .settings-tab-panel .settings-form.group-upsert-form {
         grid-template-columns: 1fr;
     }
+}
+
+/* --- Custom Formats settings tab --- */
+
+/* Top-level sections are each wrapped in a dark card so the CF page
+   reads as distinct actions (Current list / Add-Edit / Defaults / etc.)
+   instead of a single scrolling blob. */
+.cf-section {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 22px 24px;
+    margin-bottom: 20px;
+}
+
+.cf-section-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0 0 6px;
+}
+
+.cf-section-header h3 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-bright);
+    text-transform: none;
+    letter-spacing: normal;
+    margin: 0;
+}
+
+.cf-section-desc {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin: 0 0 18px;
+    line-height: 1.55;
+    max-width: 820px;
+}
+
+/* When a list table lives inside a .cf-section card, strip its own
+   frame (the card already provides one) so it doesn't look like a
+   card-within-a-card. A subtle top divider visually separates the
+   section header from the rows. */
+.cf-section .group-source-table {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    margin: 14px 0 0;
+    border-top: 1px solid var(--border);
+}
+
+.cf-section .group-source-table thead {
+    background: transparent;
+}
+
+.cf-section .group-source-table th:first-child,
+.cf-section .group-source-table td:first-child {
+    padding-left: 0;
+}
+
+.cf-section .group-source-table th:last-child,
+.cf-section .group-source-table td:last-child {
+    padding-right: 0;
+}
+
+/* The last <form> or <div> in a card shouldn't leave a dangling bottom
+   margin on top of the card padding. */
+.cf-section > *:last-child { margin-bottom: 0; }
+.cf-section > form:last-child > :last-child { margin-bottom: 0; }
+
+.cf-count-pill {
+    display: inline-block;
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+/* Trash-Guides description callout shown above the edit form when the
+   CF carries a `trash_description` field. Replaces the inline-styled
+   white box that broke the dark theme. */
+.cf-trash-description {
+    margin: 0 0 16px;
+    padding: 12px 14px;
+    border-left: 3px solid var(--accent);
+    background: var(--bg-elevated);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.cf-trash-description strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--accent);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* Import collision review panel — shown after a Sonarr export import
+   hits one or more name collisions. Styled as a highlighted card so the
+   user can't miss that an action is required. */
+.cf-import-review {
+    margin: 16px 0;
+    padding: 16px 18px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-lg);
+}
+
+.cf-import-review h4 {
+    margin: 0 0 6px;
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.cf-import-review .form-hint { margin-bottom: 12px; }
+
+/* Empty-state card shown when the user has zero Custom Formats. The
+   bundled-defaults CTA sits inside it so first-time users see a clear
+   next step instead of an empty table. */
+.cf-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 20px;
+    background: var(--bg-elevated);
+    border: 1px dashed var(--border-accent);
+    border-radius: var(--radius);
+}
+
+.cf-empty-state p {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin: 0;
+}
+
+/* CF list table tweaks — the base `.group-source-table` layout is
+   reused, but CF rows have a badge column that needs a bit more room
+   and the actions column should align its buttons cleanly. */
+.cf-table .cf-name { font-weight: 600; color: var(--text-bright); }
+.cf-table .cf-score { font-variant-numeric: tabular-nums; }
+.cf-table .cf-score-positive { color: var(--green); }
+.cf-table .cf-score-negative { color: var(--red); }
+.cf-table .cf-score-zero { color: var(--text-dim); }
+
+.cf-origin-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.cf-origin-default  { background: var(--purple-bg); color: var(--accent); }
+.cf-origin-import   { background: var(--blue-bg);   color: var(--blue); }
+.cf-origin-manual   { background: var(--bg-elevated); color: var(--text-dim); border: 1px solid var(--border); }
+
+.cf-parse-error {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(211, 125, 125, 0.12);
+    color: var(--red);
 }
 
 /* Logs Toolbar */
