@@ -9,8 +9,12 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs
 RUN cargo build --release 2>/dev/null || true
 
 # Now copy the real source and build.
+# static/ is needed at compile time: src/handlers/settings.rs uses
+# include_str!("../../static/default_custom_formats.json") to embed the
+# bundled CF defaults into the binary.
 COPY src/ src/
 COPY templates/ templates/
+COPY static/ static/
 RUN touch src/main.rs && cargo build --release
 
 # Runtime stage
