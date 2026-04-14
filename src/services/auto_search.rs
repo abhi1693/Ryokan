@@ -1,5 +1,6 @@
-use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use regex_lite::Regex;
 use sqlx::SqlitePool;
@@ -1188,7 +1189,7 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, ex
 /// (smol's `Monogatari (Season 9)` megapack for Kizumonogatari Part 2
 /// is the canonical example). The text-query sweep can't find them;
 /// we go direct to `/view/<id>` and inject the result ourselves.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct SeaDexPayload {
     hashes: HashSet<String>,
     /// Synthetic candidates fetched directly from each SeaDex-curated
@@ -1196,6 +1197,39 @@ struct SeaDexPayload {
     /// fails, or when every fetch fails. Merged into the candidate
     /// pool by the caller before the text-query sweep runs.
     candidates: Vec<SearchResult>,
+}
+
+/// 5-minute in-memory cache for SeaDex lookups, keyed by AniList ID.
+///
+/// A single auto-search sweep across a multi-target batch (`find_all_for_target`,
+/// `collect_scored_batches_for_target`, `collect_scored_for_target`)
+/// can round-trip releases.moe several times per target, and each hit
+/// also fetches every SeaDex-best torrent's Nyaa view page. For a
+/// JoJo S1–S5 sweep that's up to ~5 × (1 + N) HTTP requests — enough
+/// to throttle both releases.moe and Nyaa on a cold start.
+///
+/// The cache amortizes the cost to one round-trip per target per
+/// 5-minute window. Config changes (preferred groups, resolution)
+/// affect how candidates get *scored* downstream, not what SeaDex
+/// returns, so keying by anilist_id alone is correct.
+const SEADEX_CACHE_TTL: Duration = Duration::from_secs(300);
+static SEADEX_CACHE: LazyLock<StdMutex<HashMap<i64, (Instant, SeaDexPayload)>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn seadex_cache_get(anilist_id: i64) -> Option<SeaDexPayload> {
+    let cache = SEADEX_CACHE.lock().ok()?;
+    let (fetched_at, payload) = cache.get(&anilist_id)?;
+    if fetched_at.elapsed() < SEADEX_CACHE_TTL {
+        Some(payload.clone())
+    } else {
+        None
+    }
+}
+
+fn seadex_cache_put(anilist_id: i64, payload: SeaDexPayload) {
+    if let Ok(mut cache) = SEADEX_CACHE.lock() {
+        cache.insert(anilist_id, (Instant::now(), payload));
+    }
 }
 
 async fn fetch_seadex_payload(
@@ -1228,6 +1262,14 @@ async fn fetch_seadex_payload(
         )
         .await;
         return SeaDexPayload::default();
+    }
+    if let Some(cached) = seadex_cache_get(anilist_id) {
+        tracing::debug!(
+            "seadex: cache hit for anilist_id={anilist_id} ({} hash(es), {} candidate(s))",
+            cached.hashes.len(),
+            cached.candidates.len()
+        );
+        return cached;
     }
     tracing::debug!("seadex: fetching releases.moe entry for anilist_id={anilist_id}");
     match seadex::lookup(anilist_id).await {
@@ -1295,7 +1337,9 @@ async fn fetch_seadex_payload(
                     }
                 }
             }
-            SeaDexPayload { hashes, candidates }
+            let payload = SeaDexPayload { hashes, candidates };
+            seadex_cache_put(anilist_id, payload.clone());
+            payload
         }
         Ok(None) => {
             tracing::debug!(
@@ -1308,7 +1352,13 @@ async fn fetch_seadex_payload(
                 &format!("anilist_id={anilist_id}"),
             )
             .await;
-            SeaDexPayload::default()
+            // Cache the "no entry" result so we don't re-hit releases.moe
+            // for the same anilist_id within the TTL window. Err paths
+            // are intentionally NOT cached — transient failures should
+            // retry on the next call.
+            let payload = SeaDexPayload::default();
+            seadex_cache_put(anilist_id, payload.clone());
+            payload
         }
         Err(e) => {
             tracing::warn!(
@@ -1344,16 +1394,23 @@ fn seadex_gates(
 }
 
 /// True if `info_hash` (non-empty) is in the SeaDex best-hashes set.
-/// Comparison is case-insensitive via lowercase normalization — the
-/// hash set is populated with lowercase hashes by `seadex::best_hashes`,
-/// and Nyaa-scraped hashes come through `extract_hash` already
-/// lowercased, but the explicit `to_ascii_lowercase` here keeps the
-/// contract obvious at the call sites.
+///
+/// **Both inputs must already be lowercase.** `seadex::best_hashes`
+/// populates the set with lowercase strings, and `extract_hash` in
+/// `services::nyaa` lowercases every scraped magnet hash at parse
+/// time. Enforced by `debug_assert!` so a future caller that forgets
+/// fails loudly in tests. The previous version called
+/// `info_hash.to_ascii_lowercase()` on every invocation — one
+/// allocation per candidate × per CF, which adds up on a batch sweep.
 fn is_seadex_match(info_hash: &str, seadex_hashes: &HashSet<String>) -> bool {
     if info_hash.is_empty() || seadex_hashes.is_empty() {
         return false;
     }
-    seadex_hashes.contains(&info_hash.to_ascii_lowercase())
+    debug_assert!(
+        !info_hash.chars().any(|c| c.is_ascii_uppercase()),
+        "is_seadex_match: info_hash must be lowercase, got {info_hash:?}"
+    );
+    seadex_hashes.contains(info_hash)
 }
 
 /// Human-readable short label for a series, used in SeaDex lookup log
@@ -1732,13 +1789,24 @@ static RE_PART_N: LazyLock<Regex> = LazyLock::new(||
     Regex::new(r"(?i)\b(?:part|chapter|movie|film)\s*(\d{1,2})\b").unwrap()
 );
 
-/// Bare Roman numeral at a word boundary. Covers the I–X range, which
-/// spans every multi-part anime film series we care about. Matches at
-/// end of string or before common separators (`:` for subtitle, space,
-/// `-`) so titles like "Kizumonogatari II: Nekketsu-hen" and
-/// "Rebuild of Evangelion III" both resolve cleanly.
+/// Roman numeral at a word boundary, II–IX only. Matches at end of
+/// string or before common separators (`:` for subtitle, space, `-`)
+/// so titles like "Kizumonogatari II: Nekketsu-hen" and "Rebuild of
+/// Evangelion III" both resolve cleanly.
+///
+/// **Single-letter Romans (`I`, `V`, `X`) are deliberately excluded.**
+/// Matching bare `I` would fire on any anime title containing the
+/// English pronoun — "I Want to Eat Your Pancreas", "I, Robot" — and
+/// resolve them as part 1, causing `pick_by_part_number` to narrow a
+/// megapack to the wrong file. Bare `V` and `X` carry the same risk
+/// ("V for Vendetta", "X/1999"). The tradeoff is that trilogy first
+/// entries titled "Kizumonogatari I" no longer narrow to E01 inside a
+/// megapack — they fall through to the full pack instead, which is
+/// fine because users rarely grab a trilogy's opening chapter in
+/// isolation. Explicit markers like "Part 1" / "Chapter 1" still
+/// work via [`RE_PART_N`].
 static RE_ROMAN_PART: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"(?i)\b(i{1,3}|iv|v|vi{1,3}|ix|x)\b(?:\s*[:\-]|$|\s)").unwrap()
+    Regex::new(r"(?i)\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-]|$|\s)").unwrap()
 );
 
 /// Extract the "part number" from an AniList detail's titles. Returns
@@ -1852,6 +1920,27 @@ pub fn pick_wanted_file_indices(
     None
 }
 
+/// Narrow a megapack to the files that correspond to the target's
+/// part number.
+///
+/// **Assumes 1 part = 1 episode number in the filename.** Works for
+/// the canonical smol Monogatari pack (Kizumonogatari I/II/III land
+/// as S09E01/S09E02/S09E03) and similar per-episode layouts. Breaks
+/// for releases where a single "part" spans multiple files — e.g.
+/// multi-file BDMV rips of a single film, or "Part 2 E13-E24" —
+/// because `parse_release_numbers(filename).contains(&part)` then
+/// matches the wrong files entirely. Rebuild of Evangelion 1.0/2.0/3.0
+/// happens to fall through to `None` for a different reason:
+/// `parse_release_numbers` doesn't capture `2.22`-style decimal parts,
+/// so the match set is empty and the caller keeps the whole pack —
+/// which is the safe outcome.
+///
+/// Returns `None` when:
+/// - no files match (keep-everything is safer than picking wrong),
+/// - every file matches (nothing was actually narrowed),
+/// - the match set exceeds the target's expected episode count (guards
+///   against a `part=1` query sweeping in every episode in a 24-ep TV
+///   season when the target is actually a 2-ep OVA).
 fn pick_by_part_number(
     filenames: &[String],
     part: i32,
@@ -2075,19 +2164,29 @@ pub struct SiblingMatch {
 }
 
 /// Relation types we'll consider in-pack candidates when scanning an
-/// AniList relation graph for siblings. Excludes source material
-/// (`ADAPTATION`, `SOURCE`, `COMPILATION`, `CONTAINS`) because those
-/// point at manga / LN / book entries that will never appear in an
-/// anime torrent. Everything else — `SEQUEL`, `PREQUEL`, `SIDE_STORY`,
-/// `PARENT`, `ALTERNATIVE`, `SPIN_OFF`, `CHARACTER`, `SUMMARY`,
-/// `OTHER` — passes through because the downstream subtitle-match +
-/// episode-count cap are already doing the real false-positive
-/// filtering. This gate is just a performance filter that avoids
-/// normalizing obvious non-anime titles against every filename.
+/// AniList relation graph for siblings. Excludes:
+///
+/// - **Source material** (`ADAPTATION`, `SOURCE`, `COMPILATION`,
+///   `CONTAINS`) — these point at manga / LN / book entries that
+///   will never appear in an anime torrent.
+/// - **Off-series tie-ins** (`CHARACTER`, `OTHER`) — `CHARACTER`
+///   links to shared-universe spinoffs that share no animation DNA
+///   with the parent (e.g. a crossover cameo), and `OTHER` is
+///   AniList's dumping ground for unusual relations (promotional
+///   videos, live-action adaptations, disambiguation links, etc.).
+///   Both are noisy enough that including them mostly pads the
+///   candidate list with entries that never match.
+///
+/// Everything else — `SEQUEL`, `PREQUEL`, `SIDE_STORY`, `PARENT`,
+/// `ALTERNATIVE`, `SPIN_OFF`, `SUMMARY` — passes through because the
+/// downstream subtitle-match + episode-count cap are already doing
+/// the real false-positive filtering. This gate is a performance
+/// filter that avoids normalizing obviously-wrong candidates against
+/// every filename.
 fn is_pack_candidate_relation(relation_type: &str) -> bool {
     !matches!(
         relation_type,
-        "ADAPTATION" | "SOURCE" | "COMPILATION" | "CONTAINS"
+        "ADAPTATION" | "SOURCE" | "COMPILATION" | "CONTAINS" | "CHARACTER" | "OTHER"
     )
 }
 
@@ -2628,14 +2727,31 @@ mod tests {
     }
 
     #[test]
-    fn extract_part_number_ignores_roman_i_alone() {
-        // "Part I" is a part marker, but ambiguous bare Roman numeral
-        // "I" at the end of a title still resolves to 1 — the Roman
-        // regex accepts it. That's intentional: a trilogy's first
-        // entry is titled "Kizumonogatari I: Tekketsu-hen", and the
-        // user may want to grab that part specifically.
+    fn extract_part_number_drops_bare_roman_i_on_kizu_first_entry() {
+        // Kizumonogatari I no longer resolves to Some(1) — see the
+        // RE_ROMAN_PART docstring. Dropping bare single-letter Romans
+        // trades selective narrowing for entry 1 of a trilogy against
+        // not false-positiving any title containing an English pronoun
+        // "I". Users who want Kizu I specifically still get the whole
+        // smol pack (no selective narrowing), which is the acceptable
+        // fallback for this edge case.
         let d = detail_with_titles("Kizumonogatari I: Tekketsu-hen", "Kizumonogatari I: Tekketsu-hen");
-        assert_eq!(extract_part_number(&d), Some(1));
+        assert_eq!(extract_part_number(&d), None);
+    }
+
+    #[test]
+    fn extract_part_number_rejects_bare_roman_on_english_pronoun() {
+        // "I Want to Eat Your Pancreas" must NOT resolve to Some(1).
+        // Otherwise, if the user ever grabbed a Monogatari-style
+        // megapack with this detail as the target, pick_by_part_number
+        // would narrow to "files containing episode 1" for an
+        // unrelated film. The same concern motivates dropping bare V
+        // ("V for Vendetta") and bare X ("X/1999").
+        let d = detail_with_titles(
+            "I Want to Eat Your Pancreas",
+            "Kimi no Suizou wo Tabetai",
+        );
+        assert_eq!(extract_part_number(&d), None);
     }
 
     #[test]
