@@ -1875,7 +1875,10 @@ async fn auto_expand_library_from_pack(
     // Wait for qBit metadata before asking for the file list. Fresh
     // grabs via `add_torrent` don't block on metadata discovery, so
     // a naive `get_torrent_files` right after add returns empty.
-    // The 60s ceiling matches `add_torrent_with_file_filter`.
+    // We use a generous 60s ceiling here (rather than the 10s used
+    // by the interactive selective-narrowing path) because this runs
+    // inside a `tokio::spawn` — blocking up to a minute in the
+    // background is fine, the HTTP handler has already returned.
     let files = match qbit
         .wait_for_metadata(info_hash, std::time::Duration::from_secs(60))
         .await
