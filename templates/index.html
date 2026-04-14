@@ -135,7 +135,12 @@ function searchAnilist() {
 
     fetch(`/api/anilist/search?q=${encodeURIComponent(q)}`)
         .then(r => {
-            if (!r.ok) throw new Error('Search failed');
+            if (!r.ok) {
+                return r.text().then(msg => {
+                    const trimmed = (msg || '').trim();
+                    throw new Error(trimmed || `Search failed (HTTP ${r.status})`);
+                });
+            }
             return r.json();
         })
         .then(results => {
