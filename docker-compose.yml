@@ -1,6 +1,6 @@
 services:
   ryokan:
-    build: .
+    image: ghcr.io/johnthreekay/ryokan:latest
     container_name: ryokan
     ports:
       - "8978:8978"
