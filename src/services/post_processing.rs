@@ -316,29 +316,32 @@ async fn import_torrent(
             .copied()
             .unwrap_or(grab.series_id);
 
-        if !series_ctx_cache.contains_key(&target_series_id) {
-            match load_series_import_ctx(state, cfg, target_series_id).await {
-                Ok(ctx) => {
-                    series_ctx_cache.insert(target_series_id, ctx);
-                }
-                Err(e) => {
-                    logger::error(
-                        &state.db,
-                        LogCategory::PostProcess,
-                        &format!(
-                            "Failed to load series context for id={}",
-                            target_series_id
-                        ),
-                        &e,
-                    )
-                    .await;
-                    continue;
+        // Can't use the clean `Entry::or_insert_with_async` pattern
+        // because the loader is async and `entry()` borrows the map
+        // across the await. Branching on the Entry variant keeps the
+        // hot path (cache hit) to a single lookup and only calls the
+        // loader on a cold miss.
+        let ctx = match series_ctx_cache.entry(target_series_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                match load_series_import_ctx(state, cfg, target_series_id).await {
+                    Ok(ctx) => entry.insert(ctx),
+                    Err(e) => {
+                        logger::error(
+                            &state.db,
+                            LogCategory::PostProcess,
+                            &format!(
+                                "Failed to load series context for id={}",
+                                target_series_id
+                            ),
+                            &e,
+                        )
+                        .await;
+                        continue;
+                    }
                 }
             }
-        }
-        let ctx = series_ctx_cache
-            .get(&target_series_id)
-            .expect("ctx just inserted");
+        };
 
         let src: PathBuf = Path::new(&source_base).join(&file.name);
 
