@@ -2275,7 +2275,22 @@ async fn run_auto_search_targets_with_upgrades(
                             // route each file to the correct series.
                             // Only runs on fresh grabs (existing
                             // grab_id skips the route-write path).
-                            if result.is_batch {
+                            //
+                            // Skip auto-expand when selective narrowing
+                            // successfully applied — the user is
+                            // explicitly targeting one sibling inside a
+                            // megapack (e.g. Stardust Crusaders in a
+                            // JoJo pack), so the other siblings' files
+                            // are marked priority=0 in qBit and will
+                            // never land. Creating ghost library rows
+                            // for them would leave dangling entries
+                            // with no imported files. The
+                            // `kept.is_none()` fallback path
+                            // (selective filter timed out → full
+                            // download) still auto-expands because the
+                            // whole pack is actually downloading.
+                            let selective_narrowed = wants_selective && kept.is_some();
+                            if result.is_batch && !selective_narrowed {
                                 if let Some(grab_id) = grab_id {
                                     let _ = auto_expand_library_from_pack(
                                         &state.db,
@@ -2831,19 +2846,29 @@ pub async fn grab_batch_result(
         let grab_id = crate::models::grabbed_torrents::record_grab(
             &state.db, &info_hash, &title, sid, &[], true,
         ).await.ok().flatten();
-        // Phase 2 sibling auto-expand. Always true here because this
-        // is the batch-grab path.
-        if let Some(grab_id) = grab_id {
-            let _ = auto_expand_library_from_pack(
-                &state.db,
-                &qbit,
-                &info_hash,
-                &detail,
-                sid,
-                &[],
-                grab_id,
-                &title,
-            ).await;
+        // Phase 2 sibling auto-expand. Skip when selective narrowing
+        // successfully applied — the user picked a specific sibling
+        // (e.g. Stardust Crusaders) out of a megapack and the other
+        // siblings' files are marked priority=0 in qBit and won't
+        // land. Creating library entries for them would leave ghost
+        // rows with no imported files. The `selective_outcome.is_none()
+        // && wants_selective` fallback (filter timed out → full
+        // download) still auto-expands because the whole pack is
+        // actually downloading.
+        let selective_narrowed = wants_selective && selective_outcome.is_some();
+        if !selective_narrowed {
+            if let Some(grab_id) = grab_id {
+                let _ = auto_expand_library_from_pack(
+                    &state.db,
+                    &qbit,
+                    &info_hash,
+                    &detail,
+                    sid,
+                    &[],
+                    grab_id,
+                    &title,
+                ).await;
+            }
         }
     }
 
