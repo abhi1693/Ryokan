@@ -2812,6 +2812,19 @@ pub fn detect_sibling_entries_in_pack(
 }
 
 /// Per-sibling offset detection. See [`SiblingMatch::episode_offset`].
+///
+/// Returns `min_ep - 1` when the sibling's smallest parsed episode
+/// exceeds `parent_cap` — that makes the offset subtract out to a
+/// local ep 1 regardless of how the pack aligns with AL's count.
+/// Returns `0` when the sibling's episodes sit within the parent's
+/// range (arc-local numbering, no offset needed).
+///
+/// In the common case where filenames use continuous numbering
+/// starting at `parent_cap + 1`, `min_ep - 1 == parent_cap`, matching
+/// the older behavior. When the pack's partition disagrees with AL
+/// (e.g. a BD that splits a merged long-runtime episode into two
+/// halves), `min_ep - 1 > parent_cap` and the offset correctly shifts
+/// the sibling's first file to local ep 1 anyway.
 fn compute_sibling_episode_offset(
     file_indices: &[usize],
     filenames: &[String],
@@ -2828,7 +2841,7 @@ fn compute_sibling_episode_offset(
         .map(|(_, ep)| ep)
         .min();
     match min_ep {
-        Some(m) if m > parent_cap => parent_cap,
+        Some(m) if m > parent_cap => m - 1,
         _ => 0,
     }
 }
@@ -3018,13 +3031,175 @@ fn detect_sibling_via_episode_range(
         return Vec::new();
     }
 
-    // Iterative sequential packing.
+    // Shared claim state for the filename-subtitle pre-pass and the
+    // numeric packing loop below. Filename claims go in first and
+    // the loop naturally skips anything they've already consumed.
     let mut results: Vec<SiblingMatch> = Vec::new();
-    let mut base: i32 = parent_cap;
     let mut claimed_rel_idxs: std::collections::HashSet<usize> =
         std::collections::HashSet::new();
     let mut claimed_file_idxs: std::collections::HashSet<usize> =
         std::collections::HashSet::new();
+
+    // ── Filename-subtitle pre-pass ────────────────────────────────
+    //
+    // AL's `parent.episodes` can disagree with how a specific release
+    // partitions its files. The canonical example is Owarimonogatari
+    // on BD: AL reports 12 eps (the first aired episode was 48 min
+    // and AL groups it as one) but the [smol] BD release splits the
+    // 48-min ep 1 back into two ~24-min halves, so the pack has 13
+    // Owarimonogatari files (S07E01..=E13) followed by 7 Owari S2
+    // files (S07E14..=E20). Forward-aligned numeric packing anchored
+    // at `parent_cap = 12` would mis-route S07E13 (Owari 1 ep 13)
+    // into Owari S2 as "ep 1" and leave S07E20 (the real Owari S2
+    // finale) hanging under the parent.
+    //
+    // The filenames themselves carry ground truth: `S07E13 -
+    // Owarimonogatari (...)` vs `S07E14 - Owarimonogatari Second
+    // Season (...)`. So before numeric packing runs, scan each
+    // overflow file for a substring match against the parent's or a
+    // candidate's normalized title. Longest-prefix wins (so "Owari…
+    // Second Season" beats plain "Owari…"). Parent-matched files are
+    // dropped from the overflow pool (they fall to parent by default);
+    // candidate-matched files are pre-claimed to that candidate and
+    // the candidate is marked consumed so numeric packing can't
+    // duplicate-claim it.
+    //
+    // Needles shorter than 8 chars are rejected to avoid false
+    // positives from short titles colliding with episode markers
+    // (e.g. "Show 2" matching "Show - 02").
+    #[derive(Clone, Copy)]
+    enum NeedleSource {
+        Parent,
+        Candidate(usize), // index into `candidates`
+    }
+    const MIN_FILENAME_NEEDLE_LEN: usize = 8;
+    let mut needles: Vec<(NeedleSource, String)> = Vec::new();
+    for p in [parent_en.as_str(), parent_ro.as_str()] {
+        if p.len() >= MIN_FILENAME_NEEDLE_LEN
+            && !needles.iter().any(|(_, n)| n == p)
+        {
+            needles.push((NeedleSource::Parent, p.to_string()));
+        }
+    }
+    for (cand_idx, cand) in candidates.iter().enumerate() {
+        let rel = &parent_detail.relations[cand.rel_idx];
+        let en = normalize_subtitle(&rel.title_english);
+        let ro = normalize_subtitle(&rel.title_romaji);
+        for n in [en, ro] {
+            if n.len() >= MIN_FILENAME_NEEDLE_LEN
+                && !needles.iter().any(|(_, x)| x == &n)
+            {
+                needles.push((NeedleSource::Candidate(cand_idx), n));
+            }
+        }
+    }
+    tracing::debug!(
+        "auto-expand: fallback filename-subtitle needles={}",
+        needles.len()
+    );
+
+    let mut filename_claimed_by_cand: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
+    // Parent pre-claims are staged separately: in bare-number packs
+    // every file matches parent's root title, so unconditionally
+    // consuming them would strip the whole overflow and starve the
+    // numeric packing loop. Only apply them if at least one sibling
+    // was pre-claimed (i.e., the filenames actually distinguish arcs).
+    let mut filename_claimed_parent: Vec<usize> = Vec::new();
+    for (f_idx, ep) in overflow.iter() {
+        let norm = normalize_subtitle(&filenames[*f_idx]);
+        let mut best: Option<(NeedleSource, usize)> = None;
+        for (source, needle) in &needles {
+            if !norm.contains(needle) {
+                continue;
+            }
+            let len = needle.len();
+            match best {
+                Some((_, cur)) if cur >= len => {}
+                _ => best = Some((*source, len)),
+            }
+        }
+        match best {
+            Some((NeedleSource::Parent, len)) => {
+                filename_claimed_parent.push(*f_idx);
+                tracing::debug!(
+                    "auto-expand: fallback filename-subtitle file_idx={} ep={} → parent (needle_len={})",
+                    f_idx, ep, len
+                );
+            }
+            Some((NeedleSource::Candidate(cand_idx), len)) => {
+                filename_claimed_by_cand
+                    .entry(cand_idx)
+                    .or_default()
+                    .push(*f_idx);
+                tracing::debug!(
+                    "auto-expand: fallback filename-subtitle file_idx={} ep={} → candidate[{}] (needle_len={})",
+                    f_idx, ep, cand_idx, len
+                );
+            }
+            None => {}
+        }
+    }
+
+    let have_sibling_evidence = !filename_claimed_by_cand.is_empty();
+    if have_sibling_evidence {
+        for f_idx in &filename_claimed_parent {
+            claimed_file_idxs.insert(*f_idx);
+        }
+        tracing::debug!(
+            "auto-expand: fallback filename-subtitle applied {} parent pre-claims",
+            filename_claimed_parent.len()
+        );
+    } else if !filename_claimed_parent.is_empty() {
+        tracing::debug!(
+            "auto-expand: fallback filename-subtitle discarded {} parent pre-claims (no sibling evidence)",
+            filename_claimed_parent.len()
+        );
+    }
+
+    for (cand_idx, mut file_indices) in filename_claimed_by_cand.into_iter() {
+        let cand = &candidates[cand_idx];
+        let rel = &parent_detail.relations[cand.rel_idx];
+        if !within_episode_slack(file_indices.len(), cand.sib_cap) {
+            tracing::debug!(
+                "auto-expand: fallback filename-subtitle skip cand[{}] reason=slack-cap files={} sib_cap={}",
+                cand_idx, file_indices.len(), cand.sib_cap
+            );
+            continue;
+        }
+        file_indices.sort_unstable();
+        claimed_rel_idxs.insert(cand.rel_idx);
+        for f in &file_indices {
+            claimed_file_idxs.insert(*f);
+        }
+        let label = if !rel.title_english.is_empty() {
+            rel.title_english.as_str()
+        } else {
+            rel.title_romaji.as_str()
+        };
+        tracing::debug!(
+            "auto-expand: fallback filename-subtitle emitted sibling rel='{}' id={} files={}",
+            label, rel.id, file_indices.len()
+        );
+        results.push(SiblingMatch {
+            anilist_id: rel.id,
+            mal_id: rel.id_mal,
+            title_romaji: rel.title_romaji.clone(),
+            title_english: rel.title_english.clone(),
+            title_native: rel.title_native.clone(),
+            cover_url: rel.cover_url.clone(),
+            format: rel.format.clone(),
+            status: rel.status.clone(),
+            episodes: rel.episodes,
+            season_year: rel.season_year,
+            matched_subtitle: "episode-range fallback (filename subtitle match)".to_string(),
+            file_indices,
+            episode_offset: 0, // populated by the offset pass in the caller
+        });
+    }
+
+    // ── Iterative sequential packing ──────────────────────────────
+    let mut base: i32 = parent_cap;
 
     loop {
         // Short-circuit when there are no more overflow files beyond
@@ -4424,6 +4599,88 @@ mod tests {
             "ep 20 Zoku file must remain unattributed"
         );
         assert_eq!(s.episode_offset, 12, "absolute numbering → offset = parent cap");
+    }
+
+    #[test]
+    fn detect_siblings_fallback_filename_subtitle_corrects_bd_split_first_ep() {
+        // Real-world case from the live [smol] Owarimonogatari grab
+        // (reported 2026-04-15): the BD release splits the 48-min
+        // first aired episode back into two ~24-min halves, so the
+        // pack has 13 Owari 1 files (S07E01..=E13) followed by 7
+        // Owari 2 files (S07E14..=E20). But AniList reports the
+        // parent as 12 eps (it groups the merged broadcast ep 1 as
+        // one). Forward-aligned numeric packing anchored at
+        // parent_cap=12 would misroute S07E13 (Owari 1's last ep) to
+        // Owari S2 as "ep 1" and leave S07E20 (the real Owari S2
+        // finale) hanging under the parent.
+        //
+        // The filename subtitle pre-pass fixes this: S07E13's file-
+        // name only contains "Owarimonogatari", matching the parent
+        // title, so it's parent-pre-claimed. S07E14..=E20 contain
+        // "Owarimonogatari Second Season", matching the sibling
+        // title (longer → wins), so those 7 files are sibling-pre-
+        // claimed. The episode offset comes out to 13 (min_ep - 1),
+        // so post-processing renames S07E14..=E20 to Owari S2
+        // E01..=E07 correctly.
+        //
+        // Filenames are taken directly from the user's grab; they
+        // correspond to a specific real release of a real group.
+        let mut parent = detail_with_titles("Owarimonogatari", "Owarimonogatari");
+        parent.id = 21262;
+        parent.episodes = Some(12); // AL undercount — BD has 13 files for parent
+        parent.relations = vec![
+            related(20787, "Tsukimonogatari", "Tsukimonogatari", "SEQUEL", Some(4)),
+            related(
+                21745,
+                "Owarimonogatari Second Season",
+                "Owarimonogatari Second Season",
+                "SEQUEL",
+                Some(7),
+            ),
+        ];
+        let mut files: Vec<String> = Vec::new();
+        for n in 1..=13 {
+            files.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p HEVC Opus) [DEADBEEF].mkv",
+                n
+            ));
+        }
+        for n in 14..=20 {
+            files.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p HEVC Opus) [DEADBEEF].mkv",
+                n
+            ));
+        }
+
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(
+            siblings.len(),
+            1,
+            "filename subtitle pre-pass should identify Owari S2"
+        );
+        let s = &siblings[0];
+        assert_eq!(s.anilist_id, 21745);
+        assert_eq!(
+            s.file_indices.len(),
+            7,
+            "Owari S2 should claim exactly the 7 S07E14..=E20 files"
+        );
+        // File indices 13..=19 correspond to S07E14..=E20 (files
+        // vec is 0-indexed).
+        assert_eq!(*s.file_indices.first().unwrap(), 13);
+        assert_eq!(*s.file_indices.last().unwrap(), 19);
+        // Critically: file index 12 (S07E13) must NOT be claimed —
+        // that's Owari 1's last ep, and misrouting it was the bug.
+        assert!(
+            !s.file_indices.contains(&12),
+            "S07E13 (Owari 1 ep 13) must stay with parent"
+        );
+        // Offset: min_ep = 14, so offset = 13 (not parent_cap = 12).
+        // S07E14 → 14 - 13 = Owari S2 ep 1. Correct.
+        assert_eq!(
+            s.episode_offset, 13,
+            "offset must be min_ep - 1 = 13 so Owari S2 starts at local ep 1"
+        );
     }
 
     // ── transitive_relation_graft ────────────────────────────────────
