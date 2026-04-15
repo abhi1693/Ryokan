@@ -24,9 +24,17 @@ fn blob_filename(blob_hash: &str, content_type: &str, source_url: &str) -> Strin
 }
 
 pub fn media_cache_dir() -> PathBuf {
-    std::env::var("RYOKAN_MEDIA_CACHE_DIR")
+    let base = std::env::var("RYOKAN_MEDIA_CACHE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data/cache/artwork"))
+        .unwrap_or_else(|_| PathBuf::from("data/cache/artwork"));
+    // Always store absolute paths. Older builds wrote the relative
+    // default ("data/cache/artwork/blobs/<hash>.jpg") straight into
+    // image_blobs.local_path; those rows then break whenever the
+    // process CWD changes (e.g. a Docker image that later adds
+    // WORKDIR or sets RYOKAN_MEDIA_CACHE_DIR). Canonicalizing here
+    // means every new write records an absolute path regardless of
+    // how the env is configured.
+    std::path::absolute(&base).unwrap_or(base)
 }
 
 pub fn local_url(cache_key: &str, last_write: i64) -> String {
@@ -105,13 +113,24 @@ pub async fn cache_image(
     let dir = media_cache_dir().join("blobs");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create artwork dir failed: {}", e))?;
 
-    let blob_exists = artwork_cache::has_blob(db, &blob_hash)
+    // Check whether we already have a row for this hash, and if so whether
+    // the on-disk file is still where the DB says it is. `has_blob` used to
+    // only return a bool; that meant a row with a stale relative path (or
+    // a blob file that had been deleted out from under us) would short-
+    // circuit the write forever, because the ref row would get refreshed
+    // while the broken blob row sat untouched. Self-heal: if the stored
+    // path is missing, rewrite the file to the current (absolute) path
+    // and upsert_blob so image_blobs is updated in place.
+    let existing_path = artwork_cache::get_blob_path(db, &blob_hash)
         .await
         .map_err(|e| e.to_string())?;
 
-    if blob_exists {
-        // Blob already exists; only refresh the lightweight reference row below.
-    } else {
+    let file_is_live = existing_path
+        .as_deref()
+        .map(|p| std::path::Path::new(p).is_file())
+        .unwrap_or(false);
+
+    if !file_is_live {
         let filename = blob_filename(&blob_hash, &content_type, source_url);
         let path = dir.join(&filename);
         if !path.exists() {

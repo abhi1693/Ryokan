@@ -34,13 +34,19 @@ pub async fn upsert_blob(
     Ok(())
 }
 
-pub async fn has_blob(db: &SqlitePool, blob_hash: &str) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query(r#"SELECT 1 FROM image_blobs WHERE blob_hash = ?"#)
+/// Returns the `local_path` stored for a given blob hash, or `None` if no
+/// such blob row exists. Callers use this both as an existence check and
+/// to verify the on-disk file is still where the DB says it is — older
+/// builds wrote relative paths to this column, which break when the
+/// runtime CWD changes. See `services::artwork::cache_image` for the
+/// self-heal path.
+pub async fn get_blob_path(db: &SqlitePool, blob_hash: &str) -> Result<Option<String>, sqlx::Error> {
+    let row = sqlx::query(r#"SELECT local_path FROM image_blobs WHERE blob_hash = ?"#)
         .bind(blob_hash)
         .fetch_optional(db)
         .await?;
 
-    Ok(row.is_some())
+    Ok(row.map(|r| r.get::<String, _>("local_path")))
 }
 
 /// Payload for `upsert_ref`. Named fields so callers can't swap the
