@@ -2105,11 +2105,21 @@ async fn auto_expand_library_from_pack_with_files(
         // Derive episode numbers per sibling so
         // find_imported_for_episode can locate this route when
         // an upgrade later targets one of the sibling's episodes.
+        //
+        // The stored ep_nums are *effective* (post-offset) numbers so
+        // an upgrade searching by episode 1 of Owari S2 finds a route
+        // whose files were originally numbered E14 on disk. Skip
+        // rows that would resolve to a non-positive effective number
+        // (shouldn't happen — detection sets offset conservatively —
+        // but guards against a bad route/file pairing).
         let mut ep_nums: Vec<i32> = Vec::new();
         for &file_idx in &sibling.file_indices {
             if let Some(name) = filenames.get(file_idx) {
-                if let Some((_, n)) = media::parse_episode_number(&name.to_lowercase()) {
-                    ep_nums.push(n);
+                if let Some((_, raw)) = media::parse_episode_number(&name.to_lowercase()) {
+                    let effective = raw - sibling.episode_offset;
+                    if effective > 0 {
+                        ep_nums.push(effective);
+                    }
                 }
             }
         }
@@ -2125,10 +2135,7 @@ async fn auto_expand_library_from_pack_with_files(
             file_indices: sibling.file_indices,
             episode_numbers: ep_nums,
             matched_subtitle: sibling.matched_subtitle,
-            // Wired through from sibling.episode_offset in Commit 5;
-            // for now the schema column exists and every row writes 0
-            // so legacy behavior is preserved.
-            episode_offset: 0,
+            episode_offset: sibling.episode_offset,
         });
     }
 
@@ -3782,6 +3789,11 @@ mod tests {
             .expect("sibling route present");
         assert_eq!(sibling_route.file_indices, vec![0, 1]);
         assert_eq!(sibling_route.matched_subtitle, "Stardust Crusaders");
+        // Arc-local numbering (files E01, E02) → min_ep=1 ≤
+        // parent_cap=26 → offset=0, and stored episode_numbers
+        // equal the raw parsed values.
+        assert_eq!(sibling_route.episode_offset, 0);
+        assert_eq!(sibling_route.episode_numbers, vec![1, 2]);
 
         // The parent route: claims the unclaimed media files (2 and 3)
         // and reuses the caller-supplied episode numbers verbatim.
@@ -3791,6 +3803,123 @@ mod tests {
             .expect("parent route present");
         assert_eq!(parent_route.file_indices, vec![2, 3]);
         assert_eq!(parent_route.episode_numbers, vec![1, 2]);
+        // Parent routes always carry offset 0.
+        assert_eq!(parent_route.episode_offset, 0);
+    }
+
+    /// Smol Monogatari-style batch: absolute episode numbering runs
+    /// across parent + sibling (E13 = last parent ep, E14 = first
+    /// sibling ep). The fallback path detects Owarimonogatari Second
+    /// Season via title-prefix matching AND the per-sibling offset
+    /// pass sets offset=13 so the route row's episode_numbers store
+    /// the effective (arc-local) 1..=7 instead of the raw 14..=20.
+    #[tokio::test]
+    async fn auto_expand_persists_episode_offset_for_absolute_numbered_batch() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21320,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(13),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "owarismolhash00000000000000000000000000",
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        // Parent AnimeDetail with a continuation relation. Use the
+        // real title "Owarimonogatari Second Season" — no delimiter,
+        // no 2-token trailing subtitle — so the subtitle path cannot
+        // match and the fallback path's title-prefix rule must fire.
+        let mut parent_detail = empty_anime_detail(21320, "Owarimonogatari");
+        parent_detail.episodes = Some(13);
+        parent_detail
+            .relations
+            .push(related_entry(21860, "Owarimonogatari Second Season", Some(7)));
+
+        // 13 parent files (S07E01..E13) + 7 sibling files (S07E14..E20).
+        let mut filenames: Vec<String> = Vec::new();
+        for n in 1..=13 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p).mkv",
+                n
+            ));
+        }
+        for n in 14..=20 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p).mkv",
+                n
+            ));
+        }
+        let parent_episode_numbers: Vec<i32> = (1..=13).collect();
+
+        let added = auto_expand_library_from_pack_with_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &parent_episode_numbers,
+            grab_id,
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+        )
+        .await;
+
+        assert_eq!(added, 1, "one new sibling (Owari S2) expected");
+
+        let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(routes.len(), 2, "sibling route + parent route expected");
+
+        let sibling_route = routes
+            .iter()
+            .find(|r| r.series_id != parent_id)
+            .expect("sibling route present");
+        // Files 13..=19 (0-based indices) correspond to S07E14..E20.
+        assert_eq!(sibling_route.file_indices, vec![13, 14, 15, 16, 17, 18, 19]);
+        // The matched subtitle records the detection method for
+        // operator inspection.
+        assert!(sibling_route
+            .matched_subtitle
+            .starts_with("episode-range fallback"));
+        // Absolute numbering → offset = parent_cap = 13.
+        assert_eq!(sibling_route.episode_offset, 13);
+        // Stored episode_numbers are effective (post-offset) values,
+        // so a later `find_imported_for_episode(sibling, 1)` upgrade
+        // query hits this route row correctly.
+        assert_eq!(sibling_route.episode_numbers, vec![1, 2, 3, 4, 5, 6, 7]);
+
+        let parent_route = routes
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route present");
+        assert_eq!(parent_route.file_indices, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(parent_route.episode_offset, 0);
     }
 
     /// When the file list has no sibling matches, the inner fn is a
