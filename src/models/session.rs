@@ -56,6 +56,6 @@ pub async fn delete_session(db: &SqlitePool, token: &str) -> Result<(), sqlx::Er
 fn generate_token() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+    let bytes: Vec<u8> = (0..32).map(|_| rng.r#gen()).collect();
     hex::encode(bytes)
 }
