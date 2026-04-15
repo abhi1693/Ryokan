@@ -696,8 +696,9 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             quality_tag TEXT NOT NULL DEFAULT '',
             release_title TEXT NOT NULL DEFAULT '',
             release_group TEXT NOT NULL DEFAULT '',
-            torrent_name TEXT NOT NULL DEFAULT '',
+            file_name TEXT NOT NULL DEFAULT '',
             size_bytes INTEGER NOT NULL DEFAULT 0,
+            is_batch INTEGER NOT NULL DEFAULT 0,
             state TEXT NOT NULL DEFAULT 'grabbed',
             grabbed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
@@ -711,22 +712,47 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
 
-    // Original on-disk torrent name — seeded at grab time from the Nyaa
-    // release title, then overwritten at post-process time with the actual
-    // qBittorrent torrent name (which may differ for renamed/auto-managed
-    // torrents). The episode detail modal reads this so the user can see
-    // what qBit actually downloaded, not just what Ryokan asked for.
+    // On-disk *post-processed* file name for this episode. Seeded from the
+    // Nyaa release title at grab time, then overwritten at post-process
+    // time with the final Sonarr-style filename Ryokan renamed the imported
+    // file to (e.g. `Jujutsu Kaisen - S01E06 - Hidden Inventory.mkv`). The
+    // episode detail modal reads this column so each grab-history row
+    // shows the per-episode file name — distinct from the batch torrent's
+    // release title, which is already in `release_title`. Historically
+    // this column was called `torrent_name`; the two ALTER TABLE lines
+    // below handle both upgrade paths (DB that had `torrent_name` →
+    // renamed; fresh install → CREATE TABLE already has `file_name`).
     sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN torrent_name TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
         .ok();
+    sqlx::query("ALTER TABLE episode_grab_history RENAME COLUMN torrent_name TO file_name")
+        .execute(db)
+        .await
+        .ok();
+    // No-op on already-migrated DBs; covers the sliver of rows that were
+    // never renamed because of a race or a partially-migrated install.
+    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
 
-    // Episode-file size. At grab time this holds the Nyaa-reported total
-    // torrent size (best available before download). At post-process time
-    // it is replaced with the *individual* imported file's size — batches
-    // span many episodes so the per-episode row should reflect just its
-    // own file, not the aggregate torrent size.
+    // Episode-file size. For non-batch grabs this gets refined to the
+    // imported file's size at post-process time. For batch grabs it
+    // stays as the whole torrent's total reported at grab time — the
+    // episode detail modal surfaces that as "this episode came from an
+    // X GiB batch". The CASE guard in `mark_grab_history_completed`
+    // enforces this asymmetry.
     sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    // is_batch marker — needed at read time so the UI can decide whether
+    // to surface `size_bytes` as "whole batch" or "single file". It's
+    // also what `mark_grab_history_completed` uses to decide whether to
+    // refine `size_bytes` on import (non-batch only).
+    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN is_batch INTEGER NOT NULL DEFAULT 0")
         .execute(db)
         .await
         .ok();

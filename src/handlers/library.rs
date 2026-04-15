@@ -2333,6 +2333,7 @@ async fn run_auto_search_targets_with_upgrades(
                                     &result.title,
                                     &result.group,
                                     result.size_bytes,
+                                    result.is_batch,
                                 ).await;
                             }
                             // Phase 2 sibling auto-expand: when the
@@ -2730,6 +2731,7 @@ pub async fn search_batch_releases(
                         &result.title,
                         &result.group,
                         result.size_bytes,
+                        result.is_batch,
                     ).await;
                 }
             }
@@ -2981,6 +2983,7 @@ pub async fn grab_batch_result(
                 &title,
                 &group,
                 size_bytes,
+                true,
             ).await;
         }
         // Phase 2 sibling auto-expand. Skip when selective narrowing
@@ -3154,7 +3157,7 @@ pub async fn grab_interactive_result(
             &state.db, &info_hash, &title, sid, &[episode_number], false,
         ).await;
         let _ = episode_tags::record_grab(
-            &state.db, sid, episode_number, &classification, &title, &group, size_bytes,
+            &state.db, sid, episode_number, &classification, &title, &group, size_bytes, false,
         ).await;
     }
 

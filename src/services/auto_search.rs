@@ -159,6 +159,7 @@ pub async fn find_all_for_target(
     let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
+    let sibling_aliases = collect_sibling_aliases(detail, &aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
@@ -179,6 +180,7 @@ pub async fn find_all_for_target(
 
     let ctx = InteractiveQueryCtx {
         aliases: &aliases,
+        sibling_aliases: &sibling_aliases,
         preferred_groups: &preferred_groups,
         preferred_resolution: &preferred_res,
         target,
@@ -347,6 +349,7 @@ pub async fn collect_scored_batches_for_target(
     let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
+    let sibling_aliases = collect_sibling_aliases(detail, &aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
@@ -369,6 +372,7 @@ pub async fn collect_scored_batches_for_target(
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
+        sibling_aliases: &sibling_aliases,
         preferred_groups: &preferred_groups,
         preferred_resolution: &preferred_res,
         target,
@@ -512,6 +516,7 @@ async fn collect_scored_for_target(
     let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
+    let sibling_aliases = collect_sibling_aliases(detail, &aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
@@ -547,6 +552,7 @@ async fn collect_scored_for_target(
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
+        sibling_aliases: &sibling_aliases,
         preferred_groups: &preferred_groups,
         preferred_resolution: &preferred_res,
         target,
@@ -674,6 +680,11 @@ async fn collect_scored_for_target(
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
     aliases: &'a [String],
+    /// Titles of sibling entries (sequels, prequels, side stories) from
+    /// AniList relations. A release whose token overlap with any sibling
+    /// beats its overlap with every own-alias is rejected — see
+    /// `collect_sibling_aliases` for the JJK S1→S3 motivating case.
+    sibling_aliases: &'a [String],
     preferred_groups: &'a [String],
     preferred_resolution: &'a str,
     target: &'a SearchTarget,
@@ -698,6 +709,7 @@ struct AutoQueryCtx<'a> {
 #[derive(Clone, Copy)]
 struct InteractiveQueryCtx<'a> {
     aliases: &'a [String],
+    sibling_aliases: &'a [String],
     preferred_groups: &'a [String],
     preferred_resolution: &'a str,
     target: &'a SearchTarget,
@@ -766,7 +778,14 @@ async fn run_queries(
                 }
                 let is_seadex_best = is_seadex_match(&result.info_hash, ctx.seadex_hashes);
                 if !is_seadex_best {
-                    if !matches_target(&result.title, ctx.aliases, ctx.target, ctx.expected_season, ctx.batch_episode_match && result.is_batch) {
+                    if !matches_target(
+                        &result.title,
+                        ctx.aliases,
+                        ctx.sibling_aliases,
+                        ctx.target,
+                        ctx.expected_season,
+                        ctx.batch_episode_match && result.is_batch,
+                    ) {
                         continue;
                     }
                 } else {
@@ -842,6 +861,12 @@ async fn run_queries_interactive(
                     || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
             });
             if !alias_match {
+                continue;
+            }
+            // Sibling rejection: same sequel/prequel guard as the auto
+            // path — a release that matches a sibling more tightly than
+            // us is almost certainly for the sibling.
+            if sibling_match_rejects(&title_tokens, ctx.aliases, ctx.sibling_aliases) {
                 continue;
             }
             // Season check: reject results clearly from a different season
@@ -1046,6 +1071,147 @@ pub fn collect_aliases(detail: &AnimeDetail) -> Vec<String> {
     ])
 }
 
+/// Distinctive titles of this series' siblings (sequels, prequels, side
+/// stories, alternative versions, spin-offs, summaries) — used to reject
+/// releases that look MORE like a sibling than the target.
+///
+/// The motivating bug: auto-searching for Jujutsu Kaisen S1 E6 grabbed a
+/// release titled `[Erai-raws] Jujutsu Kaisen: Shimetsu Kaiyuu - Zenpen -
+/// 06`, which is actually an S2/S3 arc. The existing season_mismatch()
+/// heuristic only catches explicit `S02` / `Season 2` markers; an arc
+/// title like "Shimetsu Kaiyuu" slips through. But AniList knows that
+/// "Jujutsu Kaisen: Shimetsu Kaiyuu" is a SEQUEL of JJK S1 — so we can
+/// use the relation graph to derive the distinctive tokens that, when
+/// present in a release filename, mean "this is the sibling, not me".
+///
+/// Returns sibling titles only where the sibling's normalized title is
+/// NOT a substring of any of this target's own aliases (otherwise the
+/// sibling title would match the target too — e.g. a prequel sharing
+/// the base franchise name is not a useful discriminator). The returned
+/// titles are still raw (un-normalized) so the matching logic can
+/// re-normalize them the same way it does the release title.
+pub fn collect_sibling_aliases(detail: &AnimeDetail, own_aliases: &[String]) -> Vec<String> {
+    if detail.id <= 0 || detail.relations.is_empty() {
+        return Vec::new();
+    }
+
+    // Normalized own-alias set — used to filter out sibling titles that
+    // are themselves substrings of one of our own aliases (those would
+    // substring-match us too, so they're not distinctive).
+    let normalized_own: Vec<String> = own_aliases
+        .iter()
+        .map(|a| normalize_title(a))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut out: Vec<String> = Vec::new();
+    for rel in &detail.relations {
+        if !rel.media_type.eq_ignore_ascii_case("ANIME") {
+            continue;
+        }
+        if !is_pack_candidate_relation(&rel.relation_type) {
+            continue;
+        }
+        // Consider all three title fields so romaji-only or native-only
+        // titles still contribute. The de-dup below squashes repeats.
+        for raw in [
+            rel.title_english.as_str(),
+            rel.title_romaji.as_str(),
+            rel.title_native.as_str(),
+        ] {
+            if raw.is_empty() {
+                continue;
+            }
+            let normalized = normalize_title(raw);
+            // Need ≥ 2 tokens for the sibling title to be a meaningful
+            // discriminator — a single token is too generic and will
+            // false-positive on unrelated releases that happen to share
+            // a common word.
+            if normalized.split_whitespace().count() < 2 {
+                continue;
+            }
+            // Skip sibling titles whose normalized form is a substring
+            // of one of our own aliases — those can't tell us apart
+            // from the target.
+            if normalized_own.iter().any(|own| own.contains(&normalized)) {
+                continue;
+            }
+            out.push(raw.to_string());
+        }
+    }
+    dedupe_strings(out)
+}
+
+/// Reject a release when it looks MORE like one of our siblings than
+/// it does like us. The check compares token overlap: if any sibling
+/// alias shares strictly more tokens with the release than the best
+/// target alias does, the release is for the sibling.
+///
+/// Returns `true` to reject, `false` to keep.
+///
+/// Called from `matches_target` and the interactive-search path. Both
+/// are guarded by an upstream basic alias-match, so by the time we get
+/// here the release already passes the "could plausibly be us" gate —
+/// the sibling check is the last defense against "plausibly us" also
+/// being "more plausibly a sibling".
+fn sibling_match_rejects(
+    normalized_release_tokens: &HashSet<String>,
+    own_aliases: &[String],
+    sibling_aliases: &[String],
+) -> bool {
+    if sibling_aliases.is_empty() {
+        return false;
+    }
+
+    // Best token overlap COUNT between release and any of our own aliases.
+    // Using absolute overlap count (not ratio) so a sibling with 4 matching
+    // tokens beats a target alias with 2 matching tokens even if the target
+    // alias has fewer tokens overall.
+    let best_own_overlap: usize = own_aliases
+        .iter()
+        .map(|a| {
+            let tokens = token_set(&normalize_title(a));
+            normalized_release_tokens.intersection(&tokens).count()
+        })
+        .max()
+        .unwrap_or(0);
+
+    for sibling in sibling_aliases {
+        let normalized_sibling = normalize_title(sibling);
+        let sibling_tokens = token_set(&normalized_sibling);
+        if sibling_tokens.is_empty() {
+            continue;
+        }
+        let sibling_overlap = normalized_release_tokens
+            .intersection(&sibling_tokens)
+            .count();
+        // Strictly greater: a tie means both the target and the sibling
+        // match equally well, which is the normal case for a release
+        // like "Jujutsu Kaisen - 06" where sibling "Jujutsu Kaisen 2nd
+        // Season" also overlaps on {jujutsu, kaisen}. Only reject when
+        // the sibling picks up EXTRA tokens that the target doesn't.
+        if sibling_overlap > best_own_overlap {
+            // Also require that the sibling's entire normalized title
+            // is either a contiguous substring of the release or that
+            // ALL of its tokens appear in the release. This prevents
+            // freak two-token overlaps ("side story" + some other
+            // common fragment) from tripping the rejection.
+            let normalized_release_joined: String = normalized_release_tokens
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let all_tokens_present = sibling_tokens
+                .iter()
+                .all(|t| normalized_release_tokens.contains(t));
+            if all_tokens_present || normalized_release_joined.contains(&normalized_sibling) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Extended aliases: synonyms + decomposed sub-phrases from compound titles.
 /// Only used as a fallback when primary aliases don't find results.
 pub fn collect_extended_aliases(detail: &AnimeDetail) -> Vec<String> {
@@ -1148,7 +1314,14 @@ pub fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     out
 }
 
-pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, expected_season: i32, allow_batch_episode: bool) -> bool {
+pub fn matches_target(
+    title: &str,
+    aliases: &[String],
+    sibling_aliases: &[String],
+    target: &SearchTarget,
+    expected_season: i32,
+    allow_batch_episode: bool,
+) -> bool {
     let normalized_title = normalize_title(title);
     let title_tokens = token_set(&normalized_title);
 
@@ -1159,6 +1332,13 @@ pub fn matches_target(title: &str, aliases: &[String], target: &SearchTarget, ex
     });
 
     if !alias_match {
+        return false;
+    }
+
+    // Sibling rejection: if the release looks more like a sequel /
+    // prequel / side story than it looks like us, reject. See the
+    // JJK S1→S3 case in the `collect_sibling_aliases` docstring.
+    if sibling_match_rejects(&title_tokens, aliases, sibling_aliases) {
         return false;
     }
 
@@ -2629,6 +2809,7 @@ mod tests {
             !matches_target(
                 unrelated_release,
                 &aliases,
+                &[],
                 &SearchTarget::Episode(1),
                 0,
                 false,
@@ -2644,7 +2825,73 @@ mod tests {
         assert!(matches_target(
             good_release,
             &aliases,
+            &[],
             &SearchTarget::Single,
+            0,
+            false,
+        ));
+    }
+
+    #[test]
+    fn matches_target_rejects_sibling_arc_release() {
+        // Regression: auto-searching JJK S1 E6 used to grab
+        // `[Erai-raws] Jujutsu Kaisen: Shimetsu Kaiyuu - Zenpen - 06`
+        // because the sibling arc title has no explicit "S02"/"Season 2"
+        // marker for `season_mismatch` to catch, but "Jujutsu Kaisen" is
+        // a substring of the release. The sibling check resolves this:
+        // the sibling alias "Jujutsu Kaisen: Shimetsu Kaiyuu" has 4
+        // overlapping tokens with the release vs the target's 2, so the
+        // sibling wins and the release is rejected.
+        let own = vec!["Jujutsu Kaisen".to_string()];
+        let siblings = vec!["Jujutsu Kaisen: Shimetsu Kaiyuu".to_string()];
+        let release = "[Erai-raws] Jujutsu Kaisen: Shimetsu Kaiyuu - Zenpen - 06 [1080p CR WEBRip HEVC AAC].mkv";
+        assert!(
+            !matches_target(
+                release,
+                &own,
+                &siblings,
+                &SearchTarget::Episode(6),
+                1,
+                false,
+            ),
+            "sibling arc release must not match the base-franchise target"
+        );
+    }
+
+    #[test]
+    fn matches_target_keeps_base_franchise_release_despite_siblings() {
+        // Symmetric: with the same sibling list, a plain JJK S1 release
+        // should still match the target. The sibling overlaps on only
+        // 2 tokens ({jujutsu, kaisen}) — the same as the target's own
+        // overlap — so the sibling check is a no-op.
+        let own = vec!["Jujutsu Kaisen".to_string()];
+        let siblings = vec!["Jujutsu Kaisen: Shimetsu Kaiyuu".to_string()];
+        let release = "[Erai-raws] Jujutsu Kaisen - 06 [1080p].mkv";
+        assert!(matches_target(
+            release,
+            &own,
+            &siblings,
+            &SearchTarget::Episode(6),
+            1,
+            false,
+        ));
+    }
+
+    #[test]
+    fn matches_target_keeps_target_arc_release_against_unrelated_sibling() {
+        // A JJK S2 Shibuya Incident target should still accept its own
+        // arc release even when the sibling list includes another arc.
+        let own = vec!["Jujutsu Kaisen: Shimetsu Kaiyuu".to_string()];
+        let siblings = vec![
+            "Jujutsu Kaisen".to_string(),
+            "Jujutsu Kaisen: Kaigyoku Gyokusetsu".to_string(),
+        ];
+        let release = "[Erai-raws] Jujutsu Kaisen: Shimetsu Kaiyuu - Zenpen - 06 [1080p].mkv";
+        assert!(matches_target(
+            release,
+            &own,
+            &siblings,
+            &SearchTarget::Episode(6),
             0,
             false,
         ));

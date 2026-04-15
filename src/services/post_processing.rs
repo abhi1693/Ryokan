@@ -242,7 +242,6 @@ async fn import_torrent(
     grab: &grabbed_torrents::GrabbedTorrent,
     torrent_hash: &str,
     torrent_save_path: &str,
-    qbit_torrent_name: &str,
 ) -> Result<bool, String> {
     // Phase 2: look up per-file routing rows written by the auto-expand
     // path. A non-empty result means this grab was an auto-expanded
@@ -304,16 +303,22 @@ async fn import_torrent(
     // Unique series_ids that had at least one file successfully
     // imported — drives the per-series NFO/poster write after the loop.
     let mut touched_series: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
-    // Per-target-series (episode number, individual file size) pairs for
-    // every file we successfully landed. Replaces the
-    // `grab.episode_numbers`-based mark_completed at the end of the loop:
-    // bare batch grabs arrive here with an empty episode list on the
-    // parent grab row, but we've already parsed ep_num per file above so
-    // we can mark completed with the real list instead. The per-file
-    // size (not the total torrent size) is what the episode detail modal
-    // surfaces to the user — a batch torrent's aggregate size across ~12
-    // episodes is not a meaningful per-episode number.
-    let mut imported_eps_by_series: HashMap<i64, Vec<(i32, i64)>> = HashMap::new();
+    // Per-target-series tuple (episode number, individual file size,
+    // post-processed on-disk file name) for every file we successfully
+    // landed. Replaces the `grab.episode_numbers`-based mark_completed
+    // at the end of the loop: bare batch grabs arrive here with an
+    // empty episode list on the parent grab row, but we've already
+    // parsed ep_num per file above so we can mark completed with the
+    // real list instead.
+    //
+    // The per-file size feeds `mark_grab_history_completed`'s
+    // non-batch-only size-refine path (batch rows retain their whole-
+    // torrent total so the episode detail modal can show "from an
+    // X GiB batch"). The on-disk file name feeds the same function so
+    // each per-episode row carries the Sonarr-style renamed basename
+    // (e.g. `Jujutsu Kaisen - S01E06 - Hidden Inventory.mkv`) instead
+    // of the batch torrent's release title.
+    let mut imported_eps_by_series: HashMap<i64, Vec<(i32, i64, String)>> = HashMap::new();
     let mut imported_count = 0_usize;
 
     for (file_idx, file) in &video_files {
@@ -620,6 +625,7 @@ async fn import_torrent(
                         &grab.torrent_name,
                         "",
                         file.size,
+                        grab.is_batch,
                     )
                     .await
                     .map(|_| ())
@@ -673,10 +679,15 @@ async fn import_torrent(
                     }
                 }
 
+                let dest_basename = dest_video
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(filename_only)
+                    .to_string();
                 imported_eps_by_series
                     .entry(target_series_id)
                     .or_default()
-                    .push((ep_num, file.size));
+                    .push((ep_num, file.size, dest_basename));
             }
             Err(e) => {
                 logger::error(
@@ -733,18 +744,21 @@ async fn import_torrent(
     // Two flips happen per episode: the quality-tag row (via
     // `mark_completed`) and the newest 'grabbed' history row (via
     // `mark_grab_history_completed`). The history flip stamps in the
-    // real qBit torrent name and the per-file size so the episode
-    // detail modal can show both in the history table.
+    // per-episode post-processed file name (Sonarr-style renamed
+    // basename) and — only for non-batch rows — refines size_bytes to
+    // the imported file's real size. Batch rows keep the whole-
+    // torrent total so the episode detail modal can report "this
+    // episode came from an X GiB batch".
     for (series_id, episodes) in &imported_eps_by_series {
-        let ep_nums: Vec<i32> = episodes.iter().map(|(n, _)| *n).collect();
+        let ep_nums: Vec<i32> = episodes.iter().map(|(n, _, _)| *n).collect();
         let _ = episode_tags::mark_completed(&state.db, *series_id, &ep_nums).await;
-        for (ep_num, size_bytes) in episodes {
+        for (ep_num, file_size, file_name) in episodes {
             let _ = episode_tags::mark_grab_history_completed(
                 &state.db,
                 *series_id,
                 *ep_num,
-                qbit_torrent_name,
-                *size_bytes,
+                file_name,
+                *file_size,
             )
             .await;
         }
@@ -866,7 +880,7 @@ pub async fn run_once(state: &AppState) {
             continue;
         }
 
-        match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path, &torrent.name).await {
+        match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
             Ok(true) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
@@ -1179,6 +1193,10 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             let file_size = std::fs::metadata(&item.file_path)
                 .map(|m| m.len() as i64)
                 .unwrap_or(0);
+            // Externally-imported file — we're creating both the quality
+            // tag and the grab history row from thin air. `is_batch` is
+            // looked up above from the optional matching grabbed_torrents
+            // row; falls back to false for truly external files.
             let _ = episode_tags::record_grab(
                 &state.db,
                 item.series_id,
@@ -1187,6 +1205,7 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                 classify_title,
                 "",
                 file_size,
+                is_batch,
             )
             .await;
             let _ = episode_tags::mark_completed(
@@ -1195,16 +1214,19 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                 &[item.episode_number],
             )
             .await;
-            // Also flip the fresh grab history row to 'completed' with
-            // the actual file size. No qBit torrent name exists for
-            // externally-imported files — fall back to the classify
-            // title (same as release_title) so the modal shows
-            // something.
+            // Flip the fresh grab history row to 'completed' and stamp
+            // in the on-disk file basename for the episode detail modal.
+            let imported_basename = item
+                .file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(classify_title)
+                .to_string();
             let _ = episode_tags::mark_grab_history_completed(
                 &state.db,
                 item.series_id,
                 item.episode_number,
-                classify_title,
+                &imported_basename,
                 file_size,
             )
             .await;

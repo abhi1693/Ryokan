@@ -404,6 +404,8 @@ fieldset legend {
 
 /* --- Seed/leech counts --- */
 .seed-count { color: var(--green); font-family: var(--font-mono); font-weight: 600; }
+.leech-count { color: var(--red); font-family: var(--font-mono); font-weight: 600; }
+.peer-sep { color: var(--text-dim); font-family: var(--font-mono); }
 .leech-count { color: var(--red); font-family: var(--font-mono); }
 .dl-count { color: var(--text-dim); font-family: var(--font-mono); }
 
@@ -2936,10 +2938,11 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     background: var(--bg-elevated);
 }
 
-.interactive-search-table .col-score { width: 55px; text-align: center; }
-.interactive-search-table .col-grab  { width: 70px; text-align: right; }
-.interactive-search-table .col-size  { width: 80px; white-space: nowrap; }
-.interactive-search-table .col-seeds { width: 50px; text-align: right; }
+.interactive-search-table .col-score   { width: 55px; text-align: center; }
+.interactive-search-table .col-grab    { width: 70px; text-align: right; }
+.interactive-search-table .col-size    { width: 80px; white-space: nowrap; }
+.interactive-search-table .col-seeds   { width: 78px; text-align: right; white-space: nowrap; }
+.interactive-search-table .col-quality { width: 120px; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
 
 .is-modal-scroll {
     overflow-y: auto;

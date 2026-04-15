@@ -78,17 +78,24 @@ pub struct GrabHistoryEntry {
     pub quality_tag: String,
     pub release_title: String,
     pub release_group: String,
-    /// On-disk torrent name. Seeded from the Nyaa release title at grab
-    /// time, overwritten with the actual qBittorrent torrent name when
-    /// post-processing completes — useful when qBit renamed the torrent
-    /// via an auto-management rule and the user is trying to reconcile
-    /// what they see in qBit's UI with Ryokan's history.
-    pub torrent_name: String,
-    /// Individual imported file size for completed entries; falls back to
-    /// the Nyaa-reported total torrent size for grabbed/pending entries.
-    /// Zero if the grab predates the size_bytes column (pre-migration
-    /// rows) or the size couldn't be determined.
+    /// Post-processed on-disk file name for this episode. Seeded with
+    /// the Nyaa release title at grab time, then overwritten with the
+    /// Sonarr-style renamed file once post-processing imports the
+    /// episode (e.g. `Jujutsu Kaisen - S01E06 - Hidden Inventory.mkv`).
+    /// This is distinct from `release_title`, which carries the batch
+    /// torrent's title unchanged even for per-episode rows of a pack.
+    pub file_name: String,
+    /// Size reported at grab time. For batch grabs this is the **whole
+    /// torrent** total (same value replicated across every episode row
+    /// of the batch — the episode detail modal reads it as "this came
+    /// from an X GiB batch"). For single-episode grabs it is refined to
+    /// the imported file's true size at post-process time. Zero only
+    /// for pre-migration rows or cases where the size was never known.
     pub size_bytes: i64,
+    /// True when the originating grab was a batch/pack. Used by the UI
+    /// to decide whether `size_bytes` represents a whole-torrent total
+    /// or a single-file size.
+    pub is_batch: bool,
     pub grabbed_at: String,
     pub state: String,
 }
@@ -135,6 +142,7 @@ pub struct EpisodeQualityTag {
 /// are written alongside it on `episode_quality_tags`. `manual_override` is
 /// intentionally preserved across re-grabs — a user-set override should
 /// stick even when a newer grab comes in.
+#[allow(clippy::too_many_arguments)]
 pub async fn record_grab(
     db: &SqlitePool,
     series_id: i64,
@@ -143,6 +151,7 @@ pub async fn record_grab(
     release_title: &str,
     release_group: &str,
     size_bytes: i64,
+    is_batch: bool,
 ) -> Result<i64, sqlx::Error> {
     let quality_tag = classification.label();
     let source_str = classification.source.as_str();
@@ -159,14 +168,19 @@ pub async fn record_grab(
     let evidence_json =
         serde_json::to_string(&classification.evidence).unwrap_or_default();
 
-    // Seed `torrent_name` with the Nyaa release title — post-processing
-    // will overwrite it with the real qBit torrent name once the
-    // download resolves. `size_bytes` starts as the Nyaa-reported total
-    // torrent size and gets replaced with the individual imported file
-    // size in `mark_grab_history_completed`.
+    // Seed `file_name` with the Nyaa release title. For non-batch grabs
+    // post-processing later overwrites it with the Sonarr-style renamed
+    // on-disk file. For batch grabs each per-episode row gets its own
+    // on-disk file name too, populated from the landed filename rather
+    // than the batch torrent's title. `size_bytes` is whatever Nyaa
+    // reported for the whole torrent — for a batch it stays as the
+    // pack total (every episode row of the batch has the same value);
+    // for a single-episode it gets refined to the per-file size at
+    // import time.
+    let is_batch_i: i64 = if is_batch { 1 } else { 0 };
     let history_id: i64 = sqlx::query_scalar(
-        "INSERT INTO episode_grab_history (series_id, episode_number, quality_tag, release_title, release_group, torrent_name, size_bytes, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'grabbed')
+        "INSERT INTO episode_grab_history (series_id, episode_number, quality_tag, release_title, release_group, file_name, size_bytes, is_batch, state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'grabbed')
          RETURNING id",
     )
     .bind(series_id)
@@ -176,6 +190,7 @@ pub async fn record_grab(
     .bind(release_group)
     .bind(release_title)
     .bind(size_bytes)
+    .bind(is_batch_i)
     .fetch_one(db)
     .await?;
 
@@ -288,8 +303,9 @@ pub async fn get_grab_history(
 ) -> Result<Vec<GrabHistoryEntry>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id, quality_tag, release_title, release_group,
-                COALESCE(torrent_name, '') AS torrent_name,
+                COALESCE(file_name, '') AS file_name,
                 COALESCE(size_bytes, 0) AS size_bytes,
+                COALESCE(is_batch, 0) AS is_batch,
                 grabbed_at, state
          FROM episode_grab_history
          WHERE series_id = ? AND episode_number = ?
@@ -302,15 +318,19 @@ pub async fn get_grab_history(
 
     Ok(rows
         .iter()
-        .map(|row| GrabHistoryEntry {
-            id: row.get("id"),
-            quality_tag: row.get("quality_tag"),
-            release_title: row.get("release_title"),
-            release_group: row.get("release_group"),
-            torrent_name: row.get("torrent_name"),
-            size_bytes: row.get("size_bytes"),
-            grabbed_at: row.get("grabbed_at"),
-            state: row.get("state"),
+        .map(|row| {
+            let is_batch_i: i64 = row.get("is_batch");
+            GrabHistoryEntry {
+                id: row.get("id"),
+                quality_tag: row.get("quality_tag"),
+                release_title: row.get("release_title"),
+                release_group: row.get("release_group"),
+                file_name: row.get("file_name"),
+                size_bytes: row.get("size_bytes"),
+                is_batch: is_batch_i != 0,
+                grabbed_at: row.get("grabbed_at"),
+                state: row.get("state"),
+            }
         })
         .collect())
 }
@@ -492,30 +512,35 @@ pub async fn mark_completed(
 }
 
 /// Flip the newest 'grabbed' `episode_grab_history` row for an episode to
-/// 'completed', stamping in the real on-disk torrent name and the
-/// *individual* imported file's size. Called by post-processing once per
-/// imported file, immediately before / alongside `mark_completed`.
+/// 'completed', stamping in the Sonarr-style post-processed on-disk file
+/// name and (for non-batch rows only) refining `size_bytes` to the
+/// imported file's true size. Called by post-processing once per imported
+/// file, immediately before / alongside `mark_completed`.
 ///
 /// Only the latest grabbed row for that episode is touched — older rows
 /// from previous grabs stay as-is (they'll be 'grabbed' forever or were
-/// already marked 'failed'/'removed' by the upgrade/removal path). This
-/// mirrors `mark_grab_failed`'s "newest matching row" semantics but for
-/// the happy path.
+/// already marked 'failed'/'removed' by the upgrade/removal path).
 ///
-/// `torrent_name` is the qBittorrent torrent name (not the Nyaa release
-/// title); `size_bytes` is the single file's size, not the batch total.
+/// `file_name` is the on-disk basename after post-processing's rename
+/// step (e.g. `Jujutsu Kaisen - S01E06 - Hidden Inventory.mkv`).
+/// `file_size_bytes` is the single imported file's size.
+///
+/// The `size_bytes` CASE guard enforces the invariant that batch rows
+/// continue to hold the whole-torrent total (not the per-episode file
+/// size), so the episode detail modal can surface "this episode came
+/// from an X GiB batch" without losing the pack total on import.
 pub async fn mark_grab_history_completed(
     db: &SqlitePool,
     series_id: i64,
     episode_number: i32,
-    torrent_name: &str,
-    size_bytes: i64,
+    file_name: &str,
+    file_size_bytes: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE episode_grab_history
          SET state = 'completed',
-             torrent_name = ?,
-             size_bytes = ?
+             file_name = ?,
+             size_bytes = CASE WHEN COALESCE(is_batch, 0) = 1 THEN size_bytes ELSE ? END
          WHERE id = (
              SELECT id FROM episode_grab_history
              WHERE series_id = ? AND episode_number = ? AND state = 'grabbed'
@@ -523,8 +548,8 @@ pub async fn mark_grab_history_completed(
              LIMIT 1
          )",
     )
-    .bind(torrent_name)
-    .bind(size_bytes)
+    .bind(file_name)
+    .bind(file_size_bytes)
     .bind(series_id)
     .bind(episode_number)
     .execute(db)

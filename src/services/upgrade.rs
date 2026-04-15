@@ -258,6 +258,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             &result.title,
                             &result.group,
                             result.size_bytes,
+                            result.is_batch,
                         )
                         .await;
                     }
