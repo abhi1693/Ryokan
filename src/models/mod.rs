@@ -597,6 +597,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
 
+    // Per-route episode offset for the Phase 2 auto-expand path.
+    // Applied by post_processing at rename time to convert a file's
+    // absolute episode number into the sibling's arc-local episode
+    // number (e.g. smol Monogatari batch: E14 → E01 of Owari S2 with
+    // offset 13, NoobSubs JoJo: E25 → E01 of Egypt-hen with offset 24).
+    // Non-offset siblings (filenames numbered arc-local from 1) get
+    // offset 0, matching the legacy default for rows written before
+    // this column existed.
+    sqlx::query("ALTER TABLE grabbed_torrent_series ADD COLUMN episode_offset INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.
     sqlx::query("ALTER TABLE series ADD COLUMN tmdb_id INTEGER")

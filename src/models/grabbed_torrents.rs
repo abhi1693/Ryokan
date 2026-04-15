@@ -89,6 +89,13 @@ pub struct GrabSeriesRoute {
     pub file_indices: Vec<usize>,
     pub episode_numbers: Vec<i32>,
     pub matched_subtitle: String,
+    /// Amount to subtract from each file's parsed episode number at
+    /// rename/tag time. Non-zero for siblings whose files use
+    /// numbering that's continuous across the parent (e.g. an E14
+    /// file in a 20-ep Owarimonogatari batch is actually Owari S2's
+    /// E01 and needs `episode_offset = 13`). Zero for siblings with
+    /// arc-local numbering.
+    pub episode_offset: i32,
 }
 
 /// Write one or more `grabbed_torrent_series` rows for a freshly
@@ -108,14 +115,15 @@ pub async fn record_grab_series_routes(
             .unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
             r#"INSERT OR REPLACE INTO grabbed_torrent_series
-               (grab_id, series_id, file_indices, episode_numbers, matched_subtitle)
-               VALUES (?, ?, ?, ?, ?)"#,
+               (grab_id, series_id, file_indices, episode_numbers, matched_subtitle, episode_offset)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
         )
         .bind(route.grab_id)
         .bind(route.series_id)
         .bind(&file_indices_json)
         .bind(&eps_json)
         .bind(&route.matched_subtitle)
+        .bind(route.episode_offset)
         .execute(db)
         .await?;
     }
@@ -130,8 +138,11 @@ pub async fn get_series_routes(
     db: &SqlitePool,
     grab_id: i64,
 ) -> Result<Vec<GrabSeriesRoute>, sqlx::Error> {
+    // COALESCE on episode_offset keeps legacy rows (written before
+    // the ALTER TABLE migration) readable as offset=0.
     let rows = sqlx::query(
-        r#"SELECT grab_id, series_id, file_indices, episode_numbers, matched_subtitle
+        r#"SELECT grab_id, series_id, file_indices, episode_numbers, matched_subtitle,
+                  COALESCE(episode_offset, 0) AS episode_offset
            FROM grabbed_torrent_series
            WHERE grab_id = ?"#,
     )
@@ -154,6 +165,7 @@ pub async fn get_series_routes(
                 file_indices: file_idx.into_iter().map(|i| i as usize).collect(),
                 episode_numbers,
                 matched_subtitle: row.get("matched_subtitle"),
+                episode_offset: row.get("episode_offset"),
             }
         })
         .collect())

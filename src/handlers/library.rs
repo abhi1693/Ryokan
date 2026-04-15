@@ -2125,6 +2125,10 @@ async fn auto_expand_library_from_pack_with_files(
             file_indices: sibling.file_indices,
             episode_numbers: ep_nums,
             matched_subtitle: sibling.matched_subtitle,
+            // Wired through from sibling.episode_offset in Commit 5;
+            // for now the schema column exists and every row writes 0
+            // so legacy behavior is preserved.
+            episode_offset: 0,
         });
     }
 
@@ -2168,6 +2172,9 @@ async fn auto_expand_library_from_pack_with_files(
             file_indices: parent_file_indices,
             episode_numbers: parent_episode_numbers.to_vec(),
             matched_subtitle: String::new(),
+            // Parent-route files always use their own arc-local
+            // numbering — no offset ever needed here.
+            episode_offset: 0,
         });
     }
 
