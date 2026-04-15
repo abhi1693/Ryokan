@@ -194,9 +194,15 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
 
 /// Extract quality/resolution from filename.
 fn parse_quality(lower: &str) -> String {
-    // Source type.
+    // Source type. Names match `ClassificationResult::label()` in
+    // `source.rs` so disk-scanned fallback strings render the same as
+    // classifier-derived ones ("BD-1080p", "WEBDL-1080p", etc.). This
+    // path can't distinguish BD Remux / BD-RAW from filename tokens
+    // alone; the classifier handles those through the structured
+    // columns so the quality shown for a properly-classified episode
+    // comes from `tag.quality_tag`, not from here.
     let source = if lower.contains("bluray") || lower.contains("blu-ray") || lower.contains("bdrip") || lower.contains("[bd") || lower.contains("(bd") {
-        "Bluray"
+        "BD"
     } else if lower.contains("webdl") || lower.contains("web-dl") || lower.contains("web dl") {
         "WEBDL"
     } else if lower.contains("webrip") || lower.contains("web-rip") {

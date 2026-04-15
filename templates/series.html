@@ -393,11 +393,11 @@
                 <label class="form-row">
                     <span class="form-label">Source</span>
                     <select id="override-source" class="folder-select">
-                        <option value="bluray_bdmv">BD-Raw (BDMV)</option>
+                        <option value="bluray_bdmv">BD-RAW</option>
                         <option value="bluray_remux">BD-Remux</option>
-                        <option value="bluray">BluRay</option>
-                        <option value="web_dl">WEB-DL</option>
-                        <option value="webrip">WEBRip</option>
+                        <option value="bluray">BD</option>
+                        <option value="web_dl">WEBDL</option>
+                        <option value="webrip">WEBRIP</option>
                         <option value="dvd">DVD</option>
                         <option value="hdtv">HDTV</option>
                         <option value="tv">TV</option>
@@ -567,6 +567,14 @@ function showEpisodeDetail(epNum, btn) {
     }
 }
 
+function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return '';
+    const gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return gb.toFixed(1) + ' GiB';
+    const mb = bytes / (1024 * 1024);
+    return Math.round(mb) + ' MiB';
+}
+
 function renderGrabHistory(entries, epNum) {
     const el = document.getElementById('grab-history-body');
     if (!el) return;
@@ -574,20 +582,37 @@ function renderGrabHistory(entries, epNum) {
         el.textContent = 'No grab history.';
         return;
     }
-    let html = '<table class="grab-history-table"><thead><tr><th>Quality</th><th>Release</th><th>Group</th><th>Date</th><th>State</th><th></th></tr></thead><tbody>';
+    // Table lives inside a scroll container so history past 10 entries
+    // scrolls within the modal rather than blowing out modal height.
+    let html = '<div class="grab-history-scroll"><table class="grab-history-table"><thead><tr><th>Quality</th><th>Release</th><th>Torrent Name</th><th>Group</th><th>Size</th><th>Date</th><th>State</th><th></th></tr></thead><tbody>';
     for (const e of entries) {
-        const stateClass = e.state === 'failed' ? 'grab-state-failed' : e.state === 'removed' ? 'grab-state-removed' : 'grab-state-grabbed';
+        const stateClass = e.state === 'failed' ? 'grab-state-failed'
+            : e.state === 'removed' ? 'grab-state-removed'
+            : e.state === 'completed' ? 'grab-state-completed'
+            : 'grab-state-grabbed';
+        // Only active 'grabbed' rows can be manually failed — once
+        // post-processing flips to 'completed' the user should delete
+        // the file or trigger an upgrade instead.
         const canFail = e.state === 'grabbed';
+        // Torrent name column falls back to the release title when the
+        // grab never completed (pre-post-process rows, RSS items).
+        const torrentName = e.torrent_name && e.torrent_name.length ? e.torrent_name : e.release_title;
+        const sameAsRelease = torrentName === e.release_title;
+        const torrentCell = sameAsRelease
+            ? '<span style="color:var(--text-dim)">—</span>'
+            : escHtml(torrentName);
         html += `<tr>
             <td>${escHtml(e.quality_tag)}</td>
-            <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.release_title)}">${escHtml(e.release_title)}</td>
+            <td class="grab-history-ellipsis" title="${escHtml(e.release_title)}">${escHtml(e.release_title)}</td>
+            <td class="grab-history-ellipsis" title="${escHtml(torrentName)}">${torrentCell}</td>
             <td>${escHtml(e.release_group)}</td>
+            <td style="white-space:nowrap;color:var(--text-dim)">${escHtml(formatBytes(e.size_bytes))}</td>
             <td style="white-space:nowrap;color:var(--text-dim)">${escHtml(e.grabbed_at)}</td>
             <td class="${stateClass}">${escHtml(e.state)}</td>
             <td>${canFail ? `<button class="btn-mark-failed" onclick="markEpisodeFailed(${e.id}, ${epNum}, this)">Mark Failed</button>` : ''}</td>
         </tr>`;
     }
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
     el.innerHTML = html;
 }
 
@@ -764,7 +789,8 @@ function grabInteractiveResult(epNum, idx, btn) {
             title: result.title,
             group: result.group,
             resolution: result.resolution,
-            info_hash: result.info_hash
+            info_hash: result.info_hash,
+            size_bytes: result.size_bytes || 0
         })
     })
     .then(async r => {
@@ -863,7 +889,8 @@ function grabInteractiveBatchResult(idx, btn) {
             title: result.title,
             group: result.group,
             resolution: result.resolution,
-            info_hash: result.info_hash
+            info_hash: result.info_hash,
+            size_bytes: result.size_bytes || 0
         })
     })
     .then(async r => {

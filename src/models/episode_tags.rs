@@ -78,6 +78,17 @@ pub struct GrabHistoryEntry {
     pub quality_tag: String,
     pub release_title: String,
     pub release_group: String,
+    /// On-disk torrent name. Seeded from the Nyaa release title at grab
+    /// time, overwritten with the actual qBittorrent torrent name when
+    /// post-processing completes — useful when qBit renamed the torrent
+    /// via an auto-management rule and the user is trying to reconcile
+    /// what they see in qBit's UI with Ryokan's history.
+    pub torrent_name: String,
+    /// Individual imported file size for completed entries; falls back to
+    /// the Nyaa-reported total torrent size for grabbed/pending entries.
+    /// Zero if the grab predates the size_bytes column (pre-migration
+    /// rows) or the size couldn't be determined.
+    pub size_bytes: i64,
     pub grabbed_at: String,
     pub state: String,
 }
@@ -131,6 +142,7 @@ pub async fn record_grab(
     classification: &ClassificationResult,
     release_title: &str,
     release_group: &str,
+    size_bytes: i64,
 ) -> Result<i64, sqlx::Error> {
     let quality_tag = classification.label();
     let source_str = classification.source.as_str();
@@ -147,9 +159,14 @@ pub async fn record_grab(
     let evidence_json =
         serde_json::to_string(&classification.evidence).unwrap_or_default();
 
+    // Seed `torrent_name` with the Nyaa release title — post-processing
+    // will overwrite it with the real qBit torrent name once the
+    // download resolves. `size_bytes` starts as the Nyaa-reported total
+    // torrent size and gets replaced with the individual imported file
+    // size in `mark_grab_history_completed`.
     let history_id: i64 = sqlx::query_scalar(
-        "INSERT INTO episode_grab_history (series_id, episode_number, quality_tag, release_title, release_group, state)
-         VALUES (?, ?, ?, ?, ?, 'grabbed')
+        "INSERT INTO episode_grab_history (series_id, episode_number, quality_tag, release_title, release_group, torrent_name, size_bytes, state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'grabbed')
          RETURNING id",
     )
     .bind(series_id)
@@ -157,6 +174,8 @@ pub async fn record_grab(
     .bind(&quality_tag)
     .bind(release_title)
     .bind(release_group)
+    .bind(release_title)
+    .bind(size_bytes)
     .fetch_one(db)
     .await?;
 
@@ -259,18 +278,22 @@ pub async fn get_for_series(
     Ok(map)
 }
 
-/// Get grab history for a specific episode (newest first, up to 10 entries).
+/// Get grab history for a specific episode, newest first. No LIMIT — the
+/// modal UI scrolls past the first 10 entries, and there are no known
+/// series with enough grabs for an unbounded SELECT to be a problem.
 pub async fn get_grab_history(
     db: &SqlitePool,
     series_id: i64,
     episode_number: i32,
 ) -> Result<Vec<GrabHistoryEntry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, quality_tag, release_title, release_group, grabbed_at, state
+        "SELECT id, quality_tag, release_title, release_group,
+                COALESCE(torrent_name, '') AS torrent_name,
+                COALESCE(size_bytes, 0) AS size_bytes,
+                grabbed_at, state
          FROM episode_grab_history
          WHERE series_id = ? AND episode_number = ?
-         ORDER BY grabbed_at DESC
-         LIMIT 10",
+         ORDER BY grabbed_at DESC",
     )
     .bind(series_id)
     .bind(episode_number)
@@ -284,6 +307,8 @@ pub async fn get_grab_history(
             quality_tag: row.get("quality_tag"),
             release_title: row.get("release_title"),
             release_group: row.get("release_group"),
+            torrent_name: row.get("torrent_name"),
+            size_bytes: row.get("size_bytes"),
             grabbed_at: row.get("grabbed_at"),
             state: row.get("state"),
         })
@@ -463,6 +488,47 @@ pub async fn mark_completed(
         .execute(db)
         .await?;
     }
+    Ok(())
+}
+
+/// Flip the newest 'grabbed' `episode_grab_history` row for an episode to
+/// 'completed', stamping in the real on-disk torrent name and the
+/// *individual* imported file's size. Called by post-processing once per
+/// imported file, immediately before / alongside `mark_completed`.
+///
+/// Only the latest grabbed row for that episode is touched — older rows
+/// from previous grabs stay as-is (they'll be 'grabbed' forever or were
+/// already marked 'failed'/'removed' by the upgrade/removal path). This
+/// mirrors `mark_grab_failed`'s "newest matching row" semantics but for
+/// the happy path.
+///
+/// `torrent_name` is the qBittorrent torrent name (not the Nyaa release
+/// title); `size_bytes` is the single file's size, not the batch total.
+pub async fn mark_grab_history_completed(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+    torrent_name: &str,
+    size_bytes: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE episode_grab_history
+         SET state = 'completed',
+             torrent_name = ?,
+             size_bytes = ?
+         WHERE id = (
+             SELECT id FROM episode_grab_history
+             WHERE series_id = ? AND episode_number = ? AND state = 'grabbed'
+             ORDER BY grabbed_at DESC
+             LIMIT 1
+         )",
+    )
+    .bind(torrent_name)
+    .bind(size_bytes)
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

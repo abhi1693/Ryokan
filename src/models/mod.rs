@@ -696,6 +696,8 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             quality_tag TEXT NOT NULL DEFAULT '',
             release_title TEXT NOT NULL DEFAULT '',
             release_group TEXT NOT NULL DEFAULT '',
+            torrent_name TEXT NOT NULL DEFAULT '',
+            size_bytes INTEGER NOT NULL DEFAULT 0,
             state TEXT NOT NULL DEFAULT 'grabbed',
             grabbed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
@@ -708,6 +710,26 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_episode_grab_history_series ON episode_grab_history (series_id, episode_number, grabbed_at DESC)")
         .execute(db)
         .await?;
+
+    // Original on-disk torrent name — seeded at grab time from the Nyaa
+    // release title, then overwritten at post-process time with the actual
+    // qBittorrent torrent name (which may differ for renamed/auto-managed
+    // torrents). The episode detail modal reads this so the user can see
+    // what qBit actually downloaded, not just what Ryokan asked for.
+    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN torrent_name TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // Episode-file size. At grab time this holds the Nyaa-reported total
+    // torrent size (best available before download). At post-process time
+    // it is replaced with the *individual* imported file's size — batches
+    // span many episodes so the per-episode row should reflect just its
+    // own file, not the aggregate torrent size.
+    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
 
     // auto_grab_on_add: whether to automatically search for monitored episodes after adding a series.
     sqlx::query("ALTER TABLE config ADD COLUMN auto_grab_on_add INTEGER NOT NULL DEFAULT 1")
@@ -964,6 +986,116 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await
     .ok();
+
+    // Rewrite denormalized `quality_tag` strings on pre-existing
+    // `episode_quality_tags` / `episode_grab_history` rows to match the
+    // Sonarr-parity label format the classifier now emits:
+    // `BD-1080p`, `BD-1080p Remux`, `BD-1080p RAW`, `WEBDL-1080p`,
+    // `WEBRip-1080p`, `WEB-1080p`, `HDTV-1080p`, `DVD-480p`, etc. This
+    // migration bridges two prior schemas: (1) very old space-joined
+    // rows like "BluRay 1080p" / "WEB-DL 1080p", and (2) the
+    // intermediate dash-joined rename (`BD-Remux-1080p`, `BD-RAW-1080p`,
+    // `WEBRIP-1080p`) that shipped briefly before the Sonarr-parity
+    // reorder landed.
+    //
+    // `episode_quality_tags` has the structured source/resolution/
+    // web_kind/is_remux/is_bdmv columns, so we regenerate `quality_tag`
+    // directly from ground truth — always correct regardless of which
+    // label format happened to be in the column. `episode_grab_history`
+    // doesn't carry the structured columns (it's a grab-time audit
+    // trail, not a classification store), so we fall back to ordered
+    // REPLACE statements on known legacy patterns. Fully idempotent:
+    // the regen overwrites with the same value on re-runs, and the
+    // REPLACE chain no-ops once its source patterns are gone.
+    sqlx::query(
+        r#"
+        UPDATE episode_quality_tags SET quality_tag = CASE
+            WHEN TRIM(COALESCE(source, '')) = ''
+              OR LOWER(source) = 'unknown' THEN
+                CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
+                     THEN 'Unknown' ELSE resolution END
+            ELSE
+                (CASE
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd') THEN 'BD'
+                    WHEN LOWER(source) = 'web' THEN
+                        CASE
+                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webdl', 'web-dl', 'web.dl') THEN 'WEBDL'
+                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webrip', 'web-rip', 'web.rip') THEN 'WEBRip'
+                            ELSE 'WEB'
+                        END
+                    ELSE UPPER(source)
+                END)
+                || CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
+                        THEN '' ELSE '-' || resolution END
+                || CASE
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd')
+                         AND COALESCE(is_bdmv, 0) = 1 THEN ' RAW'
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd')
+                         AND COALESCE(is_remux, 0) = 1 THEN ' Remux'
+                    ELSE ''
+                END
+        END
+        "#,
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // `episode_grab_history` replacements. Two-pass approach, since
+    // SQLite REPLACE is a dumb substring swap and can't reorder tokens
+    // around a variable-width resolution in one shot:
+    //
+    //   Pass A — normalize legacy space-joined tokens to the
+    //            intermediate dash-joined form ("BluRay BDMV 1080p" →
+    //            "BD-RAW-1080p", "WEB-DL 1080p" → "WEBDL-1080p", etc.).
+    //            Only the BluRay BDMV/Remux/plain and WEB variants need
+    //            ordering care: the qualified BluRay patterns must fire
+    //            before the generic "BluRay " prefix is stripped.
+    //
+    //   Pass B — reorder `BD-{RAW|Remux}-{res}` into the final
+    //            Sonarr-parity `BD-{res} {RAW|Remux}` form. REPLACE
+    //            needs one entry per supported resolution because it
+    //            can't swap tokens generically.
+    //
+    // The straggler "WEBRIP-" → "WEBRip-" entry at the end fixes the
+    // all-caps intermediate form left by the prior rename pass.
+    for (old, new) in [
+        // ── Pass A: legacy space-joined → intermediate dash form ──
+        ("BluRay BDMV ", "BD-RAW-"),
+        ("BluRay Remux ", "BD-Remux-"),
+        ("BluRay ", "BD-"),
+        ("WEB-DL ", "WEBDL-"),
+        ("WEBRip ", "WEBRip-"),
+        ("Web ", "WEB-"),
+        ("HDTV ", "HDTV-"),
+        ("DVD ", "DVD-"),
+        ("TV ", "TV-"),
+        // ── Pass B: intermediate dash form → Sonarr-parity reorder ──
+        ("BD-RAW-480p", "BD-480p RAW"),
+        ("BD-RAW-576p", "BD-576p RAW"),
+        ("BD-RAW-720p", "BD-720p RAW"),
+        ("BD-RAW-1080p", "BD-1080p RAW"),
+        ("BD-RAW-2160p", "BD-2160p RAW"),
+        ("BD-Remux-480p", "BD-480p Remux"),
+        ("BD-Remux-576p", "BD-576p Remux"),
+        ("BD-Remux-720p", "BD-720p Remux"),
+        ("BD-Remux-1080p", "BD-1080p Remux"),
+        ("BD-Remux-2160p", "BD-2160p Remux"),
+        // Case-fix stragglers from the intermediate all-caps form.
+        ("WEBRIP-", "WEBRip-"),
+    ] {
+        let like_pat = format!("%{}%", old);
+        let _ = sqlx::query(
+            "UPDATE episode_grab_history
+             SET quality_tag = REPLACE(quality_tag, ?, ?)
+             WHERE quality_tag LIKE ?",
+        )
+        .bind(old)
+        .bind(new)
+        .bind(like_pat)
+        .execute(db)
+        .await;
+    }
 
     sqlx::query(
         r#"

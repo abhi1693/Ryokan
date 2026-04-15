@@ -386,6 +386,38 @@ pub async fn find_imported_for_episode(
         .collect())
 }
 
+/// Return the torrent name of the most recent imported grab for this
+/// series, regardless of which episodes the grab's `episode_numbers`
+/// column claims it covers. Used by
+/// `scan_library_for_unclassified` as a fallback to
+/// [`find_imported_for_episode`] when the per-episode lookup misses:
+/// pre-fix batch grabs were recorded with `episode_numbers = []`, so
+/// `json_each` yields nothing and the precise lookup returns empty
+/// even though there's a perfectly good batch grab with a real
+/// release name sitting in the table. For those stale rows we want
+/// to classify against that release name instead of the sanitized
+/// on-disk filename.
+///
+/// Returns `None` when the series has never had an imported grab,
+/// in which case the scanner falls back to the sanitized filename
+/// (correct behavior for externally-imported files Ryokan never
+/// grabbed).
+pub async fn most_recent_imported_torrent_name_for_series(
+    db: &SqlitePool,
+    series_id: i64,
+) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT torrent_name FROM grabbed_torrents
+         WHERE series_id = ? AND state = 'imported'
+         ORDER BY grabbed_at DESC LIMIT 1",
+    )
+    .bind(series_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Remove a grabbed torrent record entirely.
 pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM grabbed_torrents WHERE id = ?")

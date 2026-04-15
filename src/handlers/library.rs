@@ -1855,6 +1855,39 @@ pub async fn list_folders(
 /// when auto-expand fails partway through. Any failures get logged
 /// at warn level.
 ///
+/// Resolve the list of episode numbers a batch release should be
+/// recorded against at grab time. Parses explicit episode ranges
+/// from the release title (e.g. "01-12", "E01-E24") via
+/// [`auto_search::parse_release_numbers`], and when the title carries
+/// no explicit numbers falls back to the series' known episode count
+/// so a title like "Jellyfish Can't Swim in the Night" still spawns
+/// a row per episode.
+///
+/// Used by the two batch grab handlers (`search_batch_releases` and
+/// `grab_batch_result`). Without this, batch grabs passed an empty
+/// episode list to `grabbed_torrents::record_grab` and skipped
+/// `episode_tags::record_grab` entirely, which meant the series page
+/// showed every episode as UNKNOWN until post-processing ran — and
+/// if the user had post-processing disabled, the rows never got
+/// created at all.
+///
+/// Capped at 1000 episodes as a safety rail against a garbage
+/// AniList record reporting an absurd episode count.
+fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32> {
+    let mut ep_nums: Vec<i32> = auto_search::parse_release_numbers(title)
+        .into_iter()
+        .collect();
+    if ep_nums.is_empty() {
+        if let Some(total) = detail.episodes {
+            if total > 0 && total <= 1000 {
+                ep_nums = (1..=total).collect();
+            }
+        }
+    }
+    ep_nums.sort_unstable();
+    ep_nums
+}
+
 /// Returns the number of siblings *newly added* to the library
 /// (upserts that hit an existing row don't count).
 #[allow(clippy::too_many_arguments)]
@@ -2299,6 +2332,7 @@ async fn run_auto_search_targets_with_upgrades(
                                     &incoming_classification,
                                     &result.title,
                                     &result.group,
+                                    result.size_bytes,
                                 ).await;
                             }
                             // Phase 2 sibling auto-expand: when the
@@ -2663,9 +2697,41 @@ pub async fn search_batch_releases(
                 &format!("group={}, score={}, tier={}", result.group, result.score, tier_label),
             ).await;
             if let Some(sid) = series_id_for_grab {
+                // Parse episode list from the batch title so every covered
+                // episode gets a per-episode `episode_quality_tags` row at
+                // grab time, not just at post-processing time. Without
+                // this the UI shows UNKNOWN for every episode of a
+                // freshly-grabbed batch — and if the user has
+                // post-processing disabled the rows never get created at
+                // all. Mirrors the auto-search-path logic at
+                // `run_auto_search_targets_with_upgrades` (look for
+                // `parse_release_numbers` above).
+                //
+                // Fallback when the title carries no explicit range
+                // (e.g. "Jellyfish Can't Swim in the Night" with no
+                // "01-12" suffix): use the series' known episode count.
+                // Capped at 1000 so a garbage AniList record can't
+                // spawn a million rows.
+                let ep_nums = batch_episode_numbers(&result.title, &detail);
                 let _ = crate::models::grabbed_torrents::record_grab(
-                    &state.db, &result.info_hash, &result.title, sid, &[], result.is_batch,
+                    &state.db,
+                    &result.info_hash,
+                    &result.title,
+                    sid,
+                    &ep_nums,
+                    result.is_batch,
                 ).await;
+                for ep_num in &ep_nums {
+                    let _ = episode_tags::record_grab(
+                        &state.db,
+                        sid,
+                        *ep_num,
+                        &classification,
+                        &result.title,
+                        &result.group,
+                        result.size_bytes,
+                    ).await;
+                }
             }
             Ok(Json(auto_search::AutoSearchReport {
                 grabbed: vec![auto_search::AutoSearchHit {
@@ -2777,9 +2843,11 @@ pub async fn interactive_search_batches(
 /// Grab a specific batch release chosen from interactive batch search.
 ///
 /// Mirrors `grab_interactive_result` but without an episode number —
-/// batches don't belong to a single episode, and the per-episode tag
-/// bookkeeping (`episode_tags::record_grab`) is skipped because the
-/// episodes will be tagged when the post-processing stage extracts them.
+/// batches cover a range of episodes — the episode list is resolved
+/// from the release title via [`batch_episode_numbers`] at grab time
+/// so per-episode `episode_tags::record_grab` writes land immediately
+/// and the UI shows the batch's quality tier without waiting on
+/// post-processing.
 #[utoipa::path(
     post,
     path = "/api/series/{anilist_id}/grab-batch",
@@ -2811,6 +2879,7 @@ pub async fn grab_batch_result(
     let group = body["group"].as_str().unwrap_or("").to_string();
     let resolution = body["resolution"].as_str().unwrap_or("").to_string();
     let info_hash = body["info_hash"].as_str().unwrap_or("").to_string();
+    let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
 
     if url.is_empty() {
         return Err((axum::http::StatusCode::BAD_REQUEST, "No URL provided".to_string()));
@@ -2893,9 +2962,27 @@ pub async fn grab_batch_result(
     ).await;
 
     if let Some(sid) = series_id {
+        // Parse episode list from the batch title so every covered
+        // episode gets a per-episode `episode_quality_tags` row at
+        // grab time. Same reasoning as in `search_batch_releases` —
+        // without this, batch grabs leave every episode showing
+        // UNKNOWN in the UI, and with post-processing disabled the
+        // rows never get created at all.
+        let ep_nums = batch_episode_numbers(&title, &detail);
         let grab_id = crate::models::grabbed_torrents::record_grab(
-            &state.db, &info_hash, &title, sid, &[], true,
+            &state.db, &info_hash, &title, sid, &ep_nums, true,
         ).await.ok().flatten();
+        for ep_num in &ep_nums {
+            let _ = episode_tags::record_grab(
+                &state.db,
+                sid,
+                *ep_num,
+                &classification,
+                &title,
+                &group,
+                size_bytes,
+            ).await;
+        }
         // Phase 2 sibling auto-expand. Skip when selective narrowing
         // successfully applied — the user picked a specific sibling
         // (e.g. Stardust Crusaders) out of a megapack and the other
@@ -2916,6 +3003,7 @@ pub async fn grab_batch_result(
                 let info_hash_task = info_hash.clone();
                 let detail_task = detail.clone();
                 let title_task = title.clone();
+                let ep_nums_task = ep_nums.clone();
                 tokio::spawn(async move {
                     auto_expand_library_from_pack(
                         &db_task,
@@ -2923,7 +3011,7 @@ pub async fn grab_batch_result(
                         &info_hash_task,
                         &detail_task,
                         sid,
-                        &[],
+                        &ep_nums_task,
                         grab_id,
                         &title_task,
                     ).await;
@@ -2973,6 +3061,7 @@ pub async fn grab_interactive_result(
     let group = body["group"].as_str().unwrap_or("").to_string();
     let resolution = body["resolution"].as_str().unwrap_or("").to_string();
     let info_hash = body["info_hash"].as_str().unwrap_or("").to_string();
+    let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
 
     if url.is_empty() {
         return Err((axum::http::StatusCode::BAD_REQUEST, "No URL provided".to_string()));
@@ -3065,7 +3154,7 @@ pub async fn grab_interactive_result(
             &state.db, &info_hash, &title, sid, &[episode_number], false,
         ).await;
         let _ = episode_tags::record_grab(
-            &state.db, sid, episode_number, &classification, &title, &group,
+            &state.db, sid, episode_number, &classification, &title, &group, size_bytes,
         ).await;
     }
 

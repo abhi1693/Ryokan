@@ -141,7 +141,7 @@
                 <label for="preferred_source">Preferred Source</label>
                 <select name="preferred_source" id="preferred_source">
                     <option value="web" {% if config.preferred_source == "web" %}selected{% endif %}>WEB</option>
-                    <option value="bluray" {% if config.preferred_source == "bluray" %}selected{% endif %}>BluRay</option>
+                    <option value="bluray" {% if config.preferred_source == "bluray" %}selected{% endif %}>BD</option>
                     <option value="dvd" {% if config.preferred_source == "dvd" %}selected{% endif %}>DVD</option>
                 </select>
                 <span class="form-hint">The release source auto search ranks highest. Other sources still match but are deprioritized in scoring.</span>
@@ -160,12 +160,12 @@
                 <label for="cutoff_source">Cutoff Source</label>
                 <select name="cutoff_source" id="cutoff_source">
                     <option value="web" {% if config.cutoff_source == "web" %}selected{% endif %}>WEB</option>
-                    <option value="bluray" {% if config.cutoff_source == "bluray" %}selected{% endif %}>BluRay</option>
-                    <option value="bluray_remux" {% if config.cutoff_source == "bluray_remux" %}selected{% endif %}>BD Remux</option>
-                    <option value="bluray_bdmv" {% if config.cutoff_source == "bluray_bdmv" %}selected{% endif %}>BD RAW (BDMV)</option>
+                    <option value="bluray" {% if config.cutoff_source == "bluray" %}selected{% endif %}>BD</option>
+                    <option value="bluray_remux" {% if config.cutoff_source == "bluray_remux" %}selected{% endif %}>BD-Remux</option>
+                    <option value="bluray_bdmv" {% if config.cutoff_source == "bluray_bdmv" %}selected{% endif %}>BD-RAW</option>
                     <option value="dvd" {% if config.cutoff_source == "dvd" %}selected{% endif %}>DVD</option>
                 </select>
-                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source. BD Remux and BD RAW require a matching sub-tier — plain BluRay encodes will stay upgradeable.</span>
+                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source. BD-Remux and BD-RAW require a matching sub-tier — plain BD encodes will stay upgradeable.</span>
             </div>
             <div class="form-group">
                 <label for="cutoff_resolution">Cutoff Resolution</label>
@@ -184,7 +184,7 @@
                     <option value="prefer_bd" {% if config.finished_series_quality == "prefer_bd" %}selected{% endif %}>Prefer BD (fall back to WEB)</option>
                     <option value="bd_only" {% if config.finished_series_quality == "bd_only" %}selected{% endif %}>BD only (skip WEB)</option>
                 </select>
-                <span class="form-hint">For series marked "Finished" on AniList. "Prefer BD" searches for Bluray releases first, falling back to WEB if none found. "BD only" will skip WEB releases entirely.</span>
+                <span class="form-hint">For series marked "Finished" on AniList. "Prefer BD" searches for BD releases first, falling back to WEB if none found. "BD only" will skip WEB releases entirely.</span>
             </div>
             <div class="form-group">
                 <label>Audio Preference</label>
@@ -279,7 +279,7 @@
 <div class="settings-tab-panel active">
     <fieldset>
         <legend>Release Group Source Map</legend>
-        <p class="form-hint">Maps release groups to their known source. Used by Layer 3 of the classification pipeline when the filename alone doesn't carry source keywords (e.g. SubsPlease is WEB, VCB-Studio is BluRay). Seeded rows are restored on startup; user-edited rows are preserved.</p>
+        <p class="form-hint">Maps release groups to their known source. Used by Layer 3 of the classification pipeline when the filename alone doesn't carry source keywords (e.g. SubsPlease is WEB, VCB-Studio is BD). Seeded rows are restored on startup; user-edited rows are preserved.</p>
 
         {% if !suggestions.is_empty() %}
         <h3 class="settings-subheading">Suggested Mappings ({{ suggestions.len() }})</h3>
@@ -333,7 +333,7 @@
                 <label for="new_group_source">Source</label>
                 <select name="source" id="new_group_source">
                     <option value="web">WEB</option>
-                    <option value="bluray">BluRay</option>
+                    <option value="bluray">BD</option>
                     <option value="dvd">DVD</option>
                     <option value="hdtv">HDTV</option>
                     <option value="tv">TV</option>
@@ -536,7 +536,7 @@
             <h3>Bundled Defaults</h3>
         </div>
         <p class="cf-section-desc">
-            <strong>Install Defaults</strong> imports the bundled anime-tuned CF set (SeaDex best, Tier S BD groups, BluRay source, WEB groups, 10-bit/x265, FLAC/Opus, plus the 8-bit mp4 and casual-group penalties) — existing names are skipped so repeat clicks are safe.
+            <strong>Install Defaults</strong> imports the bundled anime-tuned CF set (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit/x265, FLAC/Opus, plus the 8-bit mp4 and casual-group penalties) — existing names are skipped so repeat clicks are safe.
             <strong>Reset to Defaults</strong> drops every row whose Source column shows <em>default</em> and re-installs them from the bundled file — use this after you've edited a default CF and want the original back. Manual and imported CFs are untouched.
         </p>
         <div class="settings-inline-actions">

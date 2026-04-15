@@ -519,10 +519,20 @@ async fn collect_scored_for_target(
     // view URLs — this is how the smol Kizumonogatari pack (titled
     // `[smol] Monogatari (Season 9) ...`) gets into the pool for a
     // Kizumonogatari Part 2 target whose text queries would never
-    // match the smol filename. The batch filter at `run_queries`
-    // already has a SeaDex-match bypass so `allow_batch=false` targets
-    // still see SeaDex-curated megapacks.
+    // match the smol filename.
+    //
+    // Per-episode auto-search targets (`allow_batch=false`) mean "don't
+    // add batches in this search" — the user has explicitly opted out
+    // of batch grabs for episode search. Without this filter, every
+    // episode search on a SeaDex-curated series with a megapack
+    // top-hit would resurrect that batch into the candidate pool,
+    // bypassing the setting. SeaDex curation does not override the
+    // user's batch-allowed policy; it only overrides the heuristic
+    // title-matching gate inside `run_queries`.
     for result in seadex_payload.candidates {
+        if !allow_batch && result.is_batch {
+            continue;
+        }
         let dedupe_key = if !result.info_hash.is_empty() {
             result.info_hash.clone()
         } else {
@@ -743,11 +753,19 @@ async fn run_queries(
                 // otherwise fail `matches_target` (e.g. smol's
                 // `Monogatari (Season 9)` release for a Kizumonogatari
                 // Part 2 target).
+                //
+                // Batch filter runs unconditionally even for SeaDex
+                // matches: an episode-search target with `allow_batch=
+                // false` is an explicit "don't pull batches during
+                // per-episode search" request from the user, and
+                // silently letting SeaDex-curated batches through would
+                // bypass that setting. SeaDex bypasses *heuristic* title
+                // matching, not the user's batch-allowed policy.
+                if !ctx.allow_batch && result.is_batch {
+                    continue;
+                }
                 let is_seadex_best = is_seadex_match(&result.info_hash, ctx.seadex_hashes);
                 if !is_seadex_best {
-                    if !ctx.allow_batch && result.is_batch {
-                        continue;
-                    }
                     if !matches_target(&result.title, ctx.aliases, ctx.target, ctx.expected_season, ctx.batch_episode_match && result.is_batch) {
                         continue;
                     }

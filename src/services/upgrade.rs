@@ -257,6 +257,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             &incoming_classification,
                             &result.title,
                             &result.group,
+                            result.size_bytes,
                         )
                         .await;
                     }
