@@ -1891,6 +1891,23 @@ fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32>
 /// Returns the number of siblings *newly added* to the library
 /// (upserts that hit an existing row don't count).
 #[allow(clippy::too_many_arguments)]
+/// Grab-time context threaded through the auto-expand path so each
+/// detected sibling series gets its own `episode_quality_tags` +
+/// `episode_grab_history` rows alongside its route record. Without
+/// this, the sibling series page shows UNKNOWN with no progress bar
+/// until post-processing runs — the parent series records the grab
+/// for its own episodes synchronously, but the siblings are detected
+/// asynchronously inside `auto_expand_library_from_pack` and were
+/// previously only getting route rows written. Owned-fields so the
+/// struct can be cloned into the spawned task.
+#[derive(Clone)]
+struct AutoExpandGrabContext {
+    classification: crate::services::source::ClassificationResult,
+    release_group: String,
+    size_bytes: i64,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn auto_expand_library_from_pack(
     db: &SqlitePool,
     qbit: &crate::services::qbit::QbitClient,
@@ -1900,6 +1917,7 @@ async fn auto_expand_library_from_pack(
     parent_episode_numbers: &[i32],
     grab_id: i64,
     torrent_title: &str,
+    grab_ctx: &AutoExpandGrabContext,
 ) -> usize {
     if parent_detail.id <= 0 || info_hash.is_empty() {
         return 0;
@@ -1941,6 +1959,7 @@ async fn auto_expand_library_from_pack(
         parent_episode_numbers,
         grab_id,
         torrent_title,
+        grab_ctx,
     )
     .await
 }
@@ -1959,6 +1978,7 @@ async fn auto_expand_library_from_pack_with_files(
     parent_episode_numbers: &[i32],
     grab_id: i64,
     torrent_title: &str,
+    grab_ctx: &AutoExpandGrabContext,
 ) -> usize {
     let parent_title = if !parent_detail.title_english.is_empty() {
         parent_detail.title_english.as_str()
@@ -2176,6 +2196,31 @@ async fn auto_expand_library_from_pack_with_files(
         for &i in &sibling.file_indices {
             claimed.insert(i);
         }
+
+        // Write per-episode grab history + quality tag rows for this
+        // sibling so its episode list shows `state=grabbed` in the UI
+        // (progress bar + "came from X GB batch" tooltip). The parent
+        // path records its own rows synchronously at grab time; siblings
+        // were previously only getting route rows written here, which
+        // meant their series pages rendered UNKNOWN with no progress bar
+        // until post-processing finished and backfilled the tags. Every
+        // auto-expand firing is a batch by definition (the outer
+        // selectors only call in on `result.is_batch && !selective_narrowed`),
+        // so `is_batch=true` is always correct here.
+        for &local_ep in &ep_nums {
+            let _ = episode_tags::record_grab(
+                db,
+                sibling_id,
+                local_ep,
+                &grab_ctx.classification,
+                torrent_title,
+                &grab_ctx.release_group,
+                grab_ctx.size_bytes,
+                true,
+            )
+            .await;
+        }
+
         routes.push(grabbed_torrents::GrabSeriesRoute {
             grab_id,
             series_id: sibling_id,
@@ -2496,6 +2541,11 @@ async fn run_auto_search_targets_with_upgrades(
                                     let detail_task = detail.clone();
                                     let ep_nums_task = ep_nums.clone();
                                     let title_task = result.title.clone();
+                                    let grab_ctx_task = AutoExpandGrabContext {
+                                        classification: incoming_classification.clone(),
+                                        release_group: result.group.clone(),
+                                        size_bytes: result.size_bytes,
+                                    };
                                     tokio::spawn(async move {
                                         auto_expand_library_from_pack(
                                             &db_task,
@@ -2506,6 +2556,7 @@ async fn run_auto_search_targets_with_upgrades(
                                             &ep_nums_task,
                                             grab_id,
                                             &title_task,
+                                            &grab_ctx_task,
                                         ).await;
                                     });
                                 }
@@ -3128,6 +3179,11 @@ pub async fn grab_batch_result(
                 let detail_task = detail.clone();
                 let title_task = title.clone();
                 let ep_nums_task = ep_nums.clone();
+                let grab_ctx_task = AutoExpandGrabContext {
+                    classification: classification.clone(),
+                    release_group: group.clone(),
+                    size_bytes,
+                };
                 tokio::spawn(async move {
                     auto_expand_library_from_pack(
                         &db_task,
@@ -3138,6 +3194,7 @@ pub async fn grab_batch_result(
                         &ep_nums_task,
                         grab_id,
                         &title_task,
+                        &grab_ctx_task,
                     ).await;
                 });
             }
@@ -3712,6 +3769,14 @@ mod tests {
         }
     }
 
+    fn test_grab_ctx() -> AutoExpandGrabContext {
+        AutoExpandGrabContext {
+            classification: crate::services::source::ClassificationResult::unknown(),
+            release_group: String::new(),
+            size_bytes: 0,
+        }
+    }
+
     fn related_entry(
         id: i64,
         title_english: &str,
@@ -3809,6 +3874,7 @@ mod tests {
             "[Group] JoJo no Kimyou na Bouken - 02 [BD 1080p].mkv".to_string(),
         ];
 
+        let grab_ctx = test_grab_ctx();
         let added = auto_expand_library_from_pack_with_files(
             &db,
             &filenames,
@@ -3817,6 +3883,7 @@ mod tests {
             &[1, 2],
             grab_id,
             "[Group] JoJo Megapack (BD 1080p)",
+            &grab_ctx,
         )
         .await;
 
@@ -3925,6 +3992,7 @@ mod tests {
         }
         let parent_episode_numbers: Vec<i32> = (1..=13).collect();
 
+        let grab_ctx = test_grab_ctx();
         let added = auto_expand_library_from_pack_with_files(
             &db,
             &filenames,
@@ -3933,6 +4001,7 @@ mod tests {
             &parent_episode_numbers,
             grab_id,
             "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            &grab_ctx,
         )
         .await;
 
@@ -3967,6 +4036,38 @@ mod tests {
             .expect("parent route present");
         assert_eq!(parent_route.file_indices, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         assert_eq!(parent_route.episode_offset, 0);
+
+        // Regression guard: auto-expand must also write per-episode
+        // `episode_quality_tags` + `episode_grab_history` rows for the
+        // newly-upserted sibling. Without these the sibling's series
+        // page renders UNKNOWN with no progress bar until post-
+        // processing backfills them (which, if the user has PP
+        // disabled, never happens). Uses the effective (post-offset)
+        // local episode numbers the route already stores.
+        let sibling_id = sibling_route.series_id;
+        let sibling_tags = episode_tags::get_for_series(&db, sibling_id)
+            .await
+            .expect("sibling quality tags");
+        assert_eq!(
+            sibling_tags.len(),
+            7,
+            "sibling should have 7 quality-tag rows (one per local ep 1..=7)"
+        );
+        for local_ep in 1..=7 {
+            let tag = sibling_tags
+                .get(&local_ep)
+                .unwrap_or_else(|| panic!("sibling tag for local ep {} missing", local_ep));
+            assert_eq!(tag.state, "grabbed");
+            let history = episode_tags::get_grab_history(&db, sibling_id, local_ep)
+                .await
+                .expect("sibling grab history");
+            assert_eq!(
+                history.len(),
+                1,
+                "sibling local ep {} should have 1 grab-history row",
+                local_ep
+            );
+        }
     }
 
     /// When the file list has no sibling matches, the inner fn is a
@@ -4022,6 +4123,7 @@ mod tests {
             "[Group] My Dress-Up Darling - 02 [BD 1080p].mkv".to_string(),
         ];
 
+        let grab_ctx = test_grab_ctx();
         let added = auto_expand_library_from_pack_with_files(
             &db,
             &filenames,
@@ -4030,6 +4132,7 @@ mod tests {
             &[1, 2],
             grab_id,
             "[Group] My Dress-Up Darling S01 (BD 1080p)",
+            &grab_ctx,
         )
         .await;
 
