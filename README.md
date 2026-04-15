@@ -14,13 +14,19 @@ This project's being actively developed. Expect rough edges around features and 
 ## What it does
 
 - Tracks series using AniList as the primary metadata source, with MAL (via Jikan) and Kitsu as fallbacks
-- Searches Nyaa and scores releases by source, resolution, and release group using a multi-layer classification pipeline (filename, ffprobe, temporal, group reputation)
-- Supports Sonarr-v4-compatible [Custom Formats](https://trash-guides.info/Sonarr/sonarr-collection-of-custom-formats/) for release scoring, with a Ryokan-only spec that matches [SeaDex](https://releases.moe) best-release curation
-- Automatically grabs new episodes via RSS and scans the existing library for quality upgrades on a schedule
-- Monitors series with Sonarr-style modes: all, future, missing, existing, or none
-- Integrates with qBittorrent for downloads and Jellyfin for library refresh
-- Post-processes completed downloads — hardlinks or moves them into your media root with tidy season/episode naming
-- Caches all metadata (and artwork) locally so pages load instantly after initial setup
+- Searches Nyaa and scores releases by source, resolution, and release group using a multi-layer classification pipeline (filename, Nyaa description, ffprobe, temporal heuristics, group reputation, directory layout)
+- Supports Sonarr-v4-compatible [Custom Formats](https://trash-guides.info/Sonarr/sonarr-collection-of-custom-formats/) for release scoring, including a one-click install of the TRaSH Guides anime defaults. Ships a Ryokan-only `SeaDexBestSpecification` spec that matches [SeaDex](https://releases.moe) best-release curation, plus a Settings toggle to apply the SeaDex boost without writing a Custom Format
+- Automatically grabs new episodes via RSS and scans the existing library for quality upgrades on a schedule, with separate **preferred** and **cutoff** source/resolution targets so upgrade churn stops once an episode is "good enough"
+- Tunable scoring inputs: preferred & blocked release groups, preferred source/resolution, finished-series quality mode (`Same as airing` / `Prefer BD` / `BD only`), and a prefer-subs vs prefer-dubs audio toggle
+- Monitors series with Sonarr-style modes (all / future / missing / existing / none) and also supports per-episode monitoring toggles
+- **Interactive search** per episode or for batches, on top of the automatic grab flow, so you can pick a specific release yourself when you want to
+- **Manual classification override** and a **Needs Review** queue (`/library/review`) for episodes where the classifier wasn't confident. Pins propagate into a "suggested group→source mapping" panel so repeat overrides can teach the release-group identity map
+- **Blocklist** completed/bad releases from the Downloads page or from an episode's grab history, so the upgrade sweep and RSS sync won't re-grab them
+- Per-series **Allow Upgrades** toggle to opt specific titles out of the upgrade sweep without disabling it globally
+- Integrates with qBittorrent for downloads and Jellyfin for library refresh; writes Jellyfin-compatible NFO sidecars during post-processing
+- Post-processes completed downloads in **hardlink** (default, seed-safe), **copy**, or **move** mode. Hardlink automatically falls back to copy when the download and media root are on different filesystems
+- Caches all metadata and artwork locally (content-addressed blob store) so pages load instantly after initial setup
+- Cookie-based auth with first-run admin setup, a **System** page for live logs, scheduled-task inspection/force-run, RSS grab history, and a debug tab, plus an OpenAPI/Swagger UI at `/api-docs` for everything the web UI calls
 
 ## Running with Docker
 
@@ -35,8 +41,8 @@ Listens on port `8978`. On first run, go to `http://localhost:8978` to create an
 Ryokan's post-processor reads completed torrents from qBittorrent and imports them into your anime library. For that to work, both paths have to be visible inside the container at the same paths you configure in **Settings**:
 
 1. Uncomment the two optional volume lines in `docker-compose.yml`:
-   - `/srv/downloads:/downloads` — host path where qBit writes completed torrents
-   - `/srv/media/anime:/media/anime` — host path to your anime library root
+   - `/srv/downloads:/downloads` (host path where qBit writes completed torrents)
+   - `/srv/media/anime:/media/anime` (host path to your anime library root)
 2. In **Settings → qBittorrent**, set *Download path (as Ryokan sees it)* to the right-hand side (e.g. `/downloads`).
 3. In **Settings → Media**, set *Media root* to the right-hand side (e.g. `/media/anime`).
 4. Set `PUID` / `PGID` in `docker-compose.yml` to the UID/GID that owns those host directories (run `id -u` / `id -g` on the host to find them). Ryokan drops privileges to that user at startup so imported files end up with the right ownership for Jellyfin and the rest of your *arr stack to read.
@@ -60,7 +66,7 @@ Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 | `RUST_LOG` | `ryokan=info` | Log filter (see [`tracing-subscriber`](https://github.com/tokio-rs/tracing) docs) |
 | `RYOKAN_MEDIA_CACHE_DIR` | `data/cache/artwork` (local), `/data/cache/artwork` (Docker) | On-disk directory for the artwork blob cache |
 | `JIKAN_API_BASE` | `https://api.jikan.moe/v4` | Override for a self-hosted Jikan instance |
-| `PUID` | `1000` | *Docker only.* UID Ryokan runs as inside the container — set to match host file ownership |
+| `PUID` | `1000` | *Docker only.* UID Ryokan runs as inside the container. Set to match host file ownership |
 | `PGID` | `1000` | *Docker only.* GID Ryokan runs as inside the container |
 | `TZ` | `UTC` | *Docker only.* Container timezone, affects log timestamps and scheduled-task anchoring |
 
