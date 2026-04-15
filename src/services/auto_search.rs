@@ -2430,17 +2430,23 @@ pub struct SiblingMatch {
     /// How many episodes to subtract from each file's parsed episode
     /// number before treating it as an episode of this sibling.
     ///
-    /// Set to `parent_cap` when the sibling's files use numbering that
-    /// is continuous across the parent (e.g. a 20-ep Owarimonogatari
-    /// batch with `S07E14 - Owarimonogatari Second Season` — E14 is
-    /// Owari S2 episode 1 and needs offset 13 applied). Set to 0 when
-    /// the sibling's files use their own arc-local numbering (e.g. an
-    /// Egypt-hen pack with `Stardust Crusaders S03E01` filenames).
+    /// Set to `min_ep - 1` (where `min_ep` is the smallest parsed
+    /// episode number in this sibling's files) when the sibling uses
+    /// numbering continuous with the parent — e.g. a 20-ep
+    /// Owarimonogatari batch with `S07E14 - Owarimonogatari Second
+    /// Season` resolves E14 to local ep 1 via offset 13. Set to 0
+    /// when the sibling's files use their own arc-local numbering
+    /// (e.g. an Egypt-hen pack with `Stardust Crusaders S03E01`
+    /// filenames already starting at 1).
     ///
     /// Detection rule: if `min(sibling_file_ep_nums) > parent_cap`,
-    /// offset = `parent_cap`; otherwise offset = 0. Computed
-    /// per-sibling regardless of whether the match came from the
-    /// subtitle path or the episode-range fallback.
+    /// offset = `min_ep - 1`; otherwise offset = 0. Using `min_ep - 1`
+    /// rather than `parent_cap` is what makes BD-split cases work,
+    /// where the release partitioned the parent into more files than
+    /// AL's episode count (merged long-runtime episodes get split,
+    /// pushing the sibling's first episode past `parent_cap + 1`).
+    /// Computed per-sibling regardless of whether the match came from
+    /// the subtitle path or the episode-range fallback.
     pub episode_offset: i32,
 }
 
@@ -3066,7 +3072,21 @@ fn detect_sibling_via_episode_range(
     //
     // Needles shorter than 8 chars are rejected to avoid false
     // positives from short titles colliding with episode markers
-    // (e.g. "Show 2" matching "Show - 02").
+    // or common filename tokens (e.g. "Show 2" matching "Show - 02",
+    // or a 4-letter romaji title colliding with a group tag). 8 is
+    // a heuristic floor: it keeps the substring match cheap while
+    // still covering the vast majority of anime titles.
+    //
+    // Known tradeoff: short-title series (Bleach, Naruto, Gintama,
+    // K-On!, One Piece) have normalized-title lengths below 8 chars
+    // and bypass the filename-subtitle pre-pass entirely. Those
+    // series fall through to the numeric packing path, which handles
+    // them correctly via episode-range analysis — the filename
+    // pre-pass is only load-bearing for long-title franchises that
+    // share a numbering scheme across split sagas (Monogatari is
+    // the motivating case). If you ever need to lower this floor,
+    // add a collision check against known episode-marker shapes
+    // first, or the Bleach/Naruto falsies will come roaring back.
     #[derive(Clone, Copy)]
     enum NeedleSource {
         Parent,

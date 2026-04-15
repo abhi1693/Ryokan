@@ -171,6 +171,62 @@ pub async fn get_series_routes(
         .collect())
 }
 
+/// Bulk variant of [`get_series_routes`] — fetches routes for many
+/// grabs in one round-trip and groups by `grab_id`. The download-
+/// progress poller calls this once per poll instead of fanning out
+/// N queries for N pending grabs; the poller runs every few seconds
+/// on every open series page, so the difference matters.
+///
+/// Grabs with no routes are simply absent from the result map; callers
+/// should treat a missing entry as an empty route list.
+pub async fn get_series_routes_for_grabs(
+    db: &SqlitePool,
+    grab_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<GrabSeriesRoute>>, sqlx::Error> {
+    if grab_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // sqlx doesn't bind `IN (?)` against a slice directly, so build
+    // the placeholder list at runtime. `grab_ids` comes from a
+    // `SELECT id FROM grabbed_torrents` loop so every value is a
+    // trusted i64 — no injection surface.
+    let placeholders = vec!["?"; grab_ids.len()].join(", ");
+    let sql = format!(
+        r#"SELECT grab_id, series_id, file_indices, episode_numbers, matched_subtitle,
+                  COALESCE(episode_offset, 0) AS episode_offset
+           FROM grabbed_torrent_series
+           WHERE grab_id IN ({})"#,
+        placeholders
+    );
+    let mut q = sqlx::query(&sql);
+    for id in grab_ids {
+        q = q.bind(*id);
+    }
+    let rows = q.fetch_all(db).await?;
+
+    let mut grouped: std::collections::HashMap<i64, Vec<GrabSeriesRoute>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let file_idx_json: String = row.get("file_indices");
+        let file_idx: Vec<i64> =
+            serde_json::from_str(&file_idx_json).unwrap_or_default();
+        let eps_json: String = row.get("episode_numbers");
+        let episode_numbers: Vec<i32> =
+            serde_json::from_str(&eps_json).unwrap_or_default();
+        let route = GrabSeriesRoute {
+            grab_id: row.get("grab_id"),
+            series_id: row.get("series_id"),
+            file_indices: file_idx.into_iter().map(|i| i as usize).collect(),
+            episode_numbers,
+            matched_subtitle: row.get("matched_subtitle"),
+            episode_offset: row.get("episode_offset"),
+        };
+        grouped.entry(route.grab_id).or_default().push(route);
+    }
+    Ok(grouped)
+}
+
 /// Look up the stored `is_batch` flag for a grab by its torrent name.
 /// Returns `None` when the row doesn't exist — that's the case for
 /// externally-imported library files that Ryokan never grabbed, which

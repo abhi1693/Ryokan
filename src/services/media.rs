@@ -43,6 +43,16 @@ static RE_BARE_NUM_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
     // `something 99 (extra) 12 (...)` still resolves to 12, not 99.
     Regex::new(r"(?:^|\s)(\d{1,3})(?:v\d)?\s+[\(\[]").expect("RE_BARE_NUM_BRACKET compiles")
 });
+static RE_NCOP_NCED: LazyLock<Regex> = LazyLock::new(|| {
+    // Creditless OP/ED marker that must NOT be a substring of an
+    // unrelated word. Plain `contains("nced")` trips on any filename
+    // containing "synced", "convinced", "announced", "experienced",
+    // "bounced", etc. — we anchor the left edge to start-of-string or
+    // a non-letter so only real `NCED`/`NCOP` tokens match. The right
+    // edge is left open so glued-digit forms like `NCED01a` / `NCOP01`
+    // (LOGH, some older BDMV rips) still resolve.
+    Regex::new(r"(?:^|[^a-z])(?:ncop|nced)").expect("RE_NCOP_NCED compiles")
+});
 static RE_OVA_EP: LazyLock<Regex> = LazyLock::new(|| {
     // Explicit `OVA NN` / `OVA01` episode marker — used by
     // multi-episode OVA releases (e.g. the JoJo 1993 / 2000 6-episode
@@ -235,8 +245,10 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // small integer suffix (`NCOP 1`, `NCED 1`, or even glued
     // `NCED01a` from LOGH-style packs) that the bare-number
     // fallback below would otherwise mis-parse as episode 1 and
-    // clobber the real ep1. Bail before any pattern fires.
-    if lower.contains("ncop") || lower.contains("nced") {
+    // clobber the real ep1. Bail before any pattern fires. Matched
+    // with a token-boundary regex so incidental substring hits like
+    // `synced`, `convinced`, `announced` don't false-positive.
+    if RE_NCOP_NCED.is_match(lower) {
         return None;
     }
 
@@ -674,18 +686,52 @@ mod tests {
         );
     }
 
-    // ── NCED/NCOP with glued digits (contains guard) ─────────────────
+    #[test]
+    fn title_side_season_digit_does_not_shadow_dash_ep() {
+        // `<Title> <season-digit> - NN.mkv` — when a title-side season
+        // number (e.g. "Show 2") sits before the real ` - NN` episode
+        // marker, RE_DASH_EP must win because it runs before
+        // RE_BARE_NUM_DASH. If someone ever reorders the dispatch so
+        // that RE_BARE_NUM_DASH fires first, this case would quietly
+        // resolve to the season number (2) instead of the episode
+        // (1) and import files under the wrong slot. Regression guard
+        // to pin the ordering.
+        assert_eq!(parse("show 2 - 01.mkv"), Some((None, 1)));
+        assert_eq!(parse("[group] show 2 - 01 [1080p].mkv"), Some((None, 1)));
+        assert_eq!(
+            parse("[group] show 2 - 05 - subtitle [1080p].mkv"),
+            Some((None, 5))
+        );
+    }
+
+    // ── NCED/NCOP with glued digits (token-boundary guard) ───────────
 
     #[test]
     fn nced_glued_to_number_returns_none() {
         // LOGH-style `NCED01a` / `NCOP01` — number is glued directly
-        // to the creditless marker. The top-level contains() guard
-        // catches any filename with `ncop` or `nced` anywhere in the
-        // name, so glued variants are covered without a dedicated
-        // pattern. Synthetic fixtures here because the guard is
-        // substring-based and isn't sensitive to surrounding tokens.
+        // to the creditless marker. The top-level RE_NCOP_NCED guard
+        // anchors the left edge to start-of-string or a non-letter so
+        // glued-digit variants still trip while incidental substring
+        // hits in unrelated words are ignored.
         assert_eq!(parse("show-nced01a.mkv"), None);
         assert_eq!(parse("show-ncop01.mkv"), None);
+    }
+
+    #[test]
+    fn synced_substring_does_not_false_positive_as_nced() {
+        // Regression: the old `contains("nced")` guard tripped on any
+        // filename containing the letters `n-c-e-d` — including common
+        // English words like `synced`, `announced`, `convinced`. The
+        // token-boundary regex requires start-of-string or a non-letter
+        // before the marker so these pass through to the real parser.
+        assert_eq!(
+            parse("[group] synced title - 05 [1080p].mkv"),
+            Some((None, 5))
+        );
+        assert_eq!(
+            parse("[group] announced show - 12 [1080p].mkv"),
+            Some((None, 12))
+        );
     }
 
     // ── Special / SP marker (no SxxExx, out-of-scope) ────────────────

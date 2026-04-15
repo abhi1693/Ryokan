@@ -2024,12 +2024,16 @@ async fn auto_expand_library_from_pack_with_files(
     // goes through the AL detail cache so repeat grabs within the
     // TTL are free. Failures are soft — any neighbor we can't fetch
     // is silently skipped and detection falls back to the parent's
-    // direct relations.
+    // direct relations. Fetches are dispatched concurrently via a
+    // JoinSet so N neighbors take max(fetch_time), not sum — every
+    // hop previously blocked the grab path end-to-end.
     let mut neighbor_details: std::collections::HashMap<i64, anilist::AnimeDetail> =
         std::collections::HashMap::new();
-    let mut fetched = 0_usize;
+    let mut walk_set: tokio::task::JoinSet<(i64, String, Result<anilist::AnimeDetail, String>)> =
+        tokio::task::JoinSet::new();
+    let mut dispatched = 0_usize;
     for rel in &parent_detail.relations {
-        if fetched >= auto_search::TRANSITIVE_WALK_MAX_FETCHES {
+        if dispatched >= auto_search::TRANSITIVE_WALK_MAX_FETCHES {
             break;
         }
         if !auto_search::is_transitive_walk_source(&rel.relation_type) {
@@ -2041,17 +2045,33 @@ async fn auto_expand_library_from_pack_with_files(
         if rel.id <= 0 {
             continue;
         }
-        match anilist::get_anime_detail(rel.id).await {
-            Ok(detail) => {
-                neighbor_details.insert(rel.id, detail);
-                fetched += 1;
+        let rel_id = rel.id;
+        let rel_type = rel.relation_type.clone();
+        walk_set.spawn(async move {
+            let res = anilist::get_anime_detail(rel_id)
+                .await
+                .map_err(|e| e.to_string());
+            (rel_id, rel_type, res)
+        });
+        dispatched += 1;
+    }
+    while let Some(joined) = walk_set.join_next().await {
+        match joined {
+            Ok((rel_id, _rel_type, Ok(detail))) => {
+                neighbor_details.insert(rel_id, detail);
             }
-            Err(e) => {
+            Ok((rel_id, rel_type, Err(e))) => {
                 tracing::debug!(
                     "auto-expand: transitive neighbor fetch failed rel_id={} rel_type={} err={}",
-                    rel.id,
-                    rel.relation_type,
+                    rel_id,
+                    rel_type,
                     e
+                );
+            }
+            Err(join_err) => {
+                tracing::debug!(
+                    "auto-expand: transitive neighbor task panicked: {}",
+                    join_err
                 );
             }
         }
@@ -2207,7 +2227,7 @@ async fn auto_expand_library_from_pack_with_files(
         // selectors only call in on `result.is_batch && !selective_narrowed`),
         // so `is_batch=true` is always correct here.
         for &local_ep in &ep_nums {
-            let _ = episode_tags::record_grab(
+            if let Err(e) = episode_tags::record_grab(
                 db,
                 sibling_id,
                 local_ep,
@@ -2217,7 +2237,19 @@ async fn auto_expand_library_from_pack_with_files(
                 grab_ctx.size_bytes,
                 true,
             )
-            .await;
+            .await
+            {
+                logger::warn(
+                    db,
+                    LogCategory::Library,
+                    &format!(
+                        "Auto-expand: failed to backfill grab history for sibling {} ep {}",
+                        sibling_id, local_ep,
+                    ),
+                    &format!("{}: {}", torrent_title, e),
+                )
+                .await;
+            }
         }
 
         routes.push(grabbed_torrents::GrabSeriesRoute {
@@ -3642,6 +3674,23 @@ pub async fn episode_download_progress(
         return Ok(Json(Vec::new()));
     }
 
+    // Phase 2: consult `grabbed_torrent_series` so sibling pages
+    // surface the parent torrent's progress. Auto-expand writes one
+    // route row per sibling + one for the parent; each row carries
+    // that series' own effective (post-offset) episode numbers.
+    // When routes exist we trust them exclusively (same rule post-
+    // processing uses), so the legacy parent-only match on
+    // `grab.series_id` is skipped for auto-expanded grabs.
+    //
+    // Bulk-fetched into a HashMap<grab_id, routes> so the poller (run
+    // every few seconds on every open series page) issues exactly one
+    // routes query per poll, not N.
+    let grab_ids: Vec<i64> = pending.iter().map(|g| g.id).collect();
+    let routes_by_grab =
+        crate::models::grabbed_torrents::get_series_routes_for_grabs(&state.db, &grab_ids)
+            .await
+            .unwrap_or_default();
+
     let qbit = {
         let guard = state.qbit.read().await;
         match guard.as_ref() {
@@ -3658,30 +3707,15 @@ pub async fn episode_download_progress(
 
     let mut results = Vec::new();
     for grab in &pending {
-        // Phase 2: consult `grabbed_torrent_series` so sibling pages
-        // surface the parent torrent's progress. Auto-expand writes
-        // one route row per sibling + one for the parent; each row
-        // carries that series' own effective (post-offset) episode
-        // numbers. When routes exist we trust them exclusively (same
-        // rule post-processing uses), so the legacy parent-only match
-        // on `grab.series_id` is skipped for auto-expanded grabs.
-        // Without this, the sibling's progress bar is stuck at 0.0%
-        // — its `episode_quality_tags` rows exist (so the DOM bar
-        // renders) but the poller can't find a matching grab row
-        // keyed to the sibling's series_id.
-        let routes = crate::models::grabbed_torrents::get_series_routes(&state.db, grab.id)
-            .await
-            .unwrap_or_default();
-        let ep_nums: Vec<i32> = if !routes.is_empty() {
-            routes
+        let routes = routes_by_grab.get(&grab.id);
+        let ep_nums: Vec<i32> = match routes {
+            Some(routes) if !routes.is_empty() => routes
                 .iter()
                 .filter(|r| r.series_id == tracked.id)
                 .flat_map(|r| r.episode_numbers.iter().copied())
-                .collect()
-        } else if grab.series_id == tracked.id {
-            grab.episode_numbers.clone()
-        } else {
-            continue;
+                .collect(),
+            _ if grab.series_id == tracked.id => grab.episode_numbers.clone(),
+            _ => continue,
         };
         if ep_nums.is_empty() {
             continue;
