@@ -620,6 +620,254 @@ fieldset legend {
     color: var(--bg);
 }
 
+/* --- Remove-from-library destructive confirmation modal ---
+   Dedicated variant of the generic confirm modal. It's wider, fronts a
+   red warning icon, and renders the concrete stakes of the remove
+   (path, episode count, total size) so the user can read exactly what
+   they're about to lose before committing. */
+.remove-series-modal {
+    max-width: 540px;
+}
+
+.remove-series-header {
+    align-items: flex-start;
+    gap: 12px;
+    padding: 24px 28px 20px;
+}
+
+.remove-series-heading {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    min-width: 0;
+    flex: 1;
+}
+
+.remove-series-icon {
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(211, 125, 125, 0.12);
+    color: var(--red);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(211, 125, 125, 0.3);
+}
+
+.remove-series-heading-text {
+    min-width: 0;
+    flex: 1;
+}
+
+.remove-series-heading-text h3 {
+    margin: 0 0 4px 0;
+    font-size: 18px;
+    color: var(--text-bright);
+}
+
+.remove-series-subtitle {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.remove-series-body {
+    padding: 24px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.remove-series-path {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text);
+    min-width: 0;
+}
+
+.remove-series-path-icon {
+    color: var(--text-dim);
+    flex-shrink: 0;
+}
+
+.remove-series-path span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+}
+
+.remove-series-consequences {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.remove-series-consequences li {
+    margin-bottom: 6px;
+}
+
+.remove-series-consequences li:last-child {
+    margin-bottom: 0;
+}
+
+.remove-series-consequences strong {
+    color: var(--text-bright);
+    font-weight: 600;
+}
+
+.remove-series-final-warning {
+    margin: 0;
+    padding: 10px 12px;
+    background: rgba(211, 125, 125, 0.08);
+    border: 1px solid rgba(211, 125, 125, 0.25);
+    border-radius: var(--radius);
+    color: var(--red);
+    font-weight: 600;
+    font-size: 14px;
+    text-align: center;
+}
+
+.remove-series-footer {
+    padding: 16px 28px;
+    border-top: 1px solid var(--border);
+    gap: 10px;
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* Force the solid-red destructive variant inside this modal regardless
+   of whichever global .btn-danger rule wins the cascade elsewhere.
+   Uses `color: var(--bg)` (near-black) rather than pure white so it
+   matches the existing `.btn-danger` on the series page header. */
+.remove-series-modal .btn-danger {
+    background: var(--red);
+    color: var(--bg);
+    border: 1px solid var(--red);
+}
+
+.remove-series-modal .btn-danger:hover {
+    background: #c46a6a;
+    border-color: #c46a6a;
+}
+
+/* --- Ryokan toast stack --- */
+.ryokan-toast-stack {
+    position: fixed;
+    top: 72px;
+    right: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    z-index: 1100;
+    pointer-events: none;
+    max-width: calc(100vw - 48px);
+}
+
+.ryokan-toast {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    min-width: 280px;
+    max-width: 380px;
+    padding: 12px 14px 12px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+    pointer-events: auto;
+    overflow: hidden;
+    animation: ryokan-toast-enter 180ms ease-out;
+}
+
+.ryokan-toast-leaving {
+    animation: ryokan-toast-leave 200ms ease-in forwards;
+}
+
+@keyframes ryokan-toast-enter {
+    from { opacity: 0; transform: translateX(16px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes ryokan-toast-leave {
+    from { opacity: 1; transform: translateX(0); }
+    to   { opacity: 0; transform: translateX(16px); }
+}
+
+.ryokan-toast-accent {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background: var(--text-dim);
+}
+
+.ryokan-toast-info  .ryokan-toast-accent { background: var(--accent); }
+.ryokan-toast-success .ryokan-toast-accent { background: var(--green); }
+.ryokan-toast-warn  .ryokan-toast-accent { background: var(--orange); }
+.ryokan-toast-error .ryokan-toast-accent { background: var(--red); }
+
+.ryokan-toast-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.ryokan-toast-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-bright);
+    line-height: 1.35;
+}
+
+.ryokan-toast-body {
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.45;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+}
+
+.ryokan-toast-close {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: background 120ms, color 120ms;
+}
+
+.ryokan-toast-close:hover {
+    background: var(--bg-elevated);
+    color: var(--text-bright);
+}
+
 /* --- AniList results --- */
 .anilist-results {
     display: flex;
@@ -1766,10 +2014,6 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 }
 
 
-.auto-search-status {
-    min-height: 1.25rem;
-}
-
 .icon-btn {
     display: inline-flex;
     align-items: center;
@@ -2719,10 +2963,6 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     display: flex;
     align-items: center;
     gap: 12px;
-}
-
-.debug-action-result {
-    font-size: 13px;
 }
 
 /* --- Monitor option list (add series modal) --- */

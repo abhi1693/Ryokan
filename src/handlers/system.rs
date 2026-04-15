@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::models::{config, log::{self, LogCategory}, rss, scheduled_tasks};
+use crate::models::{config, log::{self, LogCategory, LogLevel}, rss, scheduled_tasks};
 use crate::services::{logger, metadata_sync, post_processing, rss as rss_service, upgrade};
 use crate::AppState;
 
@@ -369,6 +369,54 @@ pub async fn api_logs_clear(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// Payload for the client-side log ingestion endpoint. Every in-app toast
+/// (fired via `window.ryokanToast` in `base.html`) hits this endpoint so
+/// the notification persists in the Logs tab after the transient toast
+/// fades. Toasts are user-facing so mapping is straightforward:
+///   kind `info`/`success` → LogLevel::Info
+///   kind `warn`           → LogLevel::Warn
+///   kind `error`          → LogLevel::Error
+/// The `category` string is looked up against `LogCategory::from_str`
+/// and falls back to `System` when the caller doesn't specify or passes
+/// a value outside the known set.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct ClientLogForm {
+    pub kind: String,
+    pub category: Option<String>,
+    pub title: String,
+    pub body: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/logs/client",
+    tag = "System",
+    summary = "Log a client-side toast notification",
+    description = "Persists a transient in-app toast to the logs table so users can see recent notifications in the System → Logs tab after the toast has faded. Fired automatically by window.ryokanToast.",
+    request_body = ClientLogForm,
+    responses(
+        (status = 200, description = "Toast logged", body = serde_json::Value),
+    ),
+)]
+pub async fn api_logs_client(
+    State(state): State<AppState>,
+    Json(form): Json<ClientLogForm>,
+) -> Json<serde_json::Value> {
+    let level = match form.kind.as_str() {
+        "warn" => LogLevel::Warn,
+        "error" => LogLevel::Error,
+        _ => LogLevel::Info,
+    };
+    let category = form
+        .category
+        .as_deref()
+        .and_then(LogCategory::from_str)
+        .unwrap_or(LogCategory::System);
+    let detail = form.body.as_deref().unwrap_or("");
+    logger::log(&state.db, level, category, &form.title, detail).await;
+    Json(serde_json::json!({"ok": true}))
 }
 
 

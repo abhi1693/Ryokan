@@ -58,7 +58,6 @@
             <button class="btn btn-secondary" id="btn-track" onclick="addSeries()">+ Add to Library</button>
             {% endif %}
             {% if !external_url.is_empty() %}<a href="{{ external_url }}" target="_blank" rel="noopener" class="btn btn-ghost">{{ external_label }}</a>{% endif %}
-            <span id="auto-search-status" class="form-hint auto-search-status"></span>
         </div>
 
         {% if !detail.description.is_empty() %}
@@ -425,6 +424,62 @@
     </div>
 </div>
 
+<!-- Remove-from-library confirmation modal — dedicated destructive variant,
+     not a ryokanConfirm call. The shared confirm modal is too compact to sell
+     the stakes of a library remove (folder deletion, qBit side-effects,
+     Jellyfin cleanup). This one inlines the concrete path, file count, and
+     size so the user can read exactly what is about to disappear. -->
+<div class="modal-backdrop" id="remove-series-modal" style="display:none">
+    <div class="modal remove-series-modal">
+        <div class="modal-header remove-series-header">
+            <div class="remove-series-heading">
+                <div class="remove-series-icon" aria-hidden="true">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                        <line x1="12" y1="9" x2="12" y2="13"/>
+                        <line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                </div>
+                <div class="remove-series-heading-text">
+                    <h3>Remove from library</h3>
+                    <p class="remove-series-subtitle title-switcher">
+                        <span class="title-option" data-title-lang="english">{% if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_native }}{% endif %}</span>
+                        <span class="title-option" data-title-lang="romaji">{% if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else %}{{ detail.title_native }}{% endif %}</span>
+                        <span class="title-option" data-title-lang="native">{% if !detail.title_native.is_empty() %}{{ detail.title_native }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_english }}{% endif %}</span>
+                    </p>
+                </div>
+            </div>
+            <button class="btn-icon" type="button" id="remove-series-close" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body remove-series-body">
+            {% if !folder_name.is_empty() %}
+            <div class="remove-series-path" title="{{ media_root }}/{{ folder_name }}">
+                <svg class="remove-series-path-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+                <span>{{ media_root }}/{{ folder_name }}</span>
+            </div>
+            {% endif %}
+            <ul class="remove-series-consequences">
+                {% if on_disk_count > 0 %}
+                <li>The series folder and its <strong>{{ on_disk_count }} episode file{% if on_disk_count != 1 %}s{% endif %}</strong>{% if !size_display.is_empty() %} (<strong>{{ size_display }}</strong>){% endif %} will be deleted from disk.</li>
+                {% else %}
+                <li>The series folder will be deleted from disk.</li>
+                {% endif %}
+                <li>Every torrent for this series will be removed from <strong>qBittorrent</strong>.</li>
+                <li>Imported episodes and the <strong>Jellyfin</strong> folder will be gone.</li>
+            </ul>
+            <p class="remove-series-final-warning">This cannot be undone.</p>
+        </div>
+        <div class="modal-footer remove-series-footer">
+            <button class="btn btn-secondary" type="button" id="remove-series-cancel">Cancel</button>
+            <button class="btn btn-danger" type="button" id="remove-series-confirm">Remove from library</button>
+        </div>
+    </div>
+</div>
+
 <div id="series-data" hidden
     data-id="{{ route_id }}"
     data-title-romaji="{{ detail.title_romaji }}"
@@ -661,7 +716,6 @@ function markEpisodeFailed(historyId, epNum, btn) {
         const addToBlocklist = !!res.extras.blocklist;
         btn.disabled = true;
         btn.textContent = 'Searching…';
-        const status = document.getElementById('auto-search-status');
         fetch(`/api/series/${SD.id}/mark-failed/${epNum}`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -672,13 +726,25 @@ function markEpisodeFailed(historyId, epNum, btn) {
             try { data = await r.json(); } catch (_) {}
             if (!r.ok) throw new Error(data.message || 'Failed');
             const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
-            if (status) status.textContent = grabbed > 0 ? `Re-grabbed episode ${epNum}` : `No replacement found for episode ${epNum}`;
             btn.textContent = grabbed > 0 ? 'Re-grabbed' : 'No result';
             if (grabbed > 0) {
                 const first = data.grabbed[0];
                 updateEpisodeRow(epNum, 'grabbed', first.release_group);
                 ensureDlPollRunning();
                 refreshEpisodeRows({ force: true });
+                window.ryokanToast({
+                    kind: 'success',
+                    category: 'auto_search',
+                    title: `Episode ${epNum} re-grabbed`,
+                    body: first.release_title + (first.release_group ? ' · ' + first.release_group : ''),
+                });
+            } else {
+                window.ryokanToast({
+                    kind: 'warn',
+                    category: 'auto_search',
+                    title: `No replacement for episode ${epNum}`,
+                    body: 'Nothing on Nyaa matched after marking the current grab as failed.',
+                });
             }
             // Refresh the grab history in the modal
             if (SD.dbId) {
@@ -689,33 +755,52 @@ function markEpisodeFailed(historyId, epNum, btn) {
             }
         })
         .catch(err => {
-            if (status) status.textContent = err.message || 'Failed to mark as failed';
             btn.disabled = false;
             btn.textContent = 'Mark Failed';
+            window.ryokanToast({
+                kind: 'error',
+                category: 'auto_search',
+                title: `Mark-failed error for episode ${epNum}`,
+                body: err && err.message ? err.message : 'Unknown error',
+            });
         });
     });
 }
 
-function deleteEpisodeFile() {
+async function deleteEpisodeFile() {
     const epNum = _currentEpNum;
     if (!epNum) return;
-    if (!confirm(`Delete the file for Episode ${epNum} from disk? This cannot be undone.`)) return;
+    const confirmed = await window.ryokanConfirm({
+        title: 'Delete episode file',
+        body: `Delete the file for Episode ${epNum} from disk? This cannot be undone.`,
+        yesLabel: 'Delete',
+    });
+    if (!confirmed.ok) return;
     const btn = document.getElementById('btn-delete-file');
     if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
-    const status = document.getElementById('auto-search-status');
     fetch(`/api/series/${SD.id}/delete-file/${epNum}`, { method: 'POST', headers: {'Content-Type': 'application/json'} })
         .then(async r => {
             let data = {};
             try { data = await r.json(); } catch (_) {}
             if (!r.ok) throw new Error(data.message || 'Delete failed');
-            if (status) status.textContent = `Episode ${epNum} file deleted.`;
             document.getElementById('ep-detail-modal').style.display = 'none';
             updateEpisodeRow(epNum, 'deleted');
             refreshEpisodeRows({ force: true });
+            window.ryokanToast({
+                kind: 'success',
+                category: 'library',
+                title: `Episode ${epNum} deleted`,
+                body: 'File removed from disk.',
+            });
         })
         .catch(err => {
-            if (status) status.textContent = err.message || 'Delete failed';
             if (btn) { btn.disabled = false; btn.textContent = 'Delete File'; }
+            window.ryokanToast({
+                kind: 'error',
+                category: 'library',
+                title: `Delete failed for episode ${epNum}`,
+                body: err && err.message ? err.message : 'Unknown error',
+            });
         });
 }
 
@@ -787,9 +872,13 @@ function renderPeers(seeders, leechers) {
 }
 
 function searchBatchReleases(btn) {
-    const status = document.getElementById('auto-search-status');
     setBusyButton(btn, true, 'Searching…');
-    status.textContent = 'Searching for batch releases…';
+    window.ryokanToast({
+        kind: 'info',
+        category: 'auto_search',
+        title: 'Searching for batch releases',
+        body: SD.titleEnglish || SD.titleRomaji || '',
+    });
     fetch(`/api/series/${SD.id}/search-batch`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'}
@@ -799,18 +888,33 @@ function searchBatchReleases(btn) {
         try { data = await resp.json(); } catch (_) {}
         if (!resp.ok) throw new Error(data.message || (resp.status === 404 ? 'No batch release found' : 'Batch search failed'));
         const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
-        status.textContent = grabbed > 0
-            ? `Batch queued: ${data.grabbed[0].release_title}`
-            : 'No batch release found';
         setBusyButton(btn, false);
         if (grabbed > 0) {
             ensureDlPollRunning();
             refreshEpisodeRows({ force: true });
+            window.ryokanToast({
+                kind: 'success',
+                category: 'auto_search',
+                title: 'Batch queued',
+                body: data.grabbed[0].release_title,
+            });
+        } else {
+            window.ryokanToast({
+                kind: 'warn',
+                category: 'auto_search',
+                title: 'No batch release found',
+                body: 'Nothing on Nyaa matched the batch search.',
+            });
         }
     })
     .catch(err => {
-        status.textContent = err.message || 'Batch search failed';
         setBusyButton(btn, false);
+        window.ryokanToast({
+            kind: 'error',
+            category: 'auto_search',
+            title: 'Batch search failed',
+            body: err && err.message ? err.message : 'Unknown error',
+        });
     });
 }
 
@@ -888,12 +992,16 @@ function grabInteractiveResult(epNum, idx, btn) {
         if (!r.ok) throw new Error(data.message || 'Grab failed');
         btn.textContent = 'Sent';
         btn.classList.add('btn-success');
-        const status = document.getElementById('auto-search-status');
-        if (status) status.textContent = `Episode ${epNum} queued: ${result.title}`;
         // Update the episode row to show grabbed state
         updateEpisodeRow(epNum, 'grabbed', result.group);
         ensureDlPollRunning();
         refreshEpisodeRows({ force: true });
+        window.ryokanToast({
+            kind: 'success',
+            category: 'grab',
+            title: `Episode ${epNum} queued`,
+            body: result.title + (result.group ? ' · ' + result.group : ''),
+        });
         // Close the modal after a short delay
         setTimeout(() => {
             document.getElementById('isearch-modal').style.display = 'none';
@@ -903,6 +1011,12 @@ function grabInteractiveResult(epNum, idx, btn) {
         btn.textContent = 'Error';
         btn.classList.add('btn-error');
         btn.disabled = false;
+        window.ryokanToast({
+            kind: 'error',
+            category: 'grab',
+            title: `Grab failed for episode ${epNum}`,
+            body: err && err.message ? err.message : 'Unknown error',
+        });
     });
 }
 
@@ -989,10 +1103,14 @@ function grabInteractiveBatchResult(idx, btn) {
         if (!r.ok) throw new Error(data.message || 'Grab failed');
         btn.textContent = 'Sent';
         btn.classList.add('btn-success');
-        const status = document.getElementById('auto-search-status');
-        if (status) status.textContent = `Batch queued: ${result.title}`;
         ensureDlPollRunning();
         refreshEpisodeRows({ force: true });
+        window.ryokanToast({
+            kind: 'success',
+            category: 'grab',
+            title: 'Batch queued',
+            body: result.title + (result.group ? ' · ' + result.group : ''),
+        });
         setTimeout(() => {
             document.getElementById('isearch-modal').style.display = 'none';
         }, 600);
@@ -1001,6 +1119,12 @@ function grabInteractiveBatchResult(idx, btn) {
         btn.textContent = 'Error';
         btn.classList.add('btn-error');
         btn.disabled = false;
+        window.ryokanToast({
+            kind: 'error',
+            category: 'grab',
+            title: 'Batch grab failed',
+            body: err && err.message ? err.message : 'Unknown error',
+        });
     });
 }
 
@@ -1045,9 +1169,14 @@ function setEpisodeButtonState(btn, state, title) {
 }
 
 function autoSearchEpisode(episodeNumber, btn) {
-    const status = document.getElementById('auto-search-status');
+    const seriesTitle = SD.titleEnglish || SD.titleRomaji || SD.titleNative || '';
     setEpisodeButtonState(btn, 'loading', `Searching episode ${episodeNumber}...`);
-    status.textContent = `Searching episode ${episodeNumber}...`;
+    window.ryokanToast({
+        kind: 'info',
+        category: 'auto_search',
+        title: `Searching episode ${episodeNumber}`,
+        body: seriesTitle,
+    });
 
     fetch(`/api/series/${SD.id}/auto-search/${episodeNumber}`, {
         method: 'POST',
@@ -1062,25 +1191,45 @@ function autoSearchEpisode(episodeNumber, btn) {
         const first = Array.isArray(data.grabbed) ? data.grabbed[0] : null;
         if (first) {
             setEpisodeButtonState(btn, 'success', `Queued: ${first.release_title}`);
-            status.textContent = `Episode ${episodeNumber} queued${first.release_group ? ` · ${first.release_group}` : ''}`;
             updateEpisodeRow(episodeNumber, 'grabbed', first.release_group);
             ensureDlPollRunning();
             refreshEpisodeRows({ force: true });
+            window.ryokanToast({
+                kind: 'success',
+                category: 'auto_search',
+                title: `Episode ${episodeNumber} grabbed`,
+                body: first.release_title + (first.release_group ? ' · ' + first.release_group : ''),
+            });
         } else {
             setEpisodeButtonState(btn, 'error', 'No matching release found');
-            status.textContent = `Episode ${episodeNumber}: no matching release found`;
+            window.ryokanToast({
+                kind: 'warn',
+                category: 'auto_search',
+                title: `No release for episode ${episodeNumber}`,
+                body: 'Nothing on Nyaa matched the scoring threshold.',
+            });
         }
     })
     .catch(err => {
         setEpisodeButtonState(btn, 'error', err.message || 'Episode search failed');
-        status.textContent = err.message || 'Episode search failed';
+        window.ryokanToast({
+            kind: 'error',
+            category: 'auto_search',
+            title: `Episode ${episodeNumber} search failed`,
+            body: err && err.message ? err.message : 'Unknown error',
+        });
     });
 }
 
 function autoSearchSeries(btn) {
-    const status = document.getElementById('auto-search-status');
+    const seriesTitle = SD.titleEnglish || SD.titleRomaji || SD.titleNative || '';
     setBusyButton(btn, true, 'Searching…');
-    status.textContent = 'Searching missing episodes...';
+    window.ryokanToast({
+        kind: 'info',
+        category: 'auto_search',
+        title: 'Searching missing episodes',
+        body: seriesTitle,
+    });
 
     fetch(`/api/series/${SD.id}/auto-search`, {
         method: 'POST',
@@ -1096,18 +1245,33 @@ function autoSearchSeries(btn) {
         const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
         const groups = Array.isArray(data.grabbed) ? [...new Set(data.grabbed.map(x => x.release_group).filter(Boolean))] : [];
         const queuedPack = Array.isArray(data.skipped) && data.skipped.some(x => x.toLowerCase().includes('season pack queued'));
-        status.textContent = grabbed > 0
-            ? `${queuedPack ? 'Queued season pack' : `Grabbed ${grabbed} release${grabbed === 1 ? '' : 's'}`}${groups.length ? ` · ${groups.join(', ')}` : ''}`
-            : `No release grabbed${skipped ? ` · ${skipped} skipped` : ''}`;
         setBusyButton(btn, false);
         if (grabbed > 0) {
             ensureDlPollRunning();
             refreshEpisodeRows({ force: true });
+            window.ryokanToast({
+                kind: 'success',
+                category: 'auto_search',
+                title: queuedPack ? 'Season pack queued' : `${grabbed} release${grabbed === 1 ? '' : 's'} grabbed`,
+                body: groups.length ? groups.join(', ') : seriesTitle,
+            });
+        } else {
+            window.ryokanToast({
+                kind: 'warn',
+                category: 'auto_search',
+                title: 'No release grabbed',
+                body: skipped ? `${skipped} candidate${skipped === 1 ? '' : 's'} skipped — check inline detail.` : 'Nothing matched.',
+            });
         }
     })
     .catch(err => {
-        status.textContent = err.message || 'Auto search failed';
         setBusyButton(btn, false);
+        window.ryokanToast({
+            kind: 'error',
+            category: 'auto_search',
+            title: 'Auto search failed',
+            body: err && err.message ? err.message : 'Unknown error',
+        });
     });
 }
 
@@ -1301,7 +1465,6 @@ function setAllowUpgrades(allow) {
 
 function addSeries() {
     const btn = document.getElementById('btn-track');
-    const status = document.getElementById('auto-search-status');
     btn.disabled = true;
     btn.textContent = '...';
 
@@ -1331,20 +1494,66 @@ function addSeries() {
         btn.textContent = 'Added';
         btn.className = 'btn btn-success';
         if (data.hydrating) {
-            if (status) status.textContent = 'Added to library. Fetching metadata…';
+            window.ryokanToast({
+                kind: 'info',
+                category: 'library',
+                title: 'Added to library',
+                body: 'Fetching metadata…',
+            });
             setTimeout(() => location.reload(), 4000);
         } else {
             setTimeout(() => location.reload(), 400);
         }
     })
-    .catch(() => {
+    .catch(err => {
         btn.textContent = 'Error';
         btn.className = 'btn btn-danger';
+        window.ryokanToast({
+            kind: 'error',
+            category: 'library',
+            title: 'Failed to add series',
+            body: err && err.message ? err.message : 'Unknown error',
+        });
     });
 }
 
 function removeSeries(dbId) {
-    if (!confirm('Remove from library?\n\nThis will also delete the series folder from disk and remove every torrent for this series from qBittorrent. Imported episodes and the Jellyfin folder will be gone.\n\nThis cannot be undone.')) return;
+    // Open the dedicated destructive modal. This is a one-off rather than
+    // a ryokanConfirm call because library-remove needs to render concrete
+    // stakes (path, file count, size) that the generic confirm primitive
+    // can't represent. See the #remove-series-modal block above.
+    const modal = document.getElementById('remove-series-modal');
+    const cancelBtn = document.getElementById('remove-series-cancel');
+    const closeBtn = document.getElementById('remove-series-close');
+    const confirmBtn = document.getElementById('remove-series-confirm');
+
+    function close() {
+        modal.style.display = 'none';
+        cancelBtn.removeEventListener('click', close);
+        closeBtn.removeEventListener('click', close);
+        confirmBtn.removeEventListener('click', doRemove);
+        modal.removeEventListener('click', onBackdrop);
+        document.removeEventListener('keydown', onKey);
+    }
+    function onBackdrop(ev) { if (ev.target === modal) close(); }
+    function onKey(ev) { if (ev.key === 'Escape') close(); }
+    function doRemove() {
+        close();
+        performRemoveSeries(dbId);
+    }
+
+    cancelBtn.addEventListener('click', close);
+    closeBtn.addEventListener('click', close);
+    confirmBtn.addEventListener('click', doRemove);
+    modal.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+    modal.style.display = 'flex';
+    // Focus Cancel by default so a stray Enter keypress can't
+    // surprise-trigger the destructive action.
+    setTimeout(function() { cancelBtn.focus(); }, 10);
+}
+
+function performRemoveSeries(dbId) {
     const btn = document.getElementById('btn-track');
     const originalText = btn.textContent;
     btn.disabled = true;
@@ -1377,7 +1586,10 @@ function removeSeries(dbId) {
         // ON DELETE CASCADE silently blocked every remove with
         // "FOREIGN KEY constraint failed" and the user had no way to
         // see it without devtools.
-        alert('Remove failed:\n\n' + (err && err.message ? err.message : 'unknown error'));
+        window.ryokanAlert({
+            title: 'Remove failed',
+            body: err && err.message ? err.message : 'unknown error',
+        });
         btn.disabled = false;
         btn.textContent = originalText;
     });

@@ -48,7 +48,7 @@
                 </button>
             </div>
             <div class="modal-body" style="padding:16px 24px">
-                <p id="ryokan-confirm-body" class="form-hint" style="margin-top:0"></p>
+                <p id="ryokan-confirm-body" class="form-hint" style="margin-top:0;white-space:pre-wrap"></p>
                 <div id="ryokan-confirm-extras" style="display:flex;flex-direction:column;gap:8px;margin-top:12px"></div>
             </div>
             <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
@@ -57,6 +57,58 @@
             </div>
         </div>
     </div>
+
+    <!-- Shared alert modal — in-app replacement for browser alert().
+         Invoked via window.ryokanAlert({title, body, okLabel}). Returns
+         a promise that resolves when the user dismisses the modal. -->
+    <div class="modal-backdrop" id="ryokan-alert-modal" style="display:none">
+        <div class="modal" style="max-width:420px">
+            <div class="modal-header">
+                <h3 id="ryokan-alert-title">Notice</h3>
+                <button class="btn-icon" type="button" id="ryokan-alert-close" aria-label="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding:16px 24px">
+                <p id="ryokan-alert-body" class="form-hint" style="margin-top:0;white-space:pre-wrap"></p>
+            </div>
+            <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
+                <button class="btn btn-primary" type="button" id="ryokan-alert-ok">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Shared prompt modal — in-app replacement for browser prompt().
+         Invoked via window.ryokanPrompt({title, body, label, defaultValue,
+         placeholder, okLabel, cancelLabel, validator}). Returns a promise
+         that resolves to the submitted string, or null if cancelled.
+         `validator` is an optional sync function (value) => errorString | null. -->
+    <div class="modal-backdrop" id="ryokan-prompt-modal" style="display:none">
+        <div class="modal" style="max-width:420px">
+            <div class="modal-header">
+                <h3 id="ryokan-prompt-title">Enter value</h3>
+                <button class="btn-icon" type="button" id="ryokan-prompt-close" aria-label="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding:16px 24px">
+                <p id="ryokan-prompt-body" class="form-hint" style="margin-top:0;white-space:pre-wrap"></p>
+                <div class="form-group" style="margin-top:12px;margin-bottom:0">
+                    <label id="ryokan-prompt-label" for="ryokan-prompt-input"></label>
+                    <input type="text" id="ryokan-prompt-input" autocomplete="off">
+                </div>
+                <p id="ryokan-prompt-error" class="form-hint" style="margin-top:8px;color:var(--red);display:none"></p>
+            </div>
+            <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
+                <button class="btn btn-secondary" type="button" id="ryokan-prompt-cancel">Cancel</button>
+                <button class="btn btn-primary" type="button" id="ryokan-prompt-ok">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast stack — transient top-right notifications populated by
+         window.ryokanToast({kind, title, body, duration}). -->
+    <div class="ryokan-toast-stack" id="ryokan-toast-stack" aria-live="polite" aria-atomic="false"></div>
 
     <script>
     (function() {
@@ -131,6 +183,263 @@
             });
         };
     })();
+
+    (function() {
+        // In-app replacement for browser alert(). Returns a promise that
+        // resolves when the user dismisses the modal.
+        let current = null;
+        const modal = document.getElementById('ryokan-alert-modal');
+        const titleEl = document.getElementById('ryokan-alert-title');
+        const bodyEl = document.getElementById('ryokan-alert-body');
+        const okBtn = document.getElementById('ryokan-alert-ok');
+        const closeBtn = document.getElementById('ryokan-alert-close');
+
+        function close() {
+            if (!current) return;
+            const resolve = current.resolve;
+            current = null;
+            modal.style.display = 'none';
+            resolve();
+        }
+
+        okBtn.addEventListener('click', close);
+        closeBtn.addEventListener('click', close);
+        modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) close();
+        });
+        document.addEventListener('keydown', function(ev) {
+            if (!current) return;
+            if (ev.key === 'Escape' || ev.key === 'Enter') close();
+        });
+
+        window.ryokanAlert = function(opts) {
+            opts = opts || {};
+            return new Promise(function(resolve) {
+                current = {resolve: resolve};
+                titleEl.textContent = opts.title || 'Notice';
+                bodyEl.textContent = opts.body || '';
+                okBtn.textContent = opts.okLabel || 'OK';
+                modal.style.display = 'flex';
+                setTimeout(function() { okBtn.focus(); }, 10);
+            });
+        };
+    })();
+
+    (function() {
+        // In-app replacement for browser prompt(). Returns a promise that
+        // resolves to the submitted string, or null if cancelled. Optional
+        // validator: (value) => errorString | null.
+        let current = null;
+        const modal = document.getElementById('ryokan-prompt-modal');
+        const titleEl = document.getElementById('ryokan-prompt-title');
+        const bodyEl = document.getElementById('ryokan-prompt-body');
+        const labelEl = document.getElementById('ryokan-prompt-label');
+        const inputEl = document.getElementById('ryokan-prompt-input');
+        const errorEl = document.getElementById('ryokan-prompt-error');
+        const okBtn = document.getElementById('ryokan-prompt-ok');
+        const cancelBtn = document.getElementById('ryokan-prompt-cancel');
+        const closeBtn = document.getElementById('ryokan-prompt-close');
+
+        function close(result) {
+            if (!current) return;
+            const resolve = current.resolve;
+            current = null;
+            modal.style.display = 'none';
+            errorEl.style.display = 'none';
+            errorEl.textContent = '';
+            resolve(result);
+        }
+
+        function submit() {
+            if (!current) return;
+            const value = inputEl.value;
+            if (current.validator) {
+                const err = current.validator(value);
+                if (err) {
+                    errorEl.textContent = err;
+                    errorEl.style.display = 'block';
+                    return;
+                }
+            }
+            close(value);
+        }
+
+        okBtn.addEventListener('click', submit);
+        cancelBtn.addEventListener('click', function() { close(null); });
+        closeBtn.addEventListener('click', function() { close(null); });
+        modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) close(null);
+        });
+        document.addEventListener('keydown', function(ev) {
+            if (!current) return;
+            if (ev.key === 'Escape') close(null);
+            if (ev.key === 'Enter' && ev.target === inputEl) {
+                ev.preventDefault();
+                submit();
+            }
+        });
+
+        window.ryokanPrompt = function(opts) {
+            opts = opts || {};
+            return new Promise(function(resolve) {
+                current = {resolve: resolve, validator: opts.validator || null};
+                titleEl.textContent = opts.title || 'Enter value';
+                if (opts.body) {
+                    bodyEl.textContent = opts.body;
+                    bodyEl.style.display = 'block';
+                } else {
+                    bodyEl.textContent = '';
+                    bodyEl.style.display = 'none';
+                }
+                if (opts.label) {
+                    labelEl.textContent = opts.label;
+                    labelEl.style.display = 'block';
+                } else {
+                    labelEl.textContent = '';
+                    labelEl.style.display = 'none';
+                }
+                inputEl.value = opts.defaultValue != null ? String(opts.defaultValue) : '';
+                inputEl.placeholder = opts.placeholder || '';
+                okBtn.textContent = opts.okLabel || 'OK';
+                cancelBtn.textContent = opts.cancelLabel || 'Cancel';
+                errorEl.style.display = 'none';
+                errorEl.textContent = '';
+                modal.style.display = 'flex';
+                setTimeout(function() { inputEl.focus(); inputEl.select(); }, 10);
+            });
+        };
+    })();
+
+    (function() {
+        // Transient toast notifications. window.ryokanToast({kind, title,
+        // body, category, duration}) pushes a new toast into the top-right
+        // stack. kind ∈ {info, success, warn, error}. Auto-dismiss after
+        // duration ms (default 4000, 0 disables auto-dismiss). Pause on
+        // hover. Every toast is also mirrored to POST /api/logs/client
+        // so it persists in the System → Logs tab after the transient
+        // UI disappears. Pass `category` to classify the log row; falls
+        // back to `system` on the server. Pass `log: false` to opt out
+        // of persistence (e.g. purely decorative toasts).
+        const stack = document.getElementById('ryokan-toast-stack');
+
+        function persistToast(kind, category, title, body) {
+            // Fire-and-forget. A failing log write must never surface
+            // another toast — that would be an infinite loop on an
+            // outage. Silently console-log any failure.
+            try {
+                fetch('/api/logs/client', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        kind: kind,
+                        category: category || null,
+                        title: title || '',
+                        body: body || '',
+                    }),
+                    credentials: 'same-origin',
+                    keepalive: true,
+                }).catch(function(err) {
+                    console.warn('[ryokanToast] log persist failed:', err);
+                });
+            } catch (err) {
+                console.warn('[ryokanToast] log persist threw:', err);
+            }
+        }
+
+        function dismiss(toast) {
+            if (!toast || toast.dataset.dismissed === '1') return;
+            toast.dataset.dismissed = '1';
+            toast.classList.add('ryokan-toast-leaving');
+            setTimeout(function() {
+                if (toast.parentNode) toast.parentNode.removeChild(toast);
+            }, 200);
+        }
+
+        window.ryokanToast = function(opts) {
+            opts = opts || {};
+            const kind = opts.kind && ['info','success','warn','error'].indexOf(opts.kind) >= 0
+                ? opts.kind : 'info';
+            const duration = opts.duration != null ? Number(opts.duration) : 4000;
+
+            if (opts.log !== false) {
+                persistToast(kind, opts.category, opts.title, opts.body);
+            }
+
+            const toast = document.createElement('div');
+            toast.className = 'ryokan-toast ryokan-toast-' + kind;
+            toast.setAttribute('role', kind === 'error' || kind === 'warn' ? 'alert' : 'status');
+
+            const accent = document.createElement('span');
+            accent.className = 'ryokan-toast-accent';
+            toast.appendChild(accent);
+
+            const content = document.createElement('div');
+            content.className = 'ryokan-toast-content';
+            if (opts.title) {
+                const t = document.createElement('div');
+                t.className = 'ryokan-toast-title';
+                t.textContent = opts.title;
+                content.appendChild(t);
+            }
+            if (opts.body) {
+                const b = document.createElement('div');
+                b.className = 'ryokan-toast-body';
+                b.textContent = opts.body;
+                content.appendChild(b);
+            }
+            toast.appendChild(content);
+
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'ryokan-toast-close';
+            close.setAttribute('aria-label', 'Dismiss');
+            close.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>';
+            close.addEventListener('click', function() { dismiss(toast); });
+            toast.appendChild(close);
+
+            stack.appendChild(toast);
+
+            let remaining = duration;
+            let timerStart = Date.now();
+            let timer = null;
+            function armTimer() {
+                if (remaining <= 0) return;
+                timerStart = Date.now();
+                timer = setTimeout(function() { dismiss(toast); }, remaining);
+            }
+            function pauseTimer() {
+                if (timer) {
+                    clearTimeout(timer);
+                    timer = null;
+                    remaining -= (Date.now() - timerStart);
+                }
+            }
+            toast.addEventListener('mouseenter', pauseTimer);
+            toast.addEventListener('mouseleave', armTimer);
+            armTimer();
+
+            return { dismiss: function() { dismiss(toast); } };
+        };
+    })();
+
+    // Auto-promote any `[data-ryokan-toast]` element on the page into a
+    // ryokanToast on DOM ready. Lets server-side flash banners (Settings,
+    // System Debug) double as toast notifications without duplicating the
+    // message content. The banner stays in place as durable context; the
+    // toast is the transient eye-catch.
+    //
+    // Pass `log: false` so we don't re-log these: the backend already
+    // wrote the log row that produced the flash banner in the first
+    // place, so re-ingesting via /api/logs/client would double the entry.
+    window.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('[data-ryokan-toast]').forEach(function(el) {
+            const kind = el.getAttribute('data-ryokan-toast') || 'info';
+            const title = el.getAttribute('data-ryokan-toast-title') || '';
+            const body = (el.textContent || '').trim();
+            if (!body) return;
+            window.ryokanToast({kind: kind, title: title, body: body, log: false});
+        });
+    });
     </script>
 </body>
 </html>

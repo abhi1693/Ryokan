@@ -31,10 +31,10 @@
 </div>
 
 {% if let Some(msg) = debug_message %}
-    {% if tab == "debug" %}<div class="alert alert-success">{{ msg }}</div>{% endif %}
+    {% if tab == "debug" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Debug action complete">{{ msg }}</div>{% endif %}
 {% endif %}
 {% if let Some(err) = debug_error %}
-    {% if tab == "debug" %}<div class="alert alert-error">{{ err }}</div>{% endif %}
+    {% if tab == "debug" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Debug action failed">{{ err }}</div>{% endif %}
 {% endif %}
 
 {% if tab == "logs" %}
@@ -114,12 +114,21 @@ function applyFilters() {
     window.location.href = '/system?' + params.toString();
 }
 
-function clearLogs() {
-    if (!confirm('Clear all log entries?')) return;
-    fetch('/api/logs/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}})
-        .then(r => r.json())
-        .then(() => location.reload())
-        .catch(err => console.error('Failed to clear logs:', err));
+async function clearLogs() {
+    const result = await window.ryokanConfirm({
+        title: 'Clear logs',
+        body: 'Clear all log entries?',
+        yesLabel: 'Clear',
+    });
+    if (!result.ok) return;
+    try {
+        const r = await fetch('/api/logs/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}});
+        await r.json();
+        location.reload();
+    } catch (err) {
+        console.error('Failed to clear logs:', err);
+        window.ryokanToast({kind: 'error', title: 'Clear logs failed', body: err && err.message ? err.message : 'Unknown error'});
+    }
 }
 
 function formatTimestamp(iso) {
@@ -282,15 +291,26 @@ function runRssSync(btn) {
     const result = document.getElementById('rss-sync-result');
     btn.disabled = true;
     result.textContent = 'Syncing...';
+    window.ryokanToast({kind: 'info', title: 'RSS sync running', body: 'Checking the feed for new episodes.'});
     fetch('/api/rss/sync', { method: 'POST', headers: {'Content-Type': 'application/json'} })
         .then(async r => {
             const data = await r.json();
             if (!r.ok) throw new Error(data.message || 'RSS sync failed');
             result.textContent = data.message || 'RSS sync finished.';
+            window.ryokanToast({
+                kind: 'success',
+                title: 'RSS sync complete',
+                body: data.message || 'Feed checked.',
+            });
             setTimeout(() => window.location.reload(), 600);
         })
         .catch(err => {
             result.textContent = err.message;
+            window.ryokanToast({
+                kind: 'error',
+                title: 'RSS sync failed',
+                body: err && err.message ? err.message : 'Unknown error',
+            });
         })
         .finally(() => { btn.disabled = false; });
 }
@@ -349,17 +369,46 @@ function forceRunTask(btn, taskKey) {
         anibridge_refresh: '/api/system/reload-anibridge',
     };
     const url = endpoints[taskKey];
-    if (!url) { alert('No run endpoint for task: ' + taskKey); return; }
+    if (!url) {
+        window.ryokanAlert({
+            title: 'Unknown task',
+            body: 'No run endpoint for task: ' + taskKey,
+        });
+        return;
+    }
     btn.disabled = true;
     btn.textContent = 'Running...';
     fetch(url, { method: 'POST' })
         .then(r => r.json().then(data => ({ ok: r.ok, data })).catch(() => ({ ok: r.ok, data: null })))
         .then(({ ok, data }) => {
-            if (data && data.message) { alert(data.message); }
-            else if (!ok) { alert('Task failed'); }
+            if (data && data.message) {
+                window.ryokanToast({
+                    kind: ok ? 'success' : 'error',
+                    title: ok ? 'Task complete' : 'Task failed',
+                    body: data.message,
+                });
+            } else if (!ok) {
+                window.ryokanToast({
+                    kind: 'error',
+                    title: 'Task failed',
+                    body: 'The task did not report a reason.',
+                });
+            } else {
+                window.ryokanToast({
+                    kind: 'success',
+                    title: 'Task complete',
+                    body: taskKey + ' finished.',
+                });
+            }
             location.reload();
         })
-        .catch(err => { alert('Error: ' + err.message); })
+        .catch(err => {
+            window.ryokanToast({
+                kind: 'error',
+                title: 'Task error',
+                body: err && err.message ? err.message : String(err),
+            });
+        })
         .finally(() => { btn.disabled = false; btn.textContent = 'Run now'; });
 }
 </script>
@@ -399,15 +448,12 @@ function forceRunTask(btn, taskKey) {
             <div class="debug-actions-group">
                 <div class="debug-action-row">
                     <button type="button" class="btn btn-secondary" onclick="reconcileFallbacks(this)">Reconcile fallback entries</button>
-                    <span id="reconcile-result" class="form-hint debug-action-result"></span>
                 </div>
                 <div class="debug-action-row">
                     <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
-                    <span id="rebuild-cache-result" class="form-hint debug-action-result"></span>
                 </div>
                 <div class="debug-action-row">
                     <button type="button" class="btn btn-secondary" onclick="classifyLibrary(this)">Classify imported files</button>
-                    <span id="library-classify-result" class="form-hint debug-action-result"></span>
                 </div>
                 <span class="form-hint">Walk every tracked series folder and run the source/resolution classifier on files that don't yet have a structured tag. Useful after migrating from another PVR or dropping files in manually.</span>
                 <div class="settings-inline-actions" style="margin-top:8px">
@@ -422,97 +468,104 @@ function forceRunTask(btn, taskKey) {
         <span class="form-hint">Clear the RSS grab history so previously grabbed episodes can be re-evaluated on the next sync. Use this if you deleted a file from disk and want Ryokan to re-grab it.</span>
         <div class="debug-action-row" style="margin-top: 0.5rem;">
             <button type="button" class="btn btn-secondary" onclick="clearRssHistory(this)">Clear Grab History</button>
-            <span id="rss-clear-result" class="form-hint debug-action-result"></span>
         </div>
     </fieldset>
 </div>
 
 <script>
 
+// Debug-tab fetch helper: all four buttons share the same toast shape —
+// info toast on start, success/error toast on completion — with the
+// disabled button as the only in-flight indicator. No inline result span.
+function runDebugAction(btn, opts) {
+    btn.disabled = true;
+    window.ryokanToast({
+        kind: 'info',
+        title: opts.startTitle,
+        body: opts.startBody || '',
+    });
+    fetch(opts.url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+    })
+    .then(async r => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.message || opts.failureTitle);
+        window.ryokanToast({
+            kind: 'success',
+            title: opts.successTitle,
+            body: data.message || opts.successBody || '',
+        });
+    })
+    .catch(err => {
+        window.ryokanToast({
+            kind: 'error',
+            title: opts.failureTitle,
+            body: err && err.message ? err.message : 'Unknown error',
+        });
+    })
+    .finally(() => {
+        btn.disabled = false;
+    });
+}
+
 function reconcileFallbacks(btn) {
-    const result = document.getElementById('reconcile-result');
-    btn.disabled = true;
-    result.textContent = 'Reconciling...';
-    fetch('/api/library/reconcile-fallbacks', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-    })
-    .then(async r => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.message || 'Reconciliation failed');
-        result.textContent = data.message || 'Fallback reconciliation complete.';
-    })
-    .catch(err => {
-        result.textContent = err.message;
-    })
-    .finally(() => {
-        btn.disabled = false;
+    runDebugAction(btn, {
+        url: '/api/library/reconcile-fallbacks',
+        startTitle: 'Reconciling fallback entries',
+        successTitle: 'Reconciliation complete',
+        successBody: 'Fallback reconciliation complete.',
+        failureTitle: 'Reconciliation failed',
     });
 }
 
-function rebuildAniListCache(btn) {
-    if (!confirm('Rebuild cached metadata, relations, episode data, and artwork for tracked series using the best currently available provider data? This can use MAL/Jikan fallback when AniList is unavailable.')) return;
-    const result = document.getElementById('rebuild-cache-result');
-    btn.disabled = true;
-    result.textContent = 'Rebuilding...';
-    fetch('/api/system/rebuild-anilist-cache', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-    })
-    .then(async r => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.message || 'Rebuild failed');
-        result.textContent = data.message || 'Metadata cache rebuild complete.';
-    })
-    .catch(err => {
-        result.textContent = err.message;
-    })
-    .finally(() => {
-        btn.disabled = false;
+async function rebuildAniListCache(btn) {
+    const confirmed = await window.ryokanConfirm({
+        title: 'Rebuild metadata cache',
+        body: 'Rebuild cached metadata, relations, episode data, and artwork for tracked series using the best currently available provider data? This can use MAL/Jikan fallback when AniList is unavailable.',
+        yesLabel: 'Rebuild',
+    });
+    if (!confirmed.ok) return;
+    runDebugAction(btn, {
+        url: '/api/system/rebuild-anilist-cache',
+        startTitle: 'Rebuilding metadata cache',
+        startBody: 'This can take a while for large libraries.',
+        successTitle: 'Metadata cache rebuilt',
+        successBody: 'Metadata cache rebuild complete.',
+        failureTitle: 'Rebuild failed',
     });
 }
 
-function classifyLibrary(btn) {
-    if (!confirm('Run the source/resolution classifier on every tracked series folder? Files that already have a structured classification row are skipped. This can take a while for large libraries because it runs ffprobe on each unclassified file.')) return;
-    const result = document.getElementById('library-classify-result');
-    btn.disabled = true;
-    result.textContent = 'Scanning...';
-    fetch('/api/tasks/library-classify', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-    })
-    .then(async r => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.message || 'Library classify failed');
-        result.textContent = data.message || 'Library classify complete.';
-    })
-    .catch(err => {
-        result.textContent = err.message;
-    })
-    .finally(() => {
-        btn.disabled = false;
+async function classifyLibrary(btn) {
+    const confirmed = await window.ryokanConfirm({
+        title: 'Classify library',
+        body: 'Run the source/resolution classifier on every tracked series folder? Files that already have a structured classification row are skipped. This can take a while for large libraries because it runs ffprobe on each unclassified file.',
+        yesLabel: 'Classify',
+    });
+    if (!confirmed.ok) return;
+    runDebugAction(btn, {
+        url: '/api/tasks/library-classify',
+        startTitle: 'Classifying imported files',
+        startBody: 'Running ffprobe on unclassified files.',
+        successTitle: 'Library classify complete',
+        successBody: 'Library classify complete.',
+        failureTitle: 'Library classify failed',
     });
 }
 
-function clearRssHistory(btn) {
-    if (!confirm('Clear all RSS grab history? Previously grabbed episodes will be re-evaluated on the next RSS sync.')) return;
-    const result = document.getElementById('rss-clear-result');
-    btn.disabled = true;
-    result.textContent = 'Clearing...';
-    fetch('/api/rss/clear-history', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-    })
-    .then(async r => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.message || 'Clear failed');
-        result.textContent = data.message || 'Grab history cleared.';
-    })
-    .catch(err => {
-        result.textContent = err.message;
-    })
-    .finally(() => {
-        btn.disabled = false;
+async function clearRssHistory(btn) {
+    const confirmed = await window.ryokanConfirm({
+        title: 'Clear RSS history',
+        body: 'Clear all RSS grab history? Previously grabbed episodes will be re-evaluated on the next RSS sync.',
+        yesLabel: 'Clear',
+    });
+    if (!confirmed.ok) return;
+    runDebugAction(btn, {
+        url: '/api/rss/clear-history',
+        startTitle: 'Clearing grab history',
+        successTitle: 'Grab history cleared',
+        successBody: 'Grab history cleared.',
+        failureTitle: 'Clear failed',
     });
 }
 </script>

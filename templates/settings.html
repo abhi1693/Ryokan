@@ -8,10 +8,10 @@
 </div>
 
 {% if let Some(msg) = message %}
-    <div class="alert alert-success">{{ msg|safe }}</div>
+    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Settings saved">{{ msg|safe }}</div>
 {% endif %}
 {% if let Some(err) = error %}
-    <div class="alert alert-error">{{ err }}</div>
+    <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Settings error">{{ err }}</div>
 {% endif %}
 
 <div class="settings-tabs system-tabs">
@@ -400,7 +400,10 @@
         {% if custom_formats.is_empty() %}
         <div class="cf-empty-state">
             <p>You don't have any Custom Formats yet. Install the bundled anime-tuned defaults to get started with SeaDex, tier-S BD groups, 10-bit/x265, FLAC/Opus, and other curated rules.</p>
-            <form method="post" action="/settings/custom-formats/install-defaults" onsubmit="return confirm('Install the bundled default Custom Formats? CFs whose name already exists will be skipped.');">
+            <form method="post" action="/settings/custom-formats/install-defaults"
+                  data-ryokan-confirm-title="Install bundled defaults"
+                  data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
+                  data-ryokan-confirm-label="Install">
                 <button type="submit" class="btn btn-primary">Install Bundled Defaults</button>
             </form>
         </div>
@@ -540,10 +543,16 @@
             <strong>Reset to Defaults</strong> drops every row whose Source column shows <em>default</em> and re-installs them from the bundled file — use this after you've edited a default CF and want the original back. Manual and imported CFs are untouched.
         </p>
         <div class="settings-inline-actions">
-            <form method="post" action="/settings/custom-formats/install-defaults" onsubmit="return confirm('Install the bundled default Custom Formats? CFs whose name already exists will be skipped.');">
+            <form method="post" action="/settings/custom-formats/install-defaults"
+                  data-ryokan-confirm-title="Install bundled defaults"
+                  data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
+                  data-ryokan-confirm-label="Install">
                 <button type="submit" class="btn btn-primary">Install Defaults</button>
             </form>
-            <form method="post" action="/settings/custom-formats/reset-defaults" onsubmit="return confirm('Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched.');">
+            <form method="post" action="/settings/custom-formats/reset-defaults"
+                  data-ryokan-confirm-title="Reset bundled defaults"
+                  data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
+                  data-ryokan-confirm-label="Reset">
                 <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
             </form>
         </div>
@@ -625,6 +634,28 @@
 {% endif %}
 
 <script>
+// Wire any form carrying data-ryokan-confirm-title/body through the shared
+// ryokanConfirm modal. The form submits natively on "Yes"; a flag keeps
+// the handler from re-prompting after the programmatic submit() call.
+(function() {
+    document.querySelectorAll('form[data-ryokan-confirm-title]').forEach(function(form) {
+        form.addEventListener('submit', function(ev) {
+            if (form.dataset.ryokanConfirmed === '1') return;
+            ev.preventDefault();
+            window.ryokanConfirm({
+                title: form.getAttribute('data-ryokan-confirm-title') || 'Confirm',
+                body: form.getAttribute('data-ryokan-confirm-body') || 'Are you sure?',
+                yesLabel: form.getAttribute('data-ryokan-confirm-label') || 'Yes',
+            }).then(function(result) {
+                if (result.ok) {
+                    form.dataset.ryokanConfirmed = '1';
+                    form.submit();
+                }
+            });
+        });
+    });
+})();
+
 function generateApiKey() {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     const buf = new Uint8Array(32);
@@ -663,7 +694,10 @@ function buildCfImportResolvePayload(form) {
             const input = row.querySelector('input[name="cf_rename_' + idx + '"]');
             const newName = input ? input.value.trim() : '';
             if (!newName) {
-                alert('Collision ' + idx + ': pick a new name or choose a different action.');
+                window.ryokanAlert({
+                    title: 'Rename required',
+                    body: 'Collision ' + idx + ': pick a new name or choose a different action.',
+                });
                 return false;
             }
             renames.push(idx + ':' + newName);

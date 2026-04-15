@@ -86,6 +86,7 @@ use services::{
         handlers::settings::settings_custom_formats_export,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
+        handlers::system::api_logs_client,
         handlers::system::api_rss_sync,
         handlers::system::api_rss_clear_history,
         handlers::system::api_force_metadata_refresh,
@@ -108,6 +109,7 @@ use services::{
         services::auto_search::AutoSearchHit,
         models::log::LogEntry,
         models::episode_tags::GrabHistoryEntry,
+        handlers::system::ClientLogForm,
         handlers::library::AddSeriesForm,
         handlers::library::RemoveSeriesForm,
         handlers::library::SetFolderForm,
@@ -381,6 +383,7 @@ async fn main() {
         .route("/help", get(handlers::system::system_page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
+        .route("/api/logs/client", post(handlers::system::api_logs_client))
         .route("/media/art/{cache_key}", get(handlers::media::artwork))
         .route("/logout", get(handlers::auth::logout))
         .layer(middleware::from_fn_with_state(
