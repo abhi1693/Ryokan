@@ -5,11 +5,53 @@ services:
     ports:
       - "8978:8978"
     volumes:
+      # Database, artwork cache, and saved config. Leave as-is unless you
+      # want to pin Ryokan's state to a specific host path.
       - ryokan-data:/data
+
+      # --- Optional: post-processing (move/rename completed downloads) ---
+      #
+      # Ryokan's post-processor reads completed torrents from qBittorrent
+      # and imports them into your anime library. For that to work, both
+      # paths below must be visible inside *this* container at the same
+      # paths you configure in Settings.
+      #
+      # 1. Downloads. Left side = host path where qBit writes completed
+      #    torrents. Right side = what Ryokan sees. In Settings →
+      #    qBittorrent, set "Download path (as Ryokan sees it)" to match
+      #    the right side (e.g. /downloads).
+      # - /srv/downloads:/downloads
+      #
+      # 2. Media library. Left side = host path to your anime library.
+      #    Right side = what Ryokan sees. In Settings → Media, set
+      #    "Media root" to match the right side (e.g. /media/anime).
+      # - /srv/media/anime:/media/anime
+
     environment:
-      - DATABASE_URL=sqlite:///data/ryokan.db?mode=rwc
-      - LISTEN_ADDR=0.0.0.0:8978
+      # UID/GID that Ryokan runs as inside the container. Set these to
+      # match the owner of your /downloads and /media host directories
+      # so post-processed files land with the right permissions. Run
+      # `id -u` / `id -g` on your host to find these values. Defaults
+      # to 1000:1000, which matches the first user on most Linux
+      # distributions.
+      - PUID=1000
+      - PGID=1000
+
+      # Log filter. Use `ryokan=debug` for verbose output while
+      # troubleshooting, `ryokan=info` for normal operation.
       - RUST_LOG=ryokan=info
+
+      # Container timezone. Affects log timestamps and the anchoring of
+      # RSS sync / metadata refresh schedules. Defaults to UTC.
+      # - TZ=America/Los_Angeles
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8978/login"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
     restart: unless-stopped
 
 volumes:

@@ -27,12 +27,19 @@ This project's being actively developed. Expect rough edges around features and 
 ```bash
 docker compose up -d
 ```
-Or, for non-clean installs:
-```bash
-docker compose up -d --build
-```
 
-Listens on port `8978`. On first run, go to `http://localhost:8978` to create an admin account.
+Listens on port `8978`. On first run, go to `http://localhost:8978` to create an admin account. Multi-arch images are published for `linux/amd64` and `linux/arm64`, so the same tag works on x86 servers, Raspberry Pi 4/5, Apple Silicon under Docker Desktop, etc.
+
+### Enabling post-processing
+
+Ryokan's post-processor reads completed torrents from qBittorrent and imports them into your anime library. For that to work, both paths have to be visible inside the container at the same paths you configure in **Settings**:
+
+1. Uncomment the two optional volume lines in `docker-compose.yml`:
+   - `/srv/downloads:/downloads` — host path where qBit writes completed torrents
+   - `/srv/media/anime:/media/anime` — host path to your anime library root
+2. In **Settings → qBittorrent**, set *Download path (as Ryokan sees it)* to the right-hand side (e.g. `/downloads`).
+3. In **Settings → Media**, set *Media root* to the right-hand side (e.g. `/media/anime`).
+4. Set `PUID` / `PGID` in `docker-compose.yml` to the UID/GID that owns those host directories (run `id -u` / `id -g` on the host to find them). Ryokan drops privileges to that user at startup so imported files end up with the right ownership for Jellyfin and the rest of your *arr stack to read.
 
 ## Running locally
 
@@ -49,9 +56,13 @@ Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 | Variable | Default | Description |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8978` | Bind address and port |
-| `DATABASE_URL` | `sqlite://data/ryokan.db?mode=rwc` | SQLite connection string |
+| `DATABASE_URL` | `sqlite://data/ryokan.db?mode=rwc` (local), `sqlite:///data/ryokan.db?mode=rwc` (Docker) | SQLite connection string |
 | `RUST_LOG` | `ryokan=info` | Log filter (see [`tracing-subscriber`](https://github.com/tokio-rs/tracing) docs) |
+| `RYOKAN_MEDIA_CACHE_DIR` | `data/cache/artwork` (local), `/data/cache/artwork` (Docker) | On-disk directory for the artwork blob cache |
 | `JIKAN_API_BASE` | `https://api.jikan.moe/v4` | Override for a self-hosted Jikan instance |
+| `PUID` | `1000` | *Docker only.* UID Ryokan runs as inside the container — set to match host file ownership |
+| `PGID` | `1000` | *Docker only.* GID Ryokan runs as inside the container |
+| `TZ` | `UTC` | *Docker only.* Container timezone, affects log timestamps and scheduled-task anchoring |
 
 ## Configuration
 
