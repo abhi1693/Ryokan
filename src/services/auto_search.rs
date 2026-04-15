@@ -2786,9 +2786,7 @@ pub fn detect_sibling_entries_in_pack(
     // we defer to that path and accept the known limitation that this
     // fallback can't supplement partial matches.
     if out.is_empty() {
-        if let Some(m) = detect_sibling_via_episode_range(filenames, parent_detail) {
-            out.push(m);
-        }
+        out.extend(detect_sibling_via_episode_range(filenames, parent_detail));
     }
 
     // Episode-offset pass: for every detected sibling (regardless of
@@ -2836,7 +2834,13 @@ fn compute_sibling_episode_offset(
 }
 
 /// Layer 2 fallback: attribute files whose parsed episode number
-/// exceeds `parent_cap` to a single sibling relation that
+/// exceeds `parent_cap` to one or more sibling relations via an
+/// iterative sequential-packing algorithm. Each round picks the best
+/// unclaimed candidate for the next contiguous slot
+/// `[base+1..=base+sib_cap]` (starting at `base = parent_cap`) and
+/// advances `base` by `sib_cap` after consuming that slot's files.
+///
+/// A candidate is eligible for a round if it
 ///
 /// 1. passes the pack-candidate relation-type gate,
 /// 2. is either a direct `SEQUEL` OR has a title that prefixes the
@@ -2844,17 +2848,27 @@ fn compute_sibling_episode_offset(
 ///    `SEQUEL` is semantically wrong — e.g. Owarimonogatari's listed
 ///    SEQUEL is Tsukimonogatari, but the same-title continuation is
 ///    Owarimonogatari Second Season),
-/// 3. has a known episode count,
-/// 4. and whose implied absolute episode range
-///    `(parent_cap + 1)..=(parent_cap + sibling_cap)` contains every
-///    overflow file.
+/// 3. has a known episode count, and
+/// 4. has at least `ceil(sib_cap * 0.75)` (floor 1) files from the
+///    remaining overflow whose parsed `ep` falls into its expected
+///    range. Partial fit is allowed — we don't demand that every
+///    overflow file land inside the candidate's range, because real-
+///    world absolute-numbered packs often bundle tail-end siblings
+///    (e.g. a 1-episode sequel movie) that aren't in the grafted
+///    relation pool. Files outside the chosen candidate's range
+///    carry over to the next round.
 ///
-/// If multiple siblings fit, prefer the title-prefix-matched one as a
-/// tiebreaker; if that's still ambiguous, bail. If zero fit, bail.
+/// Round winner is the scored candidate with the most files in its
+/// expected range. Tiebreaker order: title-prefix-matched beats
+/// non-prefix; smaller `sib_cap` beats larger (favors the tighter
+/// fit). If the top two are tied on all criteria, the round bails
+/// and the loop terminates — we'd rather return partial results
+/// than guess. A first-round bail returns an empty `Vec`; a later-
+/// round bail keeps results from previous rounds.
 fn detect_sibling_via_episode_range(
     filenames: &[String],
     parent_detail: &AnimeDetail,
-) -> Option<SiblingMatch> {
+) -> Vec<SiblingMatch> {
     let parent_cap = parent_detail.episodes.unwrap_or(0);
     tracing::debug!(
         "auto-expand: fallback start parent_cap={} relations={}",
@@ -2863,7 +2877,7 @@ fn detect_sibling_via_episode_range(
     );
     if parent_cap <= 0 {
         tracing::debug!("auto-expand: fallback bail reason=parent_cap<=0 (parent has no episode count)");
-        return None;
+        return Vec::new();
     }
 
     // Parse episodes per file (media files only).
@@ -2889,7 +2903,7 @@ fn detect_sibling_via_episode_range(
     );
     if overflow.is_empty() {
         tracing::debug!("auto-expand: fallback bail reason=no-overflow-files (no parsed ep > parent_cap)");
-        return None;
+        return Vec::new();
     }
     let overflow_min = overflow.iter().map(|(_, e)| *e).min().unwrap();
     let overflow_max = overflow.iter().map(|(_, e)| *e).max().unwrap();
@@ -2913,8 +2927,15 @@ fn detect_sibling_via_episode_range(
         parent_en, parent_ro
     );
 
-    // Walk relations for viable candidates.
-    let mut viable: Vec<(usize, bool)> = Vec::new(); // (rel_idx, title_prefix_matched)
+    // Collect viable candidates ONCE (type/media/episode-count +
+    // prefix-or-sequel gates). Per-round range fit is decided inside
+    // the packing loop so each round can see the current `base`.
+    struct RangeCandidate {
+        rel_idx: usize,
+        sib_cap: i32,
+        title_prefix_matched: bool,
+    }
+    let mut candidates: Vec<RangeCandidate> = Vec::new();
     for (rel_idx, rel) in parent_detail.relations.iter().enumerate() {
         let rel_label = if !rel.title_english.is_empty() {
             rel.title_english.as_str()
@@ -2966,91 +2987,177 @@ fn detect_sibling_via_episode_range(
             continue;
         }
 
-        // Range-fit check.
-        let expected_min = parent_cap + 1;
-        let expected_max = parent_cap + sib_cap;
-        if overflow_min < expected_min || overflow_max > expected_max {
-            tracing::debug!(
-                "auto-expand: fallback skip rel='{}' reason=range-mismatch sib_cap={} expected=[{}..={}] overflow=[{}..={}]",
-                rel_label, sib_cap, expected_min, expected_max, overflow_min, overflow_max
-            );
-            continue;
-        }
-        if !within_episode_slack(overflow_count, sib_cap) {
-            tracing::debug!(
-                "auto-expand: fallback skip rel='{}' reason=slack-cap overflow_count={} sib_cap={}",
-                rel_label, overflow_count, sib_cap
-            );
-            continue;
-        }
-
         tracing::debug!(
-            "auto-expand: fallback viable rel='{}' sib_cap={} title_prefix_matched={} is_sequel={}",
+            "auto-expand: fallback candidate rel='{}' sib_cap={} title_prefix_matched={} is_sequel={}",
             rel_label, sib_cap, title_prefix_matched, is_sequel
         );
-        viable.push((rel_idx, title_prefix_matched));
+        candidates.push(RangeCandidate {
+            rel_idx,
+            sib_cap,
+            title_prefix_matched,
+        });
     }
 
-    let chosen = match viable.len() {
-        0 => {
-            tracing::debug!("auto-expand: fallback bail reason=zero-viable-candidates");
-            return None;
+    if candidates.is_empty() {
+        tracing::debug!("auto-expand: fallback bail reason=zero-viable-candidates");
+        return Vec::new();
+    }
+
+    // Sanity check: if the overflow is wildly larger than the sum
+    // of all candidate capacities, the pack almost certainly doesn't
+    // correspond to the sibling pool we see — e.g., an absolute-
+    // numbered mega-franchise where most of the real siblings aren't
+    // in our graph at all. Refuse to attribute a tiny fraction of
+    // the overflow to one sibling in that case.
+    let total_candidate_capacity: i32 = candidates.iter().map(|c| c.sib_cap).sum();
+    if !within_episode_slack(overflow_count, total_candidate_capacity) {
+        tracing::debug!(
+            "auto-expand: fallback bail reason=overflow-exceeds-total-capacity overflow_count={} total_capacity={}",
+            overflow_count, total_candidate_capacity
+        );
+        return Vec::new();
+    }
+
+    // Iterative sequential packing.
+    let mut results: Vec<SiblingMatch> = Vec::new();
+    let mut base: i32 = parent_cap;
+    let mut claimed_rel_idxs: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
+    let mut claimed_file_idxs: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
+
+    loop {
+        // Short-circuit when there are no more overflow files beyond
+        // the current base to attribute.
+        let remaining_files: Vec<(usize, i32)> = overflow
+            .iter()
+            .filter(|(f_idx, ep)| !claimed_file_idxs.contains(f_idx) && *ep > base)
+            .copied()
+            .collect();
+        if remaining_files.is_empty() {
+            break;
         }
-        1 => viable[0].0,
-        _ => {
-            // Tiebreaker: prefer title-prefix-matched candidates.
-            let prefixed: Vec<usize> =
-                viable.iter().filter(|(_, p)| *p).map(|(i, _)| *i).collect();
-            if prefixed.len() == 1 {
+
+        // Score every unclaimed candidate for this round.
+        struct Scored {
+            rel_idx: usize,
+            sib_cap: i32,
+            file_indices: Vec<usize>,
+            title_prefix_matched: bool,
+        }
+        let mut scored: Vec<Scored> = Vec::new();
+        for cand in &candidates {
+            if claimed_rel_idxs.contains(&cand.rel_idx) {
+                continue;
+            }
+            let expected_min = base + 1;
+            let expected_max = base + cand.sib_cap;
+            let in_range: Vec<usize> = remaining_files
+                .iter()
+                .filter(|(_, ep)| *ep >= expected_min && *ep <= expected_max)
+                .map(|(idx, _)| *idx)
+                .collect();
+            // Partial-fit threshold: at least ceil(sib_cap * 0.75)
+            // files, floor 1. Keeps 1-episode movies accept-able
+            // without letting a 12-ep sibling win on 1/12 files.
+            let threshold = ((cand.sib_cap as f32) * 0.75).ceil() as i32;
+            let threshold = threshold.max(1) as usize;
+            if in_range.len() < threshold {
+                continue;
+            }
+            scored.push(Scored {
+                rel_idx: cand.rel_idx,
+                sib_cap: cand.sib_cap,
+                file_indices: in_range,
+                title_prefix_matched: cand.title_prefix_matched,
+            });
+        }
+
+        if scored.is_empty() {
+            tracing::debug!(
+                "auto-expand: fallback packing stop reason=no-viable-candidate-for-round base={}",
+                base
+            );
+            break;
+        }
+
+        // Sort by: file_count DESC, title_prefix DESC, sib_cap ASC.
+        // Then detect ambiguity if the top two are fully tied.
+        scored.sort_by(|a, b| {
+            b.file_indices
+                .len()
+                .cmp(&a.file_indices.len())
+                .then(b.title_prefix_matched.cmp(&a.title_prefix_matched))
+                .then(a.sib_cap.cmp(&b.sib_cap))
+        });
+
+        if scored.len() >= 2 {
+            let top = &scored[0];
+            let next = &scored[1];
+            if top.file_indices.len() == next.file_indices.len()
+                && top.title_prefix_matched == next.title_prefix_matched
+                && top.sib_cap == next.sib_cap
+            {
                 tracing::debug!(
-                    "auto-expand: fallback tiebreaker resolved via title-prefix viable={}",
-                    viable.len()
+                    "auto-expand: fallback packing stop reason=round-ambiguous base={} candidates_tied={}",
+                    base, scored.len()
                 );
-                prefixed[0]
-            } else {
-                // Still ambiguous — refuse to guess.
-                tracing::debug!(
-                    "auto-expand: fallback bail reason=tiebreaker-ambiguous viable={} prefixed={}",
-                    viable.len(), prefixed.len()
-                );
-                return None;
+                break;
             }
         }
-    };
 
-    let rel = &parent_detail.relations[chosen];
-    let sib_cap = rel.episodes.unwrap_or(0);
-    let mut file_indices: Vec<usize> = overflow.iter().map(|(i, _)| *i).collect();
-    file_indices.sort_unstable();
-    let chosen_label = if !rel.title_english.is_empty() {
-        rel.title_english.as_str()
-    } else {
-        rel.title_romaji.as_str()
-    };
+        let winner = scored.into_iter().next().unwrap();
+        claimed_rel_idxs.insert(winner.rel_idx);
+        for f in &winner.file_indices {
+            claimed_file_idxs.insert(*f);
+        }
+
+        let rel = &parent_detail.relations[winner.rel_idx];
+        let chosen_label = if !rel.title_english.is_empty() {
+            rel.title_english.as_str()
+        } else {
+            rel.title_romaji.as_str()
+        };
+        tracing::debug!(
+            "auto-expand: fallback packing round picked rel='{}' anilist_id={} sib_cap={} files={} base_before={} base_after={}",
+            chosen_label,
+            rel.id,
+            winner.sib_cap,
+            winner.file_indices.len(),
+            base,
+            base + winner.sib_cap
+        );
+
+        let mut file_indices = winner.file_indices.clone();
+        file_indices.sort_unstable();
+        results.push(SiblingMatch {
+            anilist_id: rel.id,
+            mal_id: rel.id_mal,
+            title_romaji: rel.title_romaji.clone(),
+            title_english: rel.title_english.clone(),
+            title_native: rel.title_native.clone(),
+            cover_url: rel.cover_url.clone(),
+            format: rel.format.clone(),
+            status: rel.status.clone(),
+            episodes: rel.episodes,
+            season_year: rel.season_year,
+            matched_subtitle: format!(
+                "episode-range fallback ({}..={})",
+                base + 1,
+                base + winner.sib_cap
+            ),
+            file_indices,
+            episode_offset: 0, // populated by the offset pass in the caller
+        });
+        base += winner.sib_cap;
+    }
+
     tracing::debug!(
-        "auto-expand: fallback chose rel='{}' anilist_id={} sib_cap={} files={}",
-        chosen_label, rel.id, sib_cap, file_indices.len()
+        "auto-expand: fallback packing done siblings={} remaining_overflow_unattributed={}",
+        results.len(),
+        overflow_count - claimed_file_idxs.len()
     );
-
-    Some(SiblingMatch {
-        anilist_id: rel.id,
-        mal_id: rel.id_mal,
-        title_romaji: rel.title_romaji.clone(),
-        title_english: rel.title_english.clone(),
-        title_native: rel.title_native.clone(),
-        cover_url: rel.cover_url.clone(),
-        format: rel.format.clone(),
-        status: rel.status.clone(),
-        episodes: rel.episodes,
-        season_year: rel.season_year,
-        matched_subtitle: format!(
-            "episode-range fallback ({}..={})",
-            parent_cap + 1,
-            parent_cap + sib_cap
-        ),
-        file_indices,
-        episode_offset: 0, // populated by the offset pass in the caller
-    })
+    results
 }
 
 /// Lowercase ASCII-alphanumeric chars and collapse non-alphanumeric
@@ -4240,6 +4347,83 @@ mod tests {
         assert_eq!(*s.file_indices.last().unwrap(), 19);
         assert!(s.matched_subtitle.starts_with("episode-range fallback"));
         assert_eq!(s.episode_offset, 13, "absolute numbering → offset = parent cap");
+    }
+
+    #[test]
+    fn detect_siblings_fallback_partial_fit_multi_sibling_owari_with_zoku() {
+        // Real-world progression of the smol Owari case: the pack has
+        // 20 files (S07E01..=E20) but parent_cap = 12 (some AL data
+        // sources report Owarimonogatari with 12 ep count), so
+        // overflow = 8 files (eps 13..=20). The only graph-visible
+        // sibling is Owarimonogatari Second Season (7 eps). The 8th
+        // overflow file is Zoku Owarimonogatari, a 1-episode movie
+        // that either isn't grafted or has no episodes count.
+        //
+        // Expected: packing loop picks Owari S2 for 7 of 8 overflow
+        // files (partial fit, threshold = ceil(7*0.75) = 6), ep 20
+        // falls out as unattributed. Emitting one partial-fit
+        // sibling is better than bailing entirely, because the 7
+        // files that DO fit cleanly are definitively Owari S2.
+        let mut parent = detail_with_titles("Owarimonogatari", "Owarimonogatari");
+        parent.id = 21320;
+        parent.episodes = Some(12);
+        parent.relations = vec![
+            // Direct SEQUEL is Tsukimonogatari — fits the first 4
+            // overflow eps but not title-prefixed.
+            related(
+                20787,
+                "Tsukimonogatari",
+                "Tsukimonogatari",
+                "SEQUEL",
+                Some(4),
+            ),
+            // Same-title continuation, transitively grafted as
+            // SIDE_STORY. Owari S2 takes precedence because it's
+            // title-prefixed AND covers more of the overflow in
+            // round 1.
+            related(
+                21860,
+                "Owarimonogatari Second Season",
+                "Owarimonogatari Second Season",
+                "SIDE_STORY",
+                Some(7),
+            ),
+        ];
+        let mut files: Vec<String> = Vec::new();
+        for n in 1..=12 {
+            files.push(format!(
+                "fixture-monogatari-s07e{:02}-owarimonogatari-bd-1080p.mkv",
+                n
+            ));
+        }
+        for n in 13..=19 {
+            files.push(format!(
+                "fixture-monogatari-s07e{:02}-owarimonogatari-second-season-bd-1080p.mkv",
+                n
+            ));
+        }
+        files.push(
+            "fixture-monogatari-s07e20-zoku-owarimonogatari-bd-1080p.mkv".to_string(),
+        );
+
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 1, "must emit Owari S2 as partial fit");
+        let s = &siblings[0];
+        assert_eq!(s.anilist_id, 21860);
+        assert_eq!(
+            s.file_indices.len(),
+            7,
+            "seven files in [13..=19] must be claimed"
+        );
+        assert_eq!(*s.file_indices.first().unwrap(), 12);
+        assert_eq!(*s.file_indices.last().unwrap(), 18);
+        // File index 19 (ep 20, Zoku) must NOT be claimed — it falls
+        // outside Owari S2's range and no other candidate can cover it.
+        assert!(
+            !s.file_indices.contains(&19),
+            "ep 20 Zoku file must remain unattributed"
+        );
+        assert_eq!(s.episode_offset, 12, "absolute numbering → offset = parent cap");
     }
 
     // ── transitive_relation_graft ────────────────────────────────────
