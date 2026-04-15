@@ -4,7 +4,7 @@ A self-hosted anime PVR written in Rust. Searches Nyaa for releases, scores them
 
 I built this because Sonarr doesn't always work well for anime. The RSS sync for currently airing shows works just fine, but downloading season batches of shows that've finished airing almost always hangs the interactive search. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named.
 
-This is a work in progress. Some features are incomplete or rough around the edges, and it's not quite a full Sonarr replacement just yet.
+Actively developed — expect rough edges around manual interactive search UX and the artwork pipeline.
 ## Screenshots
 
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/ab8d0588-a896-477e-b264-79d2a44fc118" />
@@ -14,11 +14,13 @@ This is a work in progress. Some features are incomplete or rough around the edg
 ## What it does
 
 - Tracks series using AniList as the primary metadata source, with MAL (via Jikan) and Kitsu as fallbacks
-- Searches Nyaa and scores releases across nine quality tiers (WEB 480p through BD Remux 1080p)
-- Automatically grabs new episodes and quality upgrades via RSS
+- Searches Nyaa and scores releases by source, resolution, and release group using a multi-layer classification pipeline (filename, ffprobe, temporal, group reputation)
+- Supports Sonarr-v4-compatible [Custom Formats](https://trash-guides.info/Sonarr/sonarr-collection-of-custom-formats/) for release scoring, with a Ryokan-only spec that matches [SeaDex](https://releases.moe) best-release curation
+- Automatically grabs new episodes via RSS and scans the existing library for quality upgrades on a schedule
 - Monitors series with Sonarr-style modes: all, future, missing, existing, or none
 - Integrates with qBittorrent for downloads and Jellyfin for library refresh
-- Caches all metadata locally so pages load instantly after initial setup
+- Post-processes completed downloads — hardlinks or moves them into your media root with tidy season/episode naming
+- Caches all metadata (and artwork) locally so pages load instantly after initial setup
 
 ## Running with Docker
 
