@@ -393,11 +393,11 @@
                 <label class="form-row">
                     <span class="form-label">Source</span>
                     <select id="override-source" class="folder-select">
-                        <option value="bluray_bdmv">BD-Raw (BDMV)</option>
+                        <option value="bluray_bdmv">BD-RAW</option>
                         <option value="bluray_remux">BD-Remux</option>
-                        <option value="bluray">BluRay</option>
-                        <option value="web_dl">WEB-DL</option>
-                        <option value="webrip">WEBRip</option>
+                        <option value="bluray">BD</option>
+                        <option value="web_dl">WEBDL</option>
+                        <option value="webrip">WEBRIP</option>
                         <option value="dvd">DVD</option>
                         <option value="hdtv">HDTV</option>
                         <option value="tv">TV</option>
@@ -545,7 +545,13 @@ function showEpisodeDetail(epNum, btn) {
         body.innerHTML =
             '<div class="ep-detail-two-col">' +
             '<div class="ep-detail-row ep-detail-full"><span class="ep-detail-label">File</span><span class="ep-detail-value ep-detail-path">' + escHtml(fullPath) + '</span></div>' +
-            (size ? '<div class="ep-detail-row"><span class="ep-detail-label">Size</span><span class="ep-detail-value">' + escHtml(size) + '</span></div>' : '') +
+            // The Size row starts with the on-disk file size and is
+            // patched in place by `renderGrabHistory` once the grab
+            // history loads: if the latest grab was a batch, the row is
+            // rewritten to show the whole-torrent total with a
+            // "(batch total)" hint. Always rendered (even when size is
+            // empty) so the batch-patch has a stable target to find.
+            '<div class="ep-detail-row"><span class="ep-detail-label">Size</span><span class="ep-detail-value ep-detail-size-value">' + escHtml(size || '—') + '</span></div>' +
             '</div>' +
             '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
     } else {
@@ -567,6 +573,14 @@ function showEpisodeDetail(epNum, btn) {
     }
 }
 
+function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return '';
+    const gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return gb.toFixed(1) + ' GiB';
+    const mb = bytes / (1024 * 1024);
+    return Math.round(mb) + ' MiB';
+}
+
 function renderGrabHistory(entries, epNum) {
     const el = document.getElementById('grab-history-body');
     if (!el) return;
@@ -574,21 +588,65 @@ function renderGrabHistory(entries, epNum) {
         el.textContent = 'No grab history.';
         return;
     }
-    let html = '<table class="grab-history-table"><thead><tr><th>Quality</th><th>Release</th><th>Group</th><th>Date</th><th>State</th><th></th></tr></thead><tbody>';
+    // Table lives inside a scroll container so history past 10 entries
+    // scrolls within the modal rather than blowing out modal height.
+    let html = '<div class="grab-history-scroll"><table class="grab-history-table"><thead><tr><th>Quality</th><th>Release</th><th>File Name</th><th>Group</th><th>Size</th><th>Date</th><th>State</th><th></th></tr></thead><tbody>';
     for (const e of entries) {
-        const stateClass = e.state === 'failed' ? 'grab-state-failed' : e.state === 'removed' ? 'grab-state-removed' : 'grab-state-grabbed';
+        const stateClass = e.state === 'failed' ? 'grab-state-failed'
+            : e.state === 'removed' ? 'grab-state-removed'
+            : e.state === 'completed' ? 'grab-state-completed'
+            : 'grab-state-grabbed';
+        // Only active 'grabbed' rows can be manually failed — once
+        // post-processing flips to 'completed' the user should delete
+        // the file or trigger an upgrade instead.
         const canFail = e.state === 'grabbed';
+        // File name column: shows the post-processed on-disk basename
+        // once post-processing lands the file. Before that it's still
+        // seeded with the release title, so hide the duplicate — the
+        // Release column already carries that.
+        const fileName = e.file_name && e.file_name.length ? e.file_name : e.release_title;
+        const sameAsRelease = fileName === e.release_title;
+        const fileCell = sameAsRelease
+            ? '<span style="color:var(--text-dim)">—</span>'
+            : escHtml(fileName);
+        // Size column: for batch grabs it's the whole-torrent total
+        // (suffixed with a dim " (batch)" hint) so the user can tell
+        // it's a pack size rather than a per-episode size.
+        const sizeText = formatBytes(e.size_bytes);
+        const sizeCell = sizeText
+            ? (e.is_batch
+                ? escHtml(sizeText) + ' <span style="color:var(--text-dim);font-size:10px">(batch)</span>'
+                : escHtml(sizeText))
+            : '';
         html += `<tr>
             <td>${escHtml(e.quality_tag)}</td>
-            <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.release_title)}">${escHtml(e.release_title)}</td>
+            <td class="grab-history-ellipsis" title="${escHtml(e.release_title)}">${escHtml(e.release_title)}</td>
+            <td class="grab-history-ellipsis" title="${escHtml(fileName)}">${fileCell}</td>
             <td>${escHtml(e.release_group)}</td>
+            <td style="white-space:nowrap;color:var(--text-dim)">${sizeCell}</td>
             <td style="white-space:nowrap;color:var(--text-dim)">${escHtml(e.grabbed_at)}</td>
             <td class="${stateClass}">${escHtml(e.state)}</td>
             <td>${canFail ? `<button class="btn-mark-failed" onclick="markEpisodeFailed(${e.id}, ${epNum}, this)">Mark Failed</button>` : ''}</td>
         </tr>`;
     }
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
     el.innerHTML = html;
+
+    // Task 24: the episode detail "Size" row above the grab history
+    // should reflect the batch total when the latest grab for this
+    // episode was a batch, not the per-file on-disk size. We only
+    // know this once history loads, so patch the row in-place after
+    // the table renders. Find the newest non-failed entry as the
+    // current source of truth — a 'completed' row wins over an older
+    // 'grabbed' row sitting behind a failed upgrade attempt.
+    const current = entries.find(function(e) { return e.state === 'completed' || e.state === 'grabbed'; });
+    if (current && current.is_batch && current.size_bytes > 0) {
+        const sizeValueEl = document.querySelector('#ep-detail-body .ep-detail-size-value');
+        if (sizeValueEl) {
+            sizeValueEl.innerHTML = escHtml(formatBytes(current.size_bytes))
+                + ' <span style="color:var(--text-dim);font-size:11px">(batch total)</span>';
+        }
+    }
 }
 
 function markEpisodeFailed(historyId, epNum, btn) {
@@ -673,6 +731,61 @@ function escHtml(s) {
     return d.innerHTML;
 }
 
+// Quick source detection from release title. The backend already carries
+// the canonical ClassificationResult, but the interactive-search payload
+// only exposes `resolution`. Per user preference the column here is a
+// pure regex read of the title — no platform-tag tables, no group
+// heuristics, no description scraping — so what you see in the UI is
+// exactly what the filename says.
+//
+// Labels mirror the backend `ClassificationResult::label()` Sonarr-parity
+// scheme so the value shown in interactive search equals the value
+// persisted to `episode_tags` once the release is grabbed:
+//     BDMV/BDISO/BD-Raw → `BD-1080p RAW`  (raw disc image)
+//     Remux             → `BD-1080p Remux`
+//     BluRay/BDRip/BD   → `BD-1080p`      (re-encode)
+//     WEB-DL            → `WEBDL-1080p`
+//     WEB-Rip           → `WEBRip-1080p`
+// Note: BDRip is a re-encode and deliberately falls into the BluRay branch,
+// NOT the BDMV branch.
+function parseQualityFromTitle(title, resolution) {
+    const t = String(title || '');
+    let source = '';
+    let suffix = ''; // ' RAW' | ' Remux' | '' — appended after resolution
+    if (/\b(BDMV|BD-?Raw|BDISO)\b/i.test(t)) {
+        source = 'BD'; suffix = ' RAW';
+    } else if (/\bRemux\b/i.test(t)) {
+        source = 'BD'; suffix = ' Remux';
+    } else if (/\b(BluRay|Blu-?Ray|BDRip|BD|\.BD\.|\[BD\])\b/i.test(t)) {
+        source = 'BD';
+    } else if (/\bWEB-?DL\b/i.test(t)) {
+        source = 'WEBDL';
+    } else if (/\bWEB-?Rip\b/i.test(t)) {
+        source = 'WEBRip';
+    } else if (/\bWEB\b/i.test(t)) {
+        source = 'WEB';
+    } else if (/\bHDTV\b/i.test(t)) {
+        source = 'HDTV';
+    } else if (/\bDVD(?:Rip)?\b/i.test(t)) {
+        source = 'DVD';
+    }
+    const res = String(resolution || '').trim();
+    let base;
+    if (source && res) base = `${source}-${res}`;
+    else if (source)   base = source;
+    else if (res)      base = res;
+    else               return '—';
+    return base + suffix;
+}
+
+// Seeders in green, leechers in red, separated by a dim slash.
+// E.g., `32 / 5` where 32 is green and 5 is red.
+function renderPeers(seeders, leechers) {
+    const s = Number.isFinite(seeders) ? seeders : 0;
+    const l = Number.isFinite(leechers) ? leechers : 0;
+    return `<span class="seed-count">${s}</span><span class="peer-sep">/</span><span class="leech-count">${l}</span>`;
+}
+
 function searchBatchReleases(btn) {
     const status = document.getElementById('auto-search-status');
     setBusyButton(btn, true, 'Searching…');
@@ -732,7 +845,7 @@ function renderInteractiveResults(results, epNum) {
         body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">No results found.</div>';
         return;
     }
-    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th>Group</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
+    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th>Group</th><th class="col-quality">Quality</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
     results.forEach((r, idx) => {
         const batchTag = r.is_batch ? '<span class="tag tag-batch" style="margin-left:4px">batch</span>' : '';
         const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
@@ -741,8 +854,9 @@ function renderInteractiveResults(results, epNum) {
             <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
             <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
+            <td class="col-quality">${escHtml(parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
-            <td class="col-seeds"><span class="seed-count">${r.seeders}</span></td>
+            <td class="col-seeds">${renderPeers(r.seeders, r.leechers)}</td>
             <td class="col-grab"><button class="btn-grab" data-idx="${idx}" onclick="grabInteractiveResult(${epNum}, ${idx}, this)">Grab</button></td>
         </tr>`;
     });
@@ -764,7 +878,8 @@ function grabInteractiveResult(epNum, idx, btn) {
             title: result.title,
             group: result.group,
             resolution: result.resolution,
-            info_hash: result.info_hash
+            info_hash: result.info_hash,
+            size_bytes: result.size_bytes || 0
         })
     })
     .then(async r => {
@@ -831,7 +946,7 @@ function renderInteractiveBatchResults(results) {
         body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">No batch releases found.</div>';
         return;
     }
-    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th>Group</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
+    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th>Group</th><th class="col-quality">Quality</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
     results.forEach((r, idx) => {
         const batchTag = r.is_batch ? '<span class="tag tag-batch" style="margin-left:4px">batch</span>' : '';
         const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
@@ -840,8 +955,9 @@ function renderInteractiveBatchResults(results) {
             <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
             <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
+            <td class="col-quality">${escHtml(parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
-            <td class="col-seeds"><span class="seed-count">${r.seeders}</span></td>
+            <td class="col-seeds">${renderPeers(r.seeders, r.leechers)}</td>
             <td class="col-grab"><button class="btn-grab" data-idx="${idx}" onclick="grabInteractiveBatchResult(${idx}, this)">Grab</button></td>
         </tr>`;
     });
@@ -863,7 +979,8 @@ function grabInteractiveBatchResult(idx, btn) {
             title: result.title,
             group: result.group,
             resolution: result.resolution,
-            info_hash: result.info_hash
+            info_hash: result.info_hash,
+            size_bytes: result.size_bytes || 0
         })
     })
     .then(async r => {
@@ -1495,12 +1612,18 @@ function pollDownloadProgress() {
                 const showingProgress = qualityCell.querySelector('.dl-progress-wrap') !== null;
 
                 if (item) {
-                    const pct = (item.progress * 100).toFixed(1);
-                    const isComplete = item.state.includes('UP') || item.state === 'uploading';
-                    if (!isComplete) {
-                        if (!qualityCell.dataset.originalHtml) {
-                            qualityCell.dataset.originalHtml = qualityCell.innerHTML;
-                        }
+                    if (!qualityCell.dataset.originalHtml) {
+                        qualityCell.dataset.originalHtml = qualityCell.innerHTML;
+                    }
+                    const isComplete = item.state.includes('UP') || item.state === 'uploading' || item.progress >= 1.0;
+                    if (isComplete) {
+                        // qBit has finished but post-processing hasn't imported
+                        // the release into the library yet. Show a full bar with
+                        // an "Importing..." label so the user isn't staring at a
+                        // stale 0.0% until the next post-processing tick.
+                        qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:100%"></div></div><span class="dl-progress-text">Importing…</span></div>';
+                    } else {
+                        const pct = (item.progress * 100).toFixed(1);
                         qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;
                     }
                 } else if (showingProgress) {

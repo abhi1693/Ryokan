@@ -2,7 +2,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 
-use crate::services::anilist::{AnimeDetail, AnimeEntry};
+use crate::services::anilist::AnimeDetail;
 use crate::services::html::sanitize_rich_description;
 
 const KITSU_API: &str = "https://kitsu.io/api/edge";
@@ -228,42 +228,6 @@ fn to_candidate(resource: Resource<AnimeAttributes>) -> Option<Candidate> {
         end_date: attrs.end_date,
         average_rating: attrs.average_rating,
     })
-}
-
-pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
-    let response = fetch_collection::<AnimeAttributes>(
-        &format!("{}/anime", KITSU_API),
-        &[("filter[text]", query.trim()), ("page[limit]", "10")],
-    )
-    .await?;
-
-    let mut out = Vec::new();
-    for item in response.data.into_iter().filter_map(to_candidate) {
-        let titles = candidate_titles(&item);
-        let title_romaji = item
-            .titles
-            .get("en_jp")
-            .cloned()
-            .or_else(|| titles.first().cloned())
-            .unwrap_or_default();
-        let title_english = item.titles.get("en").cloned().unwrap_or_default();
-        let title_native = item.titles.get("ja_jp").cloned().unwrap_or_default();
-        out.push(AnimeEntry {
-            id: item.id,
-            id_mal: None,
-            title_romaji,
-            title_english,
-            title_native,
-            cover_url: first_image(&item.poster_image),
-            format: item.subtype.to_ascii_uppercase(),
-            status: item.status.to_ascii_uppercase().replace(' ', "_"),
-            status_display: item.status.replace('-', " "),
-            episodes: item.episode_count,
-            season_year: parse_year(item.start_date.as_deref()),
-            source: "kitsu".to_string(),
-        });
-    }
-    Ok(out)
 }
 
 async fn best_candidate(queries: &[String], wanted_year: Option<i32>, wanted_eps: Option<i32>) -> Result<Option<Candidate>, String> {

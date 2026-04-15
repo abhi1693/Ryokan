@@ -564,6 +564,11 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     }),
                 ).await;
                 for ep_num in &ep_list {
+                    // RSS items don't carry size info in the feed — the
+                    // grab history row starts at 0 and gets filled in
+                    // with the actual imported file size by
+                    // post-processing. RSS feeds only surface individual
+                    // episode releases, so `is_batch=false` by definition.
                     let _ = episode_tags::record_grab(
                         &state.db,
                         cand.found.series.id,
@@ -571,6 +576,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                         &classification,
                         &cand.item.title,
                         &cand.item.group,
+                        0,
+                        false,
                     ).await;
                 }
             }

@@ -89,6 +89,13 @@ pub struct GrabSeriesRoute {
     pub file_indices: Vec<usize>,
     pub episode_numbers: Vec<i32>,
     pub matched_subtitle: String,
+    /// Amount to subtract from each file's parsed episode number at
+    /// rename/tag time. Non-zero for siblings whose files use
+    /// numbering that's continuous across the parent (e.g. an E14
+    /// file in a 20-ep Owarimonogatari batch is actually Owari S2's
+    /// E01 and needs `episode_offset = 13`). Zero for siblings with
+    /// arc-local numbering.
+    pub episode_offset: i32,
 }
 
 /// Write one or more `grabbed_torrent_series` rows for a freshly
@@ -108,14 +115,15 @@ pub async fn record_grab_series_routes(
             .unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
             r#"INSERT OR REPLACE INTO grabbed_torrent_series
-               (grab_id, series_id, file_indices, episode_numbers, matched_subtitle)
-               VALUES (?, ?, ?, ?, ?)"#,
+               (grab_id, series_id, file_indices, episode_numbers, matched_subtitle, episode_offset)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
         )
         .bind(route.grab_id)
         .bind(route.series_id)
         .bind(&file_indices_json)
         .bind(&eps_json)
         .bind(&route.matched_subtitle)
+        .bind(route.episode_offset)
         .execute(db)
         .await?;
     }
@@ -130,8 +138,11 @@ pub async fn get_series_routes(
     db: &SqlitePool,
     grab_id: i64,
 ) -> Result<Vec<GrabSeriesRoute>, sqlx::Error> {
+    // COALESCE on episode_offset keeps legacy rows (written before
+    // the ALTER TABLE migration) readable as offset=0.
     let rows = sqlx::query(
-        r#"SELECT grab_id, series_id, file_indices, episode_numbers, matched_subtitle
+        r#"SELECT grab_id, series_id, file_indices, episode_numbers, matched_subtitle,
+                  COALESCE(episode_offset, 0) AS episode_offset
            FROM grabbed_torrent_series
            WHERE grab_id = ?"#,
     )
@@ -154,9 +165,66 @@ pub async fn get_series_routes(
                 file_indices: file_idx.into_iter().map(|i| i as usize).collect(),
                 episode_numbers,
                 matched_subtitle: row.get("matched_subtitle"),
+                episode_offset: row.get("episode_offset"),
             }
         })
         .collect())
+}
+
+/// Bulk variant of [`get_series_routes`] — fetches routes for many
+/// grabs in one round-trip and groups by `grab_id`. The download-
+/// progress poller calls this once per poll instead of fanning out
+/// N queries for N pending grabs; the poller runs every few seconds
+/// on every open series page, so the difference matters.
+///
+/// Grabs with no routes are simply absent from the result map; callers
+/// should treat a missing entry as an empty route list.
+pub async fn get_series_routes_for_grabs(
+    db: &SqlitePool,
+    grab_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<GrabSeriesRoute>>, sqlx::Error> {
+    if grab_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // sqlx doesn't bind `IN (?)` against a slice directly, so build
+    // the placeholder list at runtime. `grab_ids` comes from a
+    // `SELECT id FROM grabbed_torrents` loop so every value is a
+    // trusted i64 — no injection surface.
+    let placeholders = vec!["?"; grab_ids.len()].join(", ");
+    let sql = format!(
+        r#"SELECT grab_id, series_id, file_indices, episode_numbers, matched_subtitle,
+                  COALESCE(episode_offset, 0) AS episode_offset
+           FROM grabbed_torrent_series
+           WHERE grab_id IN ({})"#,
+        placeholders
+    );
+    let mut q = sqlx::query(&sql);
+    for id in grab_ids {
+        q = q.bind(*id);
+    }
+    let rows = q.fetch_all(db).await?;
+
+    let mut grouped: std::collections::HashMap<i64, Vec<GrabSeriesRoute>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let file_idx_json: String = row.get("file_indices");
+        let file_idx: Vec<i64> =
+            serde_json::from_str(&file_idx_json).unwrap_or_default();
+        let eps_json: String = row.get("episode_numbers");
+        let episode_numbers: Vec<i32> =
+            serde_json::from_str(&eps_json).unwrap_or_default();
+        let route = GrabSeriesRoute {
+            grab_id: row.get("grab_id"),
+            series_id: row.get("series_id"),
+            file_indices: file_idx.into_iter().map(|i| i as usize).collect(),
+            episode_numbers,
+            matched_subtitle: row.get("matched_subtitle"),
+            episode_offset: row.get("episode_offset"),
+        };
+        grouped.entry(route.grab_id).or_default().push(route);
+    }
+    Ok(grouped)
 }
 
 /// Look up the stored `is_batch` flag for a grab by its torrent name.
@@ -386,6 +454,38 @@ pub async fn find_imported_for_episode(
         .collect())
 }
 
+/// Return the torrent name of the most recent imported grab for this
+/// series, regardless of which episodes the grab's `episode_numbers`
+/// column claims it covers. Used by
+/// `scan_library_for_unclassified` as a fallback to
+/// [`find_imported_for_episode`] when the per-episode lookup misses:
+/// pre-fix batch grabs were recorded with `episode_numbers = []`, so
+/// `json_each` yields nothing and the precise lookup returns empty
+/// even though there's a perfectly good batch grab with a real
+/// release name sitting in the table. For those stale rows we want
+/// to classify against that release name instead of the sanitized
+/// on-disk filename.
+///
+/// Returns `None` when the series has never had an imported grab,
+/// in which case the scanner falls back to the sanitized filename
+/// (correct behavior for externally-imported files Ryokan never
+/// grabbed).
+pub async fn most_recent_imported_torrent_name_for_series(
+    db: &SqlitePool,
+    series_id: i64,
+) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT torrent_name FROM grabbed_torrents
+         WHERE series_id = ? AND state = 'imported'
+         ORDER BY grabbed_at DESC LIMIT 1",
+    )
+    .bind(series_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Remove a grabbed torrent record entirely.
 pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM grabbed_torrents WHERE id = ?")
@@ -439,4 +539,121 @@ pub struct GrabbedTorrentWithSeries {
     pub imported_at: Option<String>,
     pub series_title: String,
     pub anilist_id: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::series;
+
+    /// Round-trip a GrabSeriesRoute through record_grab_series_routes
+    /// + get_series_routes to verify the new episode_offset column is
+    /// written and read correctly. Covers Commit 3's schema plumbing
+    /// (ALTER TABLE ADD COLUMN + INSERT bind + SELECT with COALESCE).
+    #[tokio::test]
+    async fn grab_series_route_round_trip_preserves_episode_offset() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21320,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(13),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let (sibling_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21860,
+                mal_id: None,
+                title: "Owarimonogatari Second Season",
+                title_romaji: "Owarimonogatari Second Season",
+                title_english: "Owarimonogatari Second Season",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(7),
+                season_year: Some(2017),
+                end_year: Some(2017),
+            },
+        )
+        .await
+        .expect("sibling upsert");
+
+        let grab_id = record_grab(
+            &db,
+            "roundtriphash0000000000000000000000000000",
+            "[smol] Monogatari S07 (Owarimonogatari) [BD 1080p]",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        let routes = vec![
+            // Parent route: no offset.
+            GrabSeriesRoute {
+                grab_id,
+                series_id: parent_id,
+                file_indices: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                episode_numbers: (1..=13).collect(),
+                matched_subtitle: String::new(),
+                episode_offset: 0,
+            },
+            // Sibling route: absolute-numbered, offset = parent cap.
+            GrabSeriesRoute {
+                grab_id,
+                series_id: sibling_id,
+                file_indices: vec![13, 14, 15, 16, 17, 18, 19],
+                episode_numbers: (14..=20).collect(),
+                matched_subtitle: "episode-range fallback (14..=20)".to_string(),
+                episode_offset: 13,
+            },
+        ];
+
+        record_grab_series_routes(&db, &routes)
+            .await
+            .expect("record routes");
+
+        let read_back = get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(read_back.len(), 2);
+
+        let parent_route = read_back
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route");
+        assert_eq!(parent_route.episode_offset, 0);
+
+        let sibling_route = read_back
+            .iter()
+            .find(|r| r.series_id == sibling_id)
+            .expect("sibling route");
+        assert_eq!(sibling_route.episode_offset, 13);
+        assert_eq!(
+            sibling_route.matched_subtitle,
+            "episode-range fallback (14..=20)"
+        );
+        assert_eq!(sibling_route.file_indices.len(), 7);
+    }
 }

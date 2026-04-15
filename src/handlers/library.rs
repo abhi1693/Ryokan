@@ -1855,6 +1855,55 @@ pub async fn list_folders(
 /// when auto-expand fails partway through. Any failures get logged
 /// at warn level.
 ///
+/// Resolve the list of episode numbers a batch release should be
+/// recorded against at grab time. Parses explicit episode ranges
+/// from the release title (e.g. "01-12", "E01-E24") via
+/// [`auto_search::parse_release_numbers`], and when the title carries
+/// no explicit numbers falls back to the series' known episode count
+/// so a title like "Jellyfish Can't Swim in the Night" still spawns
+/// a row per episode.
+///
+/// Used by the two batch grab handlers (`search_batch_releases` and
+/// `grab_batch_result`). Without this, batch grabs passed an empty
+/// episode list to `grabbed_torrents::record_grab` and skipped
+/// `episode_tags::record_grab` entirely, which meant the series page
+/// showed every episode as UNKNOWN until post-processing ran — and
+/// if the user had post-processing disabled, the rows never got
+/// created at all.
+///
+/// Capped at 1000 episodes as a safety rail against a garbage
+/// AniList record reporting an absurd episode count.
+fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32> {
+    let mut ep_nums: Vec<i32> = auto_search::parse_release_numbers(title)
+        .into_iter()
+        .collect();
+    if ep_nums.is_empty() {
+        if let Some(total) = detail.episodes {
+            if total > 0 && total <= 1000 {
+                ep_nums = (1..=total).collect();
+            }
+        }
+    }
+    ep_nums.sort_unstable();
+    ep_nums
+}
+
+/// Grab-time context threaded through the auto-expand path so each
+/// detected sibling series gets its own `episode_quality_tags` +
+/// `episode_grab_history` rows alongside its route record. Without
+/// this, the sibling series page shows UNKNOWN with no progress bar
+/// until post-processing runs — the parent series records the grab
+/// for its own episodes synchronously, but the siblings are detected
+/// asynchronously inside `auto_expand_library_from_pack` and were
+/// previously only getting route rows written. Owned-fields so the
+/// struct can be cloned into the spawned task.
+#[derive(Clone)]
+struct AutoExpandGrabContext {
+    classification: crate::services::source::ClassificationResult,
+    release_group: String,
+    size_bytes: i64,
+}
+
 /// Returns the number of siblings *newly added* to the library
 /// (upserts that hit an existing row don't count).
 #[allow(clippy::too_many_arguments)]
@@ -1867,6 +1916,7 @@ async fn auto_expand_library_from_pack(
     parent_episode_numbers: &[i32],
     grab_id: i64,
     torrent_title: &str,
+    grab_ctx: &AutoExpandGrabContext,
 ) -> usize {
     if parent_detail.id <= 0 || info_hash.is_empty() {
         return 0;
@@ -1875,7 +1925,10 @@ async fn auto_expand_library_from_pack(
     // Wait for qBit metadata before asking for the file list. Fresh
     // grabs via `add_torrent` don't block on metadata discovery, so
     // a naive `get_torrent_files` right after add returns empty.
-    // The 60s ceiling matches `add_torrent_with_file_filter`.
+    // We use a generous 60s ceiling here (rather than the 10s used
+    // by the interactive selective-narrowing path) because this runs
+    // inside a `tokio::spawn` — blocking up to a minute in the
+    // background is fine, the HTTP handler has already returned.
     let files = match qbit
         .wait_for_metadata(info_hash, std::time::Duration::from_secs(60))
         .await
@@ -1886,8 +1939,8 @@ async fn auto_expand_library_from_pack(
                 db,
                 LogCategory::Library,
                 &format!(
-                    "auto-expand: metadata wait failed for '{}', skipping sibling detection",
-                    torrent_title
+                    "auto-expand: metadata wait failed for '{}', skipping sibling detection (fallback: all files will route to parent series_id={})",
+                    torrent_title, parent_series_id
                 ),
                 &e,
             )
@@ -1897,11 +1950,155 @@ async fn auto_expand_library_from_pack(
     };
     let filenames: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
 
-    let siblings = auto_search::detect_sibling_entries_in_pack(&filenames, parent_detail);
-    if siblings.is_empty() {
+    auto_expand_library_from_pack_with_files(
+        db,
+        &filenames,
+        parent_detail,
+        parent_series_id,
+        parent_episode_numbers,
+        grab_id,
+        torrent_title,
+        grab_ctx,
+    )
+    .await
+}
+
+/// Pure inner fn — takes a pre-fetched file list instead of a qBit
+/// client so the test suite can exercise the sibling detection, series
+/// upsert, and route-writing logic without spinning up qBittorrent.
+/// The outer [`auto_expand_library_from_pack`] handles the metadata-
+/// wait dance; everything else lives here.
+#[allow(clippy::too_many_arguments)]
+async fn auto_expand_library_from_pack_with_files(
+    db: &SqlitePool,
+    filenames: &[String],
+    parent_detail: &anilist::AnimeDetail,
+    parent_series_id: i64,
+    parent_episode_numbers: &[i32],
+    grab_id: i64,
+    torrent_title: &str,
+    grab_ctx: &AutoExpandGrabContext,
+) -> usize {
+    let parent_title = if !parent_detail.title_english.is_empty() {
+        parent_detail.title_english.as_str()
+    } else {
+        parent_detail.title_romaji.as_str()
+    };
+
+    if parent_detail.id <= 0 {
+        logger::debug(
+            db,
+            LogCategory::Library,
+            "Auto-expand: skipping sibling detection, parent has no AniList id",
+            &format!("parent_series_id={}, torrent='{}'", parent_series_id, torrent_title),
+        )
+        .await;
         return 0;
     }
 
+    logger::debug(
+        db,
+        LogCategory::Library,
+        &format!(
+            "Auto-expand: scanning {} file(s) for siblings of '{}'",
+            filenames.len(),
+            parent_title
+        ),
+        &format!(
+            "parent_anilist_id={}, torrent='{}'",
+            parent_detail.id, torrent_title
+        ),
+    )
+    .await;
+
+    // Depth-1 transitive relation walk: AniList's relation graph
+    // has missing direct edges across split sagas (Monogatari is
+    // the motivating case — Owarimonogatari 21262 does not list
+    // Owarimonogatari 2nd Season 99423 as a direct neighbor, but
+    // reaches it via the shared saga graph). Before running sibling
+    // detection we fetch each walkable direct neighbor's AL detail,
+    // then graft its OWN relations onto the parent so
+    // `detect_sibling_entries_in_pack` sees a broader candidate
+    // pool. Fetches are capped by
+    // `auto_search::TRANSITIVE_WALK_MAX_FETCHES` and every call
+    // goes through the AL detail cache so repeat grabs within the
+    // TTL are free. Failures are soft — any neighbor we can't fetch
+    // is silently skipped and detection falls back to the parent's
+    // direct relations. Fetches are dispatched concurrently via a
+    // JoinSet so N neighbors take max(fetch_time), not sum — every
+    // hop previously blocked the grab path end-to-end.
+    let mut neighbor_details: std::collections::HashMap<i64, anilist::AnimeDetail> =
+        std::collections::HashMap::new();
+    let mut walk_set: tokio::task::JoinSet<(i64, String, Result<anilist::AnimeDetail, String>)> =
+        tokio::task::JoinSet::new();
+    let mut dispatched = 0_usize;
+    for rel in &parent_detail.relations {
+        if dispatched >= auto_search::TRANSITIVE_WALK_MAX_FETCHES {
+            break;
+        }
+        if !auto_search::is_transitive_walk_source(&rel.relation_type) {
+            continue;
+        }
+        if !rel.media_type.eq_ignore_ascii_case("ANIME") {
+            continue;
+        }
+        if rel.id <= 0 {
+            continue;
+        }
+        let rel_id = rel.id;
+        let rel_type = rel.relation_type.clone();
+        walk_set.spawn(async move {
+            let res = anilist::get_anime_detail(rel_id)
+                .await
+                .map_err(|e| e.to_string());
+            (rel_id, rel_type, res)
+        });
+        dispatched += 1;
+    }
+    while let Some(joined) = walk_set.join_next().await {
+        match joined {
+            Ok((rel_id, _rel_type, Ok(detail))) => {
+                neighbor_details.insert(rel_id, detail);
+            }
+            Ok((rel_id, rel_type, Err(e))) => {
+                tracing::debug!(
+                    "auto-expand: transitive neighbor fetch failed rel_id={} rel_type={} err={}",
+                    rel_id,
+                    rel_type,
+                    e
+                );
+            }
+            Err(join_err) => {
+                tracing::debug!(
+                    "auto-expand: transitive neighbor task panicked: {}",
+                    join_err
+                );
+            }
+        }
+    }
+    let expanded_parent =
+        auto_search::expand_parent_with_transitive_relations(parent_detail, &neighbor_details);
+    let siblings = auto_search::detect_sibling_entries_in_pack(filenames, &expanded_parent);
+    if siblings.is_empty() {
+        logger::info(
+            db,
+            LogCategory::Library,
+            &format!(
+                "Auto-expand: no siblings detected in pack '{}'",
+                torrent_title
+            ),
+            &format!(
+                "parent='{}', parent_anilist_id={}, files={}",
+                parent_title,
+                parent_detail.id,
+                filenames.len()
+            ),
+        )
+        .await;
+        return 0;
+    }
+
+    let siblings_considered = siblings.len();
     let mut added = 0_usize;
     let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut routes: Vec<grabbed_torrents::GrabSeriesRoute> = Vec::new();
@@ -1994,11 +2191,21 @@ async fn auto_expand_library_from_pack(
         // Derive episode numbers per sibling so
         // find_imported_for_episode can locate this route when
         // an upgrade later targets one of the sibling's episodes.
+        //
+        // The stored ep_nums are *effective* (post-offset) numbers so
+        // an upgrade searching by episode 1 of Owari S2 finds a route
+        // whose files were originally numbered E14 on disk. Skip
+        // rows that would resolve to a non-positive effective number
+        // (shouldn't happen — detection sets offset conservatively —
+        // but guards against a bad route/file pairing).
         let mut ep_nums: Vec<i32> = Vec::new();
         for &file_idx in &sibling.file_indices {
             if let Some(name) = filenames.get(file_idx) {
-                if let Some((_, n)) = media::parse_episode_number(&name.to_lowercase()) {
-                    ep_nums.push(n);
+                if let Some((_, raw)) = media::parse_episode_number(&name.to_lowercase()) {
+                    let effective = raw - sibling.episode_offset;
+                    if effective > 0 {
+                        ep_nums.push(effective);
+                    }
                 }
             }
         }
@@ -2008,12 +2215,50 @@ async fn auto_expand_library_from_pack(
         for &i in &sibling.file_indices {
             claimed.insert(i);
         }
+
+        // Write per-episode grab history + quality tag rows for this
+        // sibling so its episode list shows `state=grabbed` in the UI
+        // (progress bar + "came from X GB batch" tooltip). The parent
+        // path records its own rows synchronously at grab time; siblings
+        // were previously only getting route rows written here, which
+        // meant their series pages rendered UNKNOWN with no progress bar
+        // until post-processing finished and backfilled the tags. Every
+        // auto-expand firing is a batch by definition (the outer
+        // selectors only call in on `result.is_batch && !selective_narrowed`),
+        // so `is_batch=true` is always correct here.
+        for &local_ep in &ep_nums {
+            if let Err(e) = episode_tags::record_grab(
+                db,
+                sibling_id,
+                local_ep,
+                &grab_ctx.classification,
+                torrent_title,
+                &grab_ctx.release_group,
+                grab_ctx.size_bytes,
+                true,
+            )
+            .await
+            {
+                logger::warn(
+                    db,
+                    LogCategory::Library,
+                    &format!(
+                        "Auto-expand: failed to backfill grab history for sibling {} ep {}",
+                        sibling_id, local_ep,
+                    ),
+                    &format!("{}: {}", torrent_title, e),
+                )
+                .await;
+            }
+        }
+
         routes.push(grabbed_torrents::GrabSeriesRoute {
             grab_id,
             series_id: sibling_id,
             file_indices: sibling.file_indices,
             episode_numbers: ep_nums,
             matched_subtitle: sibling.matched_subtitle,
+            episode_offset: sibling.episode_offset,
         });
     }
 
@@ -2057,6 +2302,9 @@ async fn auto_expand_library_from_pack(
             file_indices: parent_file_indices,
             episode_numbers: parent_episode_numbers.to_vec(),
             matched_subtitle: String::new(),
+            // Parent-route files always use their own arc-local
+            // numbering — no offset ever needed here.
+            episode_offset: 0,
         });
     }
 
@@ -2074,6 +2322,22 @@ async fn auto_expand_library_from_pack(
             .await;
         }
     }
+
+    logger::info(
+        db,
+        LogCategory::Library,
+        &format!(
+            "Auto-expand: finished batch '{}' — {} sibling(s) added",
+            torrent_title, added
+        ),
+        &format!(
+            "parent='{}', siblings_considered={}, routes_written={}",
+            parent_title,
+            siblings_considered,
+            routes.len()
+        ),
+    )
+    .await;
 
     added
 }
@@ -2265,6 +2529,8 @@ async fn run_auto_search_targets_with_upgrades(
                                     &incoming_classification,
                                     &result.title,
                                     &result.group,
+                                    result.size_bytes,
+                                    result.is_batch,
                                 ).await;
                             }
                             // Phase 2 sibling auto-expand: when the
@@ -2292,16 +2558,38 @@ async fn run_auto_search_targets_with_upgrades(
                             let selective_narrowed = wants_selective && kept.is_some();
                             if result.is_batch && !selective_narrowed {
                                 if let Some(grab_id) = grab_id {
-                                    let _ = auto_expand_library_from_pack(
-                                        &state.db,
-                                        &qbit,
-                                        &result.info_hash,
-                                        &detail,
-                                        sid,
-                                        &ep_nums,
-                                        grab_id,
-                                        &result.title,
-                                    ).await;
+                                    // Fire-and-forget so the HTTP handler
+                                    // doesn't block up to ~60s waiting on
+                                    // qBit to discover metadata (see the
+                                    // `wait_for_metadata` call inside
+                                    // `auto_expand_library_from_pack`).
+                                    // Failures here only affect post-
+                                    // processing routing, which already
+                                    // falls back to the parent series.
+                                    let db_task = state.db.clone();
+                                    let qbit_task = qbit.clone();
+                                    let info_hash_task = result.info_hash.clone();
+                                    let detail_task = detail.clone();
+                                    let ep_nums_task = ep_nums.clone();
+                                    let title_task = result.title.clone();
+                                    let grab_ctx_task = AutoExpandGrabContext {
+                                        classification: incoming_classification.clone(),
+                                        release_group: result.group.clone(),
+                                        size_bytes: result.size_bytes,
+                                    };
+                                    tokio::spawn(async move {
+                                        auto_expand_library_from_pack(
+                                            &db_task,
+                                            &qbit_task,
+                                            &info_hash_task,
+                                            &detail_task,
+                                            sid,
+                                            &ep_nums_task,
+                                            grab_id,
+                                            &title_task,
+                                            &grab_ctx_task,
+                                        ).await;
+                                    });
                                 }
                             }
                         }
@@ -2613,9 +2901,42 @@ pub async fn search_batch_releases(
                 &format!("group={}, score={}, tier={}", result.group, result.score, tier_label),
             ).await;
             if let Some(sid) = series_id_for_grab {
+                // Parse episode list from the batch title so every covered
+                // episode gets a per-episode `episode_quality_tags` row at
+                // grab time, not just at post-processing time. Without
+                // this the UI shows UNKNOWN for every episode of a
+                // freshly-grabbed batch — and if the user has
+                // post-processing disabled the rows never get created at
+                // all. Mirrors the auto-search-path logic at
+                // `run_auto_search_targets_with_upgrades` (look for
+                // `parse_release_numbers` above).
+                //
+                // Fallback when the title carries no explicit range
+                // (e.g. "Jellyfish Can't Swim in the Night" with no
+                // "01-12" suffix): use the series' known episode count.
+                // Capped at 1000 so a garbage AniList record can't
+                // spawn a million rows.
+                let ep_nums = batch_episode_numbers(&result.title, &detail);
                 let _ = crate::models::grabbed_torrents::record_grab(
-                    &state.db, &result.info_hash, &result.title, sid, &[], result.is_batch,
+                    &state.db,
+                    &result.info_hash,
+                    &result.title,
+                    sid,
+                    &ep_nums,
+                    result.is_batch,
                 ).await;
+                for ep_num in &ep_nums {
+                    let _ = episode_tags::record_grab(
+                        &state.db,
+                        sid,
+                        *ep_num,
+                        &classification,
+                        &result.title,
+                        &result.group,
+                        result.size_bytes,
+                        result.is_batch,
+                    ).await;
+                }
             }
             Ok(Json(auto_search::AutoSearchReport {
                 grabbed: vec![auto_search::AutoSearchHit {
@@ -2727,9 +3048,11 @@ pub async fn interactive_search_batches(
 /// Grab a specific batch release chosen from interactive batch search.
 ///
 /// Mirrors `grab_interactive_result` but without an episode number —
-/// batches don't belong to a single episode, and the per-episode tag
-/// bookkeeping (`episode_tags::record_grab`) is skipped because the
-/// episodes will be tagged when the post-processing stage extracts them.
+/// batches cover a range of episodes — the episode list is resolved
+/// from the release title via [`batch_episode_numbers`] at grab time
+/// so per-episode `episode_tags::record_grab` writes land immediately
+/// and the UI shows the batch's quality tier without waiting on
+/// post-processing.
 #[utoipa::path(
     post,
     path = "/api/series/{anilist_id}/grab-batch",
@@ -2761,6 +3084,7 @@ pub async fn grab_batch_result(
     let group = body["group"].as_str().unwrap_or("").to_string();
     let resolution = body["resolution"].as_str().unwrap_or("").to_string();
     let info_hash = body["info_hash"].as_str().unwrap_or("").to_string();
+    let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
 
     if url.is_empty() {
         return Err((axum::http::StatusCode::BAD_REQUEST, "No URL provided".to_string()));
@@ -2843,9 +3167,28 @@ pub async fn grab_batch_result(
     ).await;
 
     if let Some(sid) = series_id {
+        // Parse episode list from the batch title so every covered
+        // episode gets a per-episode `episode_quality_tags` row at
+        // grab time. Same reasoning as in `search_batch_releases` —
+        // without this, batch grabs leave every episode showing
+        // UNKNOWN in the UI, and with post-processing disabled the
+        // rows never get created at all.
+        let ep_nums = batch_episode_numbers(&title, &detail);
         let grab_id = crate::models::grabbed_torrents::record_grab(
-            &state.db, &info_hash, &title, sid, &[], true,
+            &state.db, &info_hash, &title, sid, &ep_nums, true,
         ).await.ok().flatten();
+        for ep_num in &ep_nums {
+            let _ = episode_tags::record_grab(
+                &state.db,
+                sid,
+                *ep_num,
+                &classification,
+                &title,
+                &group,
+                size_bytes,
+                true,
+            ).await;
+        }
         // Phase 2 sibling auto-expand. Skip when selective narrowing
         // successfully applied — the user picked a specific sibling
         // (e.g. Stardust Crusaders) out of a megapack and the other
@@ -2858,16 +3201,33 @@ pub async fn grab_batch_result(
         let selective_narrowed = wants_selective && selective_outcome.is_some();
         if !selective_narrowed {
             if let Some(grab_id) = grab_id {
-                let _ = auto_expand_library_from_pack(
-                    &state.db,
-                    &qbit,
-                    &info_hash,
-                    &detail,
-                    sid,
-                    &[],
-                    grab_id,
-                    &title,
-                ).await;
+                // Fire-and-forget so the HTTP handler doesn't block
+                // up to ~60s on qBit metadata discovery. See the
+                // matching spawn in `run_auto_search_targets_with_upgrades`.
+                let db_task = state.db.clone();
+                let qbit_task = qbit.clone();
+                let info_hash_task = info_hash.clone();
+                let detail_task = detail.clone();
+                let title_task = title.clone();
+                let ep_nums_task = ep_nums.clone();
+                let grab_ctx_task = AutoExpandGrabContext {
+                    classification: classification.clone(),
+                    release_group: group.clone(),
+                    size_bytes,
+                };
+                tokio::spawn(async move {
+                    auto_expand_library_from_pack(
+                        &db_task,
+                        &qbit_task,
+                        &info_hash_task,
+                        &detail_task,
+                        sid,
+                        &ep_nums_task,
+                        grab_id,
+                        &title_task,
+                        &grab_ctx_task,
+                    ).await;
+                });
             }
         }
     }
@@ -2913,6 +3273,7 @@ pub async fn grab_interactive_result(
     let group = body["group"].as_str().unwrap_or("").to_string();
     let resolution = body["resolution"].as_str().unwrap_or("").to_string();
     let info_hash = body["info_hash"].as_str().unwrap_or("").to_string();
+    let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
 
     if url.is_empty() {
         return Err((axum::http::StatusCode::BAD_REQUEST, "No URL provided".to_string()));
@@ -3005,7 +3366,7 @@ pub async fn grab_interactive_result(
             &state.db, &info_hash, &title, sid, &[episode_number], false,
         ).await;
         let _ = episode_tags::record_grab(
-            &state.db, sid, episode_number, &classification, &title, &group,
+            &state.db, sid, episode_number, &classification, &title, &group, size_bytes, false,
         ).await;
     }
 
@@ -3309,10 +3670,26 @@ pub async fn episode_download_progress(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let series_pending: Vec<_> = pending.iter().filter(|g| g.series_id == tracked.id).collect();
-    if series_pending.is_empty() {
+    if pending.is_empty() {
         return Ok(Json(Vec::new()));
     }
+
+    // Phase 2: consult `grabbed_torrent_series` so sibling pages
+    // surface the parent torrent's progress. Auto-expand writes one
+    // route row per sibling + one for the parent; each row carries
+    // that series' own effective (post-offset) episode numbers.
+    // When routes exist we trust them exclusively (same rule post-
+    // processing uses), so the legacy parent-only match on
+    // `grab.series_id` is skipped for auto-expanded grabs.
+    //
+    // Bulk-fetched into a HashMap<grab_id, routes> so the poller (run
+    // every few seconds on every open series page) issues exactly one
+    // routes query per poll, not N.
+    let grab_ids: Vec<i64> = pending.iter().map(|g| g.id).collect();
+    let routes_by_grab =
+        crate::models::grabbed_torrents::get_series_routes_for_grabs(&state.db, &grab_ids)
+            .await
+            .unwrap_or_default();
 
     let qbit = {
         let guard = state.qbit.read().await;
@@ -3329,7 +3706,21 @@ pub async fn episode_download_progress(
         .collect();
 
     let mut results = Vec::new();
-    for grab in &series_pending {
+    for grab in &pending {
+        let routes = routes_by_grab.get(&grab.id);
+        let ep_nums: Vec<i32> = match routes {
+            Some(routes) if !routes.is_empty() => routes
+                .iter()
+                .filter(|r| r.series_id == tracked.id)
+                .flat_map(|r| r.episode_numbers.iter().copied())
+                .collect(),
+            _ if grab.series_id == tracked.id => grab.episode_numbers.clone(),
+            _ => continue,
+        };
+        if ep_nums.is_empty() {
+            continue;
+        }
+
         let torrent = if !grab.hash.is_empty() {
             by_hash.get(&grab.hash.to_lowercase()).copied()
         } else {
@@ -3342,9 +3733,9 @@ pub async fn episode_download_progress(
             continue;
         };
 
-        for ep in &grab.episode_numbers {
+        for ep in ep_nums {
             results.push(EpisodeProgress {
-                episode: *ep,
+                episode: ep,
                 progress: t.progress,
                 speed: t.dlspeed,
                 state: t.state.clone(),
@@ -3402,4 +3793,417 @@ pub async fn series_episodes_json(
         build_episodes(&state.db, &detail, db_id, &folder_name, &media_root).await;
 
     Ok(Json(episodes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_anime_detail(id: i64, title_english: &str) -> anilist::AnimeDetail {
+        anilist::AnimeDetail {
+            id,
+            id_mal: None,
+            title_romaji: title_english.to_string(),
+            title_english: title_english.to_string(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            banner_url: String::new(),
+            format: "TV".to_string(),
+            status: "FINISHED".to_string(),
+            status_display: "Finished".to_string(),
+            episodes: Some(26),
+            duration: Some(24),
+            season: String::new(),
+            season_year: Some(2012),
+            end_year: Some(2013),
+            description: String::new(),
+            genres: Vec::new(),
+            average_score: None,
+            average_score_display: None,
+            score_is_ten_point: false,
+            score_class: String::new(),
+            next_airing_episode: None,
+            next_airing_at: None,
+            synonyms: Vec::new(),
+            streaming_episodes: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+
+    fn test_grab_ctx() -> AutoExpandGrabContext {
+        AutoExpandGrabContext {
+            classification: crate::services::source::ClassificationResult::unknown(),
+            release_group: String::new(),
+            size_bytes: 0,
+        }
+    }
+
+    fn related_entry(
+        id: i64,
+        title_english: &str,
+        episodes: Option<i32>,
+    ) -> anilist::RelatedEntry {
+        anilist::RelatedEntry {
+            id,
+            id_mal: None,
+            title_romaji: title_english.to_string(),
+            title_english: title_english.to_string(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            format: "TV".to_string(),
+            status: "FINISHED".to_string(),
+            status_display: "Finished".to_string(),
+            episodes,
+            relation_type: "SIDE_STORY".to_string(),
+            season_year: Some(2014),
+            media_type: "ANIME".to_string(),
+        }
+    }
+
+    /// End-to-end exercise of the Phase 2 auto-expand route writer.
+    /// Mirrors the real JoJo S1-S3 megapack case: the parent entry
+    /// ("JoJo's Bizarre Adventure") owns the Phantom Blood / Battle
+    /// Tendency files and a sibling relation ("Stardust Crusaders")
+    /// owns the S3 files. After the pure inner fn runs, we expect two
+    /// route rows to land in `grabbed_torrent_series` — one per series
+    /// — with the unclaimed (parent) files routing to the franchise
+    /// root.
+    ///
+    /// The fn is split into outer (qBit metadata wait) + inner
+    /// (`_with_files`) precisely so this test can feed synthetic
+    /// filenames without spinning up qBittorrent.
+    #[tokio::test]
+    async fn auto_expand_routes_sibling_and_parent_files() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        // Seed the parent series row. The real grab path calls
+        // series::upsert first, so this matches production flow.
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 801,
+                mal_id: None,
+                title: "JoJo's Bizarre Adventure",
+                title_romaji: "JoJo no Kimyou na Bouken",
+                title_english: "JoJo's Bizarre Adventure",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(26),
+                season_year: Some(2012),
+                end_year: Some(2013),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        // Record a grab row so there's a grab_id for the routes to
+        // attach to. `record_grab` returns Ok(Some(id)) on fresh insert.
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "dummyhash0000000000000000000000000000000",
+            "[Group] JoJo Megapack (BD 1080p)",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab row inserted");
+
+        // Construct a parent AnimeDetail with one sibling relation.
+        // The sibling title must carry an extractable trailing
+        // subtitle ("Stardust Crusaders") for detect_sibling_entries
+        // to find a needle to match.
+        let mut parent_detail = empty_anime_detail(801, "JoJo's Bizarre Adventure");
+        parent_detail.relations.push(related_entry(
+            802,
+            "JoJo's Bizarre Adventure: Stardust Crusaders",
+            Some(24),
+        ));
+
+        // Two sibling files (match the Stardust Crusaders needle) and
+        // two parent files (bare franchise title, no sibling subtitle).
+        let filenames = vec![
+            "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 01 [BD 1080p].mkv".to_string(),
+            "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 02 [BD 1080p].mkv".to_string(),
+            "[Group] JoJo no Kimyou na Bouken - 01 [BD 1080p].mkv".to_string(),
+            "[Group] JoJo no Kimyou na Bouken - 02 [BD 1080p].mkv".to_string(),
+        ];
+
+        let grab_ctx = test_grab_ctx();
+        let added = auto_expand_library_from_pack_with_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &[1, 2],
+            grab_id,
+            "[Group] JoJo Megapack (BD 1080p)",
+            &grab_ctx,
+        )
+        .await;
+
+        assert_eq!(added, 1, "one new sibling (Stardust Crusaders) expected");
+
+        let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(routes.len(), 2, "sibling route + parent route expected");
+
+        // The sibling route: claims file indices 0 and 1, its series_id
+        // differs from the parent, and the matched subtitle is the one
+        // trailing_subtitle_of extracted from the relation title.
+        let sibling_route = routes
+            .iter()
+            .find(|r| r.series_id != parent_id)
+            .expect("sibling route present");
+        assert_eq!(sibling_route.file_indices, vec![0, 1]);
+        assert_eq!(sibling_route.matched_subtitle, "Stardust Crusaders");
+        // Arc-local numbering (files E01, E02) → min_ep=1 ≤
+        // parent_cap=26 → offset=0, and stored episode_numbers
+        // equal the raw parsed values.
+        assert_eq!(sibling_route.episode_offset, 0);
+        assert_eq!(sibling_route.episode_numbers, vec![1, 2]);
+
+        // The parent route: claims the unclaimed media files (2 and 3)
+        // and reuses the caller-supplied episode numbers verbatim.
+        let parent_route = routes
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route present");
+        assert_eq!(parent_route.file_indices, vec![2, 3]);
+        assert_eq!(parent_route.episode_numbers, vec![1, 2]);
+        // Parent routes always carry offset 0.
+        assert_eq!(parent_route.episode_offset, 0);
+    }
+
+    /// Smol Monogatari-style batch: absolute episode numbering runs
+    /// across parent + sibling (E13 = last parent ep, E14 = first
+    /// sibling ep). The fallback path detects Owarimonogatari Second
+    /// Season via title-prefix matching AND the per-sibling offset
+    /// pass sets offset=13 so the route row's episode_numbers store
+    /// the effective (arc-local) 1..=7 instead of the raw 14..=20.
+    #[tokio::test]
+    async fn auto_expand_persists_episode_offset_for_absolute_numbered_batch() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21320,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(13),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "owarismolhash00000000000000000000000000",
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        // Parent AnimeDetail with a continuation relation. Use the
+        // real title "Owarimonogatari Second Season" — no delimiter,
+        // no 2-token trailing subtitle — so the subtitle path cannot
+        // match and the fallback path's title-prefix rule must fire.
+        let mut parent_detail = empty_anime_detail(21320, "Owarimonogatari");
+        parent_detail.episodes = Some(13);
+        parent_detail
+            .relations
+            .push(related_entry(21860, "Owarimonogatari Second Season", Some(7)));
+
+        // 13 parent files (S07E01..E13) + 7 sibling files (S07E14..E20).
+        let mut filenames: Vec<String> = Vec::new();
+        for n in 1..=13 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p).mkv",
+                n
+            ));
+        }
+        for n in 14..=20 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p).mkv",
+                n
+            ));
+        }
+        let parent_episode_numbers: Vec<i32> = (1..=13).collect();
+
+        let grab_ctx = test_grab_ctx();
+        let added = auto_expand_library_from_pack_with_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &parent_episode_numbers,
+            grab_id,
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            &grab_ctx,
+        )
+        .await;
+
+        assert_eq!(added, 1, "one new sibling (Owari S2) expected");
+
+        let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(routes.len(), 2, "sibling route + parent route expected");
+
+        let sibling_route = routes
+            .iter()
+            .find(|r| r.series_id != parent_id)
+            .expect("sibling route present");
+        // Files 13..=19 (0-based indices) correspond to S07E14..E20.
+        assert_eq!(sibling_route.file_indices, vec![13, 14, 15, 16, 17, 18, 19]);
+        // The matched subtitle records the detection method for
+        // operator inspection.
+        assert!(sibling_route
+            .matched_subtitle
+            .starts_with("episode-range fallback"));
+        // Absolute numbering → offset = parent_cap = 13.
+        assert_eq!(sibling_route.episode_offset, 13);
+        // Stored episode_numbers are effective (post-offset) values,
+        // so a later `find_imported_for_episode(sibling, 1)` upgrade
+        // query hits this route row correctly.
+        assert_eq!(sibling_route.episode_numbers, vec![1, 2, 3, 4, 5, 6, 7]);
+
+        let parent_route = routes
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route present");
+        assert_eq!(parent_route.file_indices, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(parent_route.episode_offset, 0);
+
+        // Regression guard: auto-expand must also write per-episode
+        // `episode_quality_tags` + `episode_grab_history` rows for the
+        // newly-upserted sibling. Without these the sibling's series
+        // page renders UNKNOWN with no progress bar until post-
+        // processing backfills them (which, if the user has PP
+        // disabled, never happens). Uses the effective (post-offset)
+        // local episode numbers the route already stores.
+        let sibling_id = sibling_route.series_id;
+        let sibling_tags = episode_tags::get_for_series(&db, sibling_id)
+            .await
+            .expect("sibling quality tags");
+        assert_eq!(
+            sibling_tags.len(),
+            7,
+            "sibling should have 7 quality-tag rows (one per local ep 1..=7)"
+        );
+        for local_ep in 1..=7 {
+            let tag = sibling_tags
+                .get(&local_ep)
+                .unwrap_or_else(|| panic!("sibling tag for local ep {} missing", local_ep));
+            assert_eq!(tag.state, "grabbed");
+            let history = episode_tags::get_grab_history(&db, sibling_id, local_ep)
+                .await
+                .expect("sibling grab history");
+            assert_eq!(
+                history.len(),
+                1,
+                "sibling local ep {} should have 1 grab-history row",
+                local_ep
+            );
+        }
+    }
+
+    /// When the file list has no sibling matches, the inner fn is a
+    /// no-op: no sibling series get upserted and no route rows get
+    /// written. This exercises the early-return after
+    /// `detect_sibling_entries_in_pack` returns an empty vec — the
+    /// production path relies on that branch to avoid polluting the
+    /// library with ghost rows for regular single-series grabs.
+    #[tokio::test]
+    async fn auto_expand_noop_when_no_siblings_detected() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 901,
+                mal_id: None,
+                title: "Sono Bisque Doll wa Koi wo Suru",
+                title_romaji: "Sono Bisque Doll wa Koi wo Suru",
+                title_english: "My Dress-Up Darling",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2022),
+                end_year: Some(2022),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "dummyhash1111111111111111111111111111111",
+            "[Group] My Dress-Up Darling S01 (BD 1080p)",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab row inserted");
+
+        // No relations on the parent detail → no sibling candidates
+        // even though the file list is full of media files.
+        let parent_detail = empty_anime_detail(901, "My Dress-Up Darling");
+        let filenames = vec![
+            "[Group] My Dress-Up Darling - 01 [BD 1080p].mkv".to_string(),
+            "[Group] My Dress-Up Darling - 02 [BD 1080p].mkv".to_string(),
+        ];
+
+        let grab_ctx = test_grab_ctx();
+        let added = auto_expand_library_from_pack_with_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &[1, 2],
+            grab_id,
+            "[Group] My Dress-Up Darling S01 (BD 1080p)",
+            &grab_ctx,
+        )
+        .await;
+
+        assert_eq!(added, 0);
+        let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert!(
+            routes.is_empty(),
+            "no sibling → no routes, post-processing falls back to grab.series_id"
+        );
+    }
 }

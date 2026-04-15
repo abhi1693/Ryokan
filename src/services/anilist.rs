@@ -1,13 +1,23 @@
 use serde::{Deserialize, Serialize};
 use crate::services::html::sanitize_rich_description;
 use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::time::Instant;
+use std::sync::{LazyLock, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::services::{jikan, kitsu};
+use crate::services::jikan;
 
 const ANILIST_API: &str = "https://graphql.anilist.co";
+
+/// TTL for the search result cache. Short enough to stay fresh, long enough to
+/// absorb bursts of repeat queries (which is what actually hammers AniList/Jikan
+/// during testing or when a user re-searches the same title).
+const SEARCH_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// How long to treat AniList as unavailable after a 429/5xx. If AniList sends a
+/// `Retry-After` header we use that value instead (capped at 5 minutes).
+const ANILIST_COOLDOWN_DEFAULT: Duration = Duration::from_secs(60);
+const ANILIST_COOLDOWN_MAX: Duration = Duration::from_secs(300);
 
 /// In-memory cache TTL for anime detail responses (15 minutes).
 const DETAIL_CACHE_TTL_SECS: u64 = 15 * 60;
@@ -25,6 +35,77 @@ struct CacheEntry {
 
 static DETAIL_CACHE: LazyLock<RwLock<HashMap<i64, CacheEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+type SearchCacheEntry = (Instant, Vec<AnimeEntry>);
+
+/// Search result cache, keyed on (provider-mode, normalized query).
+/// Provider-mode is "al" for the normal AniList-first path and "mal" for the
+/// force_mal_fallback path; we keep them separate because they return different
+/// `source` fields per entry and the frontend displays the distinction.
+static SEARCH_CACHE: LazyLock<StdMutex<HashMap<String, SearchCacheEntry>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Monotonically-set "AniList is in cooldown until Instant". Consulted at the
+/// top of every search so that once we've learned AniList is rate-limiting us,
+/// we stop wasting a round-trip per search (which was dragging Jikan into the
+/// rate-limit bucket too).
+static ANILIST_COOLDOWN_UNTIL: LazyLock<StdMutex<Option<Instant>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+fn normalize_search_key(force_fallback: bool, query: &str) -> String {
+    let folded: String = query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    format!("{}::{}", if force_fallback { "mal" } else { "al" }, folded)
+}
+
+fn search_cache_get(key: &str) -> Option<Vec<AnimeEntry>> {
+    let now = Instant::now();
+    let mut cache = SEARCH_CACHE.lock().ok()?;
+    if let Some((fetched_at, results)) = cache.get(key) {
+        if now.duration_since(*fetched_at) <= SEARCH_CACHE_TTL {
+            return Some(results.clone());
+        }
+    }
+    cache.remove(key);
+    None
+}
+
+fn search_cache_put(key: String, results: Vec<AnimeEntry>) {
+    if let Ok(mut cache) = SEARCH_CACHE.lock() {
+        // Bound the cache. Simple heuristic — if we're >200 entries, drop expired
+        // ones; if still too big, just clear. Search queries are long-tail anyway.
+        if cache.len() > 200 {
+            let now = Instant::now();
+            cache.retain(|_, (t, _)| now.duration_since(*t) <= SEARCH_CACHE_TTL);
+            if cache.len() > 200 {
+                cache.clear();
+            }
+        }
+        cache.insert(key, (Instant::now(), results));
+    }
+}
+
+fn anilist_cooldown_active() -> bool {
+    if let Ok(guard) = ANILIST_COOLDOWN_UNTIL.lock() {
+        if let Some(until) = *guard {
+            return Instant::now() < until;
+        }
+    }
+    false
+}
+
+fn set_anilist_cooldown(retry_after_secs: Option<u64>) {
+    let dur = retry_after_secs
+        .map(Duration::from_secs)
+        .unwrap_or(ANILIST_COOLDOWN_DEFAULT)
+        .min(ANILIST_COOLDOWN_MAX);
+    if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
+        *guard = Some(Instant::now() + dur);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnimeEntry {
@@ -53,11 +134,36 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
     if query.is_empty() {
         return Ok(Vec::new());
     }
+
+    // 1. Cache lookup — skip all upstream work for repeat queries within the TTL.
+    let cache_key = normalize_search_key(force_mal_fallback, query);
+    if let Some(cached) = search_cache_get(&cache_key) {
+        tracing::debug!("anilist search cache hit for {:?} ({} results)", query, cached.len());
+        return Ok(cached);
+    }
+
     if force_mal_fallback {
-        return match jikan::search_anime(query).await {
-            Ok(results) if !results.is_empty() => Ok(results),
-            Ok(_) | Err(_) => kitsu::search_anime(query).await,
-        };
+        let results = fallback_jikan(query, None).await?;
+        search_cache_put(cache_key, results.clone());
+        return Ok(results);
+    }
+
+    // 2. If AniList is known to be rate-limited, don't bother hitting it — go
+    //    straight to Jikan. This is the key fix for the "both APIs rate-limited
+    //    at once" symptom: previously every search during the 60s AL cooldown
+    //    still pinged AL, got another 429, then called Jikan, burning Jikan's
+    //    (stricter) rate-limit budget alongside.
+    if anilist_cooldown_active() {
+        tracing::debug!(
+            "anilist search skipping AniList for {:?} (still in cooldown)",
+            query
+        );
+        let results = fallback_jikan(
+            query,
+            Some("AniList rate-limited (skipped during cooldown)".to_string()),
+        ).await?;
+        search_cache_put(cache_key, results.clone());
+        return Ok(results);
     }
 
     let gql = serde_json::json!({
@@ -86,27 +192,85 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
     });
 
     let client = reqwest::Client::new();
-    let resp = client
+    let resp = match client
         .post(ANILIST_API)
         .header("User-Agent", "Ryokan/0.1")
         .json(&gql)
         .send()
         .await
-        .map_err(|e| format!("AniList request failed: {}", e))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "AniList request failed for query {:?}: {}; falling back to Jikan/MAL",
+                query, e
+            );
+            let results = fallback_jikan(
+                query,
+                Some(format!("AniList unreachable: {}", e)),
+            ).await?;
+            search_cache_put(cache_key, results.clone());
+            return Ok(results);
+        }
+    };
 
     let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse AniList response: {}", e))?;
 
-    if status == reqwest::StatusCode::FORBIDDEN {
-        tracing::warn!("AniList search 403 for query {:?}; falling back to Jikan/MAL", query);
-        return match jikan::search_anime(query).await {
-            Ok(results) if !results.is_empty() => Ok(results),
-            Ok(_) | Err(_) => kitsu::search_anime(query).await,
+    // Silently fall back to Jikan/MAL on transient AniList outages:
+    //   403 — Cloudflare challenge / geo-block
+    //   429 — rate limit (30 req/min anon)
+    //   5xx — upstream outage
+    // These are the cases where the user's search should just Work via a
+    // fallback provider rather than surfacing a cryptic HTTP error.
+    if status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        let retry_after_secs = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+        tracing::warn!(
+            "AniList search HTTP {} for query {:?} (retry-after={:?}); falling back to Jikan/MAL",
+            status, query, retry_after_secs
+        );
+        // Start a cooldown so subsequent searches in this window skip AL entirely.
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            set_anilist_cooldown(retry_after_secs);
+        }
+        let reason = match status.as_u16() {
+            429 => format!(
+                "AniList rate-limited{}",
+                retry_after_secs
+                    .map(|r| format!(" (retry in {}s)", r))
+                    .unwrap_or_default()
+            ),
+            403 => "AniList blocked our request (Cloudflare challenge)".to_string(),
+            code => format!("AniList upstream error (HTTP {})", code),
         };
+        let results = fallback_jikan(query, Some(reason)).await?;
+        search_cache_put(cache_key, results.clone());
+        return Ok(results);
     }
+
+    // Read the body as text first so a non-JSON error body (common on 4xx/5xx)
+    // produces a useful error instead of "Failed to parse AniList response".
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| format!("AniList response read failed (HTTP {}): {}", status, e))?;
+
+    let body: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(v) => v,
+        Err(parse_err) => {
+            if !status.is_success() {
+                let snippet: String = body_text.chars().take(200).collect();
+                return Err(format!("AniList search failed (HTTP {}): {}", status, snippet.trim()));
+            }
+            return Err(format!("Failed to parse AniList response: {}", parse_err));
+        }
+    };
 
     if !status.is_success() {
         let msg = extract_graphql_error(&body).unwrap_or_else(|| body.to_string());
@@ -119,10 +283,13 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
 
     let media = match body["data"]["Page"]["media"].as_array() {
         Some(arr) => arr,
-        None => return Ok(Vec::new()),
+        None => {
+            search_cache_put(cache_key, Vec::new());
+            return Ok(Vec::new());
+        }
     };
 
-    let entries = media
+    let entries: Vec<AnimeEntry> = media
         .iter()
         .map(|m| AnimeEntry {
             id: m["id"].as_i64().unwrap_or(0),
@@ -140,7 +307,52 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
         })
         .collect();
 
+    search_cache_put(cache_key, entries.clone());
     Ok(entries)
+}
+
+/// Shared fallback helper used when AniList is unavailable or force_mal_fallback is set.
+/// Tries Jikan (MAL-backed). If Jikan also fails, `compose_search_error` builds a
+/// user-friendly combined message for the frontend.
+async fn fallback_jikan(
+    query: &str,
+    anilist_reason: Option<String>,
+) -> Result<Vec<AnimeEntry>, String> {
+    match jikan::search_anime(query).await {
+        Ok(results) => Ok(results),
+        Err(jikan_err) => Err(compose_search_error(anilist_reason.as_deref(), &jikan_err)),
+    }
+}
+
+/// Produce a clean, human-readable error message from an AniList failure reason
+/// (optional — e.g. "AniList rate-limited (retry in 28s)") and a Jikan failure
+/// reason. Callers see something like:
+///   "Both AniList and Jikan/MAL are rate-limited right now. Try again in ~30s."
+/// instead of a raw JSON dump concatenation.
+fn compose_search_error(anilist_reason: Option<&str>, jikan_err: &str) -> String {
+    let al_rate_limited = anilist_reason
+        .map(|r| r.contains("rate-limited") || r.contains("429"))
+        .unwrap_or(false);
+    let jikan_rate_limited = jikan_err.contains("rate-limited") || jikan_err.contains("429");
+
+    if al_rate_limited && jikan_rate_limited {
+        // Try to surface the AL retry hint if we parsed one earlier.
+        let hint = anilist_reason
+            .and_then(|r| {
+                let start = r.find("retry in ")?;
+                let tail = &r[start + "retry in ".len()..];
+                let end = tail.find(')').unwrap_or(tail.len());
+                Some(tail[..end].to_string())
+            })
+            .map(|s| format!(" Try again in ~{}.", s))
+            .unwrap_or_else(|| " Try again in a minute.".to_string());
+        return format!("Both AniList and Jikan/MAL are rate-limited right now.{}", hint);
+    }
+
+    match anilist_reason {
+        Some(al) => format!("{}. MAL/Jikan fallback also failed: {}", al, jikan_err),
+        None => format!("MAL/Jikan search failed: {}", jikan_err),
+    }
 }
 
 
@@ -547,4 +759,86 @@ fn extract_graphql_error(body: &serde_json::Value) -> Option<String> {
         .and_then(|errs| errs.first())
         .and_then(|err| err["message"].as_str())
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_search_key_folds_whitespace_and_case() {
+        assert_eq!(
+            normalize_search_key(false, "  Jojo  Part  3 "),
+            "al::jojo part 3"
+        );
+        assert_eq!(
+            normalize_search_key(true, "\tFrieren\n"),
+            "mal::frieren"
+        );
+    }
+
+    #[test]
+    fn normalize_search_key_separates_al_from_mal_modes() {
+        assert_ne!(
+            normalize_search_key(false, "Bleach"),
+            normalize_search_key(true, "Bleach")
+        );
+    }
+
+    #[test]
+    fn compose_error_when_both_rate_limited_suggests_retry() {
+        let msg = compose_search_error(
+            Some("AniList rate-limited (retry in 28s)"),
+            "Jikan rate-limited (HTTP 429): You are being rate-limited",
+        );
+        assert!(msg.contains("Both AniList and Jikan/MAL are rate-limited"), "msg was: {}", msg);
+        assert!(msg.contains("28s"), "retry hint lost: {}", msg);
+    }
+
+    #[test]
+    fn compose_error_falls_back_when_only_one_rate_limited() {
+        let msg = compose_search_error(
+            Some("AniList rate-limited (retry in 28s)"),
+            "Jikan unreachable: connection refused",
+        );
+        assert!(msg.starts_with("AniList rate-limited"), "msg was: {}", msg);
+        assert!(msg.contains("connection refused"), "jikan detail lost: {}", msg);
+        assert!(!msg.contains("Both AniList and Jikan/MAL"), "wrong branch: {}", msg);
+    }
+
+    #[test]
+    fn compose_error_without_anilist_reason_uses_mal_prefix() {
+        let msg = compose_search_error(None, "Jikan HTTP 500: upstream down");
+        assert!(msg.starts_with("MAL/Jikan search failed"), "msg was: {}", msg);
+        assert!(msg.contains("upstream down"));
+    }
+
+    #[test]
+    fn search_cache_roundtrips_and_expires_on_ttl_mismatch() {
+        // We can't sleep for 60s in tests, but we can validate that distinct
+        // keys don't collide and that a put/get returns the same Vec.
+        let key = normalize_search_key(false, "test query unique 1");
+        let entries = vec![AnimeEntry {
+            id: 42,
+            id_mal: None,
+            title_romaji: "Test".into(),
+            title_english: "".into(),
+            title_native: "".into(),
+            cover_url: "".into(),
+            format: "TV".into(),
+            status: "FINISHED".into(),
+            status_display: "Finished".into(),
+            episodes: Some(12),
+            season_year: Some(2020),
+            source: "anilist".into(),
+        }];
+        search_cache_put(key.clone(), entries.clone());
+        let got = search_cache_get(&key).expect("cached value should be present");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, 42);
+
+        // A different normalized key should miss.
+        let other = normalize_search_key(false, "completely different");
+        assert!(search_cache_get(&other).is_none());
+    }
 }

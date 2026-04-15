@@ -16,7 +16,27 @@ pub mod nyaa_description_cache;
 pub mod media_probe_cache;
 pub mod custom_formats;
 
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
+
+/// Check whether `column` exists on `table`. Used inside [`migrate`] to
+/// gate idempotent ALTER chains whose "ADD COLUMN then RENAME" shape
+/// would otherwise leave vestigial columns on fresh installs (the ADD
+/// succeeds unconditionally because `.ok()` swallows the
+/// already-migrated case, then the RENAME silently no-ops when the
+/// target already exists). By asking SQLite directly, we can skip the
+/// ADD step entirely on installs where the current column name already
+/// exists.
+async fn column_exists(db: &SqlitePool, table: &str, column: &str) -> bool {
+    // PRAGMA doesn't accept bound parameters, but `table` is a hardcoded
+    // string literal from our own migration code — no user input — so
+    // inline interpolation is safe.
+    let sql = format!("PRAGMA table_info({})", table);
+    let Ok(rows) = sqlx::query(&sql).fetch_all(db).await else {
+        return false;
+    };
+    rows.iter()
+        .any(|r| r.try_get::<String, _>("name").ok().as_deref() == Some(column))
+}
 
 /// Run all database migrations.
 pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -577,6 +597,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
 
+    // Per-route episode offset for the Phase 2 auto-expand path.
+    // Applied by post_processing at rename time to convert a file's
+    // absolute episode number into the sibling's arc-local episode
+    // number (e.g. smol Monogatari batch: E14 → E01 of Owari S2 with
+    // offset 13, NoobSubs JoJo: E25 → E01 of Egypt-hen with offset 24).
+    // Non-offset siblings (filenames numbered arc-local from 1) get
+    // offset 0, matching the legacy default for rows written before
+    // this column existed.
+    sqlx::query("ALTER TABLE grabbed_torrent_series ADD COLUMN episode_offset INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.
     sqlx::query("ALTER TABLE series ADD COLUMN tmdb_id INTEGER")
@@ -696,6 +729,9 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             quality_tag TEXT NOT NULL DEFAULT '',
             release_title TEXT NOT NULL DEFAULT '',
             release_group TEXT NOT NULL DEFAULT '',
+            file_name TEXT NOT NULL DEFAULT '',
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            is_batch INTEGER NOT NULL DEFAULT 0,
             state TEXT NOT NULL DEFAULT 'grabbed',
             grabbed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
@@ -708,6 +744,52 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_episode_grab_history_series ON episode_grab_history (series_id, episode_number, grabbed_at DESC)")
         .execute(db)
         .await?;
+
+    // On-disk *post-processed* file name for this episode. Seeded from the
+    // Nyaa release title at grab time, then overwritten at post-process
+    // time with the final Sonarr-style filename Ryokan renamed the imported
+    // file to (e.g. `Jujutsu Kaisen - S01E06 - Hidden Inventory.mkv`). The
+    // episode detail modal reads this column so each grab-history row
+    // shows the per-episode file name — distinct from the batch torrent's
+    // release title, which is already in `release_title`. Historically
+    // this column was called `torrent_name`.
+    //
+    // Upgrade path: check for `file_name` first — a fresh install gets
+    // it from CREATE TABLE above, and an already-migrated install has
+    // it from a prior rename. If it's missing we're on a legacy
+    // `torrent_name` install and need to rename. The defensive ADD
+    // covers the corner case where neither column is present (which
+    // shouldn't happen, but keeps downstream writes safe).
+    if !column_exists(db, "episode_grab_history", "file_name").await {
+        sqlx::query("ALTER TABLE episode_grab_history RENAME COLUMN torrent_name TO file_name")
+            .execute(db)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
+            .execute(db)
+            .await
+            .ok();
+    }
+
+    // Episode-file size. For non-batch grabs this gets refined to the
+    // imported file's size at post-process time. For batch grabs it
+    // stays as the whole torrent's total reported at grab time — the
+    // episode detail modal surfaces that as "this episode came from an
+    // X GiB batch". The CASE guard in `mark_grab_history_completed`
+    // enforces this asymmetry.
+    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    // is_batch marker — needed at read time so the UI can decide whether
+    // to surface `size_bytes` as "whole batch" or "single file". It's
+    // also what `mark_grab_history_completed` uses to decide whether to
+    // refine `size_bytes` on import (non-batch only).
+    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN is_batch INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
 
     // auto_grab_on_add: whether to automatically search for monitored episodes after adding a series.
     sqlx::query("ALTER TABLE config ADD COLUMN auto_grab_on_add INTEGER NOT NULL DEFAULT 1")
@@ -964,6 +1046,116 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await
     .ok();
+
+    // Rewrite denormalized `quality_tag` strings on pre-existing
+    // `episode_quality_tags` / `episode_grab_history` rows to match the
+    // Sonarr-parity label format the classifier now emits:
+    // `BD-1080p`, `BD-1080p Remux`, `BD-1080p RAW`, `WEBDL-1080p`,
+    // `WEBRip-1080p`, `WEB-1080p`, `HDTV-1080p`, `DVD-480p`, etc. This
+    // migration bridges two prior schemas: (1) very old space-joined
+    // rows like "BluRay 1080p" / "WEB-DL 1080p", and (2) the
+    // intermediate dash-joined rename (`BD-Remux-1080p`, `BD-RAW-1080p`,
+    // `WEBRIP-1080p`) that shipped briefly before the Sonarr-parity
+    // reorder landed.
+    //
+    // `episode_quality_tags` has the structured source/resolution/
+    // web_kind/is_remux/is_bdmv columns, so we regenerate `quality_tag`
+    // directly from ground truth — always correct regardless of which
+    // label format happened to be in the column. `episode_grab_history`
+    // doesn't carry the structured columns (it's a grab-time audit
+    // trail, not a classification store), so we fall back to ordered
+    // REPLACE statements on known legacy patterns. Fully idempotent:
+    // the regen overwrites with the same value on re-runs, and the
+    // REPLACE chain no-ops once its source patterns are gone.
+    sqlx::query(
+        r#"
+        UPDATE episode_quality_tags SET quality_tag = CASE
+            WHEN TRIM(COALESCE(source, '')) = ''
+              OR LOWER(source) = 'unknown' THEN
+                CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
+                     THEN 'Unknown' ELSE resolution END
+            ELSE
+                (CASE
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd') THEN 'BD'
+                    WHEN LOWER(source) = 'web' THEN
+                        CASE
+                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webdl', 'web-dl', 'web.dl') THEN 'WEBDL'
+                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webrip', 'web-rip', 'web.rip') THEN 'WEBRip'
+                            ELSE 'WEB'
+                        END
+                    ELSE UPPER(source)
+                END)
+                || CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
+                        THEN '' ELSE '-' || resolution END
+                || CASE
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd')
+                         AND COALESCE(is_bdmv, 0) = 1 THEN ' RAW'
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd')
+                         AND COALESCE(is_remux, 0) = 1 THEN ' Remux'
+                    ELSE ''
+                END
+        END
+        "#,
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // `episode_grab_history` replacements. Two-pass approach, since
+    // SQLite REPLACE is a dumb substring swap and can't reorder tokens
+    // around a variable-width resolution in one shot:
+    //
+    //   Pass A — normalize legacy space-joined tokens to the
+    //            intermediate dash-joined form ("BluRay BDMV 1080p" →
+    //            "BD-RAW-1080p", "WEB-DL 1080p" → "WEBDL-1080p", etc.).
+    //            Only the BluRay BDMV/Remux/plain and WEB variants need
+    //            ordering care: the qualified BluRay patterns must fire
+    //            before the generic "BluRay " prefix is stripped.
+    //
+    //   Pass B — reorder `BD-{RAW|Remux}-{res}` into the final
+    //            Sonarr-parity `BD-{res} {RAW|Remux}` form. REPLACE
+    //            needs one entry per supported resolution because it
+    //            can't swap tokens generically.
+    //
+    // The straggler "WEBRIP-" → "WEBRip-" entry at the end fixes the
+    // all-caps intermediate form left by the prior rename pass.
+    for (old, new) in [
+        // ── Pass A: legacy space-joined → intermediate dash form ──
+        ("BluRay BDMV ", "BD-RAW-"),
+        ("BluRay Remux ", "BD-Remux-"),
+        ("BluRay ", "BD-"),
+        ("WEB-DL ", "WEBDL-"),
+        ("WEBRip ", "WEBRip-"),
+        ("Web ", "WEB-"),
+        ("HDTV ", "HDTV-"),
+        ("DVD ", "DVD-"),
+        ("TV ", "TV-"),
+        // ── Pass B: intermediate dash form → Sonarr-parity reorder ──
+        ("BD-RAW-480p", "BD-480p RAW"),
+        ("BD-RAW-576p", "BD-576p RAW"),
+        ("BD-RAW-720p", "BD-720p RAW"),
+        ("BD-RAW-1080p", "BD-1080p RAW"),
+        ("BD-RAW-2160p", "BD-2160p RAW"),
+        ("BD-Remux-480p", "BD-480p Remux"),
+        ("BD-Remux-576p", "BD-576p Remux"),
+        ("BD-Remux-720p", "BD-720p Remux"),
+        ("BD-Remux-1080p", "BD-1080p Remux"),
+        ("BD-Remux-2160p", "BD-2160p Remux"),
+        // Case-fix stragglers from the intermediate all-caps form.
+        ("WEBRIP-", "WEBRip-"),
+    ] {
+        let like_pat = format!("%{}%", old);
+        let _ = sqlx::query(
+            "UPDATE episode_grab_history
+             SET quality_tag = REPLACE(quality_tag, ?, ?)
+             WHERE quality_tag LIKE ?",
+        )
+        .bind(old)
+        .bind(new)
+        .bind(like_pat)
+        .execute(db)
+        .await;
+    }
 
     sqlx::query(
         r#"

@@ -300,11 +300,14 @@ impl QbitClient {
         self.resume_torrent(&hash_lc).await?;
 
         // With a `.torrent` URL qBit has the file list within 1-3
-        // seconds; 60s is a generous ceiling. On timeout we give up
-        // on narrowing and let the full download proceed — the
-        // torrent is running, not stuck.
+        // seconds; 10s is a generous ceiling that keeps the HTTP
+        // handler responsive. On timeout we give up on narrowing and
+        // let the full download proceed — the torrent is running, not
+        // stuck. A longer wait here would block the Grab button in
+        // the UI for the full timeout, which is a worse UX than just
+        // downloading the whole pack when metadata is slow.
         let files = match self
-            .wait_for_metadata(&hash_lc, std::time::Duration::from_secs(60))
+            .wait_for_metadata(&hash_lc, std::time::Duration::from_secs(10))
             .await
         {
             Ok(files) => files,
@@ -365,9 +368,31 @@ impl QbitClient {
     }
 
     /// Get the files inside a specific torrent.
+    ///
+    /// qBit 5.x returns **HTTP 404 with a plain-text `"Not Found"` body**
+    /// for `/torrents/files?hash=X` while the torrent is still fetching
+    /// metadata — not an empty JSON array. `reqwest::Response::json()`
+    /// does not look at the status code, so calling it on a 404 body
+    /// hits the serde parser against `"Not Found"` and fails with
+    /// `"error decoding response body"`. We were then treating that as
+    /// a real error and burning the full 60s timeout in
+    /// [`wait_for_metadata`]'s retry loop even though the torrent was
+    /// just a couple seconds away from being ready.
+    ///
+    /// Returning `Ok(vec![])` on 404 lets the wait loop's "empty list →
+    /// retry" arm drive the poll, the same way it would for a
+    /// pre-5.x qBit that returns `[]` in the not-ready state.
     pub async fn get_torrent_files(&self, hash: &str) -> Result<Vec<TorrentFile>, String> {
         let endpoint = format!("/api/v2/torrents/files?hash={}", hash);
         let resp = self.do_get(&endpoint).await?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("qbit torrent files fetch failed: {} {}", status, body.trim()));
+        }
         let files: Vec<TorrentFile> = resp
             .json()
             .await

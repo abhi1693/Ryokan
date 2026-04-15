@@ -155,6 +155,14 @@ struct SeriesImportCtx {
     /// series-row-only shape.
     cached_detail: Option<crate::services::anilist::AnimeDetail>,
     runtime_minutes: Option<i32>,
+    /// Snapshot of `episode_quality_tags` for this series at import
+    /// start. Used by the per-file post-download reclassify path to
+    /// decide whether to UPDATE in place vs INSERT a new row, and to
+    /// log the prior source for diagnostics. Refreshed once per
+    /// series-ctx build — safe because within a single import pass
+    /// each episode is written at most once, so later files can't
+    /// depend on earlier files' writes landing in this map.
+    existing_tags: HashMap<i32, episode_tags::EpisodeQualityTag>,
 }
 
 /// Resolve the [`SeriesImportCtx`] for `series_id`: loads the series
@@ -216,6 +224,14 @@ async fn load_series_import_ctx(
         .map(|c| c.detail);
     let runtime_minutes = cached_detail.as_ref().and_then(|d| d.duration);
 
+    // Load the full `episode_quality_tags` snapshot once here instead
+    // of inside the per-file import loop. Previously this ran N times
+    // per batch (one fetch per file) even though each file only writes
+    // its own episode row and no inter-file read dependency exists.
+    let existing_tags = episode_tags::get_for_series(&state.db, series.id)
+        .await
+        .unwrap_or_default();
+
     Ok(SeriesImportCtx {
         series,
         folder_name,
@@ -224,6 +240,7 @@ async fn load_series_import_ctx(
         ep_meta,
         cached_detail,
         runtime_minutes,
+        existing_tags,
     })
 }
 
@@ -253,10 +270,23 @@ async fn import_torrent(
         .await
         .unwrap_or_default();
 
-    // file_idx → target series_id, flattened from the routes table.
-    let routes_by_file: HashMap<usize, i64> = routes
+    // file_idx → (target series_id, episode_offset), flattened from
+    // the routes table. `episode_offset` is subtracted from each
+    // file's parsed episode number before the file is renamed /
+    // tagged so absolute-numbered batches (e.g. smol Monogatari
+    // S07E14 → Owari S2 E01 with offset 13) land under the correct
+    // arc-local episode number. Offset is 0 for siblings with arc-
+    // local numbering and for all legacy routes (via COALESCE in the
+    // model read).
+    let routes_by_file: HashMap<usize, (i64, i32)> = routes
         .iter()
-        .flat_map(|r| r.file_indices.iter().map(move |i| (*i, r.series_id)))
+        .flat_map(|r| {
+            let series_id = r.series_id;
+            let offset = r.episode_offset;
+            r.file_indices
+                .iter()
+                .map(move |i| (*i, (series_id, offset)))
+        })
         .collect();
 
     let qbit = state
@@ -303,6 +333,28 @@ async fn import_torrent(
     // Unique series_ids that had at least one file successfully
     // imported — drives the per-series NFO/poster write after the loop.
     let mut touched_series: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    // Per-target-series tuple (episode number, individual file size,
+    // post-processed on-disk file name) for every file we successfully
+    // landed. Replaces the `grab.episode_numbers`-based mark_completed
+    // at the end of the loop: bare batch grabs arrive here with an
+    // empty episode list on the parent grab row, but we've already
+    // parsed ep_num per file above so we can mark completed with the
+    // real list instead.
+    //
+    // The per-file size feeds `mark_grab_history_completed`'s
+    // non-batch-only size-refine path (batch rows retain their whole-
+    // torrent total so the episode detail modal can show "from an
+    // X GiB batch"). The on-disk file name feeds the same function so
+    // each per-episode row carries the Sonarr-style renamed basename
+    // (e.g. `Jujutsu Kaisen - S01E06 - Hidden Inventory.mkv`) instead
+    // of the batch torrent's release title.
+    // BTreeMap for deterministic iteration order downstream — the
+    // post-loop `mark_completed` / `mark_grab_history_completed` pass
+    // runs in series_id ascending order every run, matching
+    // `touched_series`'s BTreeSet so log interleaving is stable and
+    // greppable. Functionally equivalent to HashMap; pure log hygiene.
+    let mut imported_eps_by_series: std::collections::BTreeMap<i64, Vec<(i32, i64, String)>> =
+        std::collections::BTreeMap::new();
     let mut imported_count = 0_usize;
 
     for (file_idx, file) in &video_files {
@@ -311,34 +363,37 @@ async fn import_torrent(
         // grabs and for any completed video file whose index wasn't
         // covered by a route (e.g. extension mismatch between
         // `auto_search::is_media_filename` and [`is_video_file`]).
-        let target_series_id = routes_by_file
+        let (target_series_id, ep_offset) = routes_by_file
             .get(file_idx)
             .copied()
-            .unwrap_or(grab.series_id);
+            .unwrap_or((grab.series_id, 0));
 
-        if !series_ctx_cache.contains_key(&target_series_id) {
-            match load_series_import_ctx(state, cfg, target_series_id).await {
-                Ok(ctx) => {
-                    series_ctx_cache.insert(target_series_id, ctx);
-                }
-                Err(e) => {
-                    logger::error(
-                        &state.db,
-                        LogCategory::PostProcess,
-                        &format!(
-                            "Failed to load series context for id={}",
-                            target_series_id
-                        ),
-                        &e,
-                    )
-                    .await;
-                    continue;
+        // Can't use the clean `Entry::or_insert_with_async` pattern
+        // because the loader is async and `entry()` borrows the map
+        // across the await. Branching on the Entry variant keeps the
+        // hot path (cache hit) to a single lookup and only calls the
+        // loader on a cold miss.
+        let ctx = match series_ctx_cache.entry(target_series_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                match load_series_import_ctx(state, cfg, target_series_id).await {
+                    Ok(ctx) => entry.insert(ctx),
+                    Err(e) => {
+                        logger::error(
+                            &state.db,
+                            LogCategory::PostProcess,
+                            &format!(
+                                "Failed to load series context for id={}",
+                                target_series_id
+                            ),
+                            &e,
+                        )
+                        .await;
+                        continue;
+                    }
                 }
             }
-        }
-        let ctx = series_ctx_cache
-            .get(&target_series_id)
-            .expect("ctx just inserted");
+        };
 
         let src: PathBuf = Path::new(&source_base).join(&file.name);
 
@@ -362,7 +417,7 @@ async fn import_torrent(
                 }
             });
 
-        let Some(ep_num) = ep_num else {
+        let Some(raw_ep_num) = ep_num else {
             logger::warn(
                 &state.db,
                 LogCategory::PostProcess,
@@ -372,6 +427,32 @@ async fn import_torrent(
             .await;
             continue;
         };
+
+        // Apply per-route episode_offset. For absolute-numbered
+        // continuation packs (smol Monogatari S07E14 → Owari S2 E01,
+        // NoobSubs JoJo E25 → Egypt-hen E01), the offset was computed
+        // at detection time as parent_cap so E14 - 13 = E01. A non-
+        // positive result means the route/file mismatch is bad (file
+        // landed on a sibling whose offset is larger than the file's
+        // own episode number) — log and skip rather than write a
+        // bogus E0 file.
+        let ep_num = raw_ep_num - ep_offset;
+        if ep_num <= 0 {
+            logger::warn(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Skipping '{}' — effective ep {} after offset {} is non-positive",
+                    filename_only, ep_num, ep_offset
+                ),
+                &format!(
+                    "series={}, raw_ep={}, ep_offset={}",
+                    ctx.series.title, raw_ep_num, ep_offset
+                ),
+            )
+            .await;
+            continue;
+        }
 
         let ep_title = ctx
             .ep_meta
@@ -552,15 +633,16 @@ async fn import_torrent(
 
                 // Post-download re-classification (Layers 5 + 6). Runs ffprobe
                 // on the landed file and walks the series directory for BD
-                // artifacts, then updates episode_quality_tags in place.
+                // artifacts, then upserts episode_quality_tags.
                 // Rows with manual_override = 1 are left alone by the DB
-                // helper so user tags stick.
+                // helpers so user tags stick.
                 let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
-                let pre_source = episode_tags::get_for_series(&state.db, ctx.series.id)
-                    .await
-                    .ok()
-                    .and_then(|m| m.get(&ep_num).map(|t| t.source.clone()))
-                    .unwrap_or_default();
+                // Snapshot loaded once per series in `load_series_import_ctx`;
+                // see `SeriesImportCtx::existing_tags` for why refreshing
+                // per-file is unnecessary.
+                let existing_row = ctx.existing_tags.get(&ep_num);
+                let pre_source = existing_row.map(|t| t.source.clone()).unwrap_or_default();
+                let row_exists = existing_row.is_some();
                 let post = source::classify_post_download(
                     &state.db,
                     &dest_video,
@@ -574,19 +656,47 @@ async fn import_torrent(
                     grab.is_batch,
                 )
                 .await;
-                if let Err(e) = episode_tags::update_classification(
-                    &state.db,
-                    ctx.series.id,
-                    ep_num,
-                    &post,
-                )
-                .await
-                {
+                // Batch grabs often arrive here with no pre-existing tag
+                // row: the "Grab batch" dropdown and interactive batch
+                // paths skip `episode_tags::record_grab` because they
+                // don't know which episodes are in the pack until
+                // post-processing parses the filenames. `update_classification`
+                // is UPDATE-only, so in that case it would silently
+                // affect 0 rows and the episode stays UNKNOWN in the
+                // UI despite the classifier correctly identifying it.
+                // Branch on row existence: UPSERT via `record_grab`
+                // for the no-row case (same pattern
+                // `scan_library_for_unclassified` uses for externally
+                // imported files), UPDATE in-place via
+                // `update_classification` otherwise.
+                let persist_result = if row_exists {
+                    episode_tags::update_classification(
+                        &state.db,
+                        target_series_id,
+                        ep_num,
+                        &post,
+                    )
+                    .await
+                } else {
+                    episode_tags::record_grab(
+                        &state.db,
+                        target_series_id,
+                        ep_num,
+                        &post,
+                        &grab.torrent_name,
+                        "",
+                        file.size,
+                        grab.is_batch,
+                    )
+                    .await
+                    .map(|_| ())
+                };
+                if let Err(e) = persist_result {
                     logger::warn(
                         &state.db,
                         LogCategory::PostProcess,
                         &format!(
-                            "Post-download tag update failed for S{:02}E{:02}",
+                            "Post-download tag persist failed for S{:02}E{:02}",
                             season, ep_num
                         ),
                         &e.to_string(),
@@ -603,7 +713,12 @@ async fn import_torrent(
                             post.label(),
                             post.confidence
                         ),
-                        &format!("pre={}, post={}", pre_source, post.source.as_str()),
+                        &format!(
+                            "pre={}, post={}, row_existed={}",
+                            pre_source,
+                            post.source.as_str(),
+                            row_exists
+                        ),
                     )
                     .await;
                     // If the post-download classifier flipped into needs_review,
@@ -624,6 +739,16 @@ async fn import_torrent(
                         .await;
                     }
                 }
+
+                let dest_basename = dest_video
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(filename_only)
+                    .to_string();
+                imported_eps_by_series
+                    .entry(target_series_id)
+                    .or_default()
+                    .push((ep_num, file.size, dest_basename));
             }
             Err(e) => {
                 logger::error(
@@ -667,26 +792,34 @@ async fn import_torrent(
     }
 
     // Flip episode tag rows from "grabbed" to "completed" per target
-    // series. For a routed batch each sibling route gets its own
-    // `mark_completed` call with the per-sibling episode numbers the
-    // auto-expand path wrote into the routes table; the legacy path
-    // falls through to the grab's parent series and episode list.
-    if routes.is_empty() {
-        let _ = episode_tags::mark_completed(
-            &state.db,
-            grab.series_id,
-            &grab.episode_numbers,
-        )
-        .await;
-    } else {
-        for route in &routes {
-            if route.episode_numbers.is_empty() {
-                continue;
-            }
-            let _ = episode_tags::mark_completed(
+    // series. Uses the accumulator populated during the per-file loop
+    // rather than `grab.episode_numbers` so three cases are handled
+    // uniformly:
+    //   - legacy single-episode grabs (ep list populated at grab time),
+    //   - bare batch grabs where `grab.episode_numbers` is empty and
+    //     the real list only exists on the landed filenames,
+    //   - Phase 2 routed batches where files are split across sibling
+    //     series (each sibling gets its own call keyed by
+    //     `target_series_id`).
+    //
+    // Two flips happen per episode: the quality-tag row (via
+    // `mark_completed`) and the newest 'grabbed' history row (via
+    // `mark_grab_history_completed`). The history flip stamps in the
+    // per-episode post-processed file name (Sonarr-style renamed
+    // basename) and — only for non-batch rows — refines size_bytes to
+    // the imported file's real size. Batch rows keep the whole-
+    // torrent total so the episode detail modal can report "this
+    // episode came from an X GiB batch".
+    for (series_id, episodes) in &imported_eps_by_series {
+        let ep_nums: Vec<i32> = episodes.iter().map(|(n, _, _)| *n).collect();
+        let _ = episode_tags::mark_completed(&state.db, *series_id, &ep_nums).await;
+        for (ep_num, file_size, file_name) in episodes {
+            let _ = episode_tags::mark_grab_history_completed(
                 &state.db,
-                route.series_id,
-                &route.episode_numbers,
+                *series_id,
+                *ep_num,
+                file_name,
+                *file_size,
             )
             .await;
         }
@@ -879,7 +1012,19 @@ struct PendingClassification {
     series_root: std::path::PathBuf,
     file_path: std::path::PathBuf,
     episode_number: i32,
+    /// Sanitized on-disk filename. Used as a fallback title for L1
+    /// classification when `original_torrent_name` is empty (externally
+    /// imported files that Ryokan never grabbed).
     title: String,
+    /// Original torrent name from `grabbed_torrents`, if a Ryokan grab
+    /// exists for this episode. Passed to `classify_post_download` as
+    /// the L1 input when non-empty: the post-processing import step
+    /// sanitizes release tags out of filenames (e.g. "[SubsPlease] Foo
+    /// (1080p) [Batch]" becomes "Foo - S01E05 - Title.mkv"), so
+    /// classifying against the on-disk name yields `rule=empty` and
+    /// the episode shows as UNKNOWN forever. Looking up the original
+    /// grab lets us classify against the unsanitized release name.
+    original_torrent_name: String,
     /// True when an `episode_quality_tags` row already exists for this
     /// (series, episode) pair. Determines whether the persist step goes
     /// through `update_classification` (UPDATE) or `record_grab` +
@@ -954,14 +1099,12 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                 // Decide whether to (re-)classify this file.
                 //
                 // Skip when:
+                //  - `manual_override = 1`: the user explicitly pinned
+                //    this classification — never touch.
                 //  - a tag exists with a non-empty source that isn't
-                //    "unknown" — already confidently classified.
-                //  - the tag is flagged `needs_review` — user should
-                //    resolve it manually via the Needs Review queue;
-                //    we don't want to silently overwrite their pending
-                //    decision with another low-confidence result.
-                //  - the tag is `manual_override` — the user explicitly
-                //    pinned this classification.
+                //    "unknown". Already confidently classified. If such
+                //    a row is *also* flagged `needs_review`, we respect
+                //    that pending user decision and leave it alone.
                 //
                 // Pick up when:
                 //  - no tag exists yet (externally-imported file).
@@ -971,9 +1114,22 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                 //    the file exists now, so retry with the full
                 //    ffprobe/dir-walk pipeline. This is the background
                 //    self-healing path for rows that started as Unknown.
+                //
+                // Note: unknown rows are retried **even when
+                // `needs_review = 1`**. That used to trap stale bad
+                // classifications — a row that was classified
+                // against the sanitized post-import filename before
+                // the original-torrent-name lookup landed produces
+                // `rule=empty` and gets flagged for review, and the
+                // old guard then refused to retry it even after the
+                // bug was fixed. An unknown needs-review row carries
+                // no useful user decision to stomp on (the user
+                // resolves via `set_manual_override`, which sets
+                // `manual_override = 1` and clears `needs_review`),
+                // so retrying is safe.
                 let tag = existing.get(&file.episode_number);
                 if let Some(t) = tag {
-                    if t.manual_override || t.needs_review {
+                    if t.manual_override {
                         continue;
                     }
                     let src = t.source.trim();
@@ -989,13 +1145,49 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                     continue;
                 }
 
-                // Use the filename itself as the title — we don't have the
-                // original torrent name for externally-imported files.
+                // Use the sanitized on-disk filename as the fallback
+                // title. For Ryokan-grabbed files we'll override this
+                // with the original torrent name in the unlocked
+                // classify phase below so L1 sees the full release tag
+                // set instead of the tags-stripped post-import name.
                 let title = Path::new(&file.filename)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(&file.filename)
                     .to_string();
+
+                // Look up the grab that covers this episode so we can
+                // classify against the unsanitized torrent name. Done
+                // inside the lock because the enumeration phase needs
+                // the work list to be a consistent snapshot and the DB
+                // round-trip is cheap next to the ffprobe shell-out
+                // that runs in the unlocked phase below.
+                //
+                // First try the per-episode lookup. When that misses
+                // (old batch grabs recorded with `episode_numbers = []`
+                // before the grab-time episode-range fix, where
+                // `json_each` yields nothing), fall back to the most
+                // recent imported grab for the series as a whole:
+                // for a single-series batch that's by definition the
+                // grab these files came from. Both queries are cheap
+                // `LIMIT 1` lookups.
+                let original_torrent_name = match grabbed_torrents::find_imported_for_episode(
+                    &state.db,
+                    row.id,
+                    file.episode_number,
+                )
+                .await
+                .ok()
+                .and_then(|grabs| grabs.into_iter().next())
+                {
+                    Some(g) => g.torrent_name,
+                    None => grabbed_torrents::most_recent_imported_torrent_name_for_series(
+                        &state.db,
+                        row.id,
+                    )
+                    .await
+                    .unwrap_or_default(),
+                };
 
                 pending.push(PendingClassification {
                     series_id: row.id,
@@ -1006,6 +1198,7 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                     file_path,
                     episode_number: file.episode_number,
                     title,
+                    original_torrent_name,
                     row_exists: tag.is_some(),
                 });
             }
@@ -1018,17 +1211,22 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
     // slow part; doing them here instead of under the lock lets
     // `process_completed_downloads` keep running in parallel.
     for item in pending {
-        // Library scan path works against on-disk filenames, which may
-        // or may not match any original grab record. We look up the
-        // stored `is_batch` flag by torrent_name as a best effort —
-        // matches self-healed Unknown rows back to their original grab,
-        // defaults to `false` for externally-imported files that
-        // Ryokan never grabbed. Either way, L4 gets the most accurate
-        // signal available for this file.
+        // Prefer the original torrent name from `grabbed_torrents`
+        // (carries full release tags like "[SubsPlease] Foo (01-12)
+        // [BD 1080p]"), fall back to the sanitized on-disk filename
+        // for externally-imported files that Ryokan never grabbed.
+        // This is the difference between L1 producing useful
+        // evidence and producing `rule=empty` on a release that
+        // landed via post-processing's rename step.
+        let classify_title: &str = if !item.original_torrent_name.is_empty() {
+            &item.original_torrent_name
+        } else {
+            &item.title
+        };
         let is_batch = crate::models::grabbed_torrents::get_is_batch_by_name(
             &state.db,
             item.series_id,
-            &item.title,
+            classify_title,
         )
         .await
         .unwrap_or(false);
@@ -1036,7 +1234,7 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             &state.db,
             &item.file_path,
             Some(&item.series_root),
-            &item.title,
+            classify_title,
             Some(SeriesContext {
                 status: &item.series_status,
                 season_year: item.series_season_year,
@@ -1052,19 +1250,45 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
         // release metadata to insert-or-upsert, then flip state to
         // 'completed' since the file is already on disk.
         if !item.row_exists {
+            // Best-effort single stat — failure just leaves size at 0.
+            let file_size = std::fs::metadata(&item.file_path)
+                .map(|m| m.len() as i64)
+                .unwrap_or(0);
+            // Externally-imported file — we're creating both the quality
+            // tag and the grab history row from thin air. `is_batch` is
+            // looked up above from the optional matching grabbed_torrents
+            // row; falls back to false for truly external files.
             let _ = episode_tags::record_grab(
                 &state.db,
                 item.series_id,
                 item.episode_number,
                 &result,
-                &item.title,
+                classify_title,
                 "",
+                file_size,
+                is_batch,
             )
             .await;
             let _ = episode_tags::mark_completed(
                 &state.db,
                 item.series_id,
                 &[item.episode_number],
+            )
+            .await;
+            // Flip the fresh grab history row to 'completed' and stamp
+            // in the on-disk file basename for the episode detail modal.
+            let imported_basename = item
+                .file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(classify_title)
+                .to_string();
+            let _ = episode_tags::mark_grab_history_completed(
+                &state.db,
+                item.series_id,
+                item.episode_number,
+                &imported_basename,
+                file_size,
             )
             .await;
         } else {

@@ -39,8 +39,15 @@ static SEL_VIEW_TITLE: LazyLock<Selector> = LazyLock::new(|| {
 });
 static SEL_VIEW_ROW: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("div.panel-body div.row").expect("SEL_VIEW_ROW parses"));
-static SEL_VIEW_COL: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("div").expect("SEL_VIEW_COL parses"));
+// Target Nyaa's actual Bootstrap grid columns (`col-md-1`, `col-md-5`, etc.)
+// rather than every `<div>` in the row. The broader `div` selector also
+// descended into nested `<div>`s like embedded MediaInfo blocks, which
+// made the label/value pair-up (`while i + 1 < cols.len()` in
+// `parse_view_page`) drift and silently zero out seeder/leecher counts
+// on view pages that had any extra inner markup.
+static SEL_VIEW_COL: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("div[class*='col-md-']").expect("SEL_VIEW_COL parses")
+});
 static SEL_VIEW_MAGNET: LazyLock<Selector> = LazyLock::new(|| {
     Selector::parse("a.card-footer-item[href^='magnet:']").expect("SEL_VIEW_MAGNET parses")
 });

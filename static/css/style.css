@@ -404,7 +404,8 @@ fieldset legend {
 
 /* --- Seed/leech counts --- */
 .seed-count { color: var(--green); font-family: var(--font-mono); font-weight: 600; }
-.leech-count { color: var(--red); font-family: var(--font-mono); }
+.leech-count { color: var(--red); font-family: var(--font-mono); font-weight: 600; }
+.peer-sep { color: var(--text-dim); font-family: var(--font-mono); }
 .dl-count { color: var(--text-dim); font-family: var(--font-mono); }
 
 /* --- Load more --- */
@@ -2670,7 +2671,7 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 }
 
 .modal-ep {
-    max-width: 860px;
+    max-width: 1100px;
     width: 100%;
 }
 
@@ -2831,11 +2832,21 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 }
 
 /* --- Grab history table --- */
+.grab-history-scroll {
+    /* Past ~10 entries the modal would blow out vertically and the
+     * user reported clipped rows. Capping the scroll box at 320px
+     * comfortably fits ~10 rows and scrolls the rest. */
+    max-height: 320px;
+    overflow-y: auto;
+    margin-top: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
 .grab-history-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 12px;
-    margin-top: 4px;
 }
 
 .grab-history-table th {
@@ -2847,6 +2858,13 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     letter-spacing: 0.4px;
     color: var(--text-dim);
     border-bottom: 1px solid var(--border);
+    /* Sticky so the header stays put when the user scrolls past 10
+     * entries. Opaque background needed so rows scrolling beneath
+     * don't bleed through. */
+    background: var(--bg-elevated);
+    position: sticky;
+    top: 0;
+    z-index: 1;
 }
 
 .grab-history-table td {
@@ -2859,9 +2877,19 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     border-bottom: none;
 }
 
-.grab-state-grabbed { color: var(--green); font-weight: 600; }
-.grab-state-failed  { color: var(--red); font-weight: 600; }
-.grab-state-removed { color: var(--text-dim); font-weight: 600; }
+/* Release + Torrent Name cells ellipsize so wide columns don't blow the
+ * table out; full value shown via the tooltip. */
+.grab-history-table .grab-history-ellipsis {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.grab-state-grabbed   { color: var(--green); font-weight: 600; }
+.grab-state-completed { color: var(--accent); font-weight: 600; }
+.grab-state-failed    { color: var(--red); font-weight: 600; }
+.grab-state-removed   { color: var(--text-dim); font-weight: 600; }
 
 .btn-mark-failed {
     font-size: 11px;
@@ -2909,14 +2937,24 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     background: var(--bg-elevated);
 }
 
-.interactive-search-table .col-score { width: 55px; text-align: center; }
-.interactive-search-table .col-grab  { width: 70px; text-align: right; }
-.interactive-search-table .col-size  { width: 80px; white-space: nowrap; }
-.interactive-search-table .col-seeds { width: 50px; text-align: right; }
+.interactive-search-table .col-score   { width: 55px; text-align: center; }
+.interactive-search-table .col-grab    { width: 70px; text-align: right; }
+.interactive-search-table .col-size    { width: 80px; white-space: nowrap; }
+.interactive-search-table .col-seeds   { width: 78px; text-align: right; white-space: nowrap; }
+.interactive-search-table .col-quality { width: 120px; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
 
 .is-modal-scroll {
     overflow-y: auto;
     max-height: 480px;
+    /* Zero top/bottom padding so the sticky `<th>` header sits flush
+     * against the scroll container's top edge. With the inherited
+     * 20px padding from `.modal-body`, `position: sticky; top: 0`
+     * leaves a 20px gap above the header where scrolled rows bleed
+     * through (reported: "top bar isn't treated properly, results
+     * show above it"). Horizontal padding is preserved so the table
+     * still breathes from the modal edges. */
+    padding-top: 0;
+    padding-bottom: 0;
 }
 
 /* --- Delete file button in ep-detail --- */

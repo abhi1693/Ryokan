@@ -497,36 +497,56 @@ impl ClassificationResult {
         }
     }
 
-    /// Human-readable label for logs and UI.
+    /// Human-readable label for logs and UI. Sonarr-style `SOURCE-RES`
+    /// base with an optional space-separated BluRay sub-tier suffix:
+    /// `BD-1080p`, `BD-1080p Remux`, `BD-1080p RAW`, `WEBDL-1080p`,
+    /// `WEBRip-1080p`, `WEB-1080p`, `HDTV-1080p`, `DVD-480p`, etc.
+    ///
+    /// Keeping the resolution adjacent to the source (rather than
+    /// appending it after the sub-tier) preserves parity with Sonarr's
+    /// quality definition names, which treat `<source>-<resolution>`
+    /// as the immutable key and bolt any Remux qualifier on afterward.
     ///
     /// Source rendering is variant-aware:
-    /// - `Source::Web` with a known `web_kind` displays as "WEB-DL" or
-    ///   "WEBRip" instead of bare "Web".
-    /// - `Source::BluRay` picks **one** sub-label, mutually exclusive:
-    ///   "BluRay BDMV" if `is_bdmv` (highest tier — full disc), else
-    ///   "BluRay Remux" if `is_remux` (lossless MKV extract), else plain
-    ///   "BluRay" (encoded).
+    /// - `Source::Web` with a known `web_kind` displays as "WEBDL" or
+    ///   "WEBRip" (Sonarr-style, no internal hyphen) instead of the
+    ///   bare "WEB" fallback.
+    /// - `Source::BluRay` always renders as `BD` with at most one
+    ///   trailing space-separated qualifier, mutually exclusive:
+    ///   ` RAW` if `is_bdmv` (highest tier — full disc), else
+    ///   ` Remux` if `is_remux` (lossless MKV extract), else no
+    ///   suffix (encoded).
     pub fn label(&self) -> String {
         let source_label: String = match self.source {
             Source::Unknown => String::new(),
-            Source::Web if self.web_kind != WebKind::Unknown => self.web_kind.as_str().to_string(),
-            Source::BluRay => {
-                if self.is_bdmv {
-                    "BluRay BDMV".to_string()
-                } else if self.is_remux {
-                    "BluRay Remux".to_string()
-                } else {
-                    "BluRay".to_string()
-                }
-            }
+            Source::Web => match self.web_kind {
+                WebKind::WebDl => "WEBDL".to_string(),
+                WebKind::WebRip => "WEBRip".to_string(),
+                WebKind::Unknown => "WEB".to_string(),
+            },
+            Source::BluRay => "BD".to_string(),
             other => other.as_str().to_string(),
         };
-        match (source_label.as_str(), self.resolution) {
+
+        // Base `SOURCE-RESOLUTION` (or just one of the two when the
+        // other is missing). BluRay sub-tier gets appended after.
+        let base = match (source_label.as_str(), self.resolution) {
             ("", Resolution::Unknown) => "Unknown".to_string(),
             (s, Resolution::Unknown) => s.to_string(),
             ("", r) => r.as_str().to_string(),
-            (s, r) => format!("{} {}", s, r.as_str()),
+            (s, r) => format!("{}-{}", s, r.as_str()),
+        };
+
+        if matches!(self.source, Source::BluRay) {
+            if self.is_bdmv {
+                return format!("{} RAW", base);
+            }
+            if self.is_remux {
+                return format!("{} Remux", base);
+            }
         }
+
+        base
     }
 }
 
@@ -1543,7 +1563,7 @@ mod tests {
         // BDMV wins even when both flags are set.
         let both = ClassificationResult { is_remux: true, is_bdmv: true, ..plain.clone() };
         assert_eq!(both.bluray_tier(), 2);
-        assert_eq!(both.label(), "BluRay BDMV 1080p");
+        assert_eq!(both.label(), "BD-1080p RAW");
     }
 
     #[test]
@@ -1561,8 +1581,8 @@ mod tests {
         };
         let webdl = ClassificationResult { web_kind: WebKind::WebDl, ..webrip.clone() };
         assert!(webdl.rank() > webrip.rank());
-        assert_eq!(webrip.label(), "WEBRip 1080p");
-        assert_eq!(webdl.label(), "WEB-DL 1080p");
+        assert_eq!(webrip.label(), "WEBRip-1080p");
+        assert_eq!(webdl.label(), "WEBDL-1080p");
     }
 
     #[test]

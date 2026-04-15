@@ -2,7 +2,7 @@ use crate::services::html::sanitize_rich_description;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -24,6 +24,53 @@ struct DetailCacheEntry {
 
 static DETAIL_CACHE: LazyLock<RwLock<HashMap<i64, DetailCacheEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// When Jikan rate-limits us, remember "unavailable until Instant" so
+/// `search_anime` returns a clean cooldown error immediately rather than
+/// hammering the API and piling up more 429s.
+static JIKAN_COOLDOWN_UNTIL: LazyLock<StdMutex<Option<Instant>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+const JIKAN_COOLDOWN_DEFAULT: Duration = Duration::from_secs(60);
+const JIKAN_COOLDOWN_MAX: Duration = Duration::from_secs(300);
+
+fn jikan_cooldown_remaining() -> Option<Duration> {
+    let guard = JIKAN_COOLDOWN_UNTIL.lock().ok()?;
+    let until = (*guard)?;
+    let now = Instant::now();
+    if now < until {
+        Some(until - now)
+    } else {
+        None
+    }
+}
+
+fn set_jikan_cooldown(retry_after_secs: Option<u64>) {
+    let dur = retry_after_secs
+        .map(Duration::from_secs)
+        .unwrap_or(JIKAN_COOLDOWN_DEFAULT)
+        .min(JIKAN_COOLDOWN_MAX);
+    if let Ok(mut guard) = JIKAN_COOLDOWN_UNTIL.lock() {
+        *guard = Some(Instant::now() + dur);
+    }
+}
+
+/// Parse Jikan's JSON error body (shape: `{"status":"429","type":"...","message":"..."}`)
+/// into a human-readable one-liner. Falls back to a short snippet if parsing fails.
+fn parse_jikan_error(status: reqwest::StatusCode, body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(msg) = v["message"].as_str() {
+            // Take just the first sentence; the rest is usually a docs link.
+            let short = msg.split('.').next().unwrap_or(msg).trim();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return format!("Jikan rate-limited (HTTP 429): {}", short);
+            }
+            return format!("Jikan HTTP {}: {}", status.as_u16(), short);
+        }
+    }
+    let snippet: String = body.chars().take(120).collect();
+    format!("Jikan HTTP {}: {}", status.as_u16(), snippet.trim())
+}
 
 #[derive(Debug, Clone)]
 pub struct EpisodeInfo {
@@ -215,6 +262,16 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
         return Ok(Vec::new());
     }
 
+    // Short-circuit if a prior request told us Jikan is rate-limiting us.
+    // Prevents the "AL 429 → Jikan 429" cascade that drains Jikan's budget
+    // whenever AniList enters its cooldown window.
+    if let Some(remaining) = jikan_cooldown_remaining() {
+        return Err(format!(
+            "Jikan rate-limited (cooldown {}s remaining)",
+            remaining.as_secs().max(1)
+        ));
+    }
+
     let client = reqwest::Client::new();
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
     let url = format!("{}/anime", api_base.trim_end_matches('/'));
@@ -224,16 +281,24 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
         .header("User-Agent", "Ryokan/0.1")
         .send()
         .await
-        .map_err(|e| format!("Jikan search request failed: {}", e))?;
+        .map_err(|e| format!("Jikan unreachable: {}", e))?;
 
     let status = resp.status();
+    let retry_after_secs = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
     let text = resp
         .text()
         .await
         .map_err(|e| format!("Failed to read Jikan search response: {}", e))?;
 
     if !status.is_success() {
-        return Err(format!("Jikan search failed (HTTP {}): {}", status, &text[..text.len().min(200)]));
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            set_jikan_cooldown(retry_after_secs);
+        }
+        return Err(parse_jikan_error(status, &text));
     }
 
     let body: SearchResponse = serde_json::from_str(&text)
