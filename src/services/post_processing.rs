@@ -155,6 +155,14 @@ struct SeriesImportCtx {
     /// series-row-only shape.
     cached_detail: Option<crate::services::anilist::AnimeDetail>,
     runtime_minutes: Option<i32>,
+    /// Snapshot of `episode_quality_tags` for this series at import
+    /// start. Used by the per-file post-download reclassify path to
+    /// decide whether to UPDATE in place vs INSERT a new row, and to
+    /// log the prior source for diagnostics. Refreshed once per
+    /// series-ctx build — safe because within a single import pass
+    /// each episode is written at most once, so later files can't
+    /// depend on earlier files' writes landing in this map.
+    existing_tags: HashMap<i32, episode_tags::EpisodeQualityTag>,
 }
 
 /// Resolve the [`SeriesImportCtx`] for `series_id`: loads the series
@@ -216,6 +224,14 @@ async fn load_series_import_ctx(
         .map(|c| c.detail);
     let runtime_minutes = cached_detail.as_ref().and_then(|d| d.duration);
 
+    // Load the full `episode_quality_tags` snapshot once here instead
+    // of inside the per-file import loop. Previously this ran N times
+    // per batch (one fetch per file) even though each file only writes
+    // its own episode row and no inter-file read dependency exists.
+    let existing_tags = episode_tags::get_for_series(&state.db, series.id)
+        .await
+        .unwrap_or_default();
+
     Ok(SeriesImportCtx {
         series,
         folder_name,
@@ -224,6 +240,7 @@ async fn load_series_import_ctx(
         ep_meta,
         cached_detail,
         runtime_minutes,
+        existing_tags,
     })
 }
 
@@ -318,7 +335,13 @@ async fn import_torrent(
     // each per-episode row carries the Sonarr-style renamed basename
     // (e.g. `Jujutsu Kaisen - S01E06 - Hidden Inventory.mkv`) instead
     // of the batch torrent's release title.
-    let mut imported_eps_by_series: HashMap<i64, Vec<(i32, i64, String)>> = HashMap::new();
+    // BTreeMap for deterministic iteration order downstream — the
+    // post-loop `mark_completed` / `mark_grab_history_completed` pass
+    // runs in series_id ascending order every run, matching
+    // `touched_series`'s BTreeSet so log interleaving is stable and
+    // greppable. Functionally equivalent to HashMap; pure log hygiene.
+    let mut imported_eps_by_series: std::collections::BTreeMap<i64, Vec<(i32, i64, String)>> =
+        std::collections::BTreeMap::new();
     let mut imported_count = 0_usize;
 
     for (file_idx, file) in &video_files {
@@ -575,11 +598,10 @@ async fn import_torrent(
                 // Rows with manual_override = 1 are left alone by the DB
                 // helpers so user tags stick.
                 let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
-                let existing_tags =
-                    episode_tags::get_for_series(&state.db, target_series_id)
-                        .await
-                        .unwrap_or_default();
-                let existing_row = existing_tags.get(&ep_num);
+                // Snapshot loaded once per series in `load_series_import_ctx`;
+                // see `SeriesImportCtx::existing_tags` for why refreshing
+                // per-file is unnecessary.
+                let existing_row = ctx.existing_tags.get(&ep_num);
                 let pre_source = existing_row.map(|t| t.source.clone()).unwrap_or_default();
                 let row_exists = existing_row.is_some();
                 let post = source::classify_post_download(

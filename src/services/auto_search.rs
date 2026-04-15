@@ -160,6 +160,7 @@ pub async fn find_all_for_target(
 
     let expected_season = infer_season_from_detail(detail);
     let sibling_aliases = collect_sibling_aliases(detail, &aliases);
+    let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
@@ -180,7 +181,7 @@ pub async fn find_all_for_target(
 
     let ctx = InteractiveQueryCtx {
         aliases: &aliases,
-        sibling_aliases: &sibling_aliases,
+        sibling_precompute: &sibling_precompute,
         preferred_groups: &preferred_groups,
         preferred_resolution: &preferred_res,
         target,
@@ -192,13 +193,23 @@ pub async fn find_all_for_target(
     // but filter by season and episode to avoid showing wrong-season results.
     run_queries_interactive(&queries, ctx, &mut seen, &mut candidates).await;
 
-    // Try extended aliases if primary queries found nothing.
+    // Try extended aliases if primary queries found nothing. Extended
+    // aliases expand the own-side of the sibling-rejection comparison,
+    // so rebuild the precompute with the full alias list — otherwise
+    // an extended alias that legitimately overlaps with a sibling (e.g.
+    // a synonym that happens to share tokens) would look like a sibling
+    // win and get rejected.
     if candidates.is_empty() {
         let extended = collect_extended_aliases(detail);
         if !extended.is_empty() {
             let ext_queries = build_queries_from_aliases(&extended, target);
             let all_aliases = [aliases.clone(), extended].concat();
-            let ext_ctx = InteractiveQueryCtx { aliases: &all_aliases, ..ctx };
+            let ext_precompute = SiblingRejectPrecompute::build(&all_aliases, &sibling_aliases);
+            let ext_ctx = InteractiveQueryCtx {
+                aliases: &all_aliases,
+                sibling_precompute: &ext_precompute,
+                ..ctx
+            };
             run_queries_interactive(&ext_queries, ext_ctx, &mut seen, &mut candidates).await;
         }
     }
@@ -350,6 +361,7 @@ pub async fn collect_scored_batches_for_target(
 
     let expected_season = infer_season_from_detail(detail);
     let sibling_aliases = collect_sibling_aliases(detail, &aliases);
+    let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
@@ -372,7 +384,7 @@ pub async fn collect_scored_batches_for_target(
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
-        sibling_aliases: &sibling_aliases,
+        sibling_precompute: &sibling_precompute,
         preferred_groups: &preferred_groups,
         preferred_resolution: &preferred_res,
         target,
@@ -517,6 +529,7 @@ async fn collect_scored_for_target(
 
     let expected_season = infer_season_from_detail(detail);
     let sibling_aliases = collect_sibling_aliases(detail, &aliases);
+    let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
@@ -552,7 +565,7 @@ async fn collect_scored_for_target(
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
-        sibling_aliases: &sibling_aliases,
+        sibling_precompute: &sibling_precompute,
         preferred_groups: &preferred_groups,
         preferred_resolution: &preferred_res,
         target,
@@ -566,13 +579,21 @@ async fn collect_scored_for_target(
     // Phase 1: standard queries (primary aliases + episode variants).
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
 
-    // Phase 1.5: if no candidates, try extended aliases (synonyms + decomposed sub-phrases).
+    // Phase 1.5: if no candidates, try extended aliases (synonyms +
+    // decomposed sub-phrases). Rebuild the sibling precompute with the
+    // full alias list so own-vs-sibling overlap comparisons see the
+    // extended aliases too.
     if candidates.is_empty() {
         let extended = collect_extended_aliases(detail);
         if !extended.is_empty() {
             let ext_queries = build_queries_from_aliases(&extended, target);
             let all_aliases = [aliases.clone(), extended].concat();
-            let ext_ctx = AutoQueryCtx { aliases: &all_aliases, ..ctx };
+            let ext_precompute = SiblingRejectPrecompute::build(&all_aliases, &sibling_aliases);
+            let ext_ctx = AutoQueryCtx {
+                aliases: &all_aliases,
+                sibling_precompute: &ext_precompute,
+                ..ctx
+            };
             run_queries(&ext_queries, ext_ctx, &mut seen, &mut candidates).await;
         }
     }
@@ -680,11 +701,14 @@ async fn collect_scored_for_target(
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
     aliases: &'a [String],
-    /// Titles of sibling entries (sequels, prequels, side stories) from
-    /// AniList relations. A release whose token overlap with any sibling
-    /// beats its overlap with every own-alias is rejected — see
-    /// `collect_sibling_aliases` for the JJK S1→S3 motivating case.
-    sibling_aliases: &'a [String],
+    /// Precomputed token sets for own + sibling aliases, used by
+    /// [`sibling_match_rejects`] to reject a release that looks MORE
+    /// like a sequel/prequel/side-story than the target. Built once
+    /// at the top of the collect function so the ~50-candidates ×
+    /// ~5-siblings normalize/tokenize loop runs once per sweep
+    /// instead of once per candidate. See `collect_sibling_aliases`
+    /// for the JJK S1→S3 motivating case.
+    sibling_precompute: &'a SiblingRejectPrecompute,
     preferred_groups: &'a [String],
     preferred_resolution: &'a str,
     target: &'a SearchTarget,
@@ -709,7 +733,7 @@ struct AutoQueryCtx<'a> {
 #[derive(Clone, Copy)]
 struct InteractiveQueryCtx<'a> {
     aliases: &'a [String],
-    sibling_aliases: &'a [String],
+    sibling_precompute: &'a SiblingRejectPrecompute,
     preferred_groups: &'a [String],
     preferred_resolution: &'a str,
     target: &'a SearchTarget,
@@ -781,7 +805,7 @@ async fn run_queries(
                     if !matches_target(
                         &result.title,
                         ctx.aliases,
-                        ctx.sibling_aliases,
+                        ctx.sibling_precompute,
                         ctx.target,
                         ctx.expected_season,
                         ctx.batch_episode_match && result.is_batch,
@@ -866,7 +890,7 @@ async fn run_queries_interactive(
             // Sibling rejection: same sequel/prequel guard as the auto
             // path — a release that matches a sibling more tightly than
             // us is almost certainly for the sibling.
-            if sibling_match_rejects(&title_tokens, ctx.aliases, ctx.sibling_aliases) {
+            if sibling_match_rejects(&normalized_title, &title_tokens, ctx.sibling_precompute) {
                 continue;
             }
             // Season check: reject results clearly from a different season
@@ -1142,6 +1166,55 @@ pub fn collect_sibling_aliases(detail: &AnimeDetail, own_aliases: &[String]) -> 
     dedupe_strings(out)
 }
 
+/// Precomputed normalized token sets for the own-alias and sibling-alias
+/// lists used by [`sibling_match_rejects`]. Built once per target sweep
+/// (per call to `find_all_for_target` / `collect_scored_for_target` /
+/// `collect_scored_batches_for_target`) and reused across every release
+/// candidate the sweep checks against the target, instead of re-running
+/// `normalize_title` + `token_set` on the same alias strings ~50×
+/// (candidates) per target. Pure perf hoist — the rejection semantics
+/// are identical to the prior per-call implementation.
+#[derive(Debug, Clone, Default)]
+pub struct SiblingRejectPrecompute {
+    /// Token sets for own aliases. Used to find the best target-alias
+    /// overlap with any release — a sibling only wins if it beats this
+    /// number strictly.
+    own_token_sets: Vec<HashSet<String>>,
+    /// Sibling entries as `(normalized_title, token_set)` pairs. The
+    /// normalized title is kept alongside its token set so the
+    /// contiguous-substring fallback has a stable, deterministic string
+    /// to match against (the old implementation rebuilt this from
+    /// `HashSet::iter()` per call, which is nondeterministic order and
+    /// would silently misbehave on contiguous-substring checks).
+    siblings: Vec<(String, HashSet<String>)>,
+}
+
+impl SiblingRejectPrecompute {
+    pub fn build(own_aliases: &[String], sibling_aliases: &[String]) -> Self {
+        let own_token_sets = own_aliases
+            .iter()
+            .map(|a| token_set(&normalize_title(a)))
+            .collect();
+        let siblings = sibling_aliases
+            .iter()
+            .filter_map(|s| {
+                let normalized = normalize_title(s);
+                let tokens = token_set(&normalized);
+                if tokens.is_empty() {
+                    None
+                } else {
+                    Some((normalized, tokens))
+                }
+            })
+            .collect();
+        Self {
+            own_token_sets,
+            siblings,
+        }
+    }
+
+}
+
 /// Reject a release when it looks MORE like one of our siblings than
 /// it does like us. The check compares token overlap: if any sibling
 /// alias shares strictly more tokens with the release than the best
@@ -1155,11 +1228,11 @@ pub fn collect_sibling_aliases(detail: &AnimeDetail, own_aliases: &[String]) -> 
 /// the sibling check is the last defense against "plausibly us" also
 /// being "more plausibly a sibling".
 fn sibling_match_rejects(
+    normalized_release: &str,
     normalized_release_tokens: &HashSet<String>,
-    own_aliases: &[String],
-    sibling_aliases: &[String],
+    precompute: &SiblingRejectPrecompute,
 ) -> bool {
-    if sibling_aliases.is_empty() {
+    if precompute.siblings.is_empty() {
         return false;
     }
 
@@ -1167,23 +1240,16 @@ fn sibling_match_rejects(
     // Using absolute overlap count (not ratio) so a sibling with 4 matching
     // tokens beats a target alias with 2 matching tokens even if the target
     // alias has fewer tokens overall.
-    let best_own_overlap: usize = own_aliases
+    let best_own_overlap: usize = precompute
+        .own_token_sets
         .iter()
-        .map(|a| {
-            let tokens = token_set(&normalize_title(a));
-            normalized_release_tokens.intersection(&tokens).count()
-        })
+        .map(|tokens| normalized_release_tokens.intersection(tokens).count())
         .max()
         .unwrap_or(0);
 
-    for sibling in sibling_aliases {
-        let normalized_sibling = normalize_title(sibling);
-        let sibling_tokens = token_set(&normalized_sibling);
-        if sibling_tokens.is_empty() {
-            continue;
-        }
+    for (normalized_sibling, sibling_tokens) in &precompute.siblings {
         let sibling_overlap = normalized_release_tokens
-            .intersection(&sibling_tokens)
+            .intersection(sibling_tokens)
             .count();
         // Strictly greater: a tie means both the target and the sibling
         // match equally well, which is the normal case for a release
@@ -1196,15 +1262,10 @@ fn sibling_match_rejects(
             // ALL of its tokens appear in the release. This prevents
             // freak two-token overlaps ("side story" + some other
             // common fragment) from tripping the rejection.
-            let normalized_release_joined: String = normalized_release_tokens
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" ");
             let all_tokens_present = sibling_tokens
                 .iter()
                 .all(|t| normalized_release_tokens.contains(t));
-            if all_tokens_present || normalized_release_joined.contains(&normalized_sibling) {
+            if all_tokens_present || normalized_release.contains(normalized_sibling.as_str()) {
                 return true;
             }
         }
@@ -1317,7 +1378,7 @@ pub fn dedupe_strings(values: Vec<String>) -> Vec<String> {
 pub fn matches_target(
     title: &str,
     aliases: &[String],
-    sibling_aliases: &[String],
+    sibling_precompute: &SiblingRejectPrecompute,
     target: &SearchTarget,
     expected_season: i32,
     allow_batch_episode: bool,
@@ -1338,7 +1399,7 @@ pub fn matches_target(
     // Sibling rejection: if the release looks more like a sequel /
     // prequel / side story than it looks like us, reject. See the
     // JJK S1→S3 case in the `collect_sibling_aliases` docstring.
-    if sibling_match_rejects(&title_tokens, aliases, sibling_aliases) {
+    if sibling_match_rejects(&normalized_title, &title_tokens, sibling_precompute) {
         return false;
     }
 
@@ -2797,6 +2858,7 @@ mod tests {
             "Main Title: Subtitle One".to_string(),
             "Main Title: Subtitle Two".to_string(),
         ];
+        let no_siblings = SiblingRejectPrecompute::build(&aliases, &[]);
         let unrelated_release =
             "[Group] Totally Different Show - Subtitle One-Word Thing - 01 [1080p].mkv";
         // The release shares only the word "Subtitle" with the primary
@@ -2809,7 +2871,7 @@ mod tests {
             !matches_target(
                 unrelated_release,
                 &aliases,
-                &[],
+                &no_siblings,
                 &SearchTarget::Episode(1),
                 0,
                 false,
@@ -2821,11 +2883,12 @@ mod tests {
     #[test]
     fn matches_target_accepts_release_with_full_primary_alias_substring() {
         let aliases = vec!["Main Title Subtitle One".to_string()];
+        let no_siblings = SiblingRejectPrecompute::build(&aliases, &[]);
         let good_release = "[Group] Main Title Subtitle One [BD 1080p].mkv";
         assert!(matches_target(
             good_release,
             &aliases,
-            &[],
+            &no_siblings,
             &SearchTarget::Single,
             0,
             false,
@@ -2844,12 +2907,13 @@ mod tests {
         // sibling wins and the release is rejected.
         let own = vec!["Jujutsu Kaisen".to_string()];
         let siblings = vec!["Jujutsu Kaisen: Shimetsu Kaiyuu".to_string()];
+        let precompute = SiblingRejectPrecompute::build(&own, &siblings);
         let release = "[Erai-raws] Jujutsu Kaisen: Shimetsu Kaiyuu - Zenpen - 06 [1080p CR WEBRip HEVC AAC].mkv";
         assert!(
             !matches_target(
                 release,
                 &own,
-                &siblings,
+                &precompute,
                 &SearchTarget::Episode(6),
                 1,
                 false,
@@ -2866,11 +2930,12 @@ mod tests {
         // overlap — so the sibling check is a no-op.
         let own = vec!["Jujutsu Kaisen".to_string()];
         let siblings = vec!["Jujutsu Kaisen: Shimetsu Kaiyuu".to_string()];
+        let precompute = SiblingRejectPrecompute::build(&own, &siblings);
         let release = "[Erai-raws] Jujutsu Kaisen - 06 [1080p].mkv";
         assert!(matches_target(
             release,
             &own,
-            &siblings,
+            &precompute,
             &SearchTarget::Episode(6),
             1,
             false,
@@ -2886,11 +2951,12 @@ mod tests {
             "Jujutsu Kaisen".to_string(),
             "Jujutsu Kaisen: Kaigyoku Gyokusetsu".to_string(),
         ];
+        let precompute = SiblingRejectPrecompute::build(&own, &siblings);
         let release = "[Erai-raws] Jujutsu Kaisen: Shimetsu Kaiyuu - Zenpen - 06 [1080p].mkv";
         assert!(matches_target(
             release,
             &own,
-            &siblings,
+            &precompute,
             &SearchTarget::Episode(6),
             0,
             false,

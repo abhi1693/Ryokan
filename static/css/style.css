@@ -406,7 +406,6 @@ fieldset legend {
 .seed-count { color: var(--green); font-family: var(--font-mono); font-weight: 600; }
 .leech-count { color: var(--red); font-family: var(--font-mono); font-weight: 600; }
 .peer-sep { color: var(--text-dim); font-family: var(--font-mono); }
-.leech-count { color: var(--red); font-family: var(--font-mono); }
 .dl-count { color: var(--text-dim); font-family: var(--font-mono); }
 
 /* --- Load more --- */

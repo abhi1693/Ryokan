@@ -737,22 +737,45 @@ function escHtml(s) {
 // pure regex read of the title — no platform-tag tables, no group
 // heuristics, no description scraping — so what you see in the UI is
 // exactly what the filename says.
+//
+// Labels mirror the backend `ClassificationResult::label()` Sonarr-parity
+// scheme so the value shown in interactive search equals the value
+// persisted to `episode_tags` once the release is grabbed:
+//     BDMV/BDISO/BD-Raw → `BD-1080p RAW`  (raw disc image)
+//     Remux             → `BD-1080p Remux`
+//     BluRay/BDRip/BD   → `BD-1080p`      (re-encode)
+//     WEB-DL            → `WEBDL-1080p`
+//     WEB-Rip           → `WEBRip-1080p`
+// Note: BDRip is a re-encode and deliberately falls into the BluRay branch,
+// NOT the BDMV branch.
 function parseQualityFromTitle(title, resolution) {
     const t = String(title || '');
     let source = '';
-    if (/\b(BDMV|BD-?Raw|BD-?RIP\b|BDISO)\b/i.test(t))          source = 'BDMV';
-    else if (/\bRemux\b/i.test(t))                              source = 'BD-Remux';
-    else if (/\b(BluRay|Blu-?Ray|BDRip|BD|\.BD\.|\[BD\])\b/i.test(t)) source = 'BluRay';
-    else if (/\bWEB-?DL\b/i.test(t))                            source = 'WEBDL';
-    else if (/\bWEB-?Rip\b/i.test(t))                           source = 'WEBRip';
-    else if (/\bWEB\b/i.test(t))                                source = 'WEB';
-    else if (/\bHDTV\b/i.test(t))                               source = 'HDTV';
-    else if (/\bDVD(?:Rip)?\b/i.test(t))                        source = 'DVD';
+    let suffix = ''; // ' RAW' | ' Remux' | '' — appended after resolution
+    if (/\b(BDMV|BD-?Raw|BDISO)\b/i.test(t)) {
+        source = 'BD'; suffix = ' RAW';
+    } else if (/\bRemux\b/i.test(t)) {
+        source = 'BD'; suffix = ' Remux';
+    } else if (/\b(BluRay|Blu-?Ray|BDRip|BD|\.BD\.|\[BD\])\b/i.test(t)) {
+        source = 'BD';
+    } else if (/\bWEB-?DL\b/i.test(t)) {
+        source = 'WEBDL';
+    } else if (/\bWEB-?Rip\b/i.test(t)) {
+        source = 'WEBRip';
+    } else if (/\bWEB\b/i.test(t)) {
+        source = 'WEB';
+    } else if (/\bHDTV\b/i.test(t)) {
+        source = 'HDTV';
+    } else if (/\bDVD(?:Rip)?\b/i.test(t)) {
+        source = 'DVD';
+    }
     const res = String(resolution || '').trim();
-    if (source && res) return `${source}-${res}`;
-    if (source)        return source;
-    if (res)           return res;
-    return '—';
+    let base;
+    if (source && res) base = `${source}-${res}`;
+    else if (source)   base = source;
+    else if (res)      base = res;
+    else               return '—';
+    return base + suffix;
 }
 
 // Seeders in green, leechers in red, separated by a dim slash.

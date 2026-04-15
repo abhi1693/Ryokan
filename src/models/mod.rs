@@ -16,7 +16,27 @@ pub mod nyaa_description_cache;
 pub mod media_probe_cache;
 pub mod custom_formats;
 
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
+
+/// Check whether `column` exists on `table`. Used inside [`migrate`] to
+/// gate idempotent ALTER chains whose "ADD COLUMN then RENAME" shape
+/// would otherwise leave vestigial columns on fresh installs (the ADD
+/// succeeds unconditionally because `.ok()` swallows the
+/// already-migrated case, then the RENAME silently no-ops when the
+/// target already exists). By asking SQLite directly, we can skip the
+/// ADD step entirely on installs where the current column name already
+/// exists.
+async fn column_exists(db: &SqlitePool, table: &str, column: &str) -> bool {
+    // PRAGMA doesn't accept bound parameters, but `table` is a hardcoded
+    // string literal from our own migration code — no user input — so
+    // inline interpolation is safe.
+    let sql = format!("PRAGMA table_info({})", table);
+    let Ok(rows) = sqlx::query(&sql).fetch_all(db).await else {
+        return false;
+    };
+    rows.iter()
+        .any(|r| r.try_get::<String, _>("name").ok().as_deref() == Some(column))
+}
 
 /// Run all database migrations.
 pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -719,23 +739,24 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // episode detail modal reads this column so each grab-history row
     // shows the per-episode file name — distinct from the batch torrent's
     // release title, which is already in `release_title`. Historically
-    // this column was called `torrent_name`; the two ALTER TABLE lines
-    // below handle both upgrade paths (DB that had `torrent_name` →
-    // renamed; fresh install → CREATE TABLE already has `file_name`).
-    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN torrent_name TEXT NOT NULL DEFAULT ''")
-        .execute(db)
-        .await
-        .ok();
-    sqlx::query("ALTER TABLE episode_grab_history RENAME COLUMN torrent_name TO file_name")
-        .execute(db)
-        .await
-        .ok();
-    // No-op on already-migrated DBs; covers the sliver of rows that were
-    // never renamed because of a race or a partially-migrated install.
-    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
-        .execute(db)
-        .await
-        .ok();
+    // this column was called `torrent_name`.
+    //
+    // Upgrade path: check for `file_name` first — a fresh install gets
+    // it from CREATE TABLE above, and an already-migrated install has
+    // it from a prior rename. If it's missing we're on a legacy
+    // `torrent_name` install and need to rename. The defensive ADD
+    // covers the corner case where neither column is present (which
+    // shouldn't happen, but keeps downstream writes safe).
+    if !column_exists(db, "episode_grab_history", "file_name").await {
+        sqlx::query("ALTER TABLE episode_grab_history RENAME COLUMN torrent_name TO file_name")
+            .execute(db)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
+            .execute(db)
+            .await
+            .ok();
+    }
 
     // Episode-file size. For non-batch grabs this gets refined to the
     // imported file's size at post-process time. For batch grabs it
