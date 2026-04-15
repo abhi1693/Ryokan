@@ -23,6 +23,26 @@ static RE_E_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 static RE_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"episode\s*(\d{1,4})").expect("RE_EPISODE compiles")
 });
+static RE_BARE_NUM_DASH: LazyLock<Regex> = LazyLock::new(|| {
+    // Bare 1-3 digit episode number followed by ` - <subtitle>`. Used
+    // by no-group-prefix releases shaped like
+    // `<title> NN - <subtitle>.mkv`. The caller takes the FIRST match
+    // because the actual episode marker comes BEFORE the subtitle, and
+    // the subtitle itself can contain incidental ` <number> - ` runs
+    // (e.g. `Show 03 - Title, Part 4 - Coda.mkv` → must resolve 03,
+    // not 4). 1-3 digits keeps 4-digit years out.
+    Regex::new(r"(?:^|\s)(\d{1,3})(?:v\d)?\s+-\s").expect("RE_BARE_NUM_DASH compiles")
+});
+static RE_BARE_NUM_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
+    // Bare 1-3 digit episode number followed by a quality `(...)` or
+    // hash `[...]` bracket. Catches packs whose filenames are
+    // space-delimited rather than `S01E01` or `- 01` — i.e. shaped
+    // like `<title tokens> NN (<quality>) [<hash>].mkv`. 1-3 digits
+    // keeps 4-digit years from being read as episode numbers. The
+    // caller picks the rightmost match so a title token like
+    // `something 99 (extra) 12 (...)` still resolves to 12, not 99.
+    Regex::new(r"(?:^|\s)(\d{1,3})(?:v\d)?\s+[\(\[]").expect("RE_BARE_NUM_BRACKET compiles")
+});
 
 /// Sanitize a string for use as a folder name on disk.
 /// Replaces filesystem-unsafe characters and trims leading/trailing dots and whitespace.
@@ -163,7 +183,21 @@ fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
 /// - `- 05 (v2)`, `- 05v2`, `[group] Title - 05 [1080p]`
 /// - `E05`, `EP05`, `Ep.05`
 /// - `Episode 05`
+/// - `Title 05 - Subtitle` (no group bracket, bare number before subtitle)
+/// - `Title 05 (1080p) [hash]` (no group bracket, bare number before quality bracket)
+///
+/// Returns `None` for files explicitly tagged as creditless openings or
+/// endings (`NCOP`/`NCED`) so they aren't accidentally imported as
+/// episode-numbered content.
 pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
+    // Non-episodic content guard. Creditless openings/endings carry a
+    // small integer suffix (`NCOP 1`, `NCED 1`) that the bare-number
+    // fallback below would otherwise mis-parse as episode 1 and clobber
+    // the real ep1. Bail before any pattern fires.
+    if lower.contains("ncop") || lower.contains("nced") {
+        return None;
+    }
+
     // SxxExx pattern — most reliable.
     if let Some(caps) = RE_SXEX.captures(lower) {
         let s: i32 = caps.get(1)?.as_str().parse().ok()?;
@@ -187,6 +221,29 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     if let Some(caps) = RE_EPISODE.captures(lower) {
         let e: i32 = caps.get(1)?.as_str().parse().ok()?;
         return Some((None, e));
+    }
+
+    // Bare-number-before-subtitle fallback. Shape:
+    // `<title> NN - <subtitle>.mkv` — first match wins (subtitle may
+    // contain its own ` <n> - ` run that should NOT shadow the real
+    // episode marker).
+    if let Some(caps) = RE_BARE_NUM_DASH.captures(lower) {
+        if let Some(m) = caps.get(1) {
+            if let Ok(e) = m.as_str().parse::<i32>() {
+                return Some((None, e));
+            }
+        }
+    }
+
+    // Bare-number-before-bracket fallback for space-delimited packs.
+    // Use the rightmost match so an earlier title token like
+    // `Show 99 (extra) 01` doesn't shadow the actual episode number.
+    if let Some(caps) = RE_BARE_NUM_BRACKET.captures_iter(lower).last() {
+        if let Some(m) = caps.get(1) {
+            if let Ok(e) = m.as_str().parse::<i32>() {
+                return Some((None, e));
+            }
+        }
     }
 
     None
@@ -246,5 +303,240 @@ fn format_size(bytes: u64) -> String {
     } else {
         let mb = bytes as f64 / (1024.0 * 1024.0);
         format!("{:.0} MiB", mb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_episode_number;
+
+    // Fixtures here are real-world filenames captured verbatim from
+    // an actual library, lower-cased to match the parser's input. They
+    // are kept verbatim so we have genuine ground truth for what
+    // shapes the parser must handle — any divergence between these
+    // fixtures and what we produce in synthetic tests would be the
+    // silent regression hazard the no-fabricated-release-naming
+    // feedback exists to prevent.
+
+    fn parse(name: &str) -> Option<(Option<i32>, i32)> {
+        parse_episode_number(&name.to_lowercase())
+    }
+
+    // ── SxxExx (RE_SXEX) ─────────────────────────────────────────────
+
+    #[test]
+    fn sxxexx_dot_separated_full_title() {
+        // smol releases use dot-separated tokens.
+        assert_eq!(
+            parse("Whisper.Me.a.Love.Song.S01E06.REPACK.1080p.WEBRip.DDP2.0.x265-smol.mkv"),
+            Some((Some(1), 6))
+        );
+        assert_eq!(
+            parse("Nisekoi.False.Love.S02E11.1080p.BluRay.Opus2.0.x265-smol.mkv"),
+            Some((Some(2), 11))
+        );
+    }
+
+    #[test]
+    fn sxxexx_with_v2_suffix_after_episode() {
+        // S02E10v2 — the v2 must not corrupt the episode capture.
+        assert_eq!(parse("[Judas] Frieren - S02E10v2.mkv"), Some((Some(2), 10)));
+        assert_eq!(parse("[Judas] Fire Force - S03E18v2.mkv"), Some((Some(3), 18)));
+        assert_eq!(
+            parse("JUJUTSU.KAISEN.S03E03.v2.1080p.CR.WEBRip.DUAL.AUDIO.AV1-Sokudo.mkv"),
+            Some((Some(3), 3))
+        );
+    }
+
+    #[test]
+    fn sxxexx_minimal_bracketed_group() {
+        assert_eq!(parse("[Judas] Kaya-chan - S01E01.mkv"), Some((Some(1), 1)));
+    }
+
+    #[test]
+    fn sxxexx_dot_separated_with_long_subtitle() {
+        // VARYG-style: long descriptive sentence between SxxExx and quality.
+        assert_eq!(
+            parse(
+                "You.and.I.Are.Polar.Opposites.S01E05.Someone.Who.Thinks.and.Someone.Who.Doesnt.1080p.CR.WEB-DL.DUAL.AAC2.0.H.264-VARYG.mkv"
+            ),
+            Some((Some(1), 5))
+        );
+    }
+
+    #[test]
+    fn sxxexx_space_separated_with_quality_bracket() {
+        assert_eq!(
+            parse("Jujutsu Kaisen - S02E10 (BD 1080p HEVC) [Vodes].mkv"),
+            Some((Some(2), 10))
+        );
+        assert_eq!(
+            parse("[LostYears] Vinland Saga - S02E12 (WEB 1080p HEVC E-AC-3 AAC) [B413DFCD].mkv"),
+            Some((Some(2), 12))
+        );
+        assert_eq!(
+            parse("[LostYears] Vinland Saga - S02E13 (WEB 1080p HEVC AAC) [A6F924F6].mkv"),
+            Some((Some(2), 13))
+        );
+    }
+
+    // ── ` - NN ` dash-delimited (RE_DASH_EP) ─────────────────────────
+
+    #[test]
+    fn dash_ep_with_quality_and_hash_brackets() {
+        assert_eq!(
+            parse("[MTBB] Mob Psycho 100 S2 - 10 (BD 1080p) [BED02FC5].mkv"),
+            Some((None, 10))
+        );
+        assert_eq!(
+            parse("[Salieri] Jujutsu Kaisen S2 - 06 (1080p) (HDR) [Dual Audio].mkv"),
+            Some((None, 6))
+        );
+        assert_eq!(
+            parse("[Kaizoku] Jujutsu Kaisen - 35 (BD 1080p) [3311E835].mkv"),
+            Some((None, 35))
+        );
+        assert_eq!(
+            parse("[Kaizoku] Jujutsu Kaisen - 47 (BD 1080p) [3D93127E].mkv"),
+            Some((None, 47))
+        );
+    }
+
+    #[test]
+    fn dash_ep_with_square_quality_bracket() {
+        // sam / notFoxtrot use `[BD 1080p FLAC]` instead of `(...)`.
+        assert_eq!(
+            parse("[sam] Vinland Saga - 04 [BD 1080p FLAC] [22FE1988].mkv"),
+            Some((None, 4))
+        );
+        assert_eq!(
+            parse("[notFoxtrot] Vinland Saga - 05 [BD 1080p FLAC] [7F2FF84F].mkv"),
+            Some((None, 5))
+        );
+    }
+
+    #[test]
+    fn dash_ep_with_end_marker_after_number() {
+        // NanakoRaws appends ` END` to the final episode of a season.
+        assert_eq!(
+            parse("[NanakoRaws] Jujutsu Kaisen S2 - 23 END (1080p).mkv"),
+            Some((None, 23))
+        );
+    }
+
+    #[test]
+    fn dash_ep_with_v2_suffix_glued_to_number() {
+        // ` - 16v2 ` — version suffix is consumed by the trailing alt.
+        assert_eq!(
+            parse("[NanakoRaws] Jujutsu Kaisen S2 - 16v2 (1080p).mkv"),
+            Some((None, 16))
+        );
+    }
+
+    // ── Bare number before ` - subtitle` (RE_BARE_NUM_DASH) ──────────
+
+    #[test]
+    fn bare_number_before_dash_subtitle_no_group_prefix() {
+        // No group bracket, no leading ` - `, just `<title> NN - <subtitle>`.
+        // Returned None prior to RE_BARE_NUM_DASH.
+        assert_eq!(
+            parse("Koyomimonogatari 01 - Koyomi Stone.mkv"),
+            Some((None, 1))
+        );
+        assert_eq!(
+            parse("Owarimonogatari 2nd Season 03 - Hitagi Rendezvous, Part 1.mkv"),
+            Some((None, 3))
+        );
+        assert_eq!(
+            parse("Nisemonogatari 06 - Karen Bee, Part 6.mkv"),
+            Some((None, 6))
+        );
+    }
+
+    #[test]
+    fn sxxexx_with_subtitle_and_quality_brackets() {
+        // `[Group] Title - SxxExx - Episode Subtitle (quality) [hash].mkv`
+        // Two ` - ` delimiters, parenthesized quality, bracketed hash.
+        // Regression guard: RE_SXEX must win before the bare-number
+        // branches fire on the " - <subtitle>" portion.
+        assert_eq!(
+            parse("[smol] Monogatari - S07E05 - Owarimonogatari (BD 1080p HEVC Opus) [A89E97DA].mkv"),
+            Some((Some(7), 5))
+        );
+        assert_eq!(
+            parse("[smol] Monogatari - S07E14 - Owarimonogatari Second Season (Ge) (BD 1080p HEVC Opus) [EBAB5DDD].mkv"),
+            Some((Some(7), 14))
+        );
+    }
+
+    // ── "Episode N" (RE_EPISODE) ─────────────────────────────────────
+
+    #[test]
+    fn episode_word_prefix_with_three_digit_number() {
+        // Long-runner with no other tokens in the filename.
+        assert_eq!(parse("Episode 039.mkv"), Some((None, 39)));
+    }
+
+    // ── NCOP/NCED non-episodic guard ─────────────────────────────────
+
+    #[test]
+    fn nced_non_episode_returns_none() {
+        // Creditless ending. Without the NCOP/NCED guard, the
+        // bare-number-before-bracket fallback would otherwise parse
+        // ` 1 [` as episode 1 and clobber the real ep1 on import.
+        assert_eq!(
+            parse("[notFoxtrot] Vinland Saga - NCED 1 [BD 1080p FLAC] [CC708A2C].mkv"),
+            None
+        );
+    }
+
+    #[test]
+    fn ncop_non_episode_returns_none() {
+        assert_eq!(
+            parse("[notFoxtrot] Vinland Saga - NCOP 1 [BD 1080p FLAC] [300FAD69].mkv"),
+            None
+        );
+    }
+
+    // ── Non-episode files that have no number anywhere ───────────────
+
+    #[test]
+    fn ova_with_no_episode_number_returns_none() {
+        // A single OVA file with no episode marker. Today this returns
+        // None because no pattern matches, and that's the correct
+        // outcome — there's nothing to parse.
+        assert_eq!(
+            parse("[WBDP] Yahari Ore no Seishun Love Comedy wa Machigatteiru Zoku OVA [BD][1080p-AAC] [93937CE2].mkv"),
+            None
+        );
+    }
+
+    #[test]
+    fn pv_promo_video_returns_none() {
+        // Bare `PV.mkv` — no digits at all, nothing to parse.
+        assert_eq!(parse("PV.mkv"), None);
+    }
+
+    #[test]
+    fn bd_stream_file_with_only_zero_padded_index_returns_none() {
+        // Raw BD stream file from an untitled disc rip. The leading
+        // `00000` is a disc-side playlist index, not an episode
+        // number — both RE_BARE_NUM_DASH and RE_BARE_NUM_BRACKET
+        // require a delimiter after the digits, so this correctly
+        // falls through to None.
+        assert_eq!(parse("00000.m2ts"), None);
+    }
+
+    #[test]
+    fn folder_icon_with_arc_number_in_title_returns_none() {
+        // Hypothetical: if the folder-icon PNG had been served as
+        // media (it isn't — is_media_filename gates .png out), the
+        // `Arc 5 Sasuke` title token must NOT be mis-parsed as
+        // episode 5. Defensive regression guard for the bare-number
+        // branches.
+        assert_eq!(
+            parse("Naruto Arc 5 Sasuke Recovery Mission Arc Folder Icon.mkv"),
+            None
+        );
     }
 }

@@ -2509,15 +2509,42 @@ pub fn detect_sibling_entries_in_pack(
         return Vec::new();
     }
 
+    let parent_label = if !parent_detail.title_english.is_empty() {
+        parent_detail.title_english.as_str()
+    } else {
+        parent_detail.title_romaji.as_str()
+    };
+    tracing::debug!(
+        "auto-expand: detect_siblings starting parent='{}' parent_anilist_id={} parent_episodes={:?} relations={} files={}",
+        parent_label,
+        parent_detail.id,
+        parent_detail.episodes,
+        parent_detail.relations.len(),
+        filenames.len()
+    );
+
     // Candidates: one entry per relation that produced a usable
     // subtitle. Stored by index into `parent_detail.relations` to
     // avoid borrowing complications during the materialize pass.
     let mut candidates: Vec<(usize, String, String)> = Vec::new(); // (rel_idx, raw subtitle, normalized needle)
     for (rel_idx, rel) in parent_detail.relations.iter().enumerate() {
+        let rel_label = if !rel.title_english.is_empty() {
+            rel.title_english.as_str()
+        } else {
+            rel.title_romaji.as_str()
+        };
         if !rel.media_type.eq_ignore_ascii_case("ANIME") {
+            tracing::debug!(
+                "auto-expand: subtitle skip rel='{}' reason=media_type={}",
+                rel_label, rel.media_type
+            );
             continue;
         }
         if !is_pack_candidate_relation(&rel.relation_type) {
+            tracing::debug!(
+                "auto-expand: subtitle skip rel='{}' reason=relation_type={}",
+                rel_label, rel.relation_type
+            );
             continue;
         }
         let sibling_title = if !rel.title_english.is_empty() {
@@ -2525,17 +2552,37 @@ pub fn detect_sibling_entries_in_pack(
         } else if !rel.title_romaji.is_empty() {
             rel.title_romaji.as_str()
         } else {
+            tracing::debug!(
+                "auto-expand: subtitle skip rel_idx={} reason=no-title relation_type={}",
+                rel_idx, rel.relation_type
+            );
             continue;
         };
         let Some(subtitle) = trailing_subtitle_of(sibling_title) else {
+            tracing::debug!(
+                "auto-expand: subtitle skip rel='{}' reason=no-trailing-subtitle relation_type={}",
+                sibling_title, rel.relation_type
+            );
             continue;
         };
         let needle = normalize_subtitle(&subtitle);
         if needle.is_empty() {
+            tracing::debug!(
+                "auto-expand: subtitle skip rel='{}' reason=empty-needle subtitle='{}'",
+                sibling_title, subtitle
+            );
             continue;
         }
+        tracing::debug!(
+            "auto-expand: subtitle candidate rel='{}' relation_type={} subtitle='{}' needle='{}'",
+            sibling_title, rel.relation_type, subtitle, needle
+        );
         candidates.push((rel_idx, subtitle, needle));
     }
+    tracing::debug!(
+        "auto-expand: subtitle path produced {} candidate(s)",
+        candidates.len()
+    );
 
     // NOTE: intentionally do NOT early-return on empty `candidates`.
     // The subtitle path can't find siblings whose titles either lack
@@ -2610,11 +2657,11 @@ pub fn detect_sibling_entries_in_pack(
     }
 
     // Episode-range fallback: if the subtitle path came up empty
-    // (e.g. a NoobSubs-style pack where filenames carry plain episode
-    // numbers and no arc name, so `trailing_subtitle_of` + substring
-    // matching cannot find siblings), try to attribute episode-number
-    // overflow (files whose ep > parent's episode count) to a sibling
-    // whose own episode count makes the range fit.
+    // (e.g. a pack whose filenames carry plain episode numbers with
+    // no arc name, so `trailing_subtitle_of` + substring matching
+    // cannot find siblings), try to attribute episode-number overflow
+    // (files whose ep > parent's episode count) to a sibling whose own
+    // episode count makes the range fit.
     //
     // Only runs when `out.is_empty()` — i.e. the primary subtitle path
     // produced zero matches. If even one sibling was subtitle-matched,
@@ -2691,29 +2738,48 @@ fn detect_sibling_via_episode_range(
     parent_detail: &AnimeDetail,
 ) -> Option<SiblingMatch> {
     let parent_cap = parent_detail.episodes.unwrap_or(0);
+    tracing::debug!(
+        "auto-expand: fallback start parent_cap={} relations={}",
+        parent_cap,
+        parent_detail.relations.len()
+    );
     if parent_cap <= 0 {
+        tracing::debug!("auto-expand: fallback bail reason=parent_cap<=0 (parent has no episode count)");
         return None;
     }
 
     // Parse episodes per file (media files only).
     let mut overflow: Vec<(usize, i32)> = Vec::new();
+    let mut media_count: usize = 0;
+    let mut parsed_count: usize = 0;
     for (idx, name) in filenames.iter().enumerate() {
         if !is_media_filename(name) {
             continue;
         }
+        media_count += 1;
         let Some((_, ep)) = media::parse_episode_number(&name.to_ascii_lowercase()) else {
             continue;
         };
+        parsed_count += 1;
         if ep > parent_cap {
             overflow.push((idx, ep));
         }
     }
+    tracing::debug!(
+        "auto-expand: fallback overflow scan media_files={} parsed={} overflow_files={} parent_cap={}",
+        media_count, parsed_count, overflow.len(), parent_cap
+    );
     if overflow.is_empty() {
+        tracing::debug!("auto-expand: fallback bail reason=no-overflow-files (no parsed ep > parent_cap)");
         return None;
     }
     let overflow_min = overflow.iter().map(|(_, e)| *e).min().unwrap();
     let overflow_max = overflow.iter().map(|(_, e)| *e).max().unwrap();
     let overflow_count = overflow.len();
+    tracing::debug!(
+        "auto-expand: fallback overflow range [{}..={}] count={}",
+        overflow_min, overflow_max, overflow_count
+    );
 
     // Parent title prefixes for continuation matching. Both english
     // and romaji forms are tried because AniList releases are
@@ -2724,19 +2790,42 @@ fn detect_sibling_via_episode_range(
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect();
+    tracing::debug!(
+        "auto-expand: fallback parent prefixes en='{}' ro='{}'",
+        parent_en, parent_ro
+    );
 
     // Walk relations for viable candidates.
     let mut viable: Vec<(usize, bool)> = Vec::new(); // (rel_idx, title_prefix_matched)
     for (rel_idx, rel) in parent_detail.relations.iter().enumerate() {
+        let rel_label = if !rel.title_english.is_empty() {
+            rel.title_english.as_str()
+        } else {
+            rel.title_romaji.as_str()
+        };
         if !rel.media_type.eq_ignore_ascii_case("ANIME") {
+            tracing::debug!(
+                "auto-expand: fallback skip rel='{}' reason=media_type={}",
+                rel_label, rel.media_type
+            );
             continue;
         }
         if !is_pack_candidate_relation(&rel.relation_type) {
+            tracing::debug!(
+                "auto-expand: fallback skip rel='{}' reason=relation_type={}",
+                rel_label, rel.relation_type
+            );
             continue;
         }
         let sib_cap = match rel.episodes {
             Some(n) if n > 0 => n,
-            _ => continue,
+            _ => {
+                tracing::debug!(
+                    "auto-expand: fallback skip rel='{}' reason=no-episode-count episodes={:?} relation_type={}",
+                    rel_label, rel.episodes, rel.relation_type
+                );
+                continue;
+            }
         };
 
         // Title-prefix test against both english and romaji forms of
@@ -2752,6 +2841,10 @@ fn detect_sibling_via_episode_range(
         });
         let is_sequel = rel.relation_type.eq_ignore_ascii_case("SEQUEL");
         if !title_prefix_matched && !is_sequel {
+            tracing::debug!(
+                "auto-expand: fallback skip rel='{}' reason=neither-sequel-nor-title-prefix relation_type={} rel_en='{}' rel_ro='{}'",
+                rel_label, rel.relation_type, rel_en, rel_ro
+            );
             continue;
         }
 
@@ -2759,26 +2852,49 @@ fn detect_sibling_via_episode_range(
         let expected_min = parent_cap + 1;
         let expected_max = parent_cap + sib_cap;
         if overflow_min < expected_min || overflow_max > expected_max {
+            tracing::debug!(
+                "auto-expand: fallback skip rel='{}' reason=range-mismatch sib_cap={} expected=[{}..={}] overflow=[{}..={}]",
+                rel_label, sib_cap, expected_min, expected_max, overflow_min, overflow_max
+            );
             continue;
         }
         if !within_episode_slack(overflow_count, sib_cap) {
+            tracing::debug!(
+                "auto-expand: fallback skip rel='{}' reason=slack-cap overflow_count={} sib_cap={}",
+                rel_label, overflow_count, sib_cap
+            );
             continue;
         }
 
+        tracing::debug!(
+            "auto-expand: fallback viable rel='{}' sib_cap={} title_prefix_matched={} is_sequel={}",
+            rel_label, sib_cap, title_prefix_matched, is_sequel
+        );
         viable.push((rel_idx, title_prefix_matched));
     }
 
     let chosen = match viable.len() {
-        0 => return None,
+        0 => {
+            tracing::debug!("auto-expand: fallback bail reason=zero-viable-candidates");
+            return None;
+        }
         1 => viable[0].0,
         _ => {
             // Tiebreaker: prefer title-prefix-matched candidates.
             let prefixed: Vec<usize> =
                 viable.iter().filter(|(_, p)| *p).map(|(i, _)| *i).collect();
             if prefixed.len() == 1 {
+                tracing::debug!(
+                    "auto-expand: fallback tiebreaker resolved via title-prefix viable={}",
+                    viable.len()
+                );
                 prefixed[0]
             } else {
                 // Still ambiguous — refuse to guess.
+                tracing::debug!(
+                    "auto-expand: fallback bail reason=tiebreaker-ambiguous viable={} prefixed={}",
+                    viable.len(), prefixed.len()
+                );
                 return None;
             }
         }
@@ -2788,6 +2904,15 @@ fn detect_sibling_via_episode_range(
     let sib_cap = rel.episodes.unwrap_or(0);
     let mut file_indices: Vec<usize> = overflow.iter().map(|(i, _)| *i).collect();
     file_indices.sort_unstable();
+    let chosen_label = if !rel.title_english.is_empty() {
+        rel.title_english.as_str()
+    } else {
+        rel.title_romaji.as_str()
+    };
+    tracing::debug!(
+        "auto-expand: fallback chose rel='{}' anilist_id={} sib_cap={} files={}",
+        chosen_label, rel.id, sib_cap, file_indices.len()
+    );
 
     Some(SiblingMatch {
         anilist_id: rel.id,
@@ -3782,41 +3907,41 @@ mod tests {
     // ── Layer 2: episode-range fallback ────────────────────────────
 
     #[test]
-    fn detect_siblings_fallback_catches_noobsubs_jojo_single_word_arc() {
-        // NoobSubs JoJo SDC+Egypt-hen pack: filenames are plain
-        // "Stardust Crusaders - NN" with no arc subtitle for the
-        // Egypt-hen portion. Subtitle detection cannot fire because
-        // Egypt-hen's trailing subtitle is single-word ("Egypt-hen")
-        // and rejected by `trailing_subtitle_of`'s ≥2-token rule.
-        // Episode-range fallback should pick up files 25-48 and
-        // attribute them to Egypt-hen with episode_offset=24.
-        let mut parent = detail_with_titles(
-            "JoJo's Bizarre Adventure: Stardust Crusaders",
-            "JoJo no Kimyou na Bouken: Stardust Crusaders",
-        );
+    fn detect_siblings_fallback_catches_bare_number_pack_single_word_arc() {
+        // 48-file continuation pack using bare space-delimited episode
+        // numbers followed by a quality bracket (no `S01E01`, no
+        // `- 25`), where the sibling's trailing subtitle is a single
+        // word and thus rejected by `trailing_subtitle_of`'s ≥2-token
+        // rule. The subtitle path produces zero matches and files
+        // 25-48 must come through the episode-range fallback, which
+        // attributes them to the sibling with
+        // `episode_offset = parent_cap`.
+        //
+        // Filenames here are synthetic token strings — the only thing
+        // the test cares about is the bare-digit + quality-bracket
+        // shape, since that's what `parse_episode_number`'s new
+        // RE_BARE_NUM_BRACKET branch keys on.
+        let mut parent = detail_with_titles("Parent Show", "Parent Show Romaji");
         parent.id = 20474;
         parent.episodes = Some(24);
         parent.relations = vec![related(
             20799,
-            "JoJo's Bizarre Adventure: Stardust Crusaders - Egypt-hen",
-            "JoJo no Kimyou na Bouken: Stardust Crusaders - Egypt-hen",
+            "Parent Show - Coda",
+            "Parent Show - Coda",
             "SEQUEL",
             Some(24),
         )];
 
         let mut files: Vec<String> = Vec::new();
         for n in 1..=48 {
-            files.push(format!(
-                "[NoobSubs] JoJo's Bizarre Adventure Stardust Crusaders - {:02}.mkv",
-                n
-            ));
+            files.push(format!("fixture-parent-show {:02} (bd-1080p) [hash].mkv", n));
         }
 
         let siblings = detect_sibling_entries_in_pack(&files, &parent);
         assert_eq!(siblings.len(), 1, "fallback should find one sibling");
         let s = &siblings[0];
         assert_eq!(s.anilist_id, 20799);
-        // Egypt-hen claims files 24..48 (indices 24..=47 → eps 25..=48).
+        // Sibling claims files 24..48 (indices 24..=47 → eps 25..=48).
         assert_eq!(s.file_indices.len(), 24);
         assert_eq!(*s.file_indices.first().unwrap(), 24);
         assert_eq!(*s.file_indices.last().unwrap(), 47);
