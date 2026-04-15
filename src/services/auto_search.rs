@@ -2471,6 +2471,124 @@ fn is_pack_candidate_relation(relation_type: &str) -> bool {
     )
 }
 
+/// Maximum number of depth-1 AniList fetches per auto-expand grab.
+/// Bounds our AL API usage so a deeply-linked franchise doesn't blow
+/// past the background rate limits when we try to graft transitive
+/// relations onto the parent's relation list. Any franchise needing
+/// more than 10 hops out from the parent is almost certainly a
+/// signal-to-noise loss anyway.
+pub const TRANSITIVE_WALK_MAX_FETCHES: usize = 10;
+
+/// Which of `parent.relations`' edges warrant walking one hop
+/// further to graft their own relations onto the parent? This is a
+/// NARROWER gate than [`is_pack_candidate_relation`] because each
+/// step we take is an extra AL fetch — we only chase franchise-core
+/// links (not SUMMARY, not ALTERNATIVE / alternate retellings) to
+/// avoid pulling in genuinely unrelated entries that happen to be
+/// loosely associated.
+///
+/// Motivating case: Owarimonogatari (AL 21262) does not list
+/// Owarimonogatari 2nd Season (AL 99423) in its direct relations,
+/// but its PREQUEL Monogatari Series Second Season does reach it
+/// via the saga's shared continuation graph. Walking PREQUEL
+/// outward from the parent is what lets sibling detection find it.
+pub fn is_transitive_walk_source(relation_type: &str) -> bool {
+    matches!(
+        relation_type,
+        "PREQUEL" | "SEQUEL" | "PARENT" | "SIDE_STORY" | "SPIN_OFF"
+    )
+}
+
+/// Build the set of depth-1 transitive relations to graft onto
+/// `parent.relations`. For every direct relation whose type passes
+/// [`is_transitive_walk_source`] and which appears in
+/// `neighbor_details` (the caller is responsible for fetching the
+/// map from AL), pull in that neighbor's OWN relations — filtered
+/// through [`is_pack_candidate_relation`] and de-duplicated against
+/// the parent id plus every id already present in `parent.relations`.
+///
+/// Pure function: takes a pre-fetched neighbor map so it's
+/// deterministic and testable without live AniList. The caller is
+/// responsible for honoring [`TRANSITIVE_WALK_MAX_FETCHES`] when
+/// populating the map.
+///
+/// # Why a graft (not a rewalk)
+///
+/// We don't recursively walk the graph — one hop is enough to catch
+/// the Monogatari / JoJo-style missing-edge cases without pulling in
+/// unrelated franchises. Going depth-2 would start grafting e.g.
+/// side-story side-stories that have nothing to do with the grabbed
+/// pack, and each extra hop is another AL API call per grab.
+pub fn transitive_relation_graft(
+    parent: &AnimeDetail,
+    neighbor_details: &std::collections::HashMap<i64, AnimeDetail>,
+) -> Vec<RelatedEntry> {
+    if parent.id <= 0 {
+        return Vec::new();
+    }
+    // Track ids we've already accepted to avoid duplicates and
+    // cycles. Seed with the parent id and every direct-relation id
+    // so a neighbor's relation list can't re-add either.
+    let mut seen: std::collections::HashSet<i64> =
+        std::collections::HashSet::with_capacity(parent.relations.len() + 1);
+    seen.insert(parent.id);
+    for direct in &parent.relations {
+        seen.insert(direct.id);
+    }
+
+    let mut graft: Vec<RelatedEntry> = Vec::new();
+    for direct in &parent.relations {
+        if !is_transitive_walk_source(&direct.relation_type) {
+            continue;
+        }
+        if !direct.media_type.eq_ignore_ascii_case("ANIME") {
+            continue;
+        }
+        let Some(neighbor_detail) = neighbor_details.get(&direct.id) else {
+            continue;
+        };
+        for hop in &neighbor_detail.relations {
+            if hop.id <= 0 {
+                continue;
+            }
+            if !seen.insert(hop.id) {
+                continue;
+            }
+            if !hop.media_type.eq_ignore_ascii_case("ANIME") {
+                continue;
+            }
+            if !is_pack_candidate_relation(&hop.relation_type) {
+                continue;
+            }
+            graft.push(hop.clone());
+        }
+    }
+    graft
+}
+
+/// Return a cloned `parent` whose `relations` vec has been extended
+/// by [`transitive_relation_graft`]. When the graft is empty this
+/// still returns a clone so the caller can pass a single
+/// `&AnimeDetail` into sibling detection regardless of whether the
+/// walk found anything.
+pub fn expand_parent_with_transitive_relations(
+    parent: &AnimeDetail,
+    neighbor_details: &std::collections::HashMap<i64, AnimeDetail>,
+) -> AnimeDetail {
+    let graft = transitive_relation_graft(parent, neighbor_details);
+    if graft.is_empty() {
+        return parent.clone();
+    }
+    tracing::debug!(
+        "auto-expand: transitive walk grafted {} additional relation(s) onto parent id={}",
+        graft.len(),
+        parent.id
+    );
+    let mut expanded = parent.clone();
+    expanded.relations.extend(graft);
+    expanded
+}
+
 /// Detect sibling anime entries (sequel / prequel / side story /
 /// etc. of the parent) whose own episodes are present in a megapack
 /// release's file list.
@@ -4122,6 +4240,333 @@ mod tests {
         assert_eq!(*s.file_indices.last().unwrap(), 19);
         assert!(s.matched_subtitle.starts_with("episode-range fallback"));
         assert_eq!(s.episode_offset, 13, "absolute numbering → offset = parent cap");
+    }
+
+    // ── transitive_relation_graft ────────────────────────────────────
+
+    /// Build an `AnimeDetail` with a specific id, titles, episode
+    /// count, and a pre-populated relation list. Used by the
+    /// transitive-walk tests to construct the neighbor details that
+    /// the graft helper walks into.
+    fn detail_with_relations(
+        id: i64,
+        english: &str,
+        romaji: &str,
+        episodes: Option<i32>,
+        relations: Vec<RelatedEntry>,
+    ) -> AnimeDetail {
+        let mut d = detail_with_titles(english, romaji);
+        d.id = id;
+        d.episodes = episodes;
+        d.relations = relations;
+        d.format = "TV".to_string();
+        d
+    }
+
+    #[test]
+    fn transitive_graft_pulls_in_second_hop_when_direct_relations_are_missing_edge() {
+        // Parent has ONE direct PREQUEL neighbor. That neighbor's own
+        // relations include a sibling that is NOT in the parent's
+        // direct relations — the missing-edge case the walk exists to
+        // fix. Graft should surface the missing sibling.
+        let parent_id = 100;
+        let neighbor_id = 200;
+        let missing_sibling_id = 300;
+
+        let parent = detail_with_relations(
+            parent_id,
+            "Parent Show",
+            "Parent Show",
+            Some(12),
+            vec![related(
+                neighbor_id,
+                "Neighbor",
+                "Neighbor",
+                "PREQUEL",
+                Some(26),
+            )],
+        );
+        let neighbor = detail_with_relations(
+            neighbor_id,
+            "Neighbor",
+            "Neighbor",
+            Some(26),
+            vec![
+                // Back-edge to parent — must be deduped out.
+                related(parent_id, "Parent Show", "Parent Show", "SEQUEL", Some(12)),
+                // The sibling we want to surface.
+                related(
+                    missing_sibling_id,
+                    "Parent Show Continuation",
+                    "Parent Show Continuation",
+                    "SEQUEL",
+                    Some(7),
+                ),
+            ],
+        );
+        let mut neighbors = std::collections::HashMap::new();
+        neighbors.insert(neighbor_id, neighbor);
+
+        let graft = transitive_relation_graft(&parent, &neighbors);
+        assert_eq!(graft.len(), 1, "back-edge to parent must be deduped");
+        assert_eq!(graft[0].id, missing_sibling_id);
+    }
+
+    #[test]
+    fn transitive_graft_skips_non_walkable_relation_types() {
+        // Parent has an ADAPTATION neighbor (manga). The walk must
+        // NOT fetch into it even if we seed the map — is_pack_candidate
+        // already blocks ADAPTATION as a direct sibling, and
+        // is_transitive_walk_source must also block it as a walk
+        // source.
+        let parent = detail_with_relations(
+            1,
+            "Parent",
+            "Parent",
+            Some(12),
+            vec![related(2, "Manga", "Manga", "ADAPTATION", None)],
+        );
+        // Seed neighbor map anyway — graft should ignore it because
+        // the direct relation's type isn't walkable.
+        let neighbor = detail_with_relations(
+            2,
+            "Manga",
+            "Manga",
+            None,
+            vec![related(3, "Something Else", "Something Else", "SEQUEL", Some(13))],
+        );
+        let mut neighbors = std::collections::HashMap::new();
+        neighbors.insert(2, neighbor);
+
+        let graft = transitive_relation_graft(&parent, &neighbors);
+        assert!(
+            graft.is_empty(),
+            "ADAPTATION direct relation must not be walked"
+        );
+    }
+
+    #[test]
+    fn transitive_graft_dedupes_against_direct_relations() {
+        // Parent already has a direct relation to id=5. Its neighbor
+        // (reachable via PREQUEL) also lists id=5 as a sibling. The
+        // graft must NOT return id=5 again — it's already in the
+        // parent's direct list.
+        let parent = detail_with_relations(
+            1,
+            "Parent",
+            "Parent",
+            Some(12),
+            vec![
+                related(2, "Neighbor", "Neighbor", "PREQUEL", Some(26)),
+                related(5, "Already Direct", "Already Direct", "SEQUEL", Some(7)),
+            ],
+        );
+        let neighbor = detail_with_relations(
+            2,
+            "Neighbor",
+            "Neighbor",
+            Some(26),
+            vec![
+                related(5, "Already Direct", "Already Direct", "SEQUEL", Some(7)),
+                // Also a truly new one.
+                related(9, "Genuinely New", "Genuinely New", "SEQUEL", Some(12)),
+            ],
+        );
+        let mut neighbors = std::collections::HashMap::new();
+        neighbors.insert(2, neighbor);
+
+        let graft = transitive_relation_graft(&parent, &neighbors);
+        assert_eq!(graft.len(), 1, "id=5 must be deduped against direct");
+        assert_eq!(graft[0].id, 9);
+    }
+
+    #[test]
+    fn transitive_graft_filters_adaptation_hops() {
+        // Parent's neighbor is a valid PREQUEL. But that neighbor's
+        // OWN relations include a manga ADAPTATION. The hop filter
+        // (is_pack_candidate_relation) must discard ADAPTATION hops
+        // so they're never considered as siblings.
+        let parent = detail_with_relations(
+            1,
+            "Parent",
+            "Parent",
+            Some(12),
+            vec![related(2, "Neighbor", "Neighbor", "PREQUEL", Some(26))],
+        );
+        let neighbor = detail_with_relations(
+            2,
+            "Neighbor",
+            "Neighbor",
+            Some(26),
+            vec![
+                {
+                    let mut r = related(3, "Manga Source", "Manga Source", "ADAPTATION", None);
+                    r.media_type = "MANGA".to_string();
+                    r
+                },
+                related(4, "Anime Sequel", "Anime Sequel", "SEQUEL", Some(12)),
+            ],
+        );
+        let mut neighbors = std::collections::HashMap::new();
+        neighbors.insert(2, neighbor);
+
+        let graft = transitive_relation_graft(&parent, &neighbors);
+        assert_eq!(graft.len(), 1);
+        assert_eq!(graft[0].id, 4);
+    }
+
+    #[test]
+    fn transitive_graft_returns_empty_when_parent_id_is_non_positive() {
+        // Provenance gate: don't graft for Jikan-sourced details.
+        let parent = detail_with_relations(
+            -123,
+            "Parent",
+            "Parent",
+            Some(12),
+            vec![related(2, "Neighbor", "Neighbor", "PREQUEL", Some(26))],
+        );
+        let neighbor = detail_with_relations(
+            2,
+            "Neighbor",
+            "Neighbor",
+            Some(26),
+            vec![related(3, "Sibling", "Sibling", "SEQUEL", Some(12))],
+        );
+        let mut neighbors = std::collections::HashMap::new();
+        neighbors.insert(2, neighbor);
+
+        let graft = transitive_relation_graft(&parent, &neighbors);
+        assert!(graft.is_empty());
+    }
+
+    #[test]
+    fn transitive_graft_ignores_missing_neighbors_in_map() {
+        // If the caller hit the fetch cap and didn't populate every
+        // neighbor, graft must silently skip the un-fetched ones.
+        let parent = detail_with_relations(
+            1,
+            "Parent",
+            "Parent",
+            Some(12),
+            vec![
+                related(2, "Fetched Neighbor", "Fetched Neighbor", "PREQUEL", Some(26)),
+                related(7, "Unfetched Neighbor", "Unfetched Neighbor", "SEQUEL", Some(26)),
+            ],
+        );
+        let neighbor_2 = detail_with_relations(
+            2,
+            "Fetched Neighbor",
+            "Fetched Neighbor",
+            Some(26),
+            vec![related(5, "New Sibling", "New Sibling", "SEQUEL", Some(12))],
+        );
+        let mut neighbors = std::collections::HashMap::new();
+        neighbors.insert(2, neighbor_2);
+        // Note: id=7 is intentionally NOT in the map.
+
+        let graft = transitive_relation_graft(&parent, &neighbors);
+        assert_eq!(graft.len(), 1);
+        assert_eq!(graft[0].id, 5);
+    }
+
+    #[test]
+    fn expand_parent_with_transitive_relations_extends_relations_vec() {
+        // Integration: the wrapper appends the graft onto the cloned
+        // parent's relations vec. Previously-present relations stay.
+        let parent = detail_with_relations(
+            1,
+            "Parent",
+            "Parent",
+            Some(12),
+            vec![related(2, "Neighbor", "Neighbor", "PREQUEL", Some(26))],
+        );
+        let neighbor = detail_with_relations(
+            2,
+            "Neighbor",
+            "Neighbor",
+            Some(26),
+            vec![related(3, "Grafted", "Grafted", "SEQUEL", Some(13))],
+        );
+        let mut neighbors = std::collections::HashMap::new();
+        neighbors.insert(2, neighbor);
+
+        let expanded = expand_parent_with_transitive_relations(&parent, &neighbors);
+        assert_eq!(expanded.relations.len(), 2);
+        let ids: Vec<i64> = expanded.relations.iter().map(|r| r.id).collect();
+        assert!(ids.contains(&2), "direct relation must remain");
+        assert!(ids.contains(&3), "grafted relation must be appended");
+    }
+
+    #[test]
+    fn expand_parent_with_empty_graft_still_returns_clone() {
+        // When the walk produces no graft (e.g. no walkable direct
+        // relations), the wrapper still returns a cloned detail so
+        // callers can pass a single owned AnimeDetail into sibling
+        // detection regardless.
+        let parent = detail_with_relations(1, "Parent", "Parent", Some(12), vec![]);
+        let neighbors = std::collections::HashMap::new();
+        let expanded = expand_parent_with_transitive_relations(&parent, &neighbors);
+        assert_eq!(expanded.id, parent.id);
+        assert!(expanded.relations.is_empty());
+    }
+
+    #[test]
+    fn detect_siblings_finds_grafted_relation_after_transitive_walk() {
+        // End-to-end: parent has no direct edge to the sibling whose
+        // episodes are in the pack, but a PREQUEL neighbor does. After
+        // running the expand step, detect_sibling_entries_in_pack
+        // should pick up the grafted sibling. This is the Monogatari
+        // missing-edge case modeled structurally.
+        let parent_id = 21262;
+        let neighbor_id = 20899;
+        let grafted_id = 99423;
+
+        let parent = detail_with_relations(
+            parent_id,
+            "Parent Show",
+            "Parent Show",
+            Some(12),
+            vec![related(
+                neighbor_id,
+                "Parent Show Franchise",
+                "Parent Show Franchise",
+                "PREQUEL",
+                Some(26),
+            )],
+        );
+        let neighbor = detail_with_relations(
+            neighbor_id,
+            "Parent Show Franchise",
+            "Parent Show Franchise",
+            Some(26),
+            vec![related(
+                grafted_id,
+                "Parent Show: Continuation Arc",
+                "Parent Show: Continuation Arc",
+                "SEQUEL",
+                Some(7),
+            )],
+        );
+        let mut neighbors = std::collections::HashMap::new();
+        neighbors.insert(neighbor_id, neighbor);
+
+        let expanded = expand_parent_with_transitive_relations(&parent, &neighbors);
+
+        // Subtitle path: filenames mention "Continuation Arc" as the
+        // trailing subtitle. Use synthetic tokens — no real group or
+        // real release title formatting claimed here.
+        let files: Vec<String> = (1..=7)
+            .map(|n| format!("fixture-parent-show continuation arc - {:02} (bd 1080p) [hash].mkv", n))
+            .collect();
+
+        let siblings = detect_sibling_entries_in_pack(&files, &expanded);
+        assert_eq!(
+            siblings.len(),
+            1,
+            "grafted sibling should be detected after transitive walk"
+        );
+        assert_eq!(siblings[0].anilist_id, grafted_id);
+        assert_eq!(siblings[0].file_indices.len(), 7);
     }
 
     #[test]

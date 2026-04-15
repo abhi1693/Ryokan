@@ -1992,7 +1992,54 @@ async fn auto_expand_library_from_pack_with_files(
     )
     .await;
 
-    let siblings = auto_search::detect_sibling_entries_in_pack(filenames, parent_detail);
+    // Depth-1 transitive relation walk: AniList's relation graph
+    // has missing direct edges across split sagas (Monogatari is
+    // the motivating case — Owarimonogatari 21262 does not list
+    // Owarimonogatari 2nd Season 99423 as a direct neighbor, but
+    // reaches it via the shared saga graph). Before running sibling
+    // detection we fetch each walkable direct neighbor's AL detail,
+    // then graft its OWN relations onto the parent so
+    // `detect_sibling_entries_in_pack` sees a broader candidate
+    // pool. Fetches are capped by
+    // `auto_search::TRANSITIVE_WALK_MAX_FETCHES` and every call
+    // goes through the AL detail cache so repeat grabs within the
+    // TTL are free. Failures are soft — any neighbor we can't fetch
+    // is silently skipped and detection falls back to the parent's
+    // direct relations.
+    let mut neighbor_details: std::collections::HashMap<i64, anilist::AnimeDetail> =
+        std::collections::HashMap::new();
+    let mut fetched = 0_usize;
+    for rel in &parent_detail.relations {
+        if fetched >= auto_search::TRANSITIVE_WALK_MAX_FETCHES {
+            break;
+        }
+        if !auto_search::is_transitive_walk_source(&rel.relation_type) {
+            continue;
+        }
+        if !rel.media_type.eq_ignore_ascii_case("ANIME") {
+            continue;
+        }
+        if rel.id <= 0 {
+            continue;
+        }
+        match anilist::get_anime_detail(rel.id).await {
+            Ok(detail) => {
+                neighbor_details.insert(rel.id, detail);
+                fetched += 1;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "auto-expand: transitive neighbor fetch failed rel_id={} rel_type={} err={}",
+                    rel.id,
+                    rel.relation_type,
+                    e
+                );
+            }
+        }
+    }
+    let expanded_parent =
+        auto_search::expand_parent_with_transitive_relations(parent_detail, &neighbor_details);
+    let siblings = auto_search::detect_sibling_entries_in_pack(filenames, &expanded_parent);
     if siblings.is_empty() {
         logger::info(
             db,
