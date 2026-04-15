@@ -1346,6 +1346,7 @@ function addSeries() {
 function removeSeries(dbId) {
     if (!confirm('Remove from library?\n\nThis will also delete the series folder from disk and remove every torrent for this series from qBittorrent. Imported episodes and the Jellyfin folder will be gone.\n\nThis cannot be undone.')) return;
     const btn = document.getElementById('btn-track');
+    const originalText = btn.textContent;
     btn.disabled = true;
     btn.textContent = '...';
 
@@ -1355,17 +1356,30 @@ function removeSeries(dbId) {
         body: JSON.stringify({id: dbId, delete_files: true})
     })
     .then(async r => {
+        // Backend always replies with JSON now — success body is the
+        // cleanup summary, error body is {ok:false, stage, message}.
+        // Best-effort parse so a malformed body still shows *something*
+        // useful instead of silently collapsing to a generic 'Error'.
         let data = {};
         try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Remove failed');
+        if (!r.ok) {
+            const stage = data.stage ? ' [' + data.stage + ']' : '';
+            throw new Error((data.message || 'Remove failed') + stage);
+        }
         return data;
     })
     .then(() => {
         window.location.href = '/';
     })
-    .catch(() => {
-        btn.textContent = 'Error';
-        btn.className = 'btn btn-danger';
+    .catch(err => {
+        // Surface the real reason instead of the old generic 'Error'
+        // button state — this was the bug where rss_seen's missing
+        // ON DELETE CASCADE silently blocked every remove with
+        // "FOREIGN KEY constraint failed" and the user had no way to
+        // see it without devtools.
+        alert('Remove failed:\n\n' + (err && err.message ? err.message : 'unknown error'));
+        btn.disabled = false;
+        btn.textContent = originalText;
     });
 }
 function updateEpisodeRow(epNum, state, group) {

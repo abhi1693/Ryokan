@@ -267,6 +267,29 @@ pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM series_relations_cache WHERE series_id = ?").bind(id).execute(db).await.ok();
     sqlx::query("DELETE FROM series_episode_metadata WHERE series_id = ?").bind(id).execute(db).await.ok();
 
+    // Detach the rss_seen audit trail from this series before the
+    // DELETE below, or the final series delete will fail with
+    // "FOREIGN KEY constraint failed". Every other child table that
+    // references series(id) has `ON DELETE CASCADE`, but rss_seen is
+    // declared `NO ACTION` on purpose — the historical log of which
+    // RSS items matched which series is useful to keep after a
+    // removal, and `series_title` is stored alongside `series_id` on
+    // each rss_seen row precisely so the audit trail survives the
+    // FK being broken. sqlx enables `PRAGMA foreign_keys = ON` by
+    // default, so even though nothing in this codebase asks for it,
+    // the enforcement is live and a series with any RSS matches
+    // cannot be deleted without first NULL-ing this reference.
+    //
+    // `.ok()` because this is a best-effort audit-trail cleanup and
+    // a failure here shouldn't block the removal — if it really did
+    // fail, the series DELETE below would surface the same error
+    // via the FK violation and the caller would see it anyway.
+    sqlx::query("UPDATE rss_seen SET series_id = NULL WHERE series_id = ?")
+        .bind(id)
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query("DELETE FROM series WHERE id = ?")
         .bind(id)
         .execute(db)
@@ -362,5 +385,95 @@ pub fn default_monitor_mode(status: &str) -> MonitorMode {
     match upper.as_str() {
         "FINISHED" | "FINISHED_AIRING" | "CANCELLED" => MonitorMode::Missing,
         _ => MonitorMode::Future,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the "Remove from Library → generic error, no
+    /// log" bug. `rss_seen` is the only table referencing `series(id)`
+    /// without `ON DELETE CASCADE`; once RSS sync has matched any item
+    /// to a series, the parent DELETE fails the FK constraint (sqlx
+    /// enables `PRAGMA foreign_keys = ON` by default) and the remove
+    /// handler returns 500 with "FOREIGN KEY constraint failed" — a
+    /// message the frontend swallows, showing a generic "Error" on the
+    /// button.
+    ///
+    /// The fix NULL-es out `rss_seen.series_id` inside `series::remove`
+    /// before the parent DELETE, detaching the audit trail so the
+    /// constraint is satisfied while preserving the rss_seen rows
+    /// themselves (they keep `series_title` so the historical log
+    /// remains useful).
+    #[tokio::test]
+    async fn remove_succeeds_when_rss_seen_rows_reference_series() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("full migrate");
+
+        // Seed a minimal series row. Only `anilist_id` and `title` are
+        // NOT NULL; everything else takes its column default.
+        let series_id: i64 = sqlx::query_scalar(
+            "INSERT INTO series (anilist_id, title) VALUES (?, ?) RETURNING id",
+        )
+        .bind(188388_i64)
+        .bind("DIGIMON BEATBREAK")
+        .fetch_one(&db)
+        .await
+        .expect("insert series");
+
+        // Seed a couple of rss_seen rows that reference it — one
+        // "grabbed", one "skipped" — so the audit trail has meaningful
+        // content to survive the removal. The `item_key` UNIQUE index
+        // forces the keys to differ.
+        for (i, decision) in ["grabbed", "skipped"].iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO rss_seen (item_key, title, link, series_id, series_title, group_name, is_batch, decision, reason)
+                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, '')",
+            )
+            .bind(format!("beatbreak-item-{}", i))
+            .bind("[Judas] Digimon Beatbreak - S01E26")
+            .bind("https://nyaa.si/view/stub")
+            .bind(series_id)
+            .bind("DIGIMON BEATBREAK")
+            .bind("Judas")
+            .bind(*decision)
+            .execute(&db)
+            .await
+            .expect("insert rss_seen");
+        }
+
+        // Before the fix: this fails with "FOREIGN KEY constraint failed"
+        // because the rss_seen rows still point at series_id with no
+        // CASCADE to clear them. After the fix: the UPDATE inside
+        // series::remove NULL-es those rows first, then the parent
+        // DELETE succeeds cleanly.
+        remove(&db, series_id).await.expect("series::remove should succeed");
+
+        // The series row is gone.
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE id = ?")
+            .bind(series_id)
+            .fetch_one(&db)
+            .await
+            .expect("count series");
+        assert_eq!(remaining, 0, "series row should be deleted");
+
+        // The rss_seen rows SURVIVE — the audit trail is preserved on
+        // purpose — but their series_id is now NULL, and series_title
+        // still carries the human-readable label for after-the-fact
+        // inspection.
+        let rss_rows: Vec<(Option<i64>, String, String)> = sqlx::query_as(
+            "SELECT series_id, series_title, decision FROM rss_seen ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("fetch rss_seen");
+        assert_eq!(rss_rows.len(), 2, "rss_seen rows should survive removal");
+        for (id, title, _decision) in &rss_rows {
+            assert!(id.is_none(), "series_id should be NULL after removal");
+            assert_eq!(title, "DIGIMON BEATBREAK", "series_title preserved");
+        }
     }
 }

@@ -1420,17 +1420,53 @@ pub async fn reconcile_fallbacks(
 pub async fn remove_series(
     State(state): State<AppState>,
     Json(form): Json<RemoveSeriesForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let series_id = form.id;
     let delete_files = form.delete_files.unwrap_or(true);
+
+    // Centralised error exit for this handler. Before the rss_seen fix,
+    // any failure here (FK violations, stale grabbed_torrents, qBit
+    // misconfiguration) returned a plain-text 500 body that the JS in
+    // series.html silently swallowed, leaving the user staring at a
+    // generic "Error" on the button with nothing in the logs tab. This
+    // helper:
+    //   1. Writes a LogCategory::Library error row so the failure shows
+    //      up in the app's own logs view, not just the devtools network
+    //      tab.
+    //   2. Returns a JSON body `{ok:false, stage, message}` so the
+    //      frontend can display the real reason without having to
+    //      special-case content types.
+    async fn fail_with(
+        db: &sqlx::SqlitePool,
+        series_id: i64,
+        stage: &'static str,
+        err: String,
+    ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+        logger::error(
+            db,
+            LogCategory::Library,
+            &format!("Remove from library failed at {} (id={})", stage, series_id),
+            &err,
+        )
+        .await;
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "stage": stage,
+                "message": err,
+            })),
+        )
+    }
 
     // Look up the series row up front so we have folder_name to delete on
     // disk and a useful title for the log line. A missing row isn't fatal
     // — the DB delete below is idempotent — but we have no folder/torrent
     // cleanup work to do in that case.
-    let tracked = series::get_by_id(&state.db, series_id)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let tracked = match series::get_by_id(&state.db, series_id).await {
+        Ok(t) => t,
+        Err(e) => return Err(fail_with(&state.db, series_id, "lookup", e.to_string()).await),
+    };
 
     let mut torrents_removed: u64 = 0;
     let mut torrent_failures: Vec<String> = Vec::new();
@@ -1443,9 +1479,12 @@ pub async fn remove_series(
             //    grabbed for this series. A failure on one torrent is logged
             //    but doesn't abort the rest of the cleanup — we'd rather end
             //    in a partially-clean state than orphan the DB row.
-            let hashes = grabbed_torrents::get_all_for_series(&state.db, series_id)
-                .await
-                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let hashes = match grabbed_torrents::get_all_for_series(&state.db, series_id).await {
+                Ok(h) => h,
+                Err(e) => {
+                    return Err(fail_with(&state.db, series_id, "list_grabbed_torrents", e.to_string()).await);
+                }
+            };
 
             if !hashes.is_empty() {
                 let qbit_opt = state.qbit.read().await.clone();
@@ -1528,9 +1567,9 @@ pub async fn remove_series(
     // 4. Remove the DB tracking rows. This is the irreversible step, so
     //    do it last — if filesystem cleanup blew up the operator can
     //    still inspect the half-cleaned state via the Library page.
-    series::remove(&state.db, series_id)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Err(e) = series::remove(&state.db, series_id).await {
+        return Err(fail_with(&state.db, series_id, "delete_series", e.to_string()).await);
+    }
 
     // 5. Nudge Jellyfin to rescan so the now-deleted folder disappears
     //    from its UI without waiting for the next scheduled sweep. Best
