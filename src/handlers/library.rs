@@ -1888,9 +1888,6 @@ fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32>
     ep_nums
 }
 
-/// Returns the number of siblings *newly added* to the library
-/// (upserts that hit an existing row don't count).
-#[allow(clippy::too_many_arguments)]
 /// Grab-time context threaded through the auto-expand path so each
 /// detected sibling series gets its own `episode_quality_tags` +
 /// `episode_grab_history` rows alongside its route record. Without
@@ -1907,6 +1904,8 @@ struct AutoExpandGrabContext {
     size_bytes: i64,
 }
 
+/// Returns the number of siblings *newly added* to the library
+/// (upserts that hit an existing row don't count).
 #[allow(clippy::too_many_arguments)]
 async fn auto_expand_library_from_pack(
     db: &SqlitePool,
@@ -3639,8 +3638,7 @@ pub async fn episode_download_progress(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let series_pending: Vec<_> = pending.iter().filter(|g| g.series_id == tracked.id).collect();
-    if series_pending.is_empty() {
+    if pending.is_empty() {
         return Ok(Json(Vec::new()));
     }
 
@@ -3659,7 +3657,36 @@ pub async fn episode_download_progress(
         .collect();
 
     let mut results = Vec::new();
-    for grab in &series_pending {
+    for grab in &pending {
+        // Phase 2: consult `grabbed_torrent_series` so sibling pages
+        // surface the parent torrent's progress. Auto-expand writes
+        // one route row per sibling + one for the parent; each row
+        // carries that series' own effective (post-offset) episode
+        // numbers. When routes exist we trust them exclusively (same
+        // rule post-processing uses), so the legacy parent-only match
+        // on `grab.series_id` is skipped for auto-expanded grabs.
+        // Without this, the sibling's progress bar is stuck at 0.0%
+        // — its `episode_quality_tags` rows exist (so the DOM bar
+        // renders) but the poller can't find a matching grab row
+        // keyed to the sibling's series_id.
+        let routes = crate::models::grabbed_torrents::get_series_routes(&state.db, grab.id)
+            .await
+            .unwrap_or_default();
+        let ep_nums: Vec<i32> = if !routes.is_empty() {
+            routes
+                .iter()
+                .filter(|r| r.series_id == tracked.id)
+                .flat_map(|r| r.episode_numbers.iter().copied())
+                .collect()
+        } else if grab.series_id == tracked.id {
+            grab.episode_numbers.clone()
+        } else {
+            continue;
+        };
+        if ep_nums.is_empty() {
+            continue;
+        }
+
         let torrent = if !grab.hash.is_empty() {
             by_hash.get(&grab.hash.to_lowercase()).copied()
         } else {
@@ -3672,9 +3699,9 @@ pub async fn episode_download_progress(
             continue;
         };
 
-        for ep in &grab.episode_numbers {
+        for ep in ep_nums {
             results.push(EpisodeProgress {
-                episode: *ep,
+                episode: ep,
                 progress: t.progress,
                 speed: t.dlspeed,
                 state: t.state.clone(),
