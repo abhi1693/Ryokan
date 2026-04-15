@@ -270,10 +270,23 @@ async fn import_torrent(
         .await
         .unwrap_or_default();
 
-    // file_idx → target series_id, flattened from the routes table.
-    let routes_by_file: HashMap<usize, i64> = routes
+    // file_idx → (target series_id, episode_offset), flattened from
+    // the routes table. `episode_offset` is subtracted from each
+    // file's parsed episode number before the file is renamed /
+    // tagged so absolute-numbered batches (e.g. smol Monogatari
+    // S07E14 → Owari S2 E01 with offset 13) land under the correct
+    // arc-local episode number. Offset is 0 for siblings with arc-
+    // local numbering and for all legacy routes (via COALESCE in the
+    // model read).
+    let routes_by_file: HashMap<usize, (i64, i32)> = routes
         .iter()
-        .flat_map(|r| r.file_indices.iter().map(move |i| (*i, r.series_id)))
+        .flat_map(|r| {
+            let series_id = r.series_id;
+            let offset = r.episode_offset;
+            r.file_indices
+                .iter()
+                .map(move |i| (*i, (series_id, offset)))
+        })
         .collect();
 
     let qbit = state
@@ -350,10 +363,10 @@ async fn import_torrent(
         // grabs and for any completed video file whose index wasn't
         // covered by a route (e.g. extension mismatch between
         // `auto_search::is_media_filename` and [`is_video_file`]).
-        let target_series_id = routes_by_file
+        let (target_series_id, ep_offset) = routes_by_file
             .get(file_idx)
             .copied()
-            .unwrap_or(grab.series_id);
+            .unwrap_or((grab.series_id, 0));
 
         // Can't use the clean `Entry::or_insert_with_async` pattern
         // because the loader is async and `entry()` borrows the map
@@ -404,7 +417,7 @@ async fn import_torrent(
                 }
             });
 
-        let Some(ep_num) = ep_num else {
+        let Some(raw_ep_num) = ep_num else {
             logger::warn(
                 &state.db,
                 LogCategory::PostProcess,
@@ -414,6 +427,32 @@ async fn import_torrent(
             .await;
             continue;
         };
+
+        // Apply per-route episode_offset. For absolute-numbered
+        // continuation packs (smol Monogatari S07E14 → Owari S2 E01,
+        // NoobSubs JoJo E25 → Egypt-hen E01), the offset was computed
+        // at detection time as parent_cap so E14 - 13 = E01. A non-
+        // positive result means the route/file mismatch is bad (file
+        // landed on a sibling whose offset is larger than the file's
+        // own episode number) — log and skip rather than write a
+        // bogus E0 file.
+        let ep_num = raw_ep_num - ep_offset;
+        if ep_num <= 0 {
+            logger::warn(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Skipping '{}' — effective ep {} after offset {} is non-positive",
+                    filename_only, ep_num, ep_offset
+                ),
+                &format!(
+                    "series={}, raw_ep={}, ep_offset={}",
+                    ctx.series.title, raw_ep_num, ep_offset
+                ),
+            )
+            .await;
+            continue;
+        }
 
         let ep_title = ctx
             .ep_meta

@@ -484,3 +484,120 @@ pub struct GrabbedTorrentWithSeries {
     pub series_title: String,
     pub anilist_id: i64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::series;
+
+    /// Round-trip a GrabSeriesRoute through record_grab_series_routes
+    /// + get_series_routes to verify the new episode_offset column is
+    /// written and read correctly. Covers Commit 3's schema plumbing
+    /// (ALTER TABLE ADD COLUMN + INSERT bind + SELECT with COALESCE).
+    #[tokio::test]
+    async fn grab_series_route_round_trip_preserves_episode_offset() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21320,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(13),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let (sibling_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21860,
+                mal_id: None,
+                title: "Owarimonogatari Second Season",
+                title_romaji: "Owarimonogatari Second Season",
+                title_english: "Owarimonogatari Second Season",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(7),
+                season_year: Some(2017),
+                end_year: Some(2017),
+            },
+        )
+        .await
+        .expect("sibling upsert");
+
+        let grab_id = record_grab(
+            &db,
+            "roundtriphash0000000000000000000000000000",
+            "[smol] Monogatari S07 (Owarimonogatari) [BD 1080p]",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        let routes = vec![
+            // Parent route: no offset.
+            GrabSeriesRoute {
+                grab_id,
+                series_id: parent_id,
+                file_indices: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                episode_numbers: (1..=13).collect(),
+                matched_subtitle: String::new(),
+                episode_offset: 0,
+            },
+            // Sibling route: absolute-numbered, offset = parent cap.
+            GrabSeriesRoute {
+                grab_id,
+                series_id: sibling_id,
+                file_indices: vec![13, 14, 15, 16, 17, 18, 19],
+                episode_numbers: (14..=20).collect(),
+                matched_subtitle: "episode-range fallback (14..=20)".to_string(),
+                episode_offset: 13,
+            },
+        ];
+
+        record_grab_series_routes(&db, &routes)
+            .await
+            .expect("record routes");
+
+        let read_back = get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(read_back.len(), 2);
+
+        let parent_route = read_back
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route");
+        assert_eq!(parent_route.episode_offset, 0);
+
+        let sibling_route = read_back
+            .iter()
+            .find(|r| r.series_id == sibling_id)
+            .expect("sibling route");
+        assert_eq!(sibling_route.episode_offset, 13);
+        assert_eq!(
+            sibling_route.matched_subtitle,
+            "episode-range fallback (14..=20)"
+        );
+        assert_eq!(sibling_route.file_indices.len(), 7);
+    }
+}
