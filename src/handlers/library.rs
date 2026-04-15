@@ -1960,15 +1960,59 @@ async fn auto_expand_library_from_pack_with_files(
     grab_id: i64,
     torrent_title: &str,
 ) -> usize {
+    let parent_title = if !parent_detail.title_english.is_empty() {
+        parent_detail.title_english.as_str()
+    } else {
+        parent_detail.title_romaji.as_str()
+    };
+
     if parent_detail.id <= 0 {
+        logger::debug(
+            db,
+            LogCategory::Library,
+            "Auto-expand: skipping sibling detection, parent has no AniList id",
+            &format!("parent_series_id={}, torrent='{}'", parent_series_id, torrent_title),
+        )
+        .await;
         return 0;
     }
+
+    logger::debug(
+        db,
+        LogCategory::Library,
+        &format!(
+            "Auto-expand: scanning {} file(s) for siblings of '{}'",
+            filenames.len(),
+            parent_title
+        ),
+        &format!(
+            "parent_anilist_id={}, torrent='{}'",
+            parent_detail.id, torrent_title
+        ),
+    )
+    .await;
 
     let siblings = auto_search::detect_sibling_entries_in_pack(filenames, parent_detail);
     if siblings.is_empty() {
+        logger::info(
+            db,
+            LogCategory::Library,
+            &format!(
+                "Auto-expand: no siblings detected in pack '{}'",
+                torrent_title
+            ),
+            &format!(
+                "parent='{}', parent_anilist_id={}, files={}",
+                parent_title,
+                parent_detail.id,
+                filenames.len()
+            ),
+        )
+        .await;
         return 0;
     }
 
+    let siblings_considered = siblings.len();
     let mut added = 0_usize;
     let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut routes: Vec<grabbed_torrents::GrabSeriesRoute> = Vec::new();
@@ -2141,6 +2185,22 @@ async fn auto_expand_library_from_pack_with_files(
             .await;
         }
     }
+
+    logger::info(
+        db,
+        LogCategory::Library,
+        &format!(
+            "Auto-expand: finished batch '{}' — {} sibling(s) added",
+            torrent_title, added
+        ),
+        &format!(
+            "parent='{}', siblings_considered={}, routes_written={}",
+            parent_title,
+            siblings_considered,
+            routes.len()
+        ),
+    )
+    .await;
 
     added
 }
