@@ -42,10 +42,19 @@ pub struct GroupSourceEntry {
 /// blocklist (ASW, bonkai77, Trix, …) are intentionally omitted. That list
 /// governs scoring, not source classification.
 ///
-/// Confidence is 0.95 across the board: a group's tier ranking reflects
-/// encoding quality, not how reliably the source can be inferred. Entries
-/// are inserted with `INSERT OR IGNORE`, so user edits (which set
-/// `is_user_edit = 1`) are never overwritten by the seed pass.
+/// Confidence is 0.95 for single-source groups: a group's tier ranking
+/// reflects encoding quality, not how reliably the source can be inferred,
+/// but when a group works exclusively in one source the name alone is a
+/// strong signal. A handful of groups (currently just Judas) ship in both
+/// BD and WEB and are held below `CONFLICT_THRESHOLD` (0.70) so the group
+/// signal acts as a soft prior rather than overriding other layers — see
+/// the inline comment on their seed row for the rationale.
+///
+/// Entries are inserted with `INSERT OR IGNORE`, so user edits (which set
+/// `is_user_edit = 1`) are never overwritten by the seed pass. One-shot
+/// corrections to non-user-edited rows (e.g. "Judas was seeded at 0.95
+/// before we realised it was mixed-source") live in `reconcile_seed_drift`
+/// and run once per migration.
 pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     // ── Legacy BD encoders ────────────────────────────────────────────────
     // Well-known BD-only encoders that predate or sit outside the current
@@ -222,7 +231,12 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("EDGE", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("EMBER", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("GHOST", Source::BluRay, 0.95, "TRaSH BD tier 08"),
-    ("Judas", Source::BluRay, 0.95, "TRaSH BD tier 08"),
+    // Judas ships weekly WEB rips during airing *and* BD encodes post-broadcast,
+    // so they're on TRaSH's BD tier 08 list but also put out a lot of WEB. Held
+    // below STRONG_THRESHOLD (0.90) and CONFLICT_THRESHOLD (0.70) so the group
+    // signal acts as a soft BluRay prior when it's the only evidence, without
+    // overriding filename/ffprobe/temporal when those point at Web.
+    ("Judas", Source::BluRay, 0.60, "TRaSH BD tier 08 (mixed BD/WEB — low confidence)"),
     ("naiyas", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Nep_Blanc", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Prof", Source::BluRay, 0.95, "TRaSH BD tier 08"),
@@ -339,6 +353,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
     seed_defaults(db).await?;
+    reconcile_seed_drift(db).await?;
 
     Ok(())
 }
@@ -355,6 +370,33 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .bind(source.as_str())
         .bind(*confidence)
         .bind(notes)
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
+/// One-shot corrections for seed rows whose built-in value has changed
+/// since an earlier release. `seed_defaults` uses `INSERT OR IGNORE`, so
+/// an existing row keeps whatever value it was first seeded with — which
+/// means a bad default (e.g. Judas seeded at 0.95 before we realised it
+/// was a mixed BD/WEB group) never self-corrects on upgrade.
+///
+/// This pass realigns non-user-edited rows (`is_user_edit = 0`) to the
+/// current `SEED_DEFAULTS` values. User edits are preserved: anyone who
+/// deliberately set their own confidence for a group keeps it. The
+/// update is idempotent — rows that already match the seed are a no-op.
+pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    for (name, source, confidence, notes) in SEED_DEFAULTS {
+        sqlx::query(
+            "UPDATE group_source_map
+             SET source = ?, confidence = ?, notes = ?
+             WHERE group_name = ? AND is_user_edit = 0",
+        )
+        .bind(source.as_str())
+        .bind(*confidence)
+        .bind(notes)
+        .bind(name)
         .execute(db)
         .await?;
     }

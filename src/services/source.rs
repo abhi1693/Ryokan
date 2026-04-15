@@ -614,14 +614,28 @@ fn origin_priority(origin: &str) -> u8 {
 ///
 /// Rules, applied in order:
 /// 1. If all strong signals (confidence ≥ `STRONG_THRESHOLD`, 0.90) agree
-///    on a single source, pick the highest-confidence one. On exact ties,
-///    prefer filename (Layer 1) origin — the torrent title is the primary
-///    source of truth and other layers *supplement* it. If the strong
-///    signals disagree on source, fall through to rule 2 so rule 4 can
-///    detect the conflict and flag `needs_review`. Without this guard,
-///    two disagreeing strong signals (e.g. filename says WEB-DL at 0.95,
-///    directory walk found BDMV/ at 0.95) would be silently resolved by
-///    source rank alone, masking a conflict a human should see.
+///    on a single source **and** the per-source sum from rule 2 picks
+///    that same source as the leader, pick the highest-confidence strong
+///    signal. On exact ties among strong signals, prefer the filename
+///    layer origin — the torrent title is the primary source of truth
+///    and other layers *supplement* it.
+///
+///    The rule-2 cross-check exists to handle mixed-source groups like
+///    Judas: `group_source_map` seeds Judas at 0.95 BluRay (it's on
+///    TRaSH's BD tier 08), but Judas also ships weekly WEB rips during
+///    airing. If the filename/ffprobe/temporal layers all sub-strongly
+///    point at Web (≈ 0.75–0.85 each) while the group layer strongly
+///    points at BluRay, rule 2's summed evidence clearly favours Web —
+///    so the strong single-signal shortcut would be *wrong* to fire.
+///    Falling through lets the accumulated sub-strong evidence win the
+///    rule-2 path, which is the aggregator's designed behaviour.
+///
+///    If the strong signals disagree among themselves (e.g. filename
+///    says WEB-DL at 0.95, directory walk found BDMV/ at 0.95), rule 1
+///    also falls through so rule 4 can detect the conflict and flag
+///    `needs_review`. Without this guard, two disagreeing strong signals
+///    would be silently resolved by source rank alone, masking a
+///    conflict a human should see.
 /// 2. Otherwise, sum confidences per source across all evidence — but first
 ///    clamp each *origin's* contribution per source at `ORIGIN_MAX`. This
 ///    prevents any single layer from stacking so many corroborating
@@ -654,9 +668,42 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
         return ClassificationResult::unknown();
     }
 
-    // Rule 1: strong single-signal shortcut. Only fires when every strong
-    // signal agrees on the same source — disagreement falls through to
-    // rule 2+4 so the conflict gets flagged rather than silently picked.
+    // Rule 2's per-source sum is computed *first* so rule 1 can
+    // cross-check its strong-signal decision against it. We build a
+    // `(source, origin) -> sum` map, clamp each bucket at ORIGIN_MAX,
+    // then re-sum per source. A filename layer firing BDRip (0.95) +
+    // FLAC (0.85) = 1.80 for BluRay gets clamped to 1.30 here, leaving
+    // room for a contradicting ground-truth signal to still win or at
+    // least trip rule 4/5.
+    let mut per_origin: HashMap<(Source, &'static str), f32> = HashMap::new();
+    for e in evidence {
+        *per_origin.entry((e.source, e.origin)).or_insert(0.0) += e.confidence;
+    }
+    let mut sums: HashMap<Source, f32> = HashMap::new();
+    for ((source, _origin), sum) in per_origin {
+        *sums.entry(source).or_insert(0.0) += sum.min(ORIGIN_MAX);
+    }
+
+    let mut ranked: Vec<(Source, f32)> = sums.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.0.rank().cmp(&a.0.rank()))
+    });
+
+    let (leader, evidence_mass) = ranked[0];
+    let runner_sum = ranked.get(1).map(|(_, s)| *s).unwrap_or(0.0);
+    let lead = evidence_mass - runner_sum;
+
+    // Rule 1: strong single-signal shortcut. Only fires when every
+    // strong signal agrees on the same source **and** the rule-2
+    // per-source sum picks that source as the leader. The rule-2
+    // cross-check catches mixed-source groups (Judas on TRaSH BD tier
+    // 08 but also a prolific WEB ripper) where one strong group-layer
+    // signal would otherwise override multiple corroborating sub-
+    // strong signals from other layers. If the cross-check fails, we
+    // fall through to rule 2+3+4+5 — the same path disagreeing strong
+    // signals take — so the accumulated sub-strong evidence decides.
     let strong: Vec<&SourceEvidence> = evidence
         .iter()
         .filter(|e| e.confidence >= STRONG_THRESHOLD)
@@ -664,12 +711,14 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     if !strong.is_empty() {
         let first_source = strong[0].source;
         let all_agree = strong.iter().all(|e| e.source == first_source);
-        if all_agree {
-            // All strong signals point at the same source. Pick the
-            // highest-confidence one; ties broken by origin priority so
-            // filename (L1) wins over other origins when equal. This
-            // makes the filename the effective tie-breaker — the
-            // "primary source of truth" in the user's mental model.
+        if all_agree && leader == first_source {
+            // All strong signals point at the same source AND rule 2's
+            // accumulated sums agree it's the leader. Pick the
+            // highest-confidence strong signal; ties broken by origin
+            // priority so filename (L1) wins over other origins when
+            // equal. This makes the filename the effective tie-breaker
+            // — the "primary source of truth" in the user's mental
+            // model.
             let winner = strong
                 .iter()
                 .max_by(|a, b| {
@@ -691,35 +740,12 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
                 decision_rule: DecisionRule::Rule1Strong,
             };
         }
-        // Strong signals disagree — fall through to rule 2 so per-source
-        // sums can pick a leader and rule 4 can flag the conflict.
+        // Either the strong signals disagree among themselves, or
+        // rule 2's accumulated sum picks a different leader than
+        // the strong source. Fall through to rule 2+4 so the
+        // conflict is resolved by accumulated evidence and flagged
+        // for review if the runner-up is close.
     }
-
-    // Rule 2: sum per source, but cap each origin's contribution at
-    // ORIGIN_MAX first. We build a `(source, origin) -> sum` map, clamp
-    // each bucket at ORIGIN_MAX, then re-sum per source. A filename layer
-    // firing BDRip (0.95) + FLAC (0.85) = 1.80 for BluRay gets clamped to
-    // 1.30 here, leaving room for a contradicting ground-truth signal to
-    // still win or at least trip rule 4/5.
-    let mut per_origin: HashMap<(Source, &'static str), f32> = HashMap::new();
-    for e in evidence {
-        *per_origin.entry((e.source, e.origin)).or_insert(0.0) += e.confidence;
-    }
-    let mut sums: HashMap<Source, f32> = HashMap::new();
-    for ((source, _origin), sum) in per_origin {
-        *sums.entry(source).or_insert(0.0) += sum.min(ORIGIN_MAX);
-    }
-
-    let mut ranked: Vec<(Source, f32)> = sums.into_iter().collect();
-    ranked.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.0.rank().cmp(&a.0.rank()))
-    });
-
-    let (leader, evidence_mass) = ranked[0];
-    let runner_sum = ranked.get(1).map(|(_, s)| *s).unwrap_or(0.0);
-    let lead = evidence_mass - runner_sum;
 
     // Rule 3: total mass too weak, fall back to Unknown.
     if evidence_mass < MIN_TOTAL {
@@ -1793,6 +1819,34 @@ mod tests {
             ev(Source::Web, 0.90, "ffprobe"),
         ]);
         assert_eq!(rule5.decision_rule, DecisionRule::Rule5GroundTruthVeto);
+    }
+
+    #[test]
+    fn aggregate_rule_1_yields_to_rule_2_when_sums_overrule_strong_signal() {
+        // The Judas mixed-source case: the group layer fires a strong
+        // BluRay signal (0.95) because Judas is on TRaSH BD tier 08, but
+        // ffprobe and temporal both emit sub-strong Web signals (0.85 +
+        // 0.75 = 1.60 summed). Before the rule-1 cross-check, rule 1
+        // short-circuited on the lone strong signal and returned BluRay
+        // regardless, silently burying the (correct) Web evidence. Now
+        // rule 1 checks rule 2's leader before firing — if rule 2 picks
+        // a different source, rule 1 falls through and rule 2 decides.
+        let evidence = vec![
+            ev(Source::BluRay, 0.95, "group"),
+            ev(Source::Web, 0.85, "ffprobe"),
+            ev(Source::Web, 0.75, "temporal"),
+        ];
+        let result = aggregate(&evidence);
+        assert_eq!(result.source, Source::Web);
+        // Clean rule-2 win: Web sums to 1.60, BluRay to 0.95, lead 0.65
+        // which is comfortably above MIN_LEAD (0.30). ffprobe's 0.85 is
+        // below STRONG_THRESHOLD so rule 5 stays silent. No review flag.
+        assert!(
+            !result.needs_review,
+            "clean rule-2 win with sub-threshold ground truth should not flag review: {:#?}",
+            result.evidence,
+        );
+        assert_eq!(result.decision_rule, DecisionRule::Rule2Sum);
     }
 
     #[test]
