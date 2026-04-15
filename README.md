@@ -43,7 +43,7 @@ Ryokan's post-processor reads completed torrents from qBittorrent and imports th
 
 ## Running locally
 
-Requires Rust 1.85+, a C linker, and OpenSSL dev headers.
+Requires Rust 1.88+, a C linker, and OpenSSL dev headers.
 
 ```bash
 cargo run
