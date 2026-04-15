@@ -43,6 +43,43 @@ static RE_BARE_NUM_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
     // `something 99 (extra) 12 (...)` still resolves to 12, not 99.
     Regex::new(r"(?:^|\s)(\d{1,3})(?:v\d)?\s+[\(\[]").expect("RE_BARE_NUM_BRACKET compiles")
 });
+static RE_OVA_EP: LazyLock<Regex> = LazyLock::new(|| {
+    // Explicit `OVA NN` / `OVA01` episode marker — used by
+    // multi-episode OVA releases (e.g. the JoJo 1993 / 2000 6-episode
+    // OVA sets shaped `<title> - OVA 01.mkv`). Must fire BEFORE the
+    // bare-number branches so `- OVA 01.` resolves to 1 instead of
+    // being shadowed by an earlier title-side digit. Must NOT match
+    // bare `- OVA.` with no trailing digit — single-OVA AL entries
+    // (e.g. Nichijou no 0) legitimately have no episode number and
+    // should fall through to `None` rather than be invented.
+    Regex::new(r"(?:^|[\s._\-])ova\s*(\d{1,3})(?:v\d)?(?:\s|\.|\[|\(|$)")
+        .expect("RE_OVA_EP compiles")
+});
+
+/// Non-episodic subtitle markers that can sit where a real subtitle
+/// would in a `<title> NN - <subtitle>` filename. When the captured
+/// `NN` is followed by one of these markers, it's almost certainly a
+/// season/title number (e.g. `Chihayafuru 2 - OVA - Waga Miyo…`),
+/// not an episode, and the parser must bail rather than import the
+/// file under a mis-numbered slot.
+fn starts_with_non_episode_marker(rest: &str) -> bool {
+    let trimmed = rest.trim_start();
+    const MARKERS: &[&str] = &["ova", "special", "specials"];
+    for tok in MARKERS {
+        if let Some(after) = trimmed.strip_prefix(tok) {
+            // Word boundary: next char must not be another letter or
+            // digit (so `special` matches but `spectral` doesn't).
+            let bounded = match after.as_bytes().first() {
+                None => true,
+                Some(c) => !c.is_ascii_alphanumeric(),
+            };
+            if bounded {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// Sanitize a string for use as a folder name on disk.
 /// Replaces filesystem-unsafe characters and trims leading/trailing dots and whitespace.
@@ -183,20 +220,37 @@ fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
 /// - `- 05 (v2)`, `- 05v2`, `[group] Title - 05 [1080p]`
 /// - `E05`, `EP05`, `Ep.05`
 /// - `Episode 05`
+/// - `Title - OVA 01` (multi-episode OVA releases with explicit OVA marker)
 /// - `Title 05 - Subtitle` (no group bracket, bare number before subtitle)
 /// - `Title 05 (1080p) [hash]` (no group bracket, bare number before quality bracket)
+/// - Underscore-delimited filenames (`Title_-_05_-_Subtitle`) are normalized
+///   to space-delimited before matching.
 ///
 /// Returns `None` for files explicitly tagged as creditless openings or
-/// endings (`NCOP`/`NCED`) so they aren't accidentally imported as
-/// episode-numbered content.
+/// endings (`NCOP`/`NCED`), for files where a captured bare-number is
+/// followed by a non-episodic marker like `OVA`/`Special`, and for
+/// single-OVA entries with no trailing digit.
 pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // Non-episodic content guard. Creditless openings/endings carry a
-    // small integer suffix (`NCOP 1`, `NCED 1`) that the bare-number
-    // fallback below would otherwise mis-parse as episode 1 and clobber
-    // the real ep1. Bail before any pattern fires.
+    // small integer suffix (`NCOP 1`, `NCED 1`, or even glued
+    // `NCED01a` from LOGH-style packs) that the bare-number
+    // fallback below would otherwise mis-parse as episode 1 and
+    // clobber the real ep1. Bail before any pattern fires.
     if lower.contains("ncop") || lower.contains("nced") {
         return None;
     }
+
+    // Underscore-delimited releases (HGS-Renc, some older groups)
+    // use `_` where most releases use ` `. Normalize once so a
+    // single set of patterns handles both shapes without having to
+    // dual-parse. Only allocates when an underscore is actually
+    // present — most inputs skip the replace.
+    let normalized = if lower.contains('_') {
+        Some(lower.replace('_', " "))
+    } else {
+        None
+    };
+    let lower = normalized.as_deref().unwrap_or(lower);
 
     // SxxExx pattern — most reliable.
     if let Some(caps) = RE_SXEX.captures(lower) {
@@ -223,12 +277,36 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
         return Some((None, e));
     }
 
+    // Explicit `OVA NN` marker — for multi-episode OVA releases
+    // whose filenames have no SxxExx and no leading `- NN -`. Must
+    // fire before the bare-number branches so that `Title - OVA 01.`
+    // resolves to 1 even when an earlier title token (e.g. a year)
+    // would otherwise shadow it. Bare `- OVA.` with no trailing
+    // digit correctly falls through here because RE_OVA_EP requires
+    // a captured 1-3 digit group.
+    if let Some(caps) = RE_OVA_EP.captures(lower) {
+        let e: i32 = caps.get(1)?.as_str().parse().ok()?;
+        return Some((None, e));
+    }
+
     // Bare-number-before-subtitle fallback. Shape:
     // `<title> NN - <subtitle>.mkv` — first match wins (subtitle may
     // contain its own ` <n> - ` run that should NOT shadow the real
     // episode marker).
     if let Some(caps) = RE_BARE_NUM_DASH.captures(lower) {
         if let Some(m) = caps.get(1) {
+            if let Some(full) = caps.get(0) {
+                // If what follows the ` - ` is a non-episodic marker
+                // (e.g. `Chihayafuru 2 - OVA - Waga Miyo…`), the
+                // captured `2` is a season/title number, not an
+                // episode. Bail with `None` rather than fall through
+                // to further patterns — the subsequent bare-number
+                // branch would re-capture the same false digit.
+                let rest = &lower[full.end()..];
+                if starts_with_non_episode_marker(rest) {
+                    return None;
+                }
+            }
             if let Ok(e) = m.as_str().parse::<i32>() {
                 return Some((None, e));
             }
@@ -537,6 +615,117 @@ mod tests {
         assert_eq!(
             parse("Naruto Arc 5 Sasuke Recovery Mission Arc Folder Icon.mkv"),
             None
+        );
+    }
+
+    // ── OVA episode marker (RE_OVA_EP) ───────────────────────────────
+
+    #[test]
+    fn ova_numbered_after_dash_resolves_to_episode() {
+        // Multi-episode OVA releases with explicit `OVA NN` marker.
+        // The 1993 and 2000 JoJo OVAs are 6 and 13 episodes
+        // respectively — collapsing them all onto episode 1 (the
+        // pre-RE_OVA_EP behavior via grab.episode_numbers fallback)
+        // would silently corrupt the library.
+        assert_eq!(parse("[Judas] JoJo 1993 - OVA 01.mkv"), Some((None, 1)));
+        assert_eq!(parse("[Judas] JoJo 2000 - OVA 01.mkv"), Some((None, 1)));
+    }
+
+    #[test]
+    fn bare_ova_with_no_trailing_digit_returns_none() {
+        // Single-OVA AL entries (e.g. Nichijou no 0, HSotD OVA)
+        // have bare `OVA` with no digit. RE_OVA_EP must NOT fire
+        // (it requires a captured digit), and no other branch
+        // should either. Nichijou specifically is a real AL entry
+        // (https://anilist.co/anime/8857) where mis-parsing `OVA`
+        // as an episode index could have disastrous outcomes.
+        assert_eq!(parse("[Judas] Nichijou - OVA.mkv"), None);
+        assert_eq!(
+            parse("[Polarwindz] High School of the Dead - OVA (BD 1080p HEVC Dual Audio).mkv"),
+            None
+        );
+    }
+
+    #[test]
+    fn s00_ova_subtitle_does_not_shadow_sxxexx() {
+        // `<title> - S00E09 OVA <subtitle>` — the `OVA` sits in the
+        // subtitle portion, not as an episode marker. RE_SXEX must
+        // win first and return the real season 0 / episode 9 so the
+        // OVA token is harmless context, not a re-parse hazard.
+        assert_eq!(
+            parse(
+                "[Sokudo] Boku no Hero Academia - S00E09 OVA Make It Do-or-Die Survival Training Part 2 [1080p AV1][dual audio].mkv"
+            ),
+            Some((Some(0), 9))
+        );
+    }
+
+    // ── Non-episodic marker guard on RE_BARE_NUM_DASH ────────────────
+
+    #[test]
+    fn season_number_before_ova_marker_is_not_episode() {
+        // `<title> N - OVA - <subtitle>.mkv` — the `N` is a season
+        // label (Chihayafuru 2), not an episode number. Without the
+        // marker guard, bare-num-dash would naively capture `2` and
+        // import the OVA file as episode 2 of the main series.
+        assert_eq!(
+            parse("[Judas] CHIHAYAFURU 2 - OVA - Waga Miyo ni Furu Nagame Shima ni.mkv"),
+            None
+        );
+    }
+
+    // ── NCED/NCOP with glued digits (contains guard) ─────────────────
+
+    #[test]
+    fn nced_glued_to_number_returns_none() {
+        // LOGH-style `NCED01a` / `NCOP01` — number is glued directly
+        // to the creditless marker. The top-level contains() guard
+        // catches any filename with `ncop` or `nced` anywhere in the
+        // name, so glued variants are covered without a dedicated
+        // pattern. Synthetic fixtures here because the guard is
+        // substring-based and isn't sensitive to surrounding tokens.
+        assert_eq!(parse("show-nced01a.mkv"), None);
+        assert_eq!(parse("show-ncop01.mkv"), None);
+    }
+
+    // ── Special / SP marker (no SxxExx, out-of-scope) ────────────────
+
+    #[test]
+    fn s03sp_special_marker_returns_none() {
+        // `S03SP01` — SP is Special. RE_SXEX requires a contiguous
+        // `SxxExx` shape so `S03SP01` falls through every pattern
+        // and returns `None`. Specials have ambiguous episode
+        // ordering and should NOT be silently mapped to a numbered
+        // slot; None is the safe outcome.
+        assert_eq!(parse("[Judas] CHIHAYAFURU - S03SP01.mkv"), None);
+    }
+
+    // ── Underscore-delimited filenames (normalization) ───────────────
+
+    #[test]
+    fn underscore_delimited_dash_ep_normalizes_to_space() {
+        // HGS-Renc uses `_` where newer groups use ` `. The
+        // underscore normalization converts `_-_02_-_` to
+        // ` - 02 - ` so RE_DASH_EP matches via the existing path.
+        assert_eq!(
+            parse("[HGS-Renc]_Crusher_Joe_-_02_-_The_Ice_Prison_[BD1080][HEVC].mkv"),
+            Some((None, 2))
+        );
+    }
+
+    // ── High School DxD S00E18 (RE_SXEX existing path) ───────────────
+
+    #[test]
+    fn s00e18_with_double_subtitle_dashes() {
+        // `<title> - S00E18 - <subtitle> (<quality>) [<tag>] [<tag>]`
+        // — multiple ` - ` delimiters around SxxExx. Regression
+        // guard that RE_SXEX wins before any dash-delimited branch
+        // fires on the subtitle segment.
+        assert_eq!(
+            parse(
+                "High School DxD - S00E18 - Holiness Behind the Gym (BD 1080p H.264 FLAC) [Dual Audio] [IK].mkv"
+            ),
+            Some((Some(0), 18))
         );
     }
 }
