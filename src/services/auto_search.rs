@@ -2427,6 +2427,21 @@ pub struct SiblingMatch {
     /// value — [`detect_sibling_entries_in_pack`] resolves overlaps by
     /// longest-subtitle-wins.
     pub file_indices: Vec<usize>,
+    /// How many episodes to subtract from each file's parsed episode
+    /// number before treating it as an episode of this sibling.
+    ///
+    /// Set to `parent_cap` when the sibling's files use numbering that
+    /// is continuous across the parent (e.g. a 20-ep Owarimonogatari
+    /// batch with `S07E14 - Owarimonogatari Second Season` — E14 is
+    /// Owari S2 episode 1 and needs offset 13 applied). Set to 0 when
+    /// the sibling's files use their own arc-local numbering (e.g. an
+    /// Egypt-hen pack with `Stardust Crusaders S03E01` filenames).
+    ///
+    /// Detection rule: if `min(sibling_file_ep_nums) > parent_cap`,
+    /// offset = `parent_cap`; otherwise offset = 0. Computed
+    /// per-sibling regardless of whether the match came from the
+    /// subtitle path or the episode-range fallback.
+    pub episode_offset: i32,
 }
 
 /// Relation types we'll consider in-pack candidates when scanning an
@@ -2522,9 +2537,12 @@ pub fn detect_sibling_entries_in_pack(
         candidates.push((rel_idx, subtitle, needle));
     }
 
-    if candidates.is_empty() {
-        return Vec::new();
-    }
+    // NOTE: intentionally do NOT early-return on empty `candidates`.
+    // The subtitle path can't find siblings whose titles either lack
+    // a delimiter or use a single-word / generic-ordinal subtitle
+    // (Egypt-hen, Second Season), but the episode-range fallback
+    // below may still attribute overflow files to a relation by
+    // episode count + title prefix. Let the fallback run.
 
     // First pass: for each media file, pick the candidate with the
     // LONGEST normalized needle that substring-matches the filename.
@@ -2586,10 +2604,210 @@ pub fn detect_sibling_entries_in_pack(
             season_year: rel.season_year,
             matched_subtitle: subtitle,
             file_indices,
+            // Populated in the offset pass below after fallback runs.
+            episode_offset: 0,
         });
     }
 
+    // Episode-range fallback: if the subtitle path came up empty
+    // (e.g. a NoobSubs-style pack where filenames carry plain episode
+    // numbers and no arc name, so `trailing_subtitle_of` + substring
+    // matching cannot find siblings), try to attribute episode-number
+    // overflow (files whose ep > parent's episode count) to a sibling
+    // whose own episode count makes the range fit.
+    //
+    // Only runs when `out.is_empty()` — i.e. the primary subtitle path
+    // produced zero matches. If even one sibling was subtitle-matched,
+    // we defer to that path and accept the known limitation that this
+    // fallback can't supplement partial matches.
+    if out.is_empty() {
+        if let Some(m) = detect_sibling_via_episode_range(filenames, parent_detail) {
+            out.push(m);
+        }
+    }
+
+    // Episode-offset pass: for every detected sibling (regardless of
+    // code path), compute `episode_offset` from its own matched file
+    // ep_nums. If the sibling's smallest parsed ep exceeds the parent's
+    // episode count, the filenames are continuous-numbered across the
+    // parent/sibling boundary and need `offset = parent_cap` applied
+    // downstream (e.g. smol Owari: E14 is Owari S2 episode 1). If the
+    // smallest ep is ≤ parent_cap, the filenames use arc-local numbering
+    // and no offset is needed.
+    let parent_cap = parent_detail.episodes.unwrap_or(0);
+    if parent_cap > 0 {
+        for m in out.iter_mut() {
+            m.episode_offset = compute_sibling_episode_offset(
+                &m.file_indices,
+                filenames,
+                parent_cap,
+            );
+        }
+    }
+
     out
+}
+
+/// Per-sibling offset detection. See [`SiblingMatch::episode_offset`].
+fn compute_sibling_episode_offset(
+    file_indices: &[usize],
+    filenames: &[String],
+    parent_cap: i32,
+) -> i32 {
+    if parent_cap <= 0 {
+        return 0;
+    }
+    let min_ep = file_indices
+        .iter()
+        .filter_map(|&i| filenames.get(i))
+        .filter(|n| is_media_filename(n))
+        .filter_map(|n| media::parse_episode_number(&n.to_ascii_lowercase()))
+        .map(|(_, ep)| ep)
+        .min();
+    match min_ep {
+        Some(m) if m > parent_cap => parent_cap,
+        _ => 0,
+    }
+}
+
+/// Layer 2 fallback: attribute files whose parsed episode number
+/// exceeds `parent_cap` to a single sibling relation that
+///
+/// 1. passes the pack-candidate relation-type gate,
+/// 2. is either a direct `SEQUEL` OR has a title that prefixes the
+///    parent's title (catches continuations where AniList's listed
+///    `SEQUEL` is semantically wrong — e.g. Owarimonogatari's listed
+///    SEQUEL is Tsukimonogatari, but the same-title continuation is
+///    Owarimonogatari Second Season),
+/// 3. has a known episode count,
+/// 4. and whose implied absolute episode range
+///    `(parent_cap + 1)..=(parent_cap + sibling_cap)` contains every
+///    overflow file.
+///
+/// If multiple siblings fit, prefer the title-prefix-matched one as a
+/// tiebreaker; if that's still ambiguous, bail. If zero fit, bail.
+fn detect_sibling_via_episode_range(
+    filenames: &[String],
+    parent_detail: &AnimeDetail,
+) -> Option<SiblingMatch> {
+    let parent_cap = parent_detail.episodes.unwrap_or(0);
+    if parent_cap <= 0 {
+        return None;
+    }
+
+    // Parse episodes per file (media files only).
+    let mut overflow: Vec<(usize, i32)> = Vec::new();
+    for (idx, name) in filenames.iter().enumerate() {
+        if !is_media_filename(name) {
+            continue;
+        }
+        let Some((_, ep)) = media::parse_episode_number(&name.to_ascii_lowercase()) else {
+            continue;
+        };
+        if ep > parent_cap {
+            overflow.push((idx, ep));
+        }
+    }
+    if overflow.is_empty() {
+        return None;
+    }
+    let overflow_min = overflow.iter().map(|(_, e)| *e).min().unwrap();
+    let overflow_max = overflow.iter().map(|(_, e)| *e).max().unwrap();
+    let overflow_count = overflow.len();
+
+    // Parent title prefixes for continuation matching. Both english
+    // and romaji forms are tried because AniList releases are
+    // commonly titled in either.
+    let parent_en = normalize_subtitle(&parent_detail.title_english);
+    let parent_ro = normalize_subtitle(&parent_detail.title_romaji);
+    let parent_prefixes: Vec<&str> = [parent_en.as_str(), parent_ro.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Walk relations for viable candidates.
+    let mut viable: Vec<(usize, bool)> = Vec::new(); // (rel_idx, title_prefix_matched)
+    for (rel_idx, rel) in parent_detail.relations.iter().enumerate() {
+        if !rel.media_type.eq_ignore_ascii_case("ANIME") {
+            continue;
+        }
+        if !is_pack_candidate_relation(&rel.relation_type) {
+            continue;
+        }
+        let sib_cap = match rel.episodes {
+            Some(n) if n > 0 => n,
+            _ => continue,
+        };
+
+        // Title-prefix test against both english and romaji forms of
+        // the relation. A match requires the relation's normalized
+        // title to *start with* a parent prefix AND be strictly longer
+        // (exact equality would be a self-match, not a continuation).
+        let rel_en = normalize_subtitle(&rel.title_english);
+        let rel_ro = normalize_subtitle(&rel.title_romaji);
+        let title_prefix_matched = parent_prefixes.iter().any(|p| {
+            let p_len = p.len();
+            (!rel_en.is_empty() && rel_en.len() > p_len && rel_en.starts_with(p))
+                || (!rel_ro.is_empty() && rel_ro.len() > p_len && rel_ro.starts_with(p))
+        });
+        let is_sequel = rel.relation_type.eq_ignore_ascii_case("SEQUEL");
+        if !title_prefix_matched && !is_sequel {
+            continue;
+        }
+
+        // Range-fit check.
+        let expected_min = parent_cap + 1;
+        let expected_max = parent_cap + sib_cap;
+        if overflow_min < expected_min || overflow_max > expected_max {
+            continue;
+        }
+        if !within_episode_slack(overflow_count, sib_cap) {
+            continue;
+        }
+
+        viable.push((rel_idx, title_prefix_matched));
+    }
+
+    let chosen = match viable.len() {
+        0 => return None,
+        1 => viable[0].0,
+        _ => {
+            // Tiebreaker: prefer title-prefix-matched candidates.
+            let prefixed: Vec<usize> =
+                viable.iter().filter(|(_, p)| *p).map(|(i, _)| *i).collect();
+            if prefixed.len() == 1 {
+                prefixed[0]
+            } else {
+                // Still ambiguous — refuse to guess.
+                return None;
+            }
+        }
+    };
+
+    let rel = &parent_detail.relations[chosen];
+    let sib_cap = rel.episodes.unwrap_or(0);
+    let mut file_indices: Vec<usize> = overflow.iter().map(|(i, _)| *i).collect();
+    file_indices.sort_unstable();
+
+    Some(SiblingMatch {
+        anilist_id: rel.id,
+        mal_id: rel.id_mal,
+        title_romaji: rel.title_romaji.clone(),
+        title_english: rel.title_english.clone(),
+        title_native: rel.title_native.clone(),
+        cover_url: rel.cover_url.clone(),
+        format: rel.format.clone(),
+        status: rel.status.clone(),
+        episodes: rel.episodes,
+        season_year: rel.season_year,
+        matched_subtitle: format!(
+            "episode-range fallback ({}..={})",
+            parent_cap + 1,
+            parent_cap + sib_cap
+        ),
+        file_indices,
+        episode_offset: 0, // populated by the offset pass in the caller
+    })
 }
 
 /// Lowercase ASCII-alphanumeric chars and collapse non-alphanumeric
@@ -3559,5 +3777,257 @@ mod tests {
         // out by is_media_filename before they can inflate the match
         // set.
         assert_eq!(siblings[0].file_indices, vec![0]);
+    }
+
+    // ── Layer 2: episode-range fallback ────────────────────────────
+
+    #[test]
+    fn detect_siblings_fallback_catches_noobsubs_jojo_single_word_arc() {
+        // NoobSubs JoJo SDC+Egypt-hen pack: filenames are plain
+        // "Stardust Crusaders - NN" with no arc subtitle for the
+        // Egypt-hen portion. Subtitle detection cannot fire because
+        // Egypt-hen's trailing subtitle is single-word ("Egypt-hen")
+        // and rejected by `trailing_subtitle_of`'s ≥2-token rule.
+        // Episode-range fallback should pick up files 25-48 and
+        // attribute them to Egypt-hen with episode_offset=24.
+        let mut parent = detail_with_titles(
+            "JoJo's Bizarre Adventure: Stardust Crusaders",
+            "JoJo no Kimyou na Bouken: Stardust Crusaders",
+        );
+        parent.id = 20474;
+        parent.episodes = Some(24);
+        parent.relations = vec![related(
+            20799,
+            "JoJo's Bizarre Adventure: Stardust Crusaders - Egypt-hen",
+            "JoJo no Kimyou na Bouken: Stardust Crusaders - Egypt-hen",
+            "SEQUEL",
+            Some(24),
+        )];
+
+        let mut files: Vec<String> = Vec::new();
+        for n in 1..=48 {
+            files.push(format!(
+                "[NoobSubs] JoJo's Bizarre Adventure Stardust Crusaders - {:02}.mkv",
+                n
+            ));
+        }
+
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 1, "fallback should find one sibling");
+        let s = &siblings[0];
+        assert_eq!(s.anilist_id, 20799);
+        // Egypt-hen claims files 24..48 (indices 24..=47 → eps 25..=48).
+        assert_eq!(s.file_indices.len(), 24);
+        assert_eq!(*s.file_indices.first().unwrap(), 24);
+        assert_eq!(*s.file_indices.last().unwrap(), 47);
+        assert!(s.matched_subtitle.starts_with("episode-range fallback"));
+        // Absolute numbering → offset = parent cap (24).
+        assert_eq!(s.episode_offset, 24);
+    }
+
+    #[test]
+    fn detect_siblings_fallback_rejects_ambiguous_two_sequels() {
+        // Parent with two SEQUEL relations that both fit the overflow
+        // range ambiguously. Neither is title-prefix matched, so the
+        // tiebreaker doesn't save us → bail, fallback returns nothing.
+        let mut parent = detail_with_titles("Parent Show", "");
+        parent.id = 1;
+        parent.episodes = Some(12);
+        parent.relations = vec![
+            related(2, "Unrelated Sequel One", "", "SEQUEL", Some(12)),
+            related(3, "Unrelated Sequel Two", "", "SEQUEL", Some(12)),
+        ];
+        let mut files: Vec<String> = Vec::new();
+        for n in 1..=24 {
+            files.push(format!("[Group] Parent Show - {:02}.mkv", n));
+        }
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert!(siblings.is_empty(), "ambiguous sequels must bail");
+    }
+
+    #[test]
+    fn detect_siblings_fallback_title_prefix_beats_strict_sequel() {
+        // Owarimonogatari scenario: direct AniList SEQUEL is
+        // Tsukimonogatari (not a continuation of the same title),
+        // but the actual same-title continuation is Owarimonogatari
+        // Second Season. Range-fit alone can't distinguish if both
+        // candidates pass, so title-prefix wins as the tiebreaker.
+        //
+        // Here we give Tsuki an incompatible ep count (can't fit the
+        // overflow) so it's rejected by range-fit first, and Owari S2
+        // is the only survivor — validating the primary path.
+        let mut parent = detail_with_titles("Owarimonogatari", "Owarimonogatari");
+        parent.id = 21320;
+        parent.episodes = Some(13);
+        parent.relations = vec![
+            // Direct SEQUEL relation, wrong continuation — only 4 eps
+            // so it cannot fit a 7-file overflow.
+            related(
+                20787,
+                "Tsukimonogatari",
+                "Tsukimonogatari",
+                "SEQUEL",
+                Some(4),
+            ),
+            // Same-title continuation; AniList may type this as a
+            // SIDE_STORY so we must admit it via title-prefix.
+            related(
+                21860,
+                "Owarimonogatari Second Season",
+                "Owarimonogatari Second Season",
+                "SIDE_STORY",
+                Some(7),
+            ),
+        ];
+        let mut files: Vec<String> = Vec::new();
+        for n in 1..=20 {
+            files.push(format!("[smol] Monogatari - S07E{:02} - Owarimonogatari.mkv", n));
+        }
+
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 1);
+        let s = &siblings[0];
+        assert_eq!(s.anilist_id, 21860, "must pick Owari S2, not Tsukimonogatari");
+        assert_eq!(s.file_indices.len(), 7);
+        assert_eq!(s.episode_offset, 13, "absolute numbering → offset = parent cap");
+    }
+
+    #[test]
+    fn detect_siblings_fallback_skips_when_no_overflow() {
+        // 12-ep parent, 12 files numbered 01..12 — nothing exceeds the
+        // parent cap, so the fallback must not synthesize siblings.
+        let mut parent = detail_with_titles("Parent Show", "");
+        parent.id = 1;
+        parent.episodes = Some(12);
+        parent.relations = vec![related(2, "Parent Show Second Season", "", "SEQUEL", Some(12))];
+        let mut files: Vec<String> = Vec::new();
+        for n in 1..=12 {
+            files.push(format!("[Group] Parent Show - {:02}.mkv", n));
+        }
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert!(siblings.is_empty());
+    }
+
+    #[test]
+    fn detect_siblings_fallback_skipped_when_parent_episodes_unknown() {
+        // Airing / unknown-length parent (episodes=None): we can't
+        // safely attribute overflow. Fallback bails.
+        let mut parent = detail_with_titles("Parent Show", "");
+        parent.id = 1;
+        parent.episodes = None;
+        parent.relations = vec![related(2, "Parent Show Second Season", "", "SEQUEL", Some(12))];
+        let files: Vec<String> = (1..=12)
+            .map(|n| format!("[Group] Parent Show - {:02}.mkv", n))
+            .collect();
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert!(siblings.is_empty());
+    }
+
+    #[test]
+    fn detect_siblings_fallback_skipped_when_subtitle_path_found_something() {
+        // Subtitle path hit at least one sibling → fallback is
+        // suppressed. Parent has relation with a usable 2-token
+        // subtitle AND files matching it, so subtitle path produces
+        // results. Fallback won't run even if overflow files exist
+        // (known limitation — fallback doesn't supplement partial
+        // subtitle matches).
+        let mut parent = detail_with_titles("Parent Show", "");
+        parent.id = 1;
+        parent.episodes = Some(12);
+        parent.relations = vec![
+            related(2, "Parent Show: Alpha Beta", "", "SEQUEL", Some(12)),
+            related(3, "Parent Show Third Season", "", "SEQUEL", Some(12)),
+        ];
+        let files: Vec<String> = vec![
+            "[Group] Parent Show - Alpha Beta - 01.mkv".to_string(),
+            "[Group] Parent Show - Alpha Beta - 02.mkv".to_string(),
+            // These would be overflow for a 12-ep parent but subtitle
+            // path already produced matches, so fallback is suppressed.
+            "[Group] Parent Show - 25.mkv".to_string(),
+            "[Group] Parent Show - 26.mkv".to_string(),
+        ];
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 1);
+        assert_eq!(siblings[0].anilist_id, 2);
+    }
+
+    #[test]
+    fn detect_siblings_fallback_handles_absolute_numbered_smol_owari() {
+        // Real-world: [smol] Monogatari batch uses continuous
+        // absolute numbering (E13 Owarimonogatari, E14 Owarimonogatari
+        // Second Season, ...). Subtitle detection can't fire —
+        // "Owarimonogatari Second Season" has no ": " / " - "
+        // delimiter AND its trailing portion is a generic-ordinal
+        // phrase anyway — so the episode-range fallback is the only
+        // path that reaches this release. It picks Owari S2 via
+        // title-prefix matching and the per-sibling offset pass
+        // applies offset=13 so post_processing renames E14..E20 to
+        // E01..E07 of Owari S2.
+        let mut parent = detail_with_titles("Owarimonogatari", "Owarimonogatari");
+        parent.id = 21320;
+        parent.episodes = Some(13);
+        parent.relations = vec![related(
+            21860,
+            "Owarimonogatari Second Season",
+            "Owarimonogatari Second Season",
+            "SIDE_STORY",
+            Some(7),
+        )];
+        let mut files: Vec<String> = Vec::new();
+        for n in 1..=13 {
+            files.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p).mkv",
+                n
+            ));
+        }
+        for n in 14..=20 {
+            files.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p).mkv",
+                n
+            ));
+        }
+
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 1, "fallback should find Owari S2");
+        let s = &siblings[0];
+        assert_eq!(s.anilist_id, 21860);
+        // Overflow = files with E14..E20 (indices 13..=19).
+        assert_eq!(s.file_indices.len(), 7);
+        assert_eq!(*s.file_indices.first().unwrap(), 13);
+        assert_eq!(*s.file_indices.last().unwrap(), 19);
+        assert!(s.matched_subtitle.starts_with("episode-range fallback"));
+        assert_eq!(s.episode_offset, 13, "absolute numbering → offset = parent cap");
+    }
+
+    #[test]
+    fn detect_siblings_subtitle_path_keeps_offset_zero_for_arc_local_numbering() {
+        // Subtitle-matched sibling where filenames use arc-local
+        // numbering (E01..Esib_cap within their own arc). The per-
+        // sibling offset pass must leave offset=0 because
+        // min_ep=1 ≤ parent_cap. Contrived parent with a 2-token,
+        // non-ordinal trailing subtitle so the subtitle path fires
+        // deterministically.
+        let mut parent = detail_with_titles("Parent Show", "Parent Show");
+        parent.id = 1;
+        parent.episodes = Some(24);
+        parent.relations = vec![related(
+            2,
+            "Parent Show: Alpha Beta",
+            "Parent Show: Alpha Beta",
+            "SEQUEL",
+            Some(12),
+        )];
+        let files: Vec<String> = (1..=12)
+            .map(|n| format!("[Group] Parent Show - Alpha Beta - {:02}.mkv", n))
+            .collect();
+
+        let siblings = detect_sibling_entries_in_pack(&files, &parent);
+        assert_eq!(siblings.len(), 1);
+        assert_eq!(siblings[0].anilist_id, 2);
+        assert_eq!(siblings[0].file_indices.len(), 12);
+        // min_ep = 1 ≤ parent_cap=24 → offset = 0.
+        assert_eq!(siblings[0].episode_offset, 0);
+        // And the match came from the subtitle path, not the fallback.
+        assert!(!siblings[0].matched_subtitle.starts_with("episode-range fallback"));
     }
 }
