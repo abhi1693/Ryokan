@@ -73,35 +73,62 @@ pub async fn system_page(
     let filter_category = params.category.unwrap_or_default();
     let filter_search = params.search.unwrap_or_default();
 
-    let logs = if tab == "logs" {
-        log::query(
-            &state.db,
-            &log::LogQuery {
-                level: Some(filter_level.clone()),
-                category: if filter_category.is_empty() {
-                    None
-                } else {
-                    Some(filter_category.clone())
+    // Fan out every independent lookup in parallel. The previous code ran
+    // these six queries sequentially — the wall time was the sum of all
+    // RTTs. With `tokio::join!` each future races on its own pool
+    // connection and the handler waits on the slowest one only.
+    let logs_fut = async {
+        if tab == "logs" {
+            log::query(
+                &state.db,
+                &log::LogQuery {
+                    level: Some(filter_level.clone()),
+                    category: if filter_category.is_empty() {
+                        None
+                    } else {
+                        Some(filter_category.clone())
+                    },
+                    search: if filter_search.is_empty() {
+                        None
+                    } else {
+                        Some(filter_search.clone())
+                    },
+                    limit: 200,
+                    before_id: None,
                 },
-                search: if filter_search.is_empty() {
-                    None
-                } else {
-                    Some(filter_search.clone())
-                },
-                limit: 200,
-                before_id: None,
-            },
-        )
-        .await
-        .unwrap_or_default()
-    } else {
-        Vec::new()
+            )
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    };
+    let rss_recent_fut = async {
+        if tab == "rss" {
+            rss::recent_decisions(&state.db, 500).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    };
+    let scheduled_tasks_fut = async {
+        if tab == "tasks" {
+            scheduled_tasks::list(&state.db).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     };
 
-    let cfg = config::get_config(&state.db)
-        .await
-        .ok()
-        .flatten();
+    let (logs, cfg_res, rss_last_run_res, rss_recent, scheduled_tasks, log_count_res) = tokio::join!(
+        logs_fut,
+        config::get_config(&state.db),
+        rss::latest_run(&state.db),
+        rss_recent_fut,
+        scheduled_tasks_fut,
+        log::count(&state.db),
+    );
+    let cfg = cfg_res.ok().flatten();
+    let rss_last_run = rss_last_run_res.unwrap_or(None);
+    let log_count = log_count_res.unwrap_or(0);
 
     let force_mal_fallback = cfg.as_ref().map(|cfg| cfg.force_mal_fallback).unwrap_or(false);
     let force_kitsu_fallback = cfg.as_ref().map(|cfg| cfg.force_kitsu_fallback).unwrap_or(false);
@@ -109,16 +136,6 @@ pub async fn system_page(
     let allow_non_english = cfg.as_ref().map(|cfg| cfg.allow_non_english).unwrap_or(false);
     let rss_enabled = cfg.as_ref().map(|cfg| cfg.rss_enabled).unwrap_or(false);
     let rss_interval_minutes = cfg.as_ref().map(|cfg| cfg.rss_interval_minutes).unwrap_or(5);
-    let rss_last_run = rss::latest_run(&state.db).await.unwrap_or(None);
-    let rss_recent = if tab == "rss" {
-rss::recent_decisions(&state.db, 500).await.unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let scheduled_tasks = if tab == "tasks" { scheduled_tasks::list(&state.db).await.unwrap_or_default() } else { Vec::new() };
-
-    let log_count = log::count(&state.db).await.unwrap_or(0);
 
     let categories = vec![
         ("search", LogCategory::Search.label()),
@@ -255,19 +272,20 @@ pub async fn api_logs_poll(
     Query(params): Query<LogPollQuery>,
 ) -> Json<Vec<log::LogEntry>> {
     let after_id = params.after.unwrap_or(0);
-    let mut entries = log::entries_after(&state.db, after_id, 100)
-        .await
-        .unwrap_or_default();
-
-    if let Some(ref level) = params.level {
-        let min_level = level_rank(level);
-        entries.retain(|e| level_rank(&e.level) >= min_level);
-    }
-    if let Some(ref cat) = params.category {
-        if !cat.is_empty() {
-            entries.retain(|e| e.category == *cat);
-        }
-    }
+    // Level + category are pushed into SQL via entries_after so the
+    // 3s poll only materializes matching rows. The old path pulled
+    // 100 rows per tick and filtered in memory — fine functionally
+    // but wasteful when a narrow filter (e.g. level=error) matched
+    // nothing in a quiet window.
+    let entries = log::entries_after(
+        &state.db,
+        after_id,
+        100,
+        params.level.as_deref(),
+        params.category.as_deref(),
+    )
+    .await
+    .unwrap_or_default();
 
     Json(entries)
 }
@@ -557,13 +575,3 @@ pub async fn api_force_upgrade_search(
     }
 }
 
-fn level_rank(level: &str) -> u8 {
-    match level.to_lowercase().as_str() {
-        "trace" => 0,
-        "debug" => 1,
-        "info" => 2,
-        "warn" => 3,
-        "error" => 4,
-        _ => 2,
-    }
-}

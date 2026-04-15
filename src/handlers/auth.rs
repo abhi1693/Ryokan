@@ -363,9 +363,25 @@ pub async fn require_auth(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    // If no users exist, redirect to setup.
-    if let Ok(false) = user::has_users(&state.db).await {
-        return Redirect::to("/setup").into_response();
+    // If no users exist, redirect to setup. Once a user has been created
+    // the atomic flag on `AppState` pins to `true` for the rest of the
+    // process lifetime, so the common case is a lock-free load instead of
+    // a `SELECT COUNT(*) FROM users` round trip on every protected
+    // request. The slow path only runs pre-setup or right after a clean
+    // install, and promotes the flag as soon as the DB agrees.
+    if !state
+        .users_exist
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        match user::has_users(&state.db).await {
+            Ok(true) => {
+                state
+                    .users_exist
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(false) => return Redirect::to("/setup").into_response(),
+            Err(_) => return Redirect::to("/setup").into_response(),
+        }
     }
 
     // Check session cookie.

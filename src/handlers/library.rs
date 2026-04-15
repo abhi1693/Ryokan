@@ -230,6 +230,32 @@ async fn resolve_series_request(db: &SqlitePool, request_id: i64) -> Result<(Opt
     }
 }
 
+/// Lean version of [`resolve_series_context`] for polling endpoints that
+/// only need the tracked series row, never metadata.
+///
+/// `resolve_series_context` is the correct call for page loads — it
+/// resolves the series, pulls cached metadata, kicks off a background
+/// refresh if stale, and falls back through AniList / Jikan / Kitsu when
+/// the cache misses. All of that is wasted work for an endpoint like
+/// `episode_download_progress` or any other `/api/series/<id>/...` call
+/// that only consults `tracked.id`. On a series page with an open
+/// download, the progress poller fires every 5 seconds — three or four
+/// unnecessary DB round-trips per poll per open tab add up fast.
+///
+/// This path does exactly one or two `series::get_by_*` queries (by
+/// internal ID first, then by AniList ID as a fallback) and returns the
+/// row. Callers that don't find a tracked row can treat it as "not in
+/// library" without any further fallback.
+async fn resolve_tracked_series(
+    db: &SqlitePool,
+    request_id: i64,
+) -> Result<Option<series::Series>, sqlx::Error> {
+    if let Some(row) = series::get_by_id(db, request_id).await? {
+        return Ok(Some(row));
+    }
+    series::get_by_anilist_id(db, request_id).await
+}
+
 async fn maybe_reconcile_mal_entry(
     db: &SqlitePool,
     db_series: Option<series::Series>,
@@ -422,9 +448,10 @@ async fn resolve_series_context(
         if should_persist_detail_cache(tracked, &detail) {
             let _ = metadata_cache::upsert(db, tracked.id, detail.id, detail.id_mal, &detail).await;
         }
-        if detail.id_mal.is_some() {
-            let _ = jikan::fetch_episode_titles_for_detail(db, &detail).await;
-        }
+        // NOTE: we intentionally do NOT pre-warm the Jikan episode cache here.
+        // `build_episodes` calls `jikan::fetch_episode_titles_for_detail` itself
+        // with the same (db, detail) arguments; calling it here too would double
+        // the work on every page load (cache lookup + decode) for zero benefit.
     }
 
     Ok((db_series, provider_id, detail))
@@ -450,11 +477,37 @@ async fn reconcile_all_fallback_entries(db: &SqlitePool) -> ReconcileReport {
 }
 
 pub async fn index(State(state): State<AppState>) -> Html<String> {
-    let mut library = series::get_all(&state.db).await.unwrap_or_default();
-    for item in library.iter_mut() {
-        item.cover_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-cover", item.id), &item.cover_url).await;
+    // Fetch the library list and config concurrently — they're independent
+    // and each was previously serialized on the other. `get_all` is the
+    // larger query of the two so this shaves the smaller query's RTT off
+    // the critical path.
+    let (library_res, cfg_res) = tokio::join!(
+        series::get_all(&state.db),
+        config::get_config(&state.db),
+    );
+    let mut library = library_res.unwrap_or_default();
+    let cfg = cfg_res.ok().flatten();
+
+    // Batch the cover-art lookups into a single SQL round trip. The old
+    // code fired one `artwork::cached_or_source_url` per series — a 200-
+    // series library meant 200 sequential SQLite queries just to render
+    // the topbar's Library tab.
+    if !library.is_empty() {
+        let cache_keys: Vec<String> = library
+            .iter()
+            .map(|item| format!("series-{}-cover", item.id))
+            .collect();
+        if let Ok(url_map) =
+            crate::models::artwork_cache::get_local_urls_batch(&state.db, &cache_keys).await
+        {
+            for (item, key) in library.iter_mut().zip(cache_keys.iter()) {
+                if let Some(url) = url_map.get(key) {
+                    item.cover_url = url.clone();
+                }
+            }
+        }
     }
-    let cfg = config::get_config(&state.db).await.ok().flatten();
+
     let template = IndexTemplate {
         page: "library".to_string(),
         library,
@@ -468,13 +521,26 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
 /// to the series detail page so the user can open the override modal.
 pub async fn needs_review_page(State(state): State<AppState>) -> Html<String> {
     let mut entries = episode_tags::get_needs_review(&state.db).await.unwrap_or_default();
-    for entry in entries.iter_mut() {
-        entry.cover_url = artwork::cached_or_source_url(
-            &state.db,
-            &format!("series-{}-cover", entry.series_id),
-            &entry.cover_url,
-        ).await;
+
+    // Same batch-artwork treatment as `index` — the previous serial per-
+    // entry lookup was one of the reasons this page felt slow when the
+    // backlog was large.
+    if !entries.is_empty() {
+        let cache_keys: Vec<String> = entries
+            .iter()
+            .map(|e| format!("series-{}-cover", e.series_id))
+            .collect();
+        if let Ok(url_map) =
+            crate::models::artwork_cache::get_local_urls_batch(&state.db, &cache_keys).await
+        {
+            for (entry, key) in entries.iter_mut().zip(cache_keys.iter()) {
+                if let Some(url) = url_map.get(key) {
+                    entry.cover_url = url.clone();
+                }
+            }
+        }
     }
+
     let template = NeedsReviewTemplate {
         page: "library".to_string(),
         entries,
@@ -522,13 +588,10 @@ pub async fn series_detail(
     let db_id = db_series.as_ref().map(|s| s.id);
     let folder_name = db_series.as_ref().map(|s| s.folder_name.clone()).unwrap_or_default();
 
-    let cfg = config::get_config(&state.db).await.ok().flatten();
-    let media_root = cfg.as_ref().map(|c| c.media_root.clone()).unwrap_or_default();
-    let title_language = cfg
-        .as_ref()
-        .map(|c| c.title_language.clone())
-        .unwrap_or_else(|| "english".to_string());
-
+    // Ensure monitoring rows first — this writes to DB, and `build_episodes`
+    // below reads the monitored set, so these cannot run concurrently
+    // without a read-your-writes race. Everything *after* this point is
+    // read-only and fans out in parallel.
     let mut monitor_mode = "future".to_string();
     let mut monitor_mode_label = monitoring::MonitorMode::Future.label().to_string();
     if let Some(ref tracked) = db_series {
@@ -540,18 +603,101 @@ pub async fn series_detail(
             monitor_mode_label = tracked.monitor_mode_enum().label().to_string();
         }
     }
-    let (episodes, on_disk_count, size_display, monitored_count) =
-        build_episodes(&state.db, &detail, db_id, &folder_name, &media_root).await;
-    let ep_total = detail.effective_episode_count();
-    if let Some(series_id) = db_series.as_ref().map(|s| s.id) {
-        detail.cover_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-cover", series_id), &detail.cover_url).await;
-        detail.banner_url = artwork::cached_or_source_url(&state.db, &format!("series-{}-banner", series_id), &detail.banner_url).await;
-    } else if detail.id != 0 {
-        detail.cover_url = artwork::first_cached_url(&state.db, &[artwork::provider_cover_key(detail.id, detail.id_mal), format!("provider-{}-cover", detail.id)], &detail.cover_url).await;
-        detail.banner_url = artwork::first_cached_url(&state.db, &[artwork::provider_banner_key(detail.id, detail.id_mal), format!("provider-{}-banner", detail.id)], &detail.banner_url).await;
-    }
 
-    let relation_groups = build_relation_groups(&state.db, db_series.as_ref().map(|s| s.id), &detail).await;
+    // Fan out the five independent read paths. Each one was previously
+    // awaited serially — on a cold cache that meant 4+ sequential DB
+    // round trips + the build_episodes fs-walk + the relation-group
+    // artwork lookups all stacked end to end. Running them concurrently
+    // collapses the total wait to ~max(...) instead of sum(...).
+    let cfg_fut = config::get_config(&state.db);
+    let relation_groups_fut = build_relation_groups(&state.db, db_id, &detail);
+
+    let detail_for_episodes = detail.clone();
+    let db_for_episodes = state.db.clone();
+    let folder_for_episodes = folder_name.clone();
+    let episodes_fut = async move {
+        // Pull media_root from config inside the task so build_episodes
+        // can still run in parallel with the outer config fetch. The
+        // extra `get_config` hit here is harmless — the WAL page cache
+        // will serve it from memory after the first concurrent fetch.
+        let media_root = config::get_config(&db_for_episodes)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.media_root)
+            .unwrap_or_default();
+        let out = build_episodes(
+            &db_for_episodes,
+            &detail_for_episodes,
+            db_id,
+            &folder_for_episodes,
+            &media_root,
+        )
+        .await;
+        (out, media_root)
+    };
+
+    let cover_key = db_series.as_ref().map(|s| format!("series-{}-cover", s.id));
+    let banner_key = db_series.as_ref().map(|s| format!("series-{}-banner", s.id));
+    let cover_url_src = detail.cover_url.clone();
+    let banner_url_src = detail.banner_url.clone();
+    let detail_id = detail.id;
+    let detail_mal_id = detail.id_mal;
+    let db_for_art = state.db.clone();
+    let cover_fut = async move {
+        if let Some(key) = cover_key {
+            artwork::cached_or_source_url(&db_for_art, &key, &cover_url_src).await
+        } else if detail_id != 0 {
+            artwork::first_cached_url(
+                &db_for_art,
+                &[
+                    artwork::provider_cover_key(detail_id, detail_mal_id),
+                    format!("provider-{}-cover", detail_id),
+                ],
+                &cover_url_src,
+            )
+            .await
+        } else {
+            cover_url_src
+        }
+    };
+    let db_for_banner = state.db.clone();
+    let banner_fut = async move {
+        if let Some(key) = banner_key {
+            artwork::cached_or_source_url(&db_for_banner, &key, &banner_url_src).await
+        } else if detail_id != 0 {
+            artwork::first_cached_url(
+                &db_for_banner,
+                &[
+                    artwork::provider_banner_key(detail_id, detail_mal_id),
+                    format!("provider-{}-banner", detail_id),
+                ],
+                &banner_url_src,
+            )
+            .await
+        } else {
+            banner_url_src
+        }
+    };
+
+    let (cfg, relation_groups, episodes_out, cover_url, banner_url) = tokio::join!(
+        cfg_fut,
+        relation_groups_fut,
+        episodes_fut,
+        cover_fut,
+        banner_fut,
+    );
+    let cfg = cfg.ok().flatten();
+    let ((episodes, on_disk_count, size_display, monitored_count), media_root) = episodes_out;
+    detail.cover_url = cover_url;
+    detail.banner_url = banner_url;
+
+    let title_language = cfg
+        .as_ref()
+        .map(|c| c.title_language.clone())
+        .unwrap_or_else(|| "english".to_string());
+
+    let ep_total = detail.effective_episode_count();
     let (external_url, external_label) = if detail.id < 0 {
         (
             detail.id_mal
@@ -590,7 +736,14 @@ pub async fn series_detail(
         all_monitored,
         allow_upgrades,
     };
-    Html(template.render().unwrap_or_default())
+    // `series.html` is the biggest template in the app (~84KB source) and
+    // Askama's `render()` is synchronous — running it inline on the Hyper
+    // worker blocks the reactor for tens of milliseconds on big libraries.
+    // Hand it to the blocking pool so concurrent requests keep flowing.
+    let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
+        .await
+        .unwrap_or_default();
+    Html(body)
 }
 
 /// Maximum number of missing trailing Jikan episodes we'll tolerate before
@@ -624,21 +777,76 @@ async fn build_episodes(
     media_root: &str,
 ) -> (Vec<Episode>, i32, String, i32) {
     let ep_count = detail.effective_episode_count();
-    let disk_files = media::scan_series_folder(media_root, folder_name);
+    // Fan out the four independent pre-fetches in parallel:
+    //   1. disk file walk (blocking pool)
+    //   2. cached episode metadata map (DB, with a fallback path)
+    //   3. force_kitsu_fallback config flag (DB)
+    //   4. monitored-episode set (DB, only when the series is tracked)
+    //   5. per-episode quality tags (DB, only when the series is tracked)
+    //
+    // All five were previously serialized on the await chain even though
+    // nothing downstream needs the earlier results to *decide* the later
+    // fetches. The longest single hop (the fs walk on a network mount)
+    // sets the total latency, which on a cold cache is dramatically
+    // cheaper than the old `walk → cached_eps → config → monitored →
+    // tags` chain.
+    let media_root_owned = media_root.to_string();
+    let folder_name_owned = folder_name.to_string();
+    let disk_files_fut = tokio::task::spawn_blocking(move || {
+        media::scan_series_folder(&media_root_owned, &folder_name_owned)
+    });
 
-    let cached_eps = if let Some(sid) = db_id {
-        let rows = local_metadata::get_episode_map_for_series(db, sid).await.unwrap_or_default();
-        if rows.is_empty() && detail.id != 0 {
-            local_metadata::get_episode_map_for_provider(db, detail.id).await.unwrap_or_default()
+    let detail_id = detail.id;
+    let cached_eps_fut = async move {
+        if let Some(sid) = db_id {
+            let rows = local_metadata::get_episode_map_for_series(db, sid)
+                .await
+                .unwrap_or_default();
+            if rows.is_empty() && detail_id != 0 {
+                local_metadata::get_episode_map_for_provider(db, detail_id)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                rows
+            }
+        } else if detail_id != 0 {
+            local_metadata::get_episode_map_for_provider(db, detail_id)
+                .await
+                .unwrap_or_default()
         } else {
-            rows
+            HashMap::new()
         }
-    } else if detail.id != 0 {
-        local_metadata::get_episode_map_for_provider(db, detail.id).await.unwrap_or_default()
-    } else {
-        HashMap::new()
     };
-    let cached_matches_force = !force_kitsu_fallback_enabled(db).await
+
+    let monitored_fut = async move {
+        match db_id {
+            Some(id) => monitoring::get_monitored_episode_numbers(db, id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<std::collections::HashSet<i32>>(),
+            None => std::collections::HashSet::new(),
+        }
+    };
+
+    let quality_tags_fut = async move {
+        match db_id {
+            Some(id) => episode_tags::get_for_series(db, id)
+                .await
+                .unwrap_or_default(),
+            None => std::collections::HashMap::new(),
+        }
+    };
+
+    let (disk_files_res, cached_eps, force_kitsu_fallback, monitored_lookup, quality_tags) = tokio::join!(
+        disk_files_fut,
+        cached_eps_fut,
+        force_kitsu_fallback_enabled(db),
+        monitored_fut,
+        quality_tags_fut,
+    );
+    let disk_files = disk_files_res.unwrap_or_default();
+    let cached_matches_force = !force_kitsu_fallback
         || cached_eps.values().any(|ep| ep.source == "kitsu");
     let use_cached_eps = !cached_eps.is_empty() && cached_matches_force;
 
@@ -650,7 +858,6 @@ async fn build_episodes(
         HashMap::new()
     };
 
-    let force_kitsu_fallback = force_kitsu_fallback_enabled(db).await;
     let should_try_kitsu = !use_cached_eps
         && ep_count > 1
         && (force_kitsu_fallback
@@ -669,22 +876,6 @@ async fn build_episodes(
         ).await
     } else {
         HashMap::new()
-    };
-
-    let monitored_lookup: std::collections::HashSet<i32> = if let Some(id) = db_id {
-        monitoring::get_monitored_episode_numbers(db, id)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
-    } else {
-        std::collections::HashSet::new()
-    };
-
-    let quality_tags = if let Some(id) = db_id {
-        episode_tags::get_for_series(db, id).await.unwrap_or_default()
-    } else {
-        std::collections::HashMap::new()
     };
 
     let is_tracked = db_id.is_some();
@@ -1102,40 +1293,77 @@ async fn build_relation_groups(
         "SUMMARY", "FULL_STORY", "SPIN_OFF", "OTHER", "CHARACTER", "PARENT", "ADAPTATION",
     ];
 
-    let mut groups: HashMap<String, Vec<RelationCard>> = HashMap::new();
-
-    for related in &relations {
+    // Resolve the per-relation card_id + cover_url concurrently.
+    //
+    // Each relation used to fire 1–2 serial DB queries for
+    // `resolve_relation_card_id` and up to 4 serial DB queries for
+    // `artwork::first_cached_url`. A long-running franchise with 20+
+    // relations was burning 100+ sequential SQLite round-trips on the
+    // request hot path before the template could render. Fanning these
+    // out across the connection pool cuts the wall time to roughly the
+    // cost of the slowest individual lookup — WAL mode plus
+    // `max_connections=16` makes the concurrent reads actually parallel.
+    let mut join_set: tokio::task::JoinSet<(usize, i64, String)> = tokio::task::JoinSet::new();
+    for (idx, related) in relations.iter().enumerate() {
         if !matches!(related.media_type.as_str(), "ANIME" | "MUSIC") {
             continue;
         }
+        let db = db.clone();
+        let rel_id = related.id;
+        let rel_mal = related.id_mal;
+        let rel_cover = related.cover_url.clone();
+        join_set.spawn(async move {
+            let card_id = resolve_relation_card_id(&db, rel_id, rel_mal).await;
+            let cover_url = if let Some(series_id) = db_id {
+                artwork::first_cached_url(
+                    &db,
+                    &[
+                        artwork::series_relation_cover_key(series_id, rel_id, rel_mal),
+                        format!("series-{}-relation-{}-cover", series_id, rel_id),
+                        artwork::provider_cover_key(rel_id, rel_mal),
+                        format!("provider-{}-cover", rel_id),
+                    ],
+                    &rel_cover,
+                )
+                .await
+            } else if rel_id != 0 || rel_mal.is_some() {
+                artwork::first_cached_url(
+                    &db,
+                    &[
+                        artwork::provider_cover_key(rel_id, rel_mal),
+                        format!("provider-{}-cover", rel_id),
+                    ],
+                    &rel_cover,
+                )
+                .await
+            } else {
+                rel_cover
+            };
+            (idx, card_id, cover_url)
+        });
+    }
 
-        // Resolve the card's link ID: prefer the DB series ID if this entry is tracked,
-        // so clicking the card navigates to /series/<db_id> which always resolves correctly.
-        // Without this, MAL-sourced entries link to /series/<negative_mal_id> which can
-        // resolve to a different series if the provider cache is stale.
-        let card_id = resolve_relation_card_id(db, related.id, related.id_mal).await;
+    // Collect results into an index-keyed map so we can assemble cards in
+    // the original relation order below (JoinSet yields in completion order).
+    let mut resolved: HashMap<usize, (i64, String)> = HashMap::new();
+    while let Some(joined) = join_set.join_next().await {
+        if let Ok((idx, card_id, cover_url)) = joined {
+            resolved.insert(idx, (card_id, cover_url));
+        }
+    }
+
+    let mut groups: HashMap<String, Vec<RelationCard>> = HashMap::new();
+
+    for (idx, related) in relations.iter().enumerate() {
+        if !matches!(related.media_type.as_str(), "ANIME" | "MUSIC") {
+            continue;
+        }
+        let Some((card_id, cover_url)) = resolved.remove(&idx) else {
+            continue;
+        };
 
         let normalized_relation_type = local_metadata::normalize_relation_type(&related.relation_type).to_string();
         let cards = groups.entry(normalized_relation_type).or_default();
-        let cover_url = if let Some(series_id) = db_id {
-            artwork::first_cached_url(
-                db,
-                &[artwork::series_relation_cover_key(series_id, related.id, related.id_mal),
-                    format!("series-{}-relation-{}-cover", series_id, related.id),
-                    artwork::provider_cover_key(related.id, related.id_mal),
-                    format!("provider-{}-cover", related.id)],
-                &related.cover_url,
-            ).await
-        } else if related.id != 0 || related.id_mal.is_some() {
-            artwork::first_cached_url(
-                db,
-                &[artwork::provider_cover_key(related.id, related.id_mal),
-                    format!("provider-{}-cover", related.id)],
-                &related.cover_url,
-            ).await
-        } else {
-            related.cover_url.clone()
-        };
 
         cards.push(RelationCard {
             id: card_id,
@@ -3570,11 +3798,12 @@ pub async fn get_episode_grab_history(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
 ) -> Result<Json<Vec<episode_tags::GrabHistoryEntry>>, (axum::http::StatusCode, String)> {
-    let (tracked_row, _, _) = resolve_series_context(&state.db, request_id)
+    // No metadata needed — the modal just needs `series_id` to look up
+    // the grab history rows. Skip `resolve_series_context` here for the
+    // same reason we skip it on the progress poller.
+    let series_id = resolve_tracked_series(&state.db, request_id)
         .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-    let series_id = tracked_row
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?
         .id;
 
@@ -3699,11 +3928,14 @@ pub async fn episode_download_progress(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
 ) -> Result<Json<Vec<EpisodeProgress>>, (axum::http::StatusCode, String)> {
-    let (tracked_row, _, _) = resolve_series_context(&state.db, request_id)
+    // Polling endpoint — skip the full metadata-resolving path. We only
+    // need `tracked.id` to filter pending grabs and routes; doing a
+    // metadata cache lookup + force-fallback config read + potential
+    // background-refresh spawn on every 5-second poll was pure waste.
+    let tracked = resolve_tracked_series(&state.db, request_id)
         .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-    let tracked = tracked_row.ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?;
 
     let pending = crate::models::grabbed_torrents::get_all_pending(&state.db)
         .await

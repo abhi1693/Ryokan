@@ -1,7 +1,17 @@
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+/// How long a successful `get_torrents` result is served from the
+/// client-side cache before a fresh HTTP round trip is made. The
+/// downloads page and every open series tab poll this endpoint every
+/// 5s; with a remote qBit (seedbox) each one pays a full network RTT.
+/// Coalescing at 2s means a burst of N concurrent polls collapses to
+/// a single upstream fetch while the UI still refreshes on its own
+/// 5s cadence — the user-visible staleness ceiling is 2s, not 5s.
+const TORRENTS_CACHE_TTL: Duration = Duration::from_secs(2);
 
 /// qBittorrent Web API client with automatic re-authentication.
 #[derive(Clone)]
@@ -12,9 +22,16 @@ pub struct QbitClient {
     category: String,
     http: Client,
     logged_in: Arc<Mutex<bool>>,
+    /// Short-TTL coalescing cache for `get_torrents`. The mutex is held
+    /// across the upstream fetch on a miss, so concurrent callers that
+    /// arrive during the fetch block on the lock and then see the
+    /// fresh result instead of each firing their own request. Mutating
+    /// ops (add/pause/resume/delete) clear this so the next poll after
+    /// a UI action reflects the change immediately.
+    torrents_cache: Arc<Mutex<Option<(Instant, Vec<Torrent>)>>>,
 }
 
-#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct Torrent {
     pub hash: String,
     pub name: String,
@@ -76,7 +93,16 @@ impl QbitClient {
             category: category.to_string(),
             http,
             logged_in: Arc::new(Mutex::new(false)),
+            torrents_cache: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Drop any cached `get_torrents` result so the next call hits qBit
+    /// fresh. Called after every mutation (add/pause/resume/delete) so
+    /// the UI's post-action refresh sees the new state instead of a
+    /// ghost snapshot from before the click.
+    async fn invalidate_torrents_cache(&self) {
+        *self.torrents_cache.lock().await = None;
     }
 
     /// Authenticate with qBittorrent.
@@ -168,6 +194,7 @@ impl QbitClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("qbit add failed: {}", body));
         }
+        self.invalidate_torrents_cache().await;
         Ok(())
     }
 
@@ -351,7 +378,31 @@ impl QbitClient {
     }
 
     /// Get all torrents, optionally filtered by category.
+    ///
+    /// Results are served from a short-TTL (`TORRENTS_CACHE_TTL`)
+    /// in-process cache. Holding the mutex across the fetch gives us
+    /// single-flight coalescing for free: if 4 polling tabs call this
+    /// simultaneously against a remote qBit with 300ms RTT, the first
+    /// pays the round trip and the other 3 wait on the lock for ~300ms
+    /// and then read the cached vector. Without this, each tab fires
+    /// its own request and the seedbox sees 4x the load.
     pub async fn get_torrents(&self) -> Result<Vec<Torrent>, String> {
+        let mut guard = self.torrents_cache.lock().await;
+        if let Some((stamped, torrents)) = guard.as_ref() {
+            if stamped.elapsed() < TORRENTS_CACHE_TTL {
+                return Ok(torrents.clone());
+            }
+        }
+
+        let torrents = self.get_torrents_uncached().await?;
+        *guard = Some((Instant::now(), torrents.clone()));
+        Ok(torrents)
+    }
+
+    /// Raw `/api/v2/torrents/info` fetch, no caching. Split out so the
+    /// cache layer in `get_torrents` stays readable and so tests (or
+    /// future force-refresh callers) can bypass the TTL when needed.
+    async fn get_torrents_uncached(&self) -> Result<Vec<Torrent>, String> {
         let endpoint = if self.category.is_empty() {
             "/api/v2/torrents/info".to_string()
         } else {
@@ -407,11 +458,13 @@ impl QbitClient {
         let form = [("hashes", hash)];
         let resp = self.do_post_form("/api/v2/torrents/stop", &form).await?;
         if resp.status().is_success() {
+            self.invalidate_torrents_cache().await;
             return Ok(());
         }
         // Fallback for qBit ≤ 4.x.
         let resp = self.do_post_form("/api/v2/torrents/pause", &form).await?;
         if resp.status().is_success() {
+            self.invalidate_torrents_cache().await;
             return Ok(());
         }
         let status = resp.status();
@@ -426,11 +479,13 @@ impl QbitClient {
         let form = [("hashes", hash)];
         let resp = self.do_post_form("/api/v2/torrents/start", &form).await?;
         if resp.status().is_success() {
+            self.invalidate_torrents_cache().await;
             return Ok(());
         }
         // Fallback for qBit ≤ 4.x.
         let resp = self.do_post_form("/api/v2/torrents/resume", &form).await?;
         if resp.status().is_success() {
+            self.invalidate_torrents_cache().await;
             return Ok(());
         }
         let status = resp.status();
@@ -446,6 +501,7 @@ impl QbitClient {
         if !resp.status().is_success() {
             return Err("Failed to delete torrent".into());
         }
+        self.invalidate_torrents_cache().await;
         Ok(())
     }
 

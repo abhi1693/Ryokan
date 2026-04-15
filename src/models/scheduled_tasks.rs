@@ -1,4 +1,5 @@
 use sqlx::{Row, SqlitePool};
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct ScheduledTaskStatus {
@@ -70,6 +71,65 @@ pub async fn mark_finished(db: &SqlitePool, task_key: &str, status: &str, detail
     .execute(db)
     .await?;
     Ok(())
+}
+
+/// Minutes elapsed since `task_key` last finished. Returns `None` if
+/// the task has never recorded a `last_finished_at` (fresh install,
+/// or task has never been run). The caller should treat `None` as
+/// "run immediately" so first-time setup still fires on startup.
+///
+/// Uses SQLite's `strftime('%s', ...)` on both sides so the
+/// computation lives entirely in the DB: we don't parse timestamps
+/// into a DateTime type on the Rust side just to subtract them. The
+/// column is stored in UTC (`CURRENT_TIMESTAMP`), and `'now'` is
+/// also UTC, so no timezone math is needed.
+pub async fn minutes_since_last_finished(
+    db: &SqlitePool,
+    task_key: &str,
+) -> Option<i64> {
+    let row = sqlx::query(
+        r#"SELECT CAST((strftime('%s','now') - strftime('%s', last_finished_at)) / 60 AS INTEGER) AS minutes_ago
+           FROM scheduled_task_runs
+           WHERE task_key = ? AND last_finished_at IS NOT NULL"#,
+    )
+    .bind(task_key)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()?;
+    row.try_get::<i64, _>("minutes_ago").ok()
+}
+
+/// How long a background task should sleep at startup before its next
+/// run, given a fixed `interval` between runs. Uses the persisted
+/// `last_finished_at` to compute a remaining-window duration:
+///
+/// - Task never ran (fresh install, new task key): returns `ZERO` so
+///   it runs immediately on startup.
+/// - Task finished `elapsed >= interval` ago: returns `ZERO` — the
+///   next run is overdue and should happen now.
+/// - Task finished within the interval: returns `interval - elapsed`
+///   so the restart effectively resumes the prior schedule rather
+///   than re-firing the work a few minutes after the previous run.
+///
+/// This is the fix for the "every `cargo run` re-runs the 12h
+/// metadata sweep" class of bug: without it, a bare `interval.tick()`
+/// fires on the first call, and even patterns that skip-tick (like
+/// `anibridge_refresh` and `library_classify`) waste a full interval
+/// after each restart regardless of when the task actually last ran.
+pub async fn duration_until_next_run(
+    db: &SqlitePool,
+    task_key: &str,
+    interval: Duration,
+) -> Duration {
+    let Some(minutes_ago) = minutes_since_last_finished(db, task_key).await else {
+        return Duration::ZERO;
+    };
+    if minutes_ago < 0 {
+        return Duration::ZERO;
+    }
+    let elapsed = Duration::from_secs((minutes_ago as u64).saturating_mul(60));
+    interval.saturating_sub(elapsed)
 }
 
 pub async fn list(db: &SqlitePool) -> Result<Vec<ScheduledTaskStatus>, sqlx::Error> {

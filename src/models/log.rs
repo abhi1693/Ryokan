@@ -262,18 +262,45 @@ pub async fn latest_id(db: &SqlitePool) -> Result<i64, sqlx::Error> {
 }
 
 /// Get new entries after a given ID (for live polling).
+///
+/// `level` applies "at or above" semantics (matching the logs page
+/// dropdown — "warn" means warn + error). `category`, if supplied and
+/// non-empty, is an exact match. Both are pushed into the SQL query
+/// so SQLite does the filtering and the round trip carries only
+/// matching rows. Previously the poll handler fetched 100 unfiltered
+/// rows every 3s and dropped the misses in-memory — cheap per row
+/// but wasteful when a user had (say) `level=error, category=grab`
+/// set and nothing was going wrong at the moment.
 pub async fn entries_after(
     db: &SqlitePool,
     after_id: i64,
     limit: i64,
+    level: Option<&str>,
+    category: Option<&str>,
 ) -> Result<Vec<LogEntry>, sqlx::Error> {
-    let rows: Vec<(i64, String, String, String, String, String)> = sqlx::query_as(
-        "SELECT id, timestamp, level, category, message, detail FROM logs WHERE id > ? ORDER BY id DESC LIMIT ?",
-    )
-    .bind(after_id)
-    .bind(limit)
-    .fetch_all(db)
-    .await?;
+    let mut sql = String::from(
+        "SELECT id, timestamp, level, category, message, detail FROM logs WHERE id > ?",
+    );
+    let mut binds: Vec<String> = vec![after_id.to_string()];
+
+    if let Some(l) = level {
+        let levels = levels_at_or_above(l);
+        if !levels.is_empty() {
+            let placeholders: Vec<&str> = levels.iter().map(|_| "?").collect();
+            sql.push_str(&format!(" AND level IN ({})", placeholders.join(",")));
+            binds.extend(levels);
+        }
+    }
+
+    if let Some(cat) = category.filter(|c| !c.is_empty()) {
+        sql.push_str(" AND category = ?");
+        binds.push(cat.to_string());
+    }
+
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    binds.push(limit.to_string());
+
+    let rows = build_dynamic_query(&sql, &binds, db).await?;
 
     Ok(rows
         .into_iter()

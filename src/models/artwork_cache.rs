@@ -1,4 +1,5 @@
 use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct ArtworkEntry {
@@ -123,4 +124,53 @@ pub async fn get_local_url(db: &SqlitePool, cache_key: &str) -> Result<Option<St
     Ok(get(db, cache_key)
         .await?
         .map(|e| format!("/media/art/{}?v={}", e.cache_key, e.last_write)))
+}
+
+/// Batch variant of `get_local_url`: fetches `/media/art/...` URLs for a
+/// set of cache keys in a single SQL round trip. Used by list pages
+/// (library index, needs-review, etc.) that previously fired one serial
+/// query per row — for a 200-series library that was 200 sequential DB
+/// hits just to render the covers.
+///
+/// Keys with no cached row are omitted from the returned map; callers
+/// should fall back to the source URL in that case.
+pub async fn get_local_urls_batch(
+    db: &SqlitePool,
+    cache_keys: &[String],
+) -> Result<HashMap<String, String>, sqlx::Error> {
+    if cache_keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Build the `IN (?, ?, ...)` placeholder list at runtime. sqlx doesn't
+    // expand slice bindings on SQLite, so we splice the placeholders into
+    // the SQL string and bind each key individually. The key set comes
+    // from trusted server-side format strings (`series-<id>-cover`), not
+    // user input, so there's no injection surface here.
+    let placeholders = std::iter::repeat("?")
+        .take(cache_keys.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"
+        SELECT ir.cache_key, ir.last_write
+        FROM image_refs ir
+        JOIN image_blobs ib ON ib.blob_hash = ir.blob_hash
+        WHERE ir.cache_key IN ({})
+        "#,
+        placeholders
+    );
+    let mut query = sqlx::query(&sql);
+    for key in cache_keys {
+        query = query.bind(key);
+    }
+
+    let rows = query.fetch_all(db).await?;
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let key: String = row.get("cache_key");
+        let last_write: i64 = row.get("last_write");
+        out.insert(key.clone(), format!("/media/art/{}?v={}", key, last_write));
+    }
+    Ok(out)
 }

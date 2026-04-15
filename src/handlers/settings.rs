@@ -262,15 +262,17 @@ async fn build_settings_template(
     err: Option<String>,
     import_review: Option<ImportReviewView>,
 ) -> SettingsTemplate {
-    let cfg = config::get_config(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-
-    let groups = load_groups(&state.db).await;
-    let suggestions = load_suggestions(&state.db).await;
-    let custom_formats = load_custom_formats_view(&state.db).await;
+    // Fan out the four independent lookups — config row, release-group
+    // table, suggestion panel, custom-format list — in parallel. The old
+    // code issued them sequentially so the wall time was the sum of four
+    // round trips even though none depends on the others.
+    let (cfg_res, groups, suggestions, custom_formats) = tokio::join!(
+        config::get_config(&state.db),
+        load_groups(&state.db),
+        load_suggestions(&state.db),
+        load_custom_formats_view(&state.db),
+    );
+    let cfg = cfg_res.ok().flatten().unwrap_or_default();
 
     // Prefill the CF edit form only when the query param points at a row
     // that actually exists — stale edit links just fall through to the
@@ -319,25 +321,32 @@ pub async fn settings_page(
         None,
     )
     .await;
-    Html(template.render().unwrap_or_default())
+    // `settings.html` is the second-biggest template (~45KB source) and
+    // Askama's synchronous `render()` would otherwise block the async
+    // worker for a noticeable chunk of time. Offload to the blocking pool.
+    let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
+        .await
+        .unwrap_or_default();
+    Html(body)
 }
 
 pub async fn settings_submit(
     State(state): State<AppState>,
     Form(form): Form<SettingsForm>,
 ) -> Html<String> {
-    let current_force_mal_fallback = config::get_config(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|cfg| cfg.force_mal_fallback)
-        .unwrap_or(false);
-
+    // Load the existing config row once and derive every non-form
+    // field from it. The previous code fetched it twice back-to-back
+    // (once for force_mal_fallback, once for the rest), which was
+    // harmless functionally but paid an extra SQLite round trip on
+    // every settings save. `existing_cfg` feeds `force_mal_fallback`,
+    // `force_kitsu_fallback`, the legacy quality tier columns, and
+    // `auto_grab_on_add` / `allow_non_english` below.
     let existing_cfg = config::get_config(&state.db)
         .await
         .ok()
         .flatten();
 
+    let current_force_mal_fallback = existing_cfg.as_ref().map(|cfg| cfg.force_mal_fallback).unwrap_or(false);
     let current_force_kitsu_fallback = existing_cfg.as_ref().map(|cfg| cfg.force_kitsu_fallback).unwrap_or(false);
 
     let cfg = config::Config {
@@ -444,7 +453,10 @@ pub async fn settings_submit(
             message: None,
             error: Some(format!("Failed to save: {}", e)),
         };
-        return Html(template.render().unwrap_or_default());
+        let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
+            .await
+            .unwrap_or_default();
+        return Html(body);
     }
 
     logger::info(&state.db, LogCategory::System, "Settings saved", "").await;
@@ -517,7 +529,12 @@ pub async fn settings_submit(
         message: Some(notices.join("<br>")),
         error: None,
     };
-    Html(template.render().unwrap_or_default())
+    // See `settings_page` for rationale — offload the synchronous Askama
+    // render of the ~45KB settings template to the blocking pool.
+    let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
+        .await
+        .unwrap_or_default();
+    Html(body)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1115,7 +1132,10 @@ pub async fn settings_custom_formats_import(
             Some(review),
         )
         .await;
-        return Html(template.render().unwrap_or_default()).into_response();
+        let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
+            .await
+            .unwrap_or_default();
+        return Html(body).into_response();
     }
 
     // No collisions — every entry defaults to Overwrite semantics,
