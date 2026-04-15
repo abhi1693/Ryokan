@@ -736,14 +736,7 @@ pub async fn series_detail(
         all_monitored,
         allow_upgrades,
     };
-    // `series.html` is the biggest template in the app (~84KB source) and
-    // Askama's `render()` is synchronous — running it inline on the Hyper
-    // worker blocks the reactor for tens of milliseconds on big libraries.
-    // Hand it to the blocking pool so concurrent requests keep flowing.
-    let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
-        .await
-        .unwrap_or_default();
-    Html(body)
+    Html(template.render().unwrap_or_default())
 }
 
 /// Maximum number of missing trailing Jikan episodes we'll tolerate before
@@ -1345,10 +1338,22 @@ async fn build_relation_groups(
 
     // Collect results into an index-keyed map so we can assemble cards in
     // the original relation order below (JoinSet yields in completion order).
+    // A `JoinError` here means one of the spawned tasks panicked — neither
+    // `resolve_relation_card_id` nor `artwork::first_cached_url` is
+    // panicky today, but if that ever changes we want the regression to be
+    // visible in the logs rather than silently eating the relation card.
     let mut resolved: HashMap<usize, (i64, String)> = HashMap::new();
     while let Some(joined) = join_set.join_next().await {
-        if let Ok((idx, card_id, cover_url)) = joined {
-            resolved.insert(idx, (card_id, cover_url));
+        match joined {
+            Ok((idx, card_id, cover_url)) => {
+                resolved.insert(idx, (card_id, cover_url));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "build_relation_groups: relation resolver task failed; skipping one relation card"
+                );
+            }
         }
     }
 

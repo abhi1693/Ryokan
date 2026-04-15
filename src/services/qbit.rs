@@ -2,7 +2,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 /// How long a successful `get_torrents` result is served from the
 /// client-side cache before a fresh HTTP round trip is made. The
@@ -22,13 +22,26 @@ pub struct QbitClient {
     category: String,
     http: Client,
     logged_in: Arc<Mutex<bool>>,
-    /// Short-TTL coalescing cache for `get_torrents`. The mutex is held
-    /// across the upstream fetch on a miss, so concurrent callers that
-    /// arrive during the fetch block on the lock and then see the
-    /// fresh result instead of each firing their own request. Mutating
+    /// Short-TTL coalescing cache for `get_torrents`. The mutex is only
+    /// held for the brief read/write around the `Option<(Instant,
+    /// Vec<Torrent>)>` — never across the upstream HTTP fetch. Mutating
     /// ops (add/pause/resume/delete) clear this so the next poll after
-    /// a UI action reflects the change immediately.
+    /// a UI action reflects the change immediately, and — critically —
+    /// never have to wait behind a hung seedbox's in-flight GET.
     torrents_cache: Arc<Mutex<Option<(Instant, Vec<Torrent>)>>>,
+    /// Single-flight coordinator for the upstream `/torrents/info`
+    /// fetch. When a cache miss is detected, exactly one caller becomes
+    /// the "fetcher" (flipping `torrents_fetch_in_flight` to true under
+    /// the cache mutex) and every other concurrent caller awaits
+    /// `torrents_fetch_done.notified()` instead of firing its own HTTP
+    /// request. Once the fetcher finishes it writes the result into
+    /// `torrents_cache`, clears the in-flight flag, and wakes all
+    /// waiters with `notify_waiters()`. Waiters then re-read the cache
+    /// and return the freshly-stamped value. This keeps the
+    /// coalescing guarantee (one qBit request per burst) without
+    /// gating mutations on a long HTTP await.
+    torrents_fetch_in_flight: Arc<Mutex<bool>>,
+    torrents_fetch_done: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -94,6 +107,8 @@ impl QbitClient {
             http,
             logged_in: Arc::new(Mutex::new(false)),
             torrents_cache: Arc::new(Mutex::new(None)),
+            torrents_fetch_in_flight: Arc::new(Mutex::new(false)),
+            torrents_fetch_done: Arc::new(Notify::new()),
         }
     }
 
@@ -380,23 +395,78 @@ impl QbitClient {
     /// Get all torrents, optionally filtered by category.
     ///
     /// Results are served from a short-TTL (`TORRENTS_CACHE_TTL`)
-    /// in-process cache. Holding the mutex across the fetch gives us
-    /// single-flight coalescing for free: if 4 polling tabs call this
-    /// simultaneously against a remote qBit with 300ms RTT, the first
-    /// pays the round trip and the other 3 wait on the lock for ~300ms
-    /// and then read the cached vector. Without this, each tab fires
-    /// its own request and the seedbox sees 4x the load.
+    /// in-process cache with single-flight coalescing: on a cache miss
+    /// exactly one caller fetches and every other concurrent caller
+    /// waits on `torrents_fetch_done` instead of firing its own
+    /// request. Critically, the cache mutex is **never** held across
+    /// the upstream HTTP call — if we held it, a hung seedbox plus a
+    /// 10s HTTP timeout would block every `pause/resume/delete/add`
+    /// call that needs to `invalidate_torrents_cache()` for up to
+    /// 10 seconds. The `torrents_fetch_in_flight` flag + `Notify`
+    /// pair gives us the same coalescing guarantee without
+    /// serializing mutations behind reads.
     pub async fn get_torrents(&self) -> Result<Vec<Torrent>, String> {
-        let mut guard = self.torrents_cache.lock().await;
-        if let Some((stamped, torrents)) = guard.as_ref() {
-            if stamped.elapsed() < TORRENTS_CACHE_TTL {
-                return Ok(torrents.clone());
+        // Fast path: fresh cached value. Mutex is dropped at the `}`.
+        {
+            let guard = self.torrents_cache.lock().await;
+            if let Some((stamped, torrents)) = guard.as_ref() {
+                if stamped.elapsed() < TORRENTS_CACHE_TTL {
+                    return Ok(torrents.clone());
+                }
             }
         }
 
-        let torrents = self.get_torrents_uncached().await?;
-        *guard = Some((Instant::now(), torrents.clone()));
-        Ok(torrents)
+        // Miss: decide whether we're the fetcher or a waiter. Taking
+        // the in-flight flag under its own mutex is what elects exactly
+        // one fetcher per burst. We set up a notification listener
+        // *before* releasing the flag lock so a fast fetcher can't
+        // complete and wake between our release and our await — that
+        // would make us miss the wake-up and hang until the next
+        // mutation.
+        let notified = self.torrents_fetch_done.notified();
+        tokio::pin!(notified);
+        let is_fetcher = {
+            let mut flag = self.torrents_fetch_in_flight.lock().await;
+            if *flag {
+                false
+            } else {
+                *flag = true;
+                true
+            }
+        };
+
+        if !is_fetcher {
+            // Another task is already fetching. Wait for its wake-up,
+            // then re-read the cache. If the cache is still missing
+            // (fetch errored), fall through to a direct fetch as a
+            // last resort so this waiter doesn't return empty.
+            notified.as_mut().await;
+            {
+                let guard = self.torrents_cache.lock().await;
+                if let Some((stamped, torrents)) = guard.as_ref() {
+                    if stamped.elapsed() < TORRENTS_CACHE_TTL {
+                        return Ok(torrents.clone());
+                    }
+                }
+            }
+            return self.get_torrents_uncached().await;
+        }
+
+        // We're the fetcher. Do the HTTP round trip without holding
+        // the cache mutex. Regardless of the outcome, clear the flag
+        // and wake waiters in both the Ok and Err paths so the next
+        // burst can elect a fresh fetcher.
+        let result = self.get_torrents_uncached().await;
+        if let Ok(ref torrents) = result {
+            let mut guard = self.torrents_cache.lock().await;
+            *guard = Some((Instant::now(), torrents.clone()));
+        }
+        {
+            let mut flag = self.torrents_fetch_in_flight.lock().await;
+            *flag = false;
+        }
+        self.torrents_fetch_done.notify_waiters();
+        result
     }
 
     /// Raw `/api/v2/torrents/info` fetch, no caching. Split out so the

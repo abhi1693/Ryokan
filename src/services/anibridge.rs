@@ -6,14 +6,16 @@ use tokio::sync::{Mutex, RwLock};
 
 const MAPPINGS_URL: &str = "https://github.com/anibridge/anibridge-mappings/releases/latest/download/mappings.min.json";
 
-/// How long the on-disk mappings JSON is considered fresh. This
-/// matches the `anibridge_refresh` background-task cadence in
-/// `main.rs` so startup and bg refresh both agree on "fresh vs
-/// stale". Bumping one side without the other would mean either
-/// the bg task re-downloads while startup still reads stale bytes,
-/// or startup re-downloads every boot while the bg task thinks it
-/// just ran.
-const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long the on-disk mappings JSON is considered fresh. This is
+/// also re-used by `main.rs` as the `anibridge_refresh` background-
+/// task cadence (via `REFRESH_INTERVAL`), so startup cache-freshness
+/// and bg refresh both agree on "fresh vs stale" by definition.
+/// Previously the two sites both hardcoded `24 * 60 * 60` and were
+/// joined only by a comment — if either drifted you'd get the
+/// re-download-every-boot or stale-bytes-at-startup bug the comment
+/// was warning about. Now they share one constant in the type system.
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const CACHE_TTL: Duration = REFRESH_INTERVAL;
 
 /// Returns the absolute path of the on-disk mappings cache. Lives
 /// under `data/cache/anibridge/mappings.json` by default, which

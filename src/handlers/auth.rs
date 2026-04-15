@@ -369,6 +369,14 @@ pub async fn require_auth(
     // a `SELECT COUNT(*) FROM users` round trip on every protected
     // request. The slow path only runs pre-setup or right after a clean
     // install, and promotes the flag as soon as the DB agrees.
+    //
+    // On a DB error we fall through to the session check instead of
+    // redirecting to /setup — that mirrors the pre-cache behavior
+    // (`if let Ok(false) = has_users { redirect }`) and avoids evicting
+    // a real logged-in user to the setup form on a transient SQLite
+    // hiccup during the very first request after boot (before `main.rs`
+    // primes this flag). The session check below still rejects an
+    // unauthenticated user anyway, so nothing bypasses auth.
     if !state
         .users_exist
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -380,7 +388,7 @@ pub async fn require_auth(
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Ok(false) => return Redirect::to("/setup").into_response(),
-            Err(_) => return Redirect::to("/setup").into_response(),
+            Err(_) => {}
         }
     }
 

@@ -875,7 +875,10 @@ async fn main() {
             supervise("anibridge_refresh", move || {
                 let anibridge_db = anibridge_db.clone();
                 async move {
-                    let period = std::time::Duration::from_secs(24 * 60 * 60);
+                    // Share the interval with the on-disk cache TTL in
+                    // `services::anibridge` so the bg task cadence and
+                    // startup freshness check can't drift apart.
+                    let period = services::anibridge::REFRESH_INTERVAL;
                     let delay = models::scheduled_tasks::duration_until_next_run(
                         &anibridge_db, "anibridge_refresh", period,
                     ).await;

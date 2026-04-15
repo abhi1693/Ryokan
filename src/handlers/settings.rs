@@ -321,13 +321,7 @@ pub async fn settings_page(
         None,
     )
     .await;
-    // `settings.html` is the second-biggest template (~45KB source) and
-    // Askama's synchronous `render()` would otherwise block the async
-    // worker for a noticeable chunk of time. Offload to the blocking pool.
-    let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
-        .await
-        .unwrap_or_default();
-    Html(body)
+    Html(template.render().unwrap_or_default())
 }
 
 pub async fn settings_submit(
@@ -453,10 +447,7 @@ pub async fn settings_submit(
             message: None,
             error: Some(format!("Failed to save: {}", e)),
         };
-        let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
-            .await
-            .unwrap_or_default();
-        return Html(body);
+        return Html(template.render().unwrap_or_default());
     }
 
     logger::info(&state.db, LogCategory::System, "Settings saved", "").await;
@@ -529,12 +520,7 @@ pub async fn settings_submit(
         message: Some(notices.join("<br>")),
         error: None,
     };
-    // See `settings_page` for rationale — offload the synchronous Askama
-    // render of the ~45KB settings template to the blocking pool.
-    let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
-        .await
-        .unwrap_or_default();
-    Html(body)
+    Html(template.render().unwrap_or_default())
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1132,10 +1118,7 @@ pub async fn settings_custom_formats_import(
             Some(review),
         )
         .await;
-        let body = tokio::task::spawn_blocking(move || template.render().unwrap_or_default())
-            .await
-            .unwrap_or_default();
-        return Html(body).into_response();
+        return Html(template.render().unwrap_or_default()).into_response();
     }
 
     // No collisions — every entry defaults to Overwrite semantics,
