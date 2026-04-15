@@ -138,14 +138,13 @@ static TRUST_PROXY_HEADERS: LazyLock<bool> = LazyLock::new(|| {
 /// spoofed header.
 fn client_ip_from_request(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if *TRUST_PROXY_HEADERS {
-        if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = h.split(',').next() {
+        if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+            && let Some(first) = h.split(',').next() {
                 let trimmed = first.trim();
                 if !trimmed.is_empty() {
                     return trimmed.to_string();
                 }
             }
-        }
         if let Some(h) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
             let trimmed = h.trim();
             if !trimmed.is_empty() {
@@ -287,8 +286,8 @@ fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
     if let Some(h) = host_of(req) {
         hosts.push(h);
     }
-    if *TRUST_PROXY_HEADERS {
-        if let Some(raw) = req.headers().get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
+    if *TRUST_PROXY_HEADERS
+        && let Some(raw) = req.headers().get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
             for part in raw.split(',') {
                 let part = part.trim();
                 if part.is_empty() {
@@ -298,7 +297,6 @@ fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
                 hosts.push(host_only.to_ascii_lowercase());
             }
         }
-    }
     hosts
 }
 

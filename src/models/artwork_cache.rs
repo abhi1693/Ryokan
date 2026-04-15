@@ -147,8 +147,7 @@ pub async fn get_local_urls_batch(
     // the SQL string and bind each key individually. The key set comes
     // from trusted server-side format strings (`series-<id>-cover`), not
     // user input, so there's no injection surface here.
-    let placeholders = std::iter::repeat("?")
-        .take(cache_keys.len())
+    let placeholders = std::iter::repeat_n("?", cache_keys.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(

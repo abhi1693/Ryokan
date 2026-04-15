@@ -99,34 +99,31 @@ pub async fn ensure_series_monitoring_rows(db: &SqlitePool, tracked: &series::Se
 /// against zero episodes and the per-episode Monitor buttons have nothing
 /// to toggle.
 async fn effective_episode_count(db: &SqlitePool, row: &series::Series) -> i32 {
-    if let Some(n) = row.episodes {
-        if n > 0 {
+    if let Some(n) = row.episodes
+        && n > 0 {
             return n;
         }
-    }
     if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, row.id).await {
         let n = cached.detail.effective_episode_count();
         if n > 0 {
             return n;
         }
     }
-    if let Ok(map) = local_metadata::get_episode_map_for_series(db, row.id).await {
-        if let Some(max) = map.keys().copied().max() {
+    if let Ok(map) = local_metadata::get_episode_map_for_series(db, row.id).await
+        && let Some(max) = map.keys().copied().max() {
             return max;
         }
-    }
     0
 }
 
 async fn load_episode_info(db: &SqlitePool, row: &series::Series) -> HashMap<i32, jikan::EpisodeInfo> {
-    if let Ok(cached) = local_metadata::get_episode_map_for_series(db, row.id).await {
-        if !cached.is_empty() {
+    if let Ok(cached) = local_metadata::get_episode_map_for_series(db, row.id).await
+        && !cached.is_empty() {
             return cached
                 .into_iter()
                 .map(|(num, ep)| (num, jikan::EpisodeInfo { title: ep.title, aired: ep.aired }))
                 .collect();
         }
-    }
     let Some(mal_id) = row.mal_id else {
         return HashMap::new();
     };
@@ -144,13 +141,11 @@ fn resolve_monitored_episodes(
     let mut latest_aired_known = 0;
 
     for ep in episode_numbers {
-        if let Some(info) = episode_info.get(ep) {
-            if let Some(aired) = parse_aired_date(&info.aired) {
-                if aired <= today {
+        if let Some(info) = episode_info.get(ep)
+            && let Some(aired) = parse_aired_date(&info.aired)
+                && aired <= today {
                     latest_aired_known = latest_aired_known.max(*ep);
                 }
-            }
-        }
     }
 
     let max_existing = existing_eps.iter().copied().max().unwrap_or(0);
@@ -170,22 +165,20 @@ fn resolve_monitored_episodes(
                 if is_finished {
                     return true;
                 }
-                if let Some(info) = episode_info.get(ep) {
-                    if let Some(aired) = parse_aired_date(&info.aired) {
+                if let Some(info) = episode_info.get(ep)
+                    && let Some(aired) = parse_aired_date(&info.aired) {
                         return aired <= today;
                     }
-                }
                 *ep <= latest_aired_known && latest_aired_known > 0
             }
             MonitorMode::Future => {
                 if existing_eps.contains(ep) {
                     return false;
                 }
-                if let Some(info) = episode_info.get(ep) {
-                    if let Some(aired) = parse_aired_date(&info.aired) {
+                if let Some(info) = episode_info.get(ep)
+                    && let Some(aired) = parse_aired_date(&info.aired) {
                         return aired > today;
                     }
-                }
                 if latest_aired_known > 0 {
                     *ep > latest_aired_known
                 } else {

@@ -58,8 +58,8 @@ fn set_jikan_cooldown(retry_after_secs: Option<u64>) {
 /// Parse Jikan's JSON error body (shape: `{"status":"429","type":"...","message":"..."}`)
 /// into a human-readable one-liner. Falls back to a short snippet if parsing fails.
 fn parse_jikan_error(status: reqwest::StatusCode, body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(msg) = v["message"].as_str() {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(msg) = v["message"].as_str() {
             // Take just the first sentence; the rest is usually a docs link.
             let short = msg.split('.').next().unwrap_or(msg).trim();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -67,7 +67,6 @@ fn parse_jikan_error(status: reqwest::StatusCode, body: &str) -> String {
             }
             return format!("Jikan HTTP {}: {}", status.as_u16(), short);
         }
-    }
     let snippet: String = body.chars().take(120).collect();
     format!("Jikan HTTP {}: {}", status.as_u16(), snippet.trim())
 }
@@ -444,11 +443,10 @@ fn non_empty(value: &str, fallback: &str) -> String {
 pub async fn get_anime_detail_cached(mal_id: i64) -> Result<AnimeDetail, String> {
     {
         let cache = DETAIL_CACHE.read().await;
-        if let Some(entry) = cache.get(&mal_id) {
-            if entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS {
+        if let Some(entry) = cache.get(&mal_id)
+            && entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS {
                 return Ok(entry.detail.clone());
             }
-        }
     }
 
     let detail = get_anime_detail(mal_id).await?;
@@ -835,12 +833,11 @@ fn parse_duration_minutes(duration: Option<&str>) -> Option<i32> {
                 total += hours * 60;
                 saw = true;
             }
-        } else if let Some(num) = part.strip_suffix(" min") {
-            if let Ok(minutes) = num.trim().parse::<i32>() {
+        } else if let Some(num) = part.strip_suffix(" min")
+            && let Ok(minutes) = num.trim().parse::<i32>() {
                 total += minutes;
                 saw = true;
             }
-        }
     }
 
     if saw { Some(total) } else { None }

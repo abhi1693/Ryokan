@@ -905,11 +905,10 @@ pub async fn classify_release(
     let filename = classify_filename(title);
 
     let mut evidence = filename.evidence.clone();
-    if let Some(group) = filename.release_group.as_deref() {
-        if let Some(group_ev) = classify_group(db, group).await {
+    if let Some(group) = filename.release_group.as_deref()
+        && let Some(group_ev) = classify_group(db, group).await {
             evidence.push(group_ev);
         }
-    }
 
     // Layer 4 — temporal inference. Pure synchronous function with no I/O,
     // so unlike Layer 2 we run it up-front alongside L1+L3 whenever a
@@ -1033,19 +1032,18 @@ pub async fn classify_post_download(
     let mut evidence = filename.evidence.clone();
 
     // L3 — release group identity.
-    if let Some(group) = filename.release_group.as_deref() {
-        if let Some(group_ev) = classify_group(db, group).await {
+    if let Some(group) = filename.release_group.as_deref()
+        && let Some(group_ev) = classify_group(db, group).await {
             evidence.push(group_ev);
         }
-    }
 
     // L4 — temporal inference (when we have series context). Post-download
     // now feeds back the original `is_batch` flag from `grabbed_torrents`
     // so the "finished 1+ year ago + batch → BluRay" rule still fires on
     // library-sweep reclassifies. Externally-imported files that Ryokan
     // never grabbed pass `false` because there's no batch signal.
-    if let Some(series_ctx) = series {
-        if let Some(temporal_ev) = classify_temporal(
+    if let Some(series_ctx) = series
+        && let Some(temporal_ev) = classify_temporal(
             series_ctx.status,
             series_ctx.season_year,
             series_ctx.end_year,
@@ -1054,7 +1052,6 @@ pub async fn classify_post_download(
         ) {
             evidence.push(temporal_ev);
         }
-    }
 
     // L5 — ffprobe stream analysis. Strongest post-download signal. Returns
     // an empty classification on any failure (missing binary, unreadable

@@ -115,8 +115,8 @@ async fn replace_relations_table(
             .await?;
     }
 
-    if table == "provider_relations_cache" {
-        if let Some(owner) = owner_detail {
+    if table == "provider_relations_cache"
+        && let Some(owner) = owner_detail {
             for rel in relations.iter().filter(|r| relation_is_cacheable(r)) {
                 let Some(reverse_type) = reverse_relation_type(&rel.relation_type) else {
                     continue;
@@ -149,7 +149,6 @@ async fn replace_relations_table(
                     .await?;
             }
         }
-    }
 
     tx.commit().await?;
     Ok(())

@@ -1175,11 +1175,10 @@ fn parse_collision_decisions(
         if line.is_empty() {
             continue;
         }
-        if let Some((idx_str, new_name)) = line.split_once(':') {
-            if let Ok(idx) = idx_str.trim().parse::<usize>() {
+        if let Some((idx_str, new_name)) = line.split_once(':')
+            && let Ok(idx) = idx_str.trim().parse::<usize>() {
                 rename_map.insert(idx, new_name.trim().to_string());
             }
-        }
     }
 
     let mut out: std::collections::HashMap<usize, CollisionDecision> =

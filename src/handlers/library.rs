@@ -345,11 +345,10 @@ async fn resolve_series_context(
                 return Ok((db_series, cached.provider_id, cached.detail));
             }
         }
-    } else if provider_id != 0 {
-        if let Ok(Some(cached)) = metadata_cache::get_by_provider_id(db, provider_id).await {
+    } else if provider_id != 0
+        && let Ok(Some(cached)) = metadata_cache::get_by_provider_id(db, provider_id).await {
             return Ok((db_series, cached.provider_id, cached.detail));
         }
-    }
 
     let mal_hint = db_series.as_ref().and_then(|s| s.mal_id);
     let mut detail = match anilist::get_anime_detail_with_options(provider_id, mal_hint, force_fallback).await {
@@ -368,8 +367,8 @@ async fn resolve_series_context(
                         provider_id, mid
                     );
                     logger::warn(db, LogCategory::AniList, &fallback_msg, &e).await;
-                    if let Some(ref tracked) = db_series {
-                        if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
+                    if let Some(ref tracked) = db_series
+                        && let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
                             logger::info(
                                 db,
                                 LogCategory::AniList,
@@ -378,7 +377,6 @@ async fn resolve_series_context(
                             ).await;
                             return Ok((db_series, cached.provider_id, cached.detail));
                         }
-                    }
                     match jikan::get_anime_detail_cached(mid).await {
                         Ok(detail) => detail,
                         Err(je) => {
@@ -425,13 +423,12 @@ async fn resolve_series_context(
         }
     };
 
-    if !force_fallback {
-        if let Some((reconciled, upgraded_detail)) = maybe_reconcile_mal_entry(db, db_series.clone()).await {
+    if !force_fallback
+        && let Some((reconciled, upgraded_detail)) = maybe_reconcile_mal_entry(db, db_series.clone()).await {
             provider_id = reconciled.anilist_id;
             db_series = Some(reconciled);
             detail = upgraded_detail;
         }
-    }
 
     if db_series.is_none() {
         db_series = if let Some(mid) = detail.id_mal {
@@ -444,15 +441,14 @@ async fn resolve_series_context(
     if detail.id != 0 {
         let _ = metadata_cache::upsert_provider(db, detail.id, detail.id_mal, &detail).await;
     }
-    if let Some(ref tracked) = db_series {
-        if should_persist_detail_cache(tracked, &detail) {
+    if let Some(ref tracked) = db_series
+        && should_persist_detail_cache(tracked, &detail) {
             let _ = metadata_cache::upsert(db, tracked.id, detail.id, detail.id_mal, &detail).await;
         }
         // NOTE: we intentionally do NOT pre-warm the Jikan episode cache here.
         // `build_episodes` calls `jikan::fetch_episode_titles_for_detail` itself
         // with the same (db, detail) arguments; calling it here too would double
         // the work on every page load (cache lookup + decode) for zero benefit.
-    }
 
     Ok((db_series, provider_id, detail))
 }
@@ -1139,23 +1135,20 @@ fn relation_identity_key(provider_id: i64, mal_id: Option<i64>) -> String {
 /// detail resolver in `resolve_series_context` knows how to handle that).
 async fn resolve_relation_card_id(db: &SqlitePool, provider_id: i64, mal_id: Option<i64>) -> i64 {
     // Try AniList ID first (positive IDs).
-    if provider_id > 0 {
-        if let Ok(Some(row)) = series::get_by_anilist_id(db, provider_id).await {
+    if provider_id > 0
+        && let Ok(Some(row)) = series::get_by_anilist_id(db, provider_id).await {
             return row.id;
         }
-    }
     // Try MAL ID.
-    if let Some(mid) = mal_id {
-        if let Ok(Some(row)) = series::get_by_mal_id(db, mid).await {
+    if let Some(mid) = mal_id
+        && let Ok(Some(row)) = series::get_by_mal_id(db, mid).await {
             return row.id;
         }
-    }
     // For MAL-sourced entries, the anilist_id column stores -mal_id.
-    if provider_id < 0 {
-        if let Ok(Some(row)) = series::get_by_anilist_id(db, provider_id).await {
+    if provider_id < 0
+        && let Ok(Some(row)) = series::get_by_anilist_id(db, provider_id).await {
             return row.id;
         }
-    }
     provider_id
 }
 
@@ -1706,8 +1699,8 @@ pub async fn remove_series(
     let mut folder_status: &'static str = "skipped";
     let mut folder_detail: String = String::new();
 
-    if delete_files {
-        if let Some(ref tracked) = tracked {
+    if delete_files
+        && let Some(ref tracked) = tracked {
             // 1. Tell qBittorrent to drop every torrent (with files) we ever
             //    grabbed for this series. A failure on one torrent is logged
             //    but doesn't abort the rest of the cleanup — we'd rather end
@@ -1751,8 +1744,8 @@ pub async fn remove_series(
             //    accidentally remove anything outside the library. Async
             //    fs to keep the runtime worker free on slow mounts.
             let cfg_opt = config::get_config(&state.db).await.ok().flatten();
-            if let Some(cfg) = cfg_opt {
-                if !tracked.folder_name.trim().is_empty() && !cfg.media_root.trim().is_empty() {
+            if let Some(cfg) = cfg_opt
+                && !tracked.folder_name.trim().is_empty() && !cfg.media_root.trim().is_empty() {
                     let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
                     match tokio::fs::canonicalize(&cfg.media_root).await {
                         Ok(media_root_canon) => {
@@ -1793,9 +1786,7 @@ pub async fn remove_series(
                         }
                     }
                 }
-            }
         }
-    }
 
     // 4. Remove the DB tracking rows. This is the irreversible step, so
     //    do it last — if filesystem cleanup blew up the operator can
@@ -2149,13 +2140,11 @@ fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32>
     let mut ep_nums: Vec<i32> = auto_search::parse_release_numbers(title)
         .into_iter()
         .collect();
-    if ep_nums.is_empty() {
-        if let Some(total) = detail.episodes {
-            if total > 0 && total <= 1000 {
+    if ep_nums.is_empty()
+        && let Some(total) = detail.episodes
+            && total > 0 && total <= 1000 {
                 ep_nums = (1..=total).collect();
             }
-        }
-    }
     ep_nums.sort_unstable();
     ep_nums
 }
@@ -2472,14 +2461,13 @@ async fn auto_expand_library_from_pack_with_files(
         // but guards against a bad route/file pairing).
         let mut ep_nums: Vec<i32> = Vec::new();
         for &file_idx in &sibling.file_indices {
-            if let Some(name) = filenames.get(file_idx) {
-                if let Some((_, raw)) = media::parse_episode_number(&name.to_lowercase()) {
+            if let Some(name) = filenames.get(file_idx)
+                && let Some((_, raw)) = media::parse_episode_number(&name.to_lowercase()) {
                     let effective = raw - sibling.episode_offset;
                     if effective > 0 {
                         ep_nums.push(effective);
                     }
                 }
-            }
         }
         ep_nums.sort_unstable();
         ep_nums.dedup();
@@ -2580,8 +2568,8 @@ async fn auto_expand_library_from_pack_with_files(
         });
     }
 
-    if !routes.is_empty() {
-        if let Err(e) = grabbed_torrents::record_grab_series_routes(db, &routes).await {
+    if !routes.is_empty()
+        && let Err(e) = grabbed_torrents::record_grab_series_routes(db, &routes).await {
             logger::warn(
                 db,
                 LogCategory::Library,
@@ -2593,7 +2581,6 @@ async fn auto_expand_library_from_pack_with_files(
             )
             .await;
         }
-    }
 
     logger::info(
         db,
@@ -2691,8 +2678,8 @@ async fn run_auto_search_targets_with_upgrades(
 
                 // For upgrade targets, verify the found release is actually
                 // better quality than what's already on disk.
-                if let auto_search::SearchTarget::Episode(ep_num) = &target {
-                    if let Some(existing) = upgrade_classifications.get(ep_num) {
+                if let auto_search::SearchTarget::Episode(ep_num) = &target
+                    && let Some(existing) = upgrade_classifications.get(ep_num) {
                         if incoming_classification.rank() <= existing.rank() {
                             logger::debug(&state.db, LogCategory::AutoSearch, &format!("{}: skipped upgrade (incoming {} not better than existing {})", label, incoming_classification.label(), existing.label()), &result.title).await;
                             skipped.push(format!("{}: no quality upgrade available", label));
@@ -2700,7 +2687,6 @@ async fn run_auto_search_targets_with_upgrades(
                         }
                         logger::info(&state.db, LogCategory::AutoSearch, &format!("{}: upgrading from {} to {}", label, existing.label(), incoming_classification.label()), &result.title).await;
                     }
-                }
                 // For selective downloads, prefer the `.torrent` URL
                 // over the magnet: qBit can parse metadata straight
                 // from the file instead of waiting on DHT/trackers.
@@ -2828,8 +2814,8 @@ async fn run_auto_search_targets_with_upgrades(
                             // download) still auto-expands because the
                             // whole pack is actually downloading.
                             let selective_narrowed = wants_selective && kept.is_some();
-                            if result.is_batch && !selective_narrowed {
-                                if let Some(grab_id) = grab_id {
+                            if result.is_batch && !selective_narrowed
+                                && let Some(grab_id) = grab_id {
                                     // Fire-and-forget so the HTTP handler
                                     // doesn't block up to ~60s waiting on
                                     // qBit to discover metadata (see the
@@ -2863,7 +2849,6 @@ async fn run_auto_search_targets_with_upgrades(
                                         ).await;
                                     });
                                 }
-                            }
                         }
                     }
                     Err(e) => {
@@ -2990,11 +2975,10 @@ pub async fn auto_search_series(
         })
         .collect();
     for (target, _) in &upgrade_targets {
-        if let auto_search::SearchTarget::Episode(n) = target {
-            if !existing_target_eps.contains(n) {
+        if let auto_search::SearchTarget::Episode(n) = target
+            && !existing_target_eps.contains(n) {
                 targets.push(target.clone());
             }
-        }
     }
 
     let target_summary = if targets.len() <= 5 {
@@ -3471,8 +3455,8 @@ pub async fn grab_batch_result(
         // download) still auto-expands because the whole pack is
         // actually downloading.
         let selective_narrowed = wants_selective && selective_outcome.is_some();
-        if !selective_narrowed {
-            if let Some(grab_id) = grab_id {
+        if !selective_narrowed
+            && let Some(grab_id) = grab_id {
                 // Fire-and-forget so the HTTP handler doesn't block
                 // up to ~60s on qBit metadata discovery. See the
                 // matching spawn in `run_auto_search_targets_with_upgrades`.
@@ -3501,7 +3485,6 @@ pub async fn grab_batch_result(
                     ).await;
                 });
             }
-        }
     }
 
     Ok(Json(serde_json::json!({
@@ -3762,11 +3745,10 @@ pub async fn delete_episode_file(
             // async variant so the stat/readlink walk doesn't block the
             // Tokio worker on a slow mount.
             let nfo_path = full_path_canon.with_extension("nfo");
-            if let Ok(nfo_canon) = tokio::fs::canonicalize(&nfo_path).await {
-                if nfo_canon.starts_with(&media_root_canon) {
+            if let Ok(nfo_canon) = tokio::fs::canonicalize(&nfo_path).await
+                && nfo_canon.starts_with(&media_root_canon) {
                     let _ = tokio::fs::remove_file(&nfo_canon).await;
                 }
-            }
 
             // Clear the episode quality tag so it shows as missing again.
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
@@ -3869,13 +3851,12 @@ pub async fn mark_episode_failed(
     // stale library file, and import the replacement cleanly.
     if let Ok(old_grabs) =
         grabbed_torrents::find_imported_for_episode(&state.db, series_id, episode_number).await
-    {
-        if !old_grabs.is_empty() {
+        && !old_grabs.is_empty() {
             let qbit = { state.qbit.read().await.as_ref().cloned() };
             if let Some(qbit) = qbit {
                 for old in &old_grabs {
-                    if !old.hash.is_empty() {
-                        if let Err(e) = qbit.delete_torrent(&old.hash, true).await {
+                    if !old.hash.is_empty()
+                        && let Err(e) = qbit.delete_torrent(&old.hash, true).await {
                             crate::services::logger::warn(
                                 &state.db,
                                 crate::models::log::LogCategory::QBit,
@@ -3887,11 +3868,9 @@ pub async fn mark_episode_failed(
                             )
                             .await;
                         }
-                    }
                 }
             }
         }
-    }
 
     // Re-trigger auto-search for this episode in the background so it completes
     // even if the client disconnects. Collapse to Single for single-entry

@@ -13,6 +13,13 @@ use tokio::sync::{Mutex, Notify};
 /// 5s cadence — the user-visible staleness ceiling is 2s, not 5s.
 const TORRENTS_CACHE_TTL: Duration = Duration::from_secs(2);
 
+/// Stamped cache slot for the `/torrents/info` result. Held under a
+/// `Mutex` on `QbitClient` and read/written only in short critical
+/// sections — never across an await that does I/O. Aliased here so
+/// the struct field and the get/invalidate call sites stay readable
+/// and clippy stops flagging the nested generics.
+type TorrentsCacheSlot = Option<(Instant, Vec<Torrent>)>;
+
 /// qBittorrent Web API client with automatic re-authentication.
 #[derive(Clone)]
 pub struct QbitClient {
@@ -23,12 +30,12 @@ pub struct QbitClient {
     http: Client,
     logged_in: Arc<Mutex<bool>>,
     /// Short-TTL coalescing cache for `get_torrents`. The mutex is only
-    /// held for the brief read/write around the `Option<(Instant,
-    /// Vec<Torrent>)>` — never across the upstream HTTP fetch. Mutating
-    /// ops (add/pause/resume/delete) clear this so the next poll after
-    /// a UI action reflects the change immediately, and — critically —
-    /// never have to wait behind a hung seedbox's in-flight GET.
-    torrents_cache: Arc<Mutex<Option<(Instant, Vec<Torrent>)>>>,
+    /// held for the brief read/write around the `TorrentsCacheSlot` —
+    /// never across the upstream HTTP fetch. Mutating ops (add / pause /
+    /// resume / delete) clear this so the next poll after a UI action
+    /// reflects the change immediately, and — critically — never have
+    /// to wait behind a hung seedbox's in-flight GET.
+    torrents_cache: Arc<Mutex<TorrentsCacheSlot>>,
     /// Single-flight coordinator for the upstream `/torrents/info`
     /// fetch. When a cache miss is detected, exactly one caller becomes
     /// the "fetcher" (flipping `torrents_fetch_in_flight` to true under
@@ -409,11 +416,10 @@ impl QbitClient {
         // Fast path: fresh cached value. Mutex is dropped at the `}`.
         {
             let guard = self.torrents_cache.lock().await;
-            if let Some((stamped, torrents)) = guard.as_ref() {
-                if stamped.elapsed() < TORRENTS_CACHE_TTL {
+            if let Some((stamped, torrents)) = guard.as_ref()
+                && stamped.elapsed() < TORRENTS_CACHE_TTL {
                     return Ok(torrents.clone());
                 }
-            }
         }
 
         // Miss: decide whether we're the fetcher or a waiter. Taking
@@ -443,11 +449,10 @@ impl QbitClient {
             notified.as_mut().await;
             {
                 let guard = self.torrents_cache.lock().await;
-                if let Some((stamped, torrents)) = guard.as_ref() {
-                    if stamped.elapsed() < TORRENTS_CACHE_TTL {
+                if let Some((stamped, torrents)) = guard.as_ref()
+                    && stamped.elapsed() < TORRENTS_CACHE_TTL {
                         return Ok(torrents.clone());
                     }
-                }
             }
             return self.get_torrents_uncached().await;
         }

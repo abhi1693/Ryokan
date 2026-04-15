@@ -227,11 +227,10 @@ fn lookup_show(
     for ((id, _), entries) in map {
         if *id == show_id {
             for e in entries {
-                if let Some(al) = e.anilist_id {
-                    if result.iter().any(|r: &AnimeIds| r.anilist_id == Some(al)) {
+                if let Some(al) = e.anilist_id
+                    && result.iter().any(|r: &AnimeIds| r.anilist_id == Some(al)) {
                         continue;
                     }
-                }
                 result.push(e.clone());
             }
         }
@@ -397,9 +396,8 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                 if !mal_ids.contains(&id) { mal_ids.push(id); }
             } else if let Some(id_season) = parse_show_id(key, "tmdb_show") {
                 if !tmdb_ids.contains(&id_season) { tmdb_ids.push(id_season); }
-            } else if let Some(id_season) = parse_show_id(key, "tvdb_show") {
-                if !tvdb_ids.contains(&id_season) { tvdb_ids.push(id_season); }
-            }
+            } else if let Some(id_season) = parse_show_id(key, "tvdb_show")
+                && !tvdb_ids.contains(&id_season) { tvdb_ids.push(id_season); }
         }
 
         if anilist_ids.is_empty() && mal_ids.is_empty() {
@@ -440,11 +438,10 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                     if entry.iter().any(|e| e.anilist_id == Some(al)) {
                         continue;
                     }
-                } else if let Some(m) = ids.mal_id {
-                    if entry.iter().any(|e| e.mal_id == Some(m)) {
+                } else if let Some(m) = ids.mal_id
+                    && entry.iter().any(|e| e.mal_id == Some(m)) {
                         continue;
                     }
-                }
                 entry.push(ids.clone());
             }
         }
