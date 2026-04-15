@@ -288,11 +288,10 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
 }
 
 fn extract_group(title: &str) -> String {
-    if let Some(start) = title.find('[') {
-        if let Some(end) = title[start..].find(']') {
+    if let Some(start) = title.find('[')
+        && let Some(end) = title[start..].find(']') {
             return title[start + 1..start + end].to_string();
         }
-    }
     String::new()
 }
 

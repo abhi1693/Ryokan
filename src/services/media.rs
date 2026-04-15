@@ -156,11 +156,10 @@ pub fn list_media_folders(media_root: &str) -> Vec<String> {
     let mut folders = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
+            if entry.path().is_dir()
+                && let Some(name) = entry.file_name().to_str() {
                     folders.push(name.to_string());
                 }
-            }
         }
     }
     folders.sort_by_key(|a| a.to_lowercase());
@@ -177,11 +176,10 @@ fn scan_dir_recursive(dir: &Path, series_root: &Path, files: &mut Vec<EpisodeFil
         let path = entry.path();
         if path.is_dir() {
             scan_dir_recursive(&path, series_root, files);
-        } else if is_video_file(&path) {
-            if let Some(ep) = parse_episode_file(&path, series_root) {
+        } else if is_video_file(&path)
+            && let Some(ep) = parse_episode_file(&path, series_root) {
                 files.push(ep);
             }
-        }
     }
 }
 
@@ -305,8 +303,8 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // `<title> NN - <subtitle>.mkv` — first match wins (subtitle may
     // contain its own ` <n> - ` run that should NOT shadow the real
     // episode marker).
-    if let Some(caps) = RE_BARE_NUM_DASH.captures(lower) {
-        if let Some(m) = caps.get(1) {
+    if let Some(caps) = RE_BARE_NUM_DASH.captures(lower)
+        && let Some(m) = caps.get(1) {
             if let Some(full) = caps.get(0) {
                 // If what follows the ` - ` is a non-episodic marker
                 // (e.g. `Chihayafuru 2 - OVA - Waga Miyo…`), the
@@ -323,18 +321,15 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
                 return Some((None, e));
             }
         }
-    }
 
     // Bare-number-before-bracket fallback for space-delimited packs.
     // Use the rightmost match so an earlier title token like
     // `Show 99 (extra) 01` doesn't shadow the actual episode number.
-    if let Some(caps) = RE_BARE_NUM_BRACKET.captures_iter(lower).last() {
-        if let Some(m) = caps.get(1) {
-            if let Ok(e) = m.as_str().parse::<i32>() {
+    if let Some(caps) = RE_BARE_NUM_BRACKET.captures_iter(lower).last()
+        && let Some(m) = caps.get(1)
+            && let Ok(e) = m.as_str().parse::<i32>() {
                 return Some((None, e));
             }
-        }
-    }
 
     None
 }

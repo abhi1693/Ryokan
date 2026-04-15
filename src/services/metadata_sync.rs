@@ -47,17 +47,15 @@ async fn fetch_live_detail_for_ids(
     episode_count: Option<i32>,
     force_mal_fallback: bool,
 ) -> Result<anilist::AnimeDetail, String> {
-    if provider_id > 0 && !force_mal_fallback {
-        if let Ok(detail) = anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
+    if provider_id > 0 && !force_mal_fallback
+        && let Ok(detail) = anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
             return Ok(detail);
         }
-    }
 
-    if let Some(mal_id) = mal_id {
-        if let Ok(detail) = jikan::get_anime_detail_cached(mal_id).await {
+    if let Some(mal_id) = mal_id
+        && let Ok(detail) = jikan::get_anime_detail_cached(mal_id).await {
             return Ok(detail);
         }
-    }
 
     if !title_candidates.is_empty() {
         return kitsu::get_anime_detail_by_titles(title_candidates, None, episode_count).await;

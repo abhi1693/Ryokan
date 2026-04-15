@@ -128,11 +128,10 @@ pub fn write_series_nfo(
         }
 
         // <runtime>: detail.duration is per-episode minutes from AniList.
-        if let Some(duration) = d.duration {
-            if duration > 0 {
+        if let Some(duration) = d.duration
+            && duration > 0 {
                 xml.push_str(&format!("  <runtime>{}</runtime>\n", duration));
             }
-        }
 
         // Real genre tags. Always include "Animation" as a fallback so the
         // category filter still groups it correctly even when AniList genres
@@ -211,11 +210,10 @@ pub fn write_episode_nfo(
         aired = aired,
     );
 
-    if let Some(runtime) = runtime_minutes {
-        if runtime > 0 {
+    if let Some(runtime) = runtime_minutes
+        && runtime > 0 {
             xml.push_str(&format!("  <runtime>{}</runtime>\n", runtime));
         }
-    }
 
     xml.push_str("</episodedetails>\n");
 

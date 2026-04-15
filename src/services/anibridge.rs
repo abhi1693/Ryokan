@@ -1,8 +1,64 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
 const MAPPINGS_URL: &str = "https://github.com/anibridge/anibridge-mappings/releases/latest/download/mappings.min.json";
+
+/// How long the on-disk mappings JSON is considered fresh. This is
+/// also re-used by `main.rs` as the `anibridge_refresh` background-
+/// task cadence (via `REFRESH_INTERVAL`), so startup cache-freshness
+/// and bg refresh both agree on "fresh vs stale" by definition.
+/// Previously the two sites both hardcoded `24 * 60 * 60` and were
+/// joined only by a comment — if either drifted you'd get the
+/// re-download-every-boot or stale-bytes-at-startup bug the comment
+/// was warning about. Now they share one constant in the type system.
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const CACHE_TTL: Duration = REFRESH_INTERVAL;
+
+/// Returns the absolute path of the on-disk mappings cache. Lives
+/// under `data/cache/anibridge/mappings.json` by default, which
+/// stays consistent with the artwork cache layout. `std::path::absolute`
+/// normalizes relative paths so the runtime CWD can't change which
+/// file the cache refers to between runs.
+fn cache_file_path() -> PathBuf {
+    let base = PathBuf::from("data/cache/anibridge/mappings.json");
+    std::path::absolute(&base).unwrap_or(base)
+}
+
+/// Read the cached mappings bytes from disk if the file is younger
+/// than `CACHE_TTL`. Returns `None` if the file is missing, unreadable,
+/// or stale — the caller then falls back to re-downloading.
+fn read_fresh_disk_cache() -> Option<Vec<u8>> {
+    let path = cache_file_path();
+    let meta = std::fs::metadata(&path).ok()?;
+    let mtime = meta.modified().ok()?;
+    let age = SystemTime::now().duration_since(mtime).ok()?;
+    if age > CACHE_TTL {
+        return None;
+    }
+    std::fs::read(&path).ok()
+}
+
+/// Persist the downloaded mappings JSON bytes to disk. Writes to a
+/// sibling `.tmp` file first and renames into place so a crash mid-
+/// write can't leave a truncated cache file behind (the next startup
+/// would then parse garbage and fall through to a fresh download
+/// anyway, but half-files are still worth avoiding).
+fn write_disk_cache(bytes: &[u8]) -> Result<(), String> {
+    let path = cache_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create anibridge cache dir failed: {}", e))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)
+        .map_err(|e| format!("write anibridge cache tmp failed: {}", e))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("rename anibridge cache tmp failed: {}", e))?;
+    Ok(())
+}
 
 /// Cached mapping data: TMDB show ID → list of (anilist_id, mal_id) pairs.
 /// A single TMDB show may map to multiple AniList entries (e.g. multi-season).
@@ -36,6 +92,18 @@ struct MappingCache {
 /// Ensure the mappings are loaded, downloading if necessary.
 /// Returns true if cache is available. The download mutex prevents
 /// concurrent callers from racing to download at the same time.
+///
+/// Precedence on a cold start:
+///   1. In-memory cache (another task already populated it)
+///   2. On-disk cache at `data/cache/anibridge/mappings.json`, if
+///      its mtime is within `CACHE_TTL`
+///   3. Fresh download from GitHub, which is then persisted to disk
+///      for the next startup
+///
+/// The disk path is what makes `cargo run` fast on subsequent
+/// launches — the GitHub download is ~20MB gzipped and can take
+/// several seconds, and it's wasteful to pay that on every restart
+/// when the data almost never changes day-to-day.
 pub async fn ensure_loaded() -> bool {
     // Fast path: cache exists and is fresh.
     {
@@ -56,7 +124,31 @@ pub async fn ensure_loaded() -> bool {
         }
     }
 
-    match download_and_parse().await {
+    // Try the on-disk cache before hitting the network. `spawn_blocking`
+    // is overkill for a single sync read, but we're in an async context
+    // and the file can be 20MB+ — doing it inline would briefly hold up
+    // other tasks sharing this runtime worker.
+    let disk_bytes = tokio::task::spawn_blocking(read_fresh_disk_cache)
+        .await
+        .ok()
+        .flatten();
+    if let Some(bytes) = disk_bytes {
+        match parse_bytes(&bytes) {
+            Ok(data) => {
+                tracing::info!("Loaded anibridge mappings from disk cache");
+                let mut w = CACHE.write().await;
+                *w = Some(CacheState { data });
+                return true;
+            }
+            Err(e) => {
+                // Corrupt cache file — fall through to a fresh download
+                // and overwrite it below rather than staying broken.
+                tracing::warn!("Anibridge disk cache unusable, re-downloading: {}", e);
+            }
+        }
+    }
+
+    match download_parse_and_persist().await {
         Ok(data) => {
             let mut w = CACHE.write().await;
             *w = Some(CacheState { data });
@@ -69,11 +161,14 @@ pub async fn ensure_loaded() -> bool {
     }
 }
 
-/// Force-reload the mappings cache, e.g. from an admin endpoint.
-/// Returns true if the reload succeeded.
+/// Force-reload the mappings cache, e.g. from an admin endpoint or
+/// from the `anibridge_refresh` background task. Always hits the
+/// network — the caller is explicitly asking for a fresh fetch, so
+/// disk TTL is ignored. The fresh bytes do get written back to disk
+/// so subsequent restarts can pick them up from there.
 pub async fn reload() -> bool {
     let _guard = DOWNLOAD_LOCK.lock().await;
-    match download_and_parse().await {
+    match download_parse_and_persist().await {
         Ok(data) => {
             let mut w = CACHE.write().await;
             *w = Some(CacheState { data });
@@ -132,11 +227,10 @@ fn lookup_show(
     for ((id, _), entries) in map {
         if *id == show_id {
             for e in entries {
-                if let Some(al) = e.anilist_id {
-                    if result.iter().any(|r: &AnimeIds| r.anilist_id == Some(al)) {
+                if let Some(al) = e.anilist_id
+                    && result.iter().any(|r: &AnimeIds| r.anilist_id == Some(al)) {
                         continue;
                     }
-                }
                 result.push(e.clone());
             }
         }
@@ -200,7 +294,24 @@ pub async fn lookup_tmdb_by_anilist(anilist_id: i64) -> Option<i64> {
         .copied()
 }
 
-async fn download_and_parse() -> Result<MappingCache, String> {
+/// Parse raw mappings JSON bytes into the in-memory lookup tables.
+/// Shared between the disk-cache path (`ensure_loaded`) and the
+/// network path (`download_parse_and_persist`) so there's only one
+/// place to fix if the JSON shape changes.
+fn parse_bytes(bytes: &[u8]) -> Result<MappingCache, String> {
+    let data: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| format!("Failed to parse mappings JSON: {}", e))?;
+    let cache = build_cache(&data);
+    tracing::info!(
+        "Anibridge mappings loaded: {} TMDB entries, {} TVDB entries, {} AniList reverse entries",
+        cache.tmdb_to_anime.len(),
+        cache.tvdb_to_anime.len(),
+        cache.anilist_to_tmdb.len(),
+    );
+    Ok(cache)
+}
+
+async fn download_parse_and_persist() -> Result<MappingCache, String> {
     tracing::info!("Downloading anibridge mappings...");
 
     let client = reqwest::Client::builder()
@@ -226,16 +337,19 @@ async fn download_and_parse() -> Result<MappingCache, String> {
 
     tracing::info!("Parsing anibridge mappings ({} bytes)...", bytes.len());
 
-    let data: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("Failed to parse mappings JSON: {}", e))?;
+    let cache = parse_bytes(&bytes)?;
 
-    let cache = build_cache(&data);
-    tracing::info!(
-        "Anibridge mappings loaded: {} TMDB entries, {} TVDB entries, {} AniList reverse entries",
-        cache.tmdb_to_anime.len(),
-        cache.tvdb_to_anime.len(),
-        cache.anilist_to_tmdb.len(),
-    );
+    // Persist to disk so the next startup can skip the download.
+    // A write failure is logged but not fatal — we still have the
+    // parsed mappings in memory and can serve this session from
+    // them. The user will see a re-download on next restart but
+    // nothing else breaks.
+    let bytes_vec = bytes.to_vec();
+    if let Err(e) = tokio::task::spawn_blocking(move || write_disk_cache(&bytes_vec)).await
+        .unwrap_or_else(|e| Err(format!("disk cache write join failed: {}", e)))
+    {
+        tracing::warn!("Failed to persist anibridge mappings to disk: {}", e);
+    }
 
     Ok(cache)
 }
@@ -282,9 +396,8 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                 if !mal_ids.contains(&id) { mal_ids.push(id); }
             } else if let Some(id_season) = parse_show_id(key, "tmdb_show") {
                 if !tmdb_ids.contains(&id_season) { tmdb_ids.push(id_season); }
-            } else if let Some(id_season) = parse_show_id(key, "tvdb_show") {
-                if !tvdb_ids.contains(&id_season) { tvdb_ids.push(id_season); }
-            }
+            } else if let Some(id_season) = parse_show_id(key, "tvdb_show")
+                && !tvdb_ids.contains(&id_season) { tvdb_ids.push(id_season); }
         }
 
         if anilist_ids.is_empty() && mal_ids.is_empty() {
@@ -325,11 +438,10 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                     if entry.iter().any(|e| e.anilist_id == Some(al)) {
                         continue;
                     }
-                } else if let Some(m) = ids.mal_id {
-                    if entry.iter().any(|e| e.mal_id == Some(m)) {
+                } else if let Some(m) = ids.mal_id
+                    && entry.iter().any(|e| e.mal_id == Some(m)) {
                         continue;
                     }
-                }
                 entry.push(ids.clone());
             }
         }

@@ -140,8 +140,8 @@ pub async fn upsert(
     db: &SqlitePool,
     core: SeriesCore<'_>,
 ) -> Result<(i64, bool), sqlx::Error> {
-    if let Some(mid) = core.mal_id {
-        if let Some(existing) = get_by_mal_id(db, mid).await? {
+    if let Some(mid) = core.mal_id
+        && let Some(existing) = get_by_mal_id(db, mid).await? {
             sqlx::query(
                 r#"
                 UPDATE series
@@ -179,7 +179,6 @@ pub async fn upsert(
             .await?;
             return Ok((existing.id, false));
         }
-    }
 
     if let Some(existing) = get_by_anilist_id(db, core.anilist_id).await? {
         sqlx::query(

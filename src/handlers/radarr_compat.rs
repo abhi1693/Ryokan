@@ -556,8 +556,8 @@ pub async fn execute_command(
 ) -> Json<serde_json::Value> {
     let name = body.name.unwrap_or_default();
 
-    if name == "MoviesSearch" {
-        if let Some(movie_ids) = body.movie_ids {
+    if name == "MoviesSearch"
+        && let Some(movie_ids) = body.movie_ids {
             for movie_id in movie_ids {
                 let state_clone = state.clone();
                 tokio::spawn(async move {
@@ -568,7 +568,6 @@ pub async fn execute_command(
                 });
             }
         }
-    }
 
     Json(serde_json::json!({
         "id": 1,
@@ -586,13 +585,11 @@ async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64
     if let Some(tmdb) = anibridge::lookup_tmdb_by_anilist(anilist_id).await {
         return tmdb;
     }
-    if let Some(mid) = mal_id.into() {
-        if mid > 0 {
-            if let Some(tmdb) = anibridge::lookup_tmdb_by_mal(mid).await {
+    if let Some(mid) = mal_id.into()
+        && mid > 0
+            && let Some(tmdb) = anibridge::lookup_tmdb_by_mal(mid).await {
                 return tmdb;
             }
-        }
-    }
     0
 }
 

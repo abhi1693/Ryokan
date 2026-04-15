@@ -654,8 +654,8 @@ pub async fn execute_command(
 ) -> Json<serde_json::Value> {
     let name = body.name.unwrap_or_default();
 
-    if name == "SeriesSearch" {
-        if let Some(series_id) = body.series_id {
+    if name == "SeriesSearch"
+        && let Some(series_id) = body.series_id {
             let state_clone = state.clone();
             tokio::spawn(async move {
                 let _ = super::library::auto_search_series(
@@ -664,7 +664,6 @@ pub async fn execute_command(
                 ).await;
             });
         }
-    }
 
     Json(serde_json::json!({
         "id": 1,
@@ -683,13 +682,11 @@ async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64
     if let Some(tmdb) = anibridge::lookup_tmdb_by_anilist(anilist_id).await {
         return tmdb;
     }
-    if let Some(mid) = mal_id.into() {
-        if mid > 0 {
-            if let Some(tmdb) = anibridge::lookup_tmdb_by_mal(mid).await {
+    if let Some(mid) = mal_id.into()
+        && mid > 0
+            && let Some(tmdb) = anibridge::lookup_tmdb_by_mal(mid).await {
                 return tmdb;
             }
-        }
-    }
     0
 }
 
@@ -813,16 +810,14 @@ async fn lookup_by_external_id(
 
 /// Fetch anime detail from AniList or Jikan, returning None on failure.
 async fn fetch_anime_detail(ids: &anibridge::AnimeIds) -> Option<anilist::AnimeDetail> {
-    if let Some(al_id) = ids.anilist_id {
-        if let Ok(d) = anilist::get_anime_detail(al_id).await {
+    if let Some(al_id) = ids.anilist_id
+        && let Ok(d) = anilist::get_anime_detail(al_id).await {
             return Some(d);
         }
-    }
-    if let Some(mal_id) = ids.mal_id {
-        if let Ok(d) = crate::services::jikan::get_anime_detail_cached(mal_id).await {
+    if let Some(mal_id) = ids.mal_id
+        && let Ok(d) = crate::services::jikan::get_anime_detail_cached(mal_id).await {
             return Some(d);
         }
-    }
     None
 }
 

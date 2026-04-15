@@ -253,13 +253,11 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
                 } else if !pix_fmt.is_empty() {
                     facts.bit_depth = 8;
                 }
-                if let Some(bps) = s.get("bits_per_raw_sample").and_then(|v| v.as_str()) {
-                    if let Ok(n) = bps.parse::<u8>() {
-                        if n > 0 {
+                if let Some(bps) = s.get("bits_per_raw_sample").and_then(|v| v.as_str())
+                    && let Ok(n) = bps.parse::<u8>()
+                        && n > 0 {
                             facts.bit_depth = n;
                         }
-                    }
-                }
             }
             "audio" => {
                 facts.audio_codecs.push(codec_name.clone());

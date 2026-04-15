@@ -166,13 +166,12 @@ pub fn classify_filename(title: &str) -> FilenameClassification {
     // title uses dot-separators, and `PDTV` isn't consistently tagged). The
     // fallback scanner also lets us pick up a SECOND source signal in the
     // rare multi-source torrent title, which feeds the review-detection rule.
-    if let Some(src_str) = elements.get(ElementCategory::Source) {
-        if let Some((src, conf, detail)) = source_from_keyword(src_str, result.resolution) {
+    if let Some(src_str) = elements.get(ElementCategory::Source)
+        && let Some((src, conf, detail)) = source_from_keyword(src_str, result.resolution) {
             result
                 .evidence
                 .push(SourceEvidence::new(src, conf, ORIGIN, detail));
         }
-    }
     for (token, mapped_src) in SOURCE_FALLBACK_TOKENS {
         if !contains_word(&title_lower, token) {
             continue;

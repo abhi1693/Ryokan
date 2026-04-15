@@ -968,8 +968,8 @@ pub async fn run_once(state: &AppState) {
         }
     }
 
-    if any_imported {
-        if let Some(jellyfin) = state.jellyfin.read().await.as_ref() {
+    if any_imported
+        && let Some(jellyfin) = state.jellyfin.read().await.as_ref() {
             if let Err(e) = jellyfin.refresh_library().await {
                 logger::warn(
                     &state.db,
@@ -988,7 +988,6 @@ pub async fn run_once(state: &AppState) {
                 .await;
             }
         }
-    }
 }
 
 /// Summary of one run of [`scan_library_for_unclassified`]. Used by the

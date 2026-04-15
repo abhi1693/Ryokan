@@ -179,12 +179,24 @@ pub async fn insert(
     Ok(())
 }
 
+/// A single dynamically-bound parameter. Keeps numeric bindings
+/// (`i64`) in their native type instead of round-tripping through
+/// `String`, which matters for SQLite index usage: an integer column
+/// compared against a text-bound value goes through NUMERIC-affinity
+/// coercion and can lose its index, while a native `i64` bind is a
+/// straight `INTEGER == INTEGER` compare. `LIMIT ?` and `id > ?` are
+/// the two call sites that care.
+enum BindValue {
+    Int(i64),
+    Text(String),
+}
+
 /// Query log entries with optional filters. Returns newest first.
 pub async fn query(db: &SqlitePool, params: &LogQuery) -> Result<Vec<LogEntry>, sqlx::Error> {
     let mut sql = String::from(
         "SELECT id, timestamp, level, category, message, detail FROM logs WHERE 1=1",
     );
-    let mut binds: Vec<String> = Vec::new();
+    let mut binds: Vec<BindValue> = Vec::new();
 
     if let Some(ref level) = params.level {
         // Filter to this level and above.
@@ -192,29 +204,31 @@ pub async fn query(db: &SqlitePool, params: &LogQuery) -> Result<Vec<LogEntry>, 
         if !levels.is_empty() {
             let placeholders: Vec<&str> = levels.iter().map(|_| "?").collect();
             sql.push_str(&format!(" AND level IN ({})", placeholders.join(",")));
-            binds.extend(levels);
+            for l in levels {
+                binds.push(BindValue::Text(l));
+            }
         }
     }
 
     if let Some(ref cat) = params.category {
         sql.push_str(" AND category = ?");
-        binds.push(cat.clone());
+        binds.push(BindValue::Text(cat.clone()));
     }
 
     if let Some(ref search) = params.search {
         sql.push_str(" AND (message LIKE ? OR detail LIKE ?)");
         let pattern = format!("%{}%", search);
-        binds.push(pattern.clone());
-        binds.push(pattern);
+        binds.push(BindValue::Text(pattern.clone()));
+        binds.push(BindValue::Text(pattern));
     }
 
     if let Some(before) = params.before_id {
         sql.push_str(" AND id < ?");
-        binds.push(before.to_string());
+        binds.push(BindValue::Int(before));
     }
 
     sql.push_str(" ORDER BY id DESC LIMIT ?");
-    binds.push(params.limit.to_string());
+    binds.push(BindValue::Int(params.limit));
 
     // sqlx doesn't support dynamic bind lists easily, so we use query_as with raw SQL.
     // Build the query manually.
@@ -262,18 +276,47 @@ pub async fn latest_id(db: &SqlitePool) -> Result<i64, sqlx::Error> {
 }
 
 /// Get new entries after a given ID (for live polling).
+///
+/// `level` applies "at or above" semantics (matching the logs page
+/// dropdown — "warn" means warn + error). `category`, if supplied and
+/// non-empty, is an exact match. Both are pushed into the SQL query
+/// so SQLite does the filtering and the round trip carries only
+/// matching rows. Previously the poll handler fetched 100 unfiltered
+/// rows every 3s and dropped the misses in-memory — cheap per row
+/// but wasteful when a user had (say) `level=error, category=grab`
+/// set and nothing was going wrong at the moment.
 pub async fn entries_after(
     db: &SqlitePool,
     after_id: i64,
     limit: i64,
+    level: Option<&str>,
+    category: Option<&str>,
 ) -> Result<Vec<LogEntry>, sqlx::Error> {
-    let rows: Vec<(i64, String, String, String, String, String)> = sqlx::query_as(
-        "SELECT id, timestamp, level, category, message, detail FROM logs WHERE id > ? ORDER BY id DESC LIMIT ?",
-    )
-    .bind(after_id)
-    .bind(limit)
-    .fetch_all(db)
-    .await?;
+    let mut sql = String::from(
+        "SELECT id, timestamp, level, category, message, detail FROM logs WHERE id > ?",
+    );
+    let mut binds: Vec<BindValue> = vec![BindValue::Int(after_id)];
+
+    if let Some(l) = level {
+        let levels = levels_at_or_above(l);
+        if !levels.is_empty() {
+            let placeholders: Vec<&str> = levels.iter().map(|_| "?").collect();
+            sql.push_str(&format!(" AND level IN ({})", placeholders.join(",")));
+            for lv in levels {
+                binds.push(BindValue::Text(lv));
+            }
+        }
+    }
+
+    if let Some(cat) = category.filter(|c| !c.is_empty()) {
+        sql.push_str(" AND category = ?");
+        binds.push(BindValue::Text(cat.to_string()));
+    }
+
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    binds.push(BindValue::Int(limit));
+
+    let rows = build_dynamic_query(&sql, &binds, db).await?;
 
     Ok(rows
         .into_iter()
@@ -294,15 +337,21 @@ fn levels_at_or_above(level: &str) -> Vec<String> {
     all[idx..].iter().map(|s| s.to_string()).collect()
 }
 
-/// Execute a dynamically-bound query. We chain `.bind()` calls in a loop.
+/// Execute a dynamically-bound query. We chain `.bind()` calls in a
+/// loop, dispatching on each bind's native type so that `i64` values
+/// stay `INTEGER`-typed at the sqlite protocol level instead of being
+/// stringified.
 async fn build_dynamic_query(
     sql: &str,
-    binds: &[String],
+    binds: &[BindValue],
     db: &SqlitePool,
 ) -> Result<Vec<(i64, String, String, String, String, String)>, sqlx::Error> {
     let mut q = sqlx::query_as::<_, (i64, String, String, String, String, String)>(sql);
     for b in binds {
-        q = q.bind(b);
+        q = match b {
+            BindValue::Int(i) => q.bind(*i),
+            BindValue::Text(s) => q.bind(s.clone()),
+        };
     }
     q.fetch_all(db).await
 }

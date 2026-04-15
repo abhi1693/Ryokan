@@ -181,8 +181,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             .await;
 
             // Verify this is actually an upgrade.
-            if let auto_search::SearchTarget::Episode(ep_num) = &target {
-                if let Some(existing_classification) = upgrade_classifications.get(ep_num) {
+            if let auto_search::SearchTarget::Episode(ep_num) = &target
+                && let Some(existing_classification) = upgrade_classifications.get(ep_num) {
                     if incoming_classification.rank() <= existing_classification.rank() {
                         continue;
                     }
@@ -200,7 +200,6 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     )
                     .await;
                 }
-            }
 
             let url = if !result.magnet.is_empty() {
                 result.magnet.clone()

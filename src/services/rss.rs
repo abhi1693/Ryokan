@@ -620,15 +620,14 @@ async fn load_canonical_history(
         }
     }
 
-    if let Some(client) = qbit {
-        if let Ok(torrents) = client.get_torrents().await {
+    if let Some(client) = qbit
+        && let Ok(torrents) = client.get_torrents().await {
             for torrent in torrents {
                 if let Some(key) = canonical_key_for_title(&torrent.name, all_meta) {
                     keys.insert(key);
                 }
             }
         }
-    }
 
     keys
 }
@@ -1237,9 +1236,8 @@ fn resolve_episode_numbers(
             for number in &parsed.absolute_eps {
                 let relative = *number - offset;
                 if relative < 1 { return (HashSet::new(), "absolute_miss"); }
-                if let Some(total) = meta.series.episodes {
-                    if relative > total { return (HashSet::new(), "absolute_miss"); }
-                }
+                if let Some(total) = meta.series.episodes
+                    && relative > total { return (HashSet::new(), "absolute_miss"); }
                 mapped.insert(relative);
             }
             if !mapped.is_empty() {
@@ -1526,11 +1524,10 @@ fn decode_xml(value: &str) -> String {
 }
 
 fn extract_group(title: &str) -> String {
-    if let Some(start) = title.find('[') {
-        if let Some(end) = title[start..].find(']') {
+    if let Some(start) = title.find('[')
+        && let Some(end) = title[start..].find(']') {
             return title[start + 1..start + end].to_string();
         }
-    }
     String::new()
 }
 

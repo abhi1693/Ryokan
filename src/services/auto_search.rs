@@ -898,14 +898,13 @@ async fn run_queries_interactive(
                 continue;
             }
             // Episode check for single-episode targets (allow batches through)
-            if let SearchTarget::Episode(target_ep) = ctx.target {
-                if !result.is_batch {
+            if let SearchTarget::Episode(target_ep) = ctx.target
+                && !result.is_batch {
                     let parsed = parse_release_numbers(&result.title);
                     if !parsed.is_empty() && !parsed.contains(target_ep) {
                         continue;
                     }
                 }
-            }
             candidates.push(result);
         }
     }
@@ -1902,11 +1901,10 @@ pub fn parse_release_numbers(title: &str) -> HashSet<i32> {
 
     for re in RE_EPISODE_PATTERNS.iter() {
         for caps in re.captures_iter(&stripped) {
-            if let Some(value) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                if !is_noise_number(value) {
+            if let Some(value) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+                && !is_noise_number(value) {
                     numbers.insert(value);
                 }
-            }
         }
     }
 
@@ -1980,27 +1978,23 @@ fn infer_season_from_title(title: &str) -> i32 {
     let lower = title.to_lowercase();
 
     // "2nd Season", "3rd Season", etc.
-    if let Some(caps) = RE_NTH_SEASON.captures(&lower) {
-        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+    if let Some(caps) = RE_NTH_SEASON.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
             return n;
         }
-    }
 
     // "Season 2", "Season 3", etc.
-    if let Some(caps) = RE_SEASON_N.captures(&lower) {
-        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+    if let Some(caps) = RE_SEASON_N.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
             return n;
         }
-    }
 
     // " Part 2", " Cour 2" — sometimes used as season aliases
-    if let Some(caps) = RE_PART_COUR.captures(&lower) {
-        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            if n >= 2 {
+    if let Some(caps) = RE_PART_COUR.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+            && n >= 2 {
                 return n;
             }
-        }
-    }
 
     0
 }
@@ -2011,34 +2005,29 @@ pub fn parse_release_season(title: &str) -> i32 {
     let lower = title.to_lowercase();
 
     // S01E05, S02E03, etc.
-    if let Some(caps) = RE_SXXEXX.captures(&lower) {
-        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+    if let Some(caps) = RE_SXXEXX.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
             return n;
         }
-    }
 
     // Standalone "S2", "S3" (not part of resolution like "S01E01")
-    if let Some(caps) = RE_STANDALONE_S.captures(&lower) {
-        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            if n > 0 && n <= 30 {
+    if let Some(caps) = RE_STANDALONE_S.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+            && n > 0 && n <= 30 {
                 return n;
             }
-        }
-    }
 
     // "Season 2", "Season 3"
-    if let Some(caps) = RE_RELEASE_SEASON_N.captures(&lower) {
-        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+    if let Some(caps) = RE_RELEASE_SEASON_N.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
             return n;
         }
-    }
 
     // "2nd Season", "3rd Season"
-    if let Some(caps) = RE_RELEASE_NTH_SEASON.captures(&lower) {
-        if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+    if let Some(caps) = RE_RELEASE_NTH_SEASON.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
             return n;
         }
-    }
 
     0
 }
@@ -2097,21 +2086,18 @@ pub fn extract_part_number(detail: &AnimeDetail) -> Option<i32> {
         detail.title_native.as_str(),
     ];
     for title in titles.iter().filter(|t| !t.is_empty()) {
-        if let Some(caps) = RE_PART_N.captures(title) {
-            if let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-                if (1..=20).contains(&n) {
+        if let Some(caps) = RE_PART_N.captures(title)
+            && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+                && (1..=20).contains(&n) {
                     return Some(n);
                 }
-            }
-        }
-        if let Some(caps) = RE_ROMAN_PART.captures(title) {
-            if let Some(m) = caps.get(1) {
+        if let Some(caps) = RE_ROMAN_PART.captures(title)
+            && let Some(m) = caps.get(1) {
                 let n = roman_to_int(m.as_str());
                 if (1..=10).contains(&n) {
                     return Some(n);
                 }
             }
-        }
     }
     None
 }
@@ -2173,16 +2159,14 @@ pub fn pick_wanted_file_indices(
     filenames: &[String],
     detail: &AnimeDetail,
 ) -> Option<Vec<usize>> {
-    if let Some(part) = extract_part_number(detail) {
-        if let Some(ids) = pick_by_part_number(filenames, part, detail) {
+    if let Some(part) = extract_part_number(detail)
+        && let Some(ids) = pick_by_part_number(filenames, part, detail) {
             return Some(ids);
         }
-    }
-    if let Some(subtitle) = extract_season_subtitle(detail) {
-        if let Some(ids) = pick_by_subtitle_include(filenames, &subtitle, detail) {
+    if let Some(subtitle) = extract_season_subtitle(detail)
+        && let Some(ids) = pick_by_subtitle_include(filenames, &subtitle, detail) {
             return Some(ids);
         }
-    }
     None
 }
 

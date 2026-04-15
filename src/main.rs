@@ -8,11 +8,17 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum::http::{header, HeaderValue};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -144,6 +150,15 @@ pub struct AppState {
     /// out on the scoring hot path so the read lock releases before the
     /// per-candidate evaluation loop begins.
     pub custom_formats: CompiledCfCache,
+    /// Flip-to-true-once cache of `user::has_users`. The auth middleware
+    /// runs on every protected request and was firing a `SELECT COUNT(*)
+    /// FROM users` query for each one just to decide whether to redirect
+    /// to `/setup`. Because Ryokan never deletes the admin account, once
+    /// this flag is true it stays true for the life of the process, and
+    /// the check becomes a lock-free atomic load. While false, the
+    /// middleware still hits the DB on the setup-pending path so a fresh
+    /// `/setup` submission is picked up on the very next request.
+    pub users_exist: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // Allow handlers to extract SqlitePool directly from AppState.
@@ -213,7 +228,29 @@ async fn main() {
         "sqlite://data/ryokan.db?mode=rwc".to_string()
     });
 
-    let db = SqlitePool::connect(&database_url)
+    // WAL mode lets readers run concurrently with a writer, which matters a
+    // lot here: seven background tasks (rss_sync, post_processing, cleanup,
+    // library_classify, metadata_refresh, upgrade_search, anibridge_refresh)
+    // all share this pool with the request path. In the default DELETE
+    // journal mode every writer takes a whole-database lock and stalls the
+    // next page load behind whatever scheduled_tasks row update or log insert
+    // happens to be running. `synchronous=NORMAL` is safe under WAL (durable
+    // across application crashes; the usual caveat is only crash-safe across
+    // OS power loss, which matches what Sonarr/Radarr ship). The pragmas
+    // below size the page cache and enable mmap'd reads so hot tables stay
+    // in memory on subsequent lookups.
+    let connect_opts = SqliteConnectOptions::from_str(&database_url)
+        .expect("Invalid DATABASE_URL")
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .pragma("cache_size", "-65536") // ~64MB page cache (negative = KB)
+        .pragma("temp_store", "MEMORY")
+        .pragma("mmap_size", "268435456"); // 256MB memory-mapped region
+
+    let db = SqlitePoolOptions::new()
+        .max_connections(16)
+        .connect_with(connect_opts)
         .await
         .expect("Failed to connect to database");
 
@@ -234,12 +271,19 @@ async fn main() {
     let cf_cache: CompiledCfCache =
         Arc::new(RwLock::new(Arc::new(custom_formats::load_compiled_cfs(&db).await)));
 
+    // Prime the `users_exist` cache at startup so a running instance with
+    // an existing admin account never pays the `SELECT COUNT(*) FROM users`
+    // cost on the auth hot path.
+    let users_exist_initial = models::user::has_users(&db).await.unwrap_or(false);
+    let users_exist = Arc::new(std::sync::atomic::AtomicBool::new(users_exist_initial));
+
     // Build shared state.
     let state = AppState {
         db: db.clone(),
         qbit: Arc::new(RwLock::new(None)),
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
+        users_exist,
     };
 
     // Initialize qBittorrent client from saved config if available.
@@ -382,12 +426,39 @@ async fn main() {
             handlers::radarr_compat::require_api_key,
         ));
 
+    // Brotli/gzip compression. The series detail template is ~80KB of HTML
+    // and style.css is ~64KB — both highly compressible (lots of repeated
+    // tokens, whitespace), and they ship on every page navigation. Axum
+    // negotiates via the client's Accept-Encoding automatically; if the
+    // client doesn't advertise support, the body is passed through
+    // unchanged.
+    let compression = CompressionLayer::new().br(true).gzip(true);
+
+    // Long-lived Cache-Control on /static/*. Without an explicit header the
+    // browser falls back to heuristic freshness and tends to fire a
+    // conditional GET on every navigation — a 304 still costs a full round
+    // trip, which shows up as a visible stall when tabbing between pages.
+    // One hour is conservative enough that a `cargo run` during development
+    // still picks up edited CSS after a hard reload, but long enough that
+    // the production case (topbar navigation) never re-validates.
+    let static_cache_control = SetResponseHeaderLayer::if_not_present(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    let static_service = ServeDir::new("static");
+
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
         .merge(sonarr_routes)
         .merge(radarr_routes)
-        .nest_service("/static", ServeDir::new("static"))
+        .nest_service(
+            "/static",
+            tower::ServiceBuilder::new()
+                .layer(static_cache_control)
+                .service(static_service),
+        )
+        .layer(compression)
         .with_state(state.clone());
 
     let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8978".to_string());
@@ -429,7 +500,20 @@ async fn main() {
                 let inner_state = rss_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                    let mut minutes_since_last: i64 = 10_000;
+                    // Seed `minutes_since_last` from the persisted
+                    // `scheduled_task_runs.last_finished_at` row so a
+                    // restart doesn't force an immediate re-run. If RSS
+                    // synced 3 minutes ago in a prior process and the
+                    // configured interval is 10 minutes, we should wait
+                    // 7 more minutes, not 0. `None` means "never run" —
+                    // fall back to the old 10_000 sentinel so first-time
+                    // setups still fire on the first tick.
+                    let mut minutes_since_last: i64 = models::scheduled_tasks::minutes_since_last_finished(
+                        &inner_state.db,
+                        "rss_sync",
+                    )
+                    .await
+                    .unwrap_or(10_000);
                     let mut consecutive_errors: i64 = 0;
                     loop {
                         interval.tick().await;
@@ -482,20 +566,29 @@ async fn main() {
 
 
     // Background task: refresh cached series metadata every 12 hours.
+    // The startup delay is computed from `scheduled_task_runs.last_finished_at`
+    // so a restart mid-window doesn't re-fire the sweep — the whole
+    // point of a 12h cadence is that it's expensive. Previously the
+    // bare `interval.tick()` fired on the first call and kicked off a
+    // fresh sweep on every `cargo run`.
     {
         let metadata_db = db.clone();
         tokio::spawn(async move {
             supervise("metadata_refresh", move || {
                 let db = metadata_db.clone();
                 async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(12 * 60 * 60));
+                    let period = std::time::Duration::from_secs(12 * 60 * 60);
+                    let delay = models::scheduled_tasks::duration_until_next_run(
+                        &db, "metadata_refresh", period,
+                    ).await;
+                    tokio::time::sleep(delay).await;
                     loop {
-                        interval.tick().await;
                         let _ = models::scheduled_tasks::mark_started(&db, "metadata_refresh", "Refreshing tracked series metadata").await;
                         let (refreshed, failed) = services::metadata_sync::refresh_all_series_metadata(&db).await;
                         let status = if failed > 0 { "warn" } else { "ok" };
                         let detail = format!("refreshed={}, failed={}", refreshed, failed);
                         let _ = models::scheduled_tasks::mark_finished(&db, "metadata_refresh", status, &detail).await;
+                        tokio::time::sleep(period).await;
                     }
                 }
             }).await;
@@ -509,9 +602,17 @@ async fn main() {
             supervise("cleanup", move || {
                 let cleanup_db = cleanup_db.clone();
                 async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            let period = std::time::Duration::from_secs(3600);
+            // Honors persisted last-run so a restart 10 minutes after
+            // the previous sweep waits 50 more, not a fresh hour. Each
+            // pass is cheap (indexed DELETEs) but the consistency with
+            // the other scheduled tasks is worth more than the tiny
+            // CPU savings.
+            let delay = models::scheduled_tasks::duration_until_next_run(
+                &cleanup_db, "cleanup", period,
+            ).await;
+            tokio::time::sleep(delay).await;
             loop {
-                interval.tick().await;
                 let _ = models::scheduled_tasks::mark_started(&cleanup_db, "cleanup", "Pruning logs and RSS decision history").await;
                 let mut cleanup_errors = Vec::new();
                 match models::log::cleanup(&cleanup_db, 30).await {
@@ -588,6 +689,7 @@ async fn main() {
                 let status = if cleanup_errors.is_empty() { "ok" } else { "warn" };
                 let detail = if cleanup_errors.is_empty() { "Cleanup completed".to_string() } else { cleanup_errors.join("; ") };
                 let _ = models::scheduled_tasks::mark_finished(&cleanup_db, "cleanup", status, &detail).await;
+                tokio::time::sleep(period).await;
             }
                 }
             }).await;
@@ -635,18 +737,31 @@ async fn main() {
     // filename-only results can now be resolved with ffprobe. The 6-hour
     // cadence is slow enough that ffprobe cost stays trivial and fast
     // enough that a new unknown row upgrades the same day.
+    //
+    // The initial delay honors the persisted `last_finished_at` so a
+    // restart mid-window resumes the prior schedule instead of always
+    // waiting a fresh 6 hours. Previously the skip-tick pattern meant
+    // a process that restarts every 5 hours would never actually
+    // classify anything.
     {
         let classify_state = state.clone();
         tokio::spawn(async move {
             supervise("library_classify", move || {
                 let classify_state = classify_state.clone();
                 async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
-                    // Skip the immediate tick — we don't want a big ffprobe
-                    // sweep racing the rest of startup.
-                    interval.tick().await;
+                    let period = std::time::Duration::from_secs(6 * 60 * 60);
+                    // Even when the persisted timer says we're overdue,
+                    // nudge a minimum startup delay so a big ffprobe sweep
+                    // doesn't race the rest of initialization on a cold
+                    // boot. Five minutes gives the rest of main.rs time
+                    // to settle and the user time to see the library
+                    // index render before we start hammering the disk.
+                    const MIN_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+                    let delay = models::scheduled_tasks::duration_until_next_run(
+                        &classify_state.db, "library_classify", period,
+                    ).await.max(MIN_STARTUP_DELAY);
+                    tokio::time::sleep(delay).await;
                     loop {
-                        interval.tick().await;
                         let _ = models::scheduled_tasks::touch_definition(
                             &classify_state.db,
                             "library_classify",
@@ -673,6 +788,7 @@ async fn main() {
                             "ok",
                             &detail,
                         ).await;
+                        tokio::time::sleep(period).await;
                     }
                 }
             }).await;
@@ -680,15 +796,20 @@ async fn main() {
     }
 
     // Background task: quality upgrade search every 24 hours (when enabled).
+    // Honors the persisted last-run time so a restart doesn't re-kick a
+    // potentially-30-minute sweep that just finished an hour ago.
     {
         let upgrade_state = state.clone();
         tokio::spawn(async move {
             supervise("upgrade_search", move || {
                 let upgrade_state = upgrade_state.clone();
                 async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+                    let period = std::time::Duration::from_secs(24 * 60 * 60);
+                    let delay = models::scheduled_tasks::duration_until_next_run(
+                        &upgrade_state.db, "upgrade_search", period,
+                    ).await;
+                    tokio::time::sleep(delay).await;
                     loop {
-                        interval.tick().await;
                         let enabled = models::config::get_config(&upgrade_state.db)
                             .await
                             .ok()
@@ -702,36 +823,40 @@ async fn main() {
                             "Every 24 hours (when enabled)",
                             enabled,
                         ).await;
-                        if !enabled {
-                            continue;
+                        if enabled {
+                            let _ = models::scheduled_tasks::mark_started(&upgrade_state.db, "upgrade_search", "Searching for quality upgrades").await;
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(30 * 60),
+                                services::upgrade::run_once(&upgrade_state),
+                            ).await {
+                                Ok(Ok(summary)) => {
+                                    let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "ok", &summary.detail).await;
+                                }
+                                Ok(Err(err)) => {
+                                    let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", &err).await;
+                                    services::logger::error(
+                                        &upgrade_state.db,
+                                        models::log::LogCategory::System,
+                                        "Upgrade search failed",
+                                        &err,
+                                    ).await;
+                                }
+                                Err(_) => {
+                                    let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", "Timed out after 30 minutes").await;
+                                    services::logger::error(
+                                        &upgrade_state.db,
+                                        models::log::LogCategory::System,
+                                        "Upgrade search timed out",
+                                        "Exceeded 30-minute limit",
+                                    ).await;
+                                }
+                            }
                         }
-                        let _ = models::scheduled_tasks::mark_started(&upgrade_state.db, "upgrade_search", "Searching for quality upgrades").await;
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(30 * 60),
-                            services::upgrade::run_once(&upgrade_state),
-                        ).await {
-                            Ok(Ok(summary)) => {
-                                let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "ok", &summary.detail).await;
-                            }
-                            Ok(Err(err)) => {
-                                let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", &err).await;
-                                services::logger::error(
-                                    &upgrade_state.db,
-                                    models::log::LogCategory::System,
-                                    "Upgrade search failed",
-                                    &err,
-                                ).await;
-                            }
-                            Err(_) => {
-                                let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", "Timed out after 30 minutes").await;
-                                services::logger::error(
-                                    &upgrade_state.db,
-                                    models::log::LogCategory::System,
-                                    "Upgrade search timed out",
-                                    "Exceeded 30-minute limit",
-                                ).await;
-                            }
-                        }
+                        // Always sleep the full period before re-checking,
+                        // whether or not the task ran this iteration. When
+                        // the toggle is off we still wake every 24h to
+                        // touch the definition row and pick up a flip.
+                        tokio::time::sleep(period).await;
                     }
                 }
             }).await;
@@ -739,22 +864,33 @@ async fn main() {
     }
 
     // Background task: Anibridge mappings refresh (every 24 hours).
+    // Honors the persisted last-run time so a restart 2h after a
+    // successful refresh waits 22h, not a fresh 24h. Combined with
+    // the on-disk mappings cache in `services::anibridge`, startup
+    // consistently avoids re-pulling the ~20MB mappings JSON from
+    // GitHub when a recent copy exists.
     {
         let anibridge_db = db.clone();
         tokio::spawn(async move {
             supervise("anibridge_refresh", move || {
                 let anibridge_db = anibridge_db.clone();
                 async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-                    interval.tick().await; // skip immediate tick — initial load happens on first use
+                    // Share the interval with the on-disk cache TTL in
+                    // `services::anibridge` so the bg task cadence and
+                    // startup freshness check can't drift apart.
+                    let period = services::anibridge::REFRESH_INTERVAL;
+                    let delay = models::scheduled_tasks::duration_until_next_run(
+                        &anibridge_db, "anibridge_refresh", period,
+                    ).await;
+                    tokio::time::sleep(delay).await;
                     loop {
-                        interval.tick().await;
                         let _ = models::scheduled_tasks::mark_started(&anibridge_db, "anibridge_refresh", "Refreshing anibridge mappings").await;
                         if services::anibridge::reload().await {
                             let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "ok", "Mappings refreshed").await;
                         } else {
                             let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "error", "Failed to download mappings").await;
                         }
+                        tokio::time::sleep(period).await;
                     }
                 }
             }).await;

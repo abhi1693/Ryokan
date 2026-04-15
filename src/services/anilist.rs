@@ -64,11 +64,10 @@ fn normalize_search_key(force_fallback: bool, query: &str) -> String {
 fn search_cache_get(key: &str) -> Option<Vec<AnimeEntry>> {
     let now = Instant::now();
     let mut cache = SEARCH_CACHE.lock().ok()?;
-    if let Some((fetched_at, results)) = cache.get(key) {
-        if now.duration_since(*fetched_at) <= SEARCH_CACHE_TTL {
+    if let Some((fetched_at, results)) = cache.get(key)
+        && now.duration_since(*fetched_at) <= SEARCH_CACHE_TTL {
             return Some(results.clone());
         }
-    }
     cache.remove(key);
     None
 }
@@ -89,11 +88,10 @@ fn search_cache_put(key: String, results: Vec<AnimeEntry>) {
 }
 
 fn anilist_cooldown_active() -> bool {
-    if let Ok(guard) = ANILIST_COOLDOWN_UNTIL.lock() {
-        if let Some(until) = *guard {
+    if let Ok(guard) = ANILIST_COOLDOWN_UNTIL.lock()
+        && let Some(until) = *guard {
             return Instant::now() < until;
         }
-    }
     false
 }
 
@@ -546,19 +544,17 @@ pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, fo
     if id < 0 {
         return jikan::get_anime_detail_cached(-id).await;
     }
-    if force_mal_fallback {
-        if let Some(mid) = mal_id_hint {
+    if force_mal_fallback
+        && let Some(mid) = mal_id_hint {
             return jikan::get_anime_detail_cached(mid).await;
         }
-    }
 
     {
         let cache = DETAIL_CACHE.read().await;
-        if let Some(entry) = cache.get(&id) {
-            if entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS {
+        if let Some(entry) = cache.get(&id)
+            && entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS {
                 return Ok(entry.detail.clone());
             }
-        }
     }
 
     let detail = fetch_anime_detail(id).await?;
@@ -580,11 +576,10 @@ pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, fo
                 cache.remove(k);
             }
             // If still over limit, drop the oldest entry.
-            if cache.len() > DETAIL_CACHE_MAX_ENTRIES {
-                if let Some((&oldest_key, _)) = cache.iter().min_by_key(|(_, e)| e.fetched_at) {
+            if cache.len() > DETAIL_CACHE_MAX_ENTRIES
+                && let Some((&oldest_key, _)) = cache.iter().min_by_key(|(_, e)| e.fetched_at) {
                     cache.remove(&oldest_key);
                 }
-            }
         }
     }
 

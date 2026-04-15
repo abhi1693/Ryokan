@@ -138,14 +138,13 @@ static TRUST_PROXY_HEADERS: LazyLock<bool> = LazyLock::new(|| {
 /// spoofed header.
 fn client_ip_from_request(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if *TRUST_PROXY_HEADERS {
-        if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = h.split(',').next() {
+        if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+            && let Some(first) = h.split(',').next() {
                 let trimmed = first.trim();
                 if !trimmed.is_empty() {
                     return trimmed.to_string();
                 }
             }
-        }
         if let Some(h) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
             let trimmed = h.trim();
             if !trimmed.is_empty() {
@@ -287,8 +286,8 @@ fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
     if let Some(h) = host_of(req) {
         hosts.push(h);
     }
-    if *TRUST_PROXY_HEADERS {
-        if let Some(raw) = req.headers().get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
+    if *TRUST_PROXY_HEADERS
+        && let Some(raw) = req.headers().get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
             for part in raw.split(',') {
                 let part = part.trim();
                 if part.is_empty() {
@@ -298,7 +297,6 @@ fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
                 hosts.push(host_only.to_ascii_lowercase());
             }
         }
-    }
     hosts
 }
 
@@ -363,9 +361,33 @@ pub async fn require_auth(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    // If no users exist, redirect to setup.
-    if let Ok(false) = user::has_users(&state.db).await {
-        return Redirect::to("/setup").into_response();
+    // If no users exist, redirect to setup. Once a user has been created
+    // the atomic flag on `AppState` pins to `true` for the rest of the
+    // process lifetime, so the common case is a lock-free load instead of
+    // a `SELECT COUNT(*) FROM users` round trip on every protected
+    // request. The slow path only runs pre-setup or right after a clean
+    // install, and promotes the flag as soon as the DB agrees.
+    //
+    // On a DB error we fall through to the session check instead of
+    // redirecting to /setup — that mirrors the pre-cache behavior
+    // (`if let Ok(false) = has_users { redirect }`) and avoids evicting
+    // a real logged-in user to the setup form on a transient SQLite
+    // hiccup during the very first request after boot (before `main.rs`
+    // primes this flag). The session check below still rejects an
+    // unauthenticated user anyway, so nothing bypasses auth.
+    if !state
+        .users_exist
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        match user::has_users(&state.db).await {
+            Ok(true) => {
+                state
+                    .users_exist
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(false) => return Redirect::to("/setup").into_response(),
+            Err(_) => {}
+        }
     }
 
     // Check session cookie.
