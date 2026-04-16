@@ -1132,6 +1132,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // Without the gate, every boot churned the WAL and held the write
     // lock long enough to delay the very first incoming request after
     // startup.
+    //
+    // MAINTENANCE: any edit to the SET CASE must be mirrored in the
+    // WHERE CASE below (and vice versa). Diverging the two is a
+    // correctness bug — the WHERE's job is to match the SET's output
+    // exactly, so the gate only skips rows that truly don't need the
+    // rewrite.
     sqlx::query(
         r#"
         UPDATE episode_quality_tags SET quality_tag = CASE

@@ -351,6 +351,13 @@ fn extract_hash(magnet: &str) -> String {
     match hash.len() {
         40 => hash.to_ascii_lowercase(),
         32 => hash.to_string(),
+        // Any other length is a malformed BTIH — not a valid
+        // info-hash. The lowercase fallthrough preserves the prior
+        // behaviour of returning *something* to downstream code
+        // rather than silently swallowing the input; a future
+        // stricter version could `return String::new()` here for
+        // defensive rejection without breaking any caller that
+        // already treats "" as "no hash".
         _ => hash.to_ascii_lowercase(),
     }
 }
