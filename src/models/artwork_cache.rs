@@ -203,35 +203,35 @@ pub async fn cleanup_orphans(
     .await?
     .rows_affected();
 
-    // Step 2: orphan blobs. Read paths first so we can delete the
-    // on-disk files, then delete the rows. The age gate uses
-    // `created_at < datetime('now', '-Nd days')`.
+    // Step 2: orphan blobs. DELETE … RETURNING in a single statement
+    // so the file removal is *consequent on* the DB delete, not
+    // concurrent with it. The earlier SELECT-then-remove_file-then-
+    // DELETE order had a TOCTOU window where a concurrent cache_image
+    // could land an upsert_ref between the SELECT and the DELETE: the
+    // SELECT-stage decision to remove the file was based on "no refs",
+    // but by DELETE time the new ref's NOT EXISTS check would fail and
+    // the row would survive — leaving a live ref pointing at an
+    // already-deleted on-disk file. With DELETE … RETURNING, only rows
+    // whose NOT EXISTS check still holds at delete-commit time return
+    // their local_path, and the file removal that follows can't beat a
+    // concurrent ref to the punch.
     let age_filter = format!("-{} days", min_age_days);
-    let orphan_rows = sqlx::query(
-        r#"SELECT blob_hash, local_path FROM image_blobs b
-           WHERE NOT EXISTS (SELECT 1 FROM image_refs r WHERE r.blob_hash = b.blob_hash)
-             AND b.created_at < datetime('now', ?)"#,
+    let deleted_rows = sqlx::query(
+        r#"DELETE FROM image_blobs
+           WHERE NOT EXISTS (SELECT 1 FROM image_refs r WHERE r.blob_hash = image_blobs.blob_hash)
+             AND created_at < datetime('now', ?)
+           RETURNING local_path"#,
     )
     .bind(&age_filter)
     .fetch_all(db)
     .await?;
 
-    let blobs_deleted = orphan_rows.len() as u64;
-    for row in &orphan_rows {
+    let blobs_deleted = deleted_rows.len() as u64;
+    for row in &deleted_rows {
         let local_path: String = row.get("local_path");
         if !local_path.is_empty() {
             let _ = std::fs::remove_file(&local_path);
         }
-    }
-    if blobs_deleted > 0 {
-        sqlx::query(
-            r#"DELETE FROM image_blobs
-               WHERE NOT EXISTS (SELECT 1 FROM image_refs r WHERE r.blob_hash = image_blobs.blob_hash)
-                 AND created_at < datetime('now', ?)"#,
-        )
-        .bind(&age_filter)
-        .execute(db)
-        .await?;
     }
 
     Ok((refs_deleted, blobs_deleted))
