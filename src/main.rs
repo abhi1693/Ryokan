@@ -715,6 +715,24 @@ async fn main() {
                     }
                     _ => {}
                 }
+                // Prune orphan artwork (image_refs whose parent series
+                // is gone, and image_blobs/files no ref references after
+                // 7 days). Without this the cache only ever grows —
+                // every removed series leaves rows pointing at on-disk
+                // blob files that nothing will ever touch again.
+                match models::artwork_cache::cleanup_orphans(&cleanup_db, 7).await {
+                    Ok((refs, blobs)) if refs > 0 || blobs > 0 => {
+                        tracing::debug!(
+                            "Cleaned up {} orphan artwork refs and {} orphan blobs",
+                            refs, blobs
+                        );
+                    }
+                    Err(e) => {
+                        cleanup_errors.push(format!("artwork_cache: {}", e));
+                        tracing::error!("Artwork cleanup failed: {}", e);
+                    }
+                    _ => {}
+                }
                 // Prune expired session rows. `validate_session` already
                 // rejects rows older than 7 days, but without this sweep
                 // the sessions table grows unbounded — every login leaves

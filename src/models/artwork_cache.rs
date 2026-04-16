@@ -173,3 +173,66 @@ pub async fn get_local_urls_batch(
     }
     Ok(out)
 }
+
+/// Two-step prune of the artwork cache, called from the hourly cleanup
+/// task. Returns `(refs_deleted, blobs_deleted)`. Without this the
+/// `image_refs` and `image_blobs` tables — and the on-disk blob files
+/// they point at — only ever grow: removing a series leaves orphan
+/// rows, renaming a cover URL leaves the old blob behind, etc.
+///
+/// Step 1 — drop refs whose parent series no longer exists.
+/// Step 2 — drop blobs (and the backing files) that no ref references
+/// AND that haven't been written in `min_age_days` (the age gate
+/// covers the small race in cache_image where upsert_blob runs before
+/// upsert_ref — we don't want a concurrent prune to delete a blob
+/// that's about to get its ref written).
+pub async fn cleanup_orphans(
+    db: &SqlitePool,
+    min_age_days: i64,
+) -> Result<(u64, u64), sqlx::Error> {
+    // Step 1: orphan refs. Only series-keyed refs are pruned here —
+    // any other parent_kind is left alone since we don't own its
+    // identity table.
+    let refs_deleted = sqlx::query(
+        "DELETE FROM image_refs
+         WHERE parent_kind IN ('series', 'series_relation')
+           AND parent_id IS NOT NULL
+           AND parent_id NOT IN (SELECT id FROM series)",
+    )
+    .execute(db)
+    .await?
+    .rows_affected();
+
+    // Step 2: orphan blobs. Read paths first so we can delete the
+    // on-disk files, then delete the rows. The age gate uses
+    // `created_at < datetime('now', '-Nd days')`.
+    let age_filter = format!("-{} days", min_age_days);
+    let orphan_rows = sqlx::query(
+        r#"SELECT blob_hash, local_path FROM image_blobs b
+           WHERE NOT EXISTS (SELECT 1 FROM image_refs r WHERE r.blob_hash = b.blob_hash)
+             AND b.created_at < datetime('now', ?)"#,
+    )
+    .bind(&age_filter)
+    .fetch_all(db)
+    .await?;
+
+    let blobs_deleted = orphan_rows.len() as u64;
+    for row in &orphan_rows {
+        let local_path: String = row.get("local_path");
+        if !local_path.is_empty() {
+            let _ = std::fs::remove_file(&local_path);
+        }
+    }
+    if blobs_deleted > 0 {
+        sqlx::query(
+            r#"DELETE FROM image_blobs
+               WHERE NOT EXISTS (SELECT 1 FROM image_refs r WHERE r.blob_hash = image_blobs.blob_hash)
+                 AND created_at < datetime('now', ?)"#,
+        )
+        .bind(&age_filter)
+        .execute(db)
+        .await?;
+    }
+
+    Ok((refs_deleted, blobs_deleted))
+}
