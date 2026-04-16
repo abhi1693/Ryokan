@@ -1010,6 +1010,16 @@ pub fn build_upgrade_targets(
         if !candidates.contains(&file.episode_number) {
             continue;
         }
+        // manual_override pins must short-circuit before find_best_for_target
+        // runs. The downstream SQL guards on record_grab /
+        // update_classification drop the tag write, but post-processing has
+        // already replaced the on-disk file by the time those guards fire.
+        if quality_tags
+            .get(&file.episode_number)
+            .is_some_and(|t| t.manual_override)
+        {
+            continue;
+        }
         let existing = resolve_existing_classification(file, quality_tags.get(&file.episode_number));
         // Skip completely unclassified episodes — we have no way to know
         // whether an incoming release would actually be an upgrade.
@@ -5044,5 +5054,83 @@ mod tests {
         assert_eq!(siblings[0].episode_offset, 0);
         // And the match came from the subtitle path, not the fallback.
         assert!(!siblings[0].matched_subtitle.starts_with("episode-range fallback"));
+    }
+
+    fn pinned_720p_web_tag(manual_override: bool) -> crate::models::episode_tags::EpisodeQualityTag {
+        crate::models::episode_tags::EpisodeQualityTag {
+            quality_tag: "WEBDL-720p".to_string(),
+            release_title: "[Group] Show - 01 [WEB-DL 720p].mkv".to_string(),
+            release_group: "Group".to_string(),
+            state: "completed".to_string(),
+            source: "Web".to_string(),
+            resolution: "720p".to_string(),
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: "WEBDL".to_string(),
+            classification_confidence: 1.0,
+            needs_review: false,
+            manual_override,
+            classification_evidence: String::new(),
+        }
+    }
+
+    fn dummy_720p_episode_file(episode_number: i32) -> media::EpisodeFile {
+        media::EpisodeFile {
+            filename: "[Group] Show - 01 [WEB-DL 720p].mkv".to_string(),
+            episode_number,
+            season_number: None,
+            quality: "720p".to_string(),
+            size_bytes: 0,
+            size_display: String::new(),
+        }
+    }
+
+    // Regression: build_upgrade_targets must skip rows the user has pinned
+    // via manual override. Otherwise the upgrade sweep selects a "better"
+    // release, post-processing replaces the on-disk file, and the
+    // manual_override SQL guards on record_grab / update_classification
+    // silently drop the tag write — the user loses their pinned file with
+    // no audit trail.
+    #[test]
+    fn build_upgrade_targets_skips_manual_override_rows() {
+        let file = dummy_720p_episode_file(1);
+        let mut tags = std::collections::HashMap::new();
+        tags.insert(1_i32, pinned_720p_web_tag(true));
+
+        let targets = build_upgrade_targets(
+            &[file],
+            &[1],
+            Source::BluRay,
+            Resolution::R1080p,
+            false,
+            false,
+            &tags,
+        );
+        assert!(
+            targets.is_empty(),
+            "manual_override row should be skipped, got {} target(s)",
+            targets.len()
+        );
+    }
+
+    // Sanity check the regression test: with the same file but
+    // manual_override = false, the upgrade target IS produced. Confirms the
+    // skip is the new behavior, not an unrelated "everything skips" bug.
+    #[test]
+    fn build_upgrade_targets_yields_target_when_not_manual_override() {
+        let file = dummy_720p_episode_file(1);
+        let mut tags = std::collections::HashMap::new();
+        tags.insert(1_i32, pinned_720p_web_tag(false));
+
+        let targets = build_upgrade_targets(
+            &[file],
+            &[1],
+            Source::BluRay,
+            Resolution::R1080p,
+            false,
+            false,
+            &tags,
+        );
+        assert_eq!(targets.len(), 1, "auto-classified row should be upgraded");
     }
 }

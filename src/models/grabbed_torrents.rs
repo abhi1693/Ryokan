@@ -411,16 +411,18 @@ pub async fn find_imported_for_episode(
     // UNION dedups grabs where the same series matches through both
     // paths (parent of a single-series grab).
     let rows = sqlx::query(
-        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at FROM (
+        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch FROM (
              SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
                     g.series_id AS series_id, g.episode_numbers AS episode_numbers,
-                    g.grabbed_at AS grabbed_at
+                    g.grabbed_at AS grabbed_at,
+                    COALESCE(g.is_batch, 0) AS is_batch
              FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
              WHERE g.series_id = ? AND je.value = ? AND g.state = 'imported'
              UNION
              SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
                     g.series_id AS series_id, g.episode_numbers AS episode_numbers,
-                    g.grabbed_at AS grabbed_at
+                    g.grabbed_at AS grabbed_at,
+                    COALESCE(g.is_batch, 0) AS is_batch
              FROM grabbed_torrents g
              JOIN grabbed_torrent_series r ON r.grab_id = g.id
              , json_each(r.episode_numbers) AS je
@@ -440,6 +442,7 @@ pub async fn find_imported_for_episode(
         .map(|row| {
             let eps_json: String = row.get("episode_numbers");
             let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            let is_batch_i: i64 = row.get("is_batch");
             GrabbedTorrent {
                 id: row.get("id"),
                 hash: row.get("hash"),
@@ -448,7 +451,7 @@ pub async fn find_imported_for_episode(
                 episode_numbers,
                 state: "imported".to_string(),
                 grabbed_at: row.get("grabbed_at"),
-                is_batch: false,
+                is_batch: is_batch_i != 0,
             }
         })
         .collect())
@@ -655,5 +658,98 @@ mod tests {
             "episode-range fallback (14..=20)"
         );
         assert_eq!(sibling_route.file_indices.len(), 7);
+    }
+
+    /// Regression: find_imported_for_episode previously hard-coded
+    /// `is_batch: false`, so callers (handlers/library.rs and
+    /// post_processing) treated batch torrents as single-episode grabs and
+    /// `delete_torrent(..., delete_files=true)` would wipe the entire pack
+    /// off disk during an upgrade-replace.
+    #[tokio::test]
+    async fn find_imported_for_episode_preserves_is_batch() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21202,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(24),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        let batch_eps: Vec<i32> = (1..=24).collect();
+        let batch_grab_id = record_grab(
+            &db,
+            "batchhash00000000000000000000000000000000",
+            "[Group] Show 01-24 [BD 1080p]",
+            series_id,
+            &batch_eps,
+            true,
+        )
+        .await
+        .expect("record batch grab")
+        .expect("batch grab inserted");
+        mark_imported(&db, batch_grab_id)
+            .await
+            .expect("mark batch imported");
+
+        let single_grab_id = record_grab(
+            &db,
+            "singlehash0000000000000000000000000000000",
+            "[Group] Show - 07 [WEB-DL 1080p]",
+            series_id,
+            &[7],
+            false,
+        )
+        .await
+        .expect("record single grab")
+        .expect("single grab inserted");
+        mark_imported(&db, single_grab_id)
+            .await
+            .expect("mark single imported");
+
+        // Episode 5 is only covered by the batch grab — its is_batch must
+        // round-trip as true.
+        let ep5 = find_imported_for_episode(&db, series_id, 5)
+            .await
+            .expect("find ep5");
+        assert_eq!(ep5.len(), 1, "expected one grab covering episode 5");
+        assert!(
+            ep5[0].is_batch,
+            "batch grab for episode 5 must report is_batch=true"
+        );
+
+        // Episode 7 is covered by both grabs. The single-episode grab was
+        // recorded second so it sorts first (ORDER BY grabbed_at DESC), but
+        // both rows must report their true is_batch value.
+        let ep7 = find_imported_for_episode(&db, series_id, 7)
+            .await
+            .expect("find ep7");
+        assert_eq!(ep7.len(), 2, "expected both grabs covering episode 7");
+        let single = ep7
+            .iter()
+            .find(|g| g.id == single_grab_id)
+            .expect("single grab present");
+        assert!(!single.is_batch, "single-episode grab is_batch=false");
+        let batch = ep7
+            .iter()
+            .find(|g| g.id == batch_grab_id)
+            .expect("batch grab present");
+        assert!(batch.is_batch, "batch grab is_batch=true");
     }
 }
