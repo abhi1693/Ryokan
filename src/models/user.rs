@@ -106,13 +106,20 @@ pub async fn verify_user(db: &SqlitePool, username: &str, password: &str) -> Res
             }
         }
         None => {
-            // Burn equivalent CPU time against the dummy hash and discard
-            // the result. DUMMY_BCRYPT_HASH is a `static LazyLock<String>`
-            // so the closure can reference it without capturing.
+            // Burn equivalent CPU time against the dummy hash and
+            // discard the result. DUMMY_BCRYPT_HASH is a
+            // `static LazyLock<String>` so the closure can reference it
+            // without capturing. Propagate JoinError with `?` to match
+            // the Some branch — without parity, an extremely-rare
+            // spawn_blocking panic would distinguish the two branches
+            // by both wall time AND result shape, defeating the
+            // username-enumeration timing equaliser the function
+            // exists to provide.
             let _ = tokio::task::spawn_blocking(move || {
                 bcrypt::verify(&password_owned, &DUMMY_BCRYPT_HASH).unwrap_or(false)
             })
-            .await;
+            .await
+            .map_err(|e| format!("verify spawn_blocking failed: {}", e))?;
             Ok(None)
         }
     }
