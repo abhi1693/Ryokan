@@ -15,6 +15,7 @@ const JIKAN_API: &str = "https://api.jikan.moe/v4";
 const CACHE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const NEGATIVE_CACHE_SENTINEL: &str = "__RYOKAN_EMPTY__";
 const DETAIL_CACHE_TTL_SECS: u64 = 15 * 60;
+const DETAIL_CACHE_MAX_ENTRIES: usize = 500;
 
 #[derive(Debug, Clone)]
 struct DetailCacheEntry {
@@ -496,6 +497,25 @@ pub async fn get_anime_detail_cached(mal_id: i64) -> Result<AnimeDetail, String>
             detail: detail.clone(),
             fetched_at: Instant::now(),
         });
+        // Cap the cache so a long-running process can't accumulate
+        // every MAL ID it ever touched. Mirrors anilist::DETAIL_CACHE
+        // eviction (drop expired first, then drop oldest if still
+        // over).
+        if cache.len() > DETAIL_CACHE_MAX_ENTRIES {
+            let expired: Vec<i64> = cache
+                .iter()
+                .filter(|(_, e)| e.fetched_at.elapsed().as_secs() >= DETAIL_CACHE_TTL_SECS)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in &expired {
+                cache.remove(k);
+            }
+            if cache.len() > DETAIL_CACHE_MAX_ENTRIES
+                && let Some((&oldest_key, _)) = cache.iter().min_by_key(|(_, e)| e.fetched_at)
+            {
+                cache.remove(&oldest_key);
+            }
+        }
     }
 
     Ok(detail)

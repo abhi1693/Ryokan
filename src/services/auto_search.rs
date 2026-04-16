@@ -1488,6 +1488,9 @@ struct SeaDexPayload {
 /// The cache lives for the lifetime of the process, so a restart is
 /// the operator's escape hatch if they ever need to force-refresh.
 const SEADEX_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+// Cap the cache so a long-running process can't accumulate every
+// AniList ID it ever touched. Mirrors anilist::DETAIL_CACHE_MAX_ENTRIES.
+const SEADEX_CACHE_MAX_ENTRIES: usize = 500;
 static SEADEX_CACHE: LazyLock<StdMutex<HashMap<i64, (Instant, SeaDexPayload)>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
@@ -1504,6 +1507,23 @@ fn seadex_cache_get(anilist_id: i64) -> Option<SeaDexPayload> {
 fn seadex_cache_put(anilist_id: i64, payload: SeaDexPayload) {
     if let Ok(mut cache) = SEADEX_CACHE.lock() {
         cache.insert(anilist_id, (Instant::now(), payload));
+        if cache.len() > SEADEX_CACHE_MAX_ENTRIES {
+            // Drop expired first; if still over cap, drop the oldest.
+            let expired: Vec<i64> = cache
+                .iter()
+                .filter(|(_, (fetched_at, _))| fetched_at.elapsed() >= SEADEX_CACHE_TTL)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in &expired {
+                cache.remove(k);
+            }
+            if cache.len() > SEADEX_CACHE_MAX_ENTRIES
+                && let Some((&oldest, _)) =
+                    cache.iter().min_by_key(|(_, (fetched_at, _))| *fetched_at)
+            {
+                cache.remove(&oldest);
+            }
+        }
     }
 }
 
