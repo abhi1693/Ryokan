@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::models::{config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, monitoring, series};
 use crate::models::log::LogCategory;
-use crate::services::{anilist, artwork, auto_search, jikan, kitsu, logger, media, metadata_sync, monitoring as monitoring_service};
+use crate::services::{anilist, artwork, auto_search, jikan, kitsu, logger, media, metadata_sync, monitoring as monitoring_service, progress};
 use crate::AppState;
 
 #[derive(Template)]
@@ -1941,6 +1941,7 @@ pub async fn set_monitoring(
                 let _ = auto_search_series(
                     axum::extract::State(state_clone),
                     axum::extract::Path(series_id),
+                    axum::extract::Query(AutoSearchQuery::default()),
                 ).await;
             });
         }
@@ -2611,6 +2612,88 @@ async fn run_auto_search_targets(
     run_auto_search_targets_with_upgrades(state, request_id, targets, allow_batch, series_id, std::collections::HashMap::new()).await
 }
 
+/// Optional `?progress_id=<opaque>` query string the frontend appends to
+/// auto-search trigger calls. The handler binds it to a fresh job in the
+/// progress registry and the worker task emits stage events into it for
+/// the sticky toast on the page.
+#[derive(Deserialize, Default)]
+pub struct AutoSearchQuery {
+    pub progress_id: Option<String>,
+}
+
+/// Pick a user-facing title for progress toasts. Prefers the English
+/// title, falling back to romaji — the same fallback the logger
+/// already uses elsewhere in this handler.
+fn display_title_for_progress(detail: &anilist::AnimeDetail) -> &str {
+    if !detail.title_english.is_empty() {
+        &detail.title_english
+    } else {
+        &detail.title_romaji
+    }
+}
+
+/// Emit a terminal progress event summarizing the outcome of an
+/// auto-search task. Called from inside the spawned task so the
+/// `progress::EMITTER` task-local is in scope.
+async fn emit_auto_search_terminal(
+    result: &Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)>,
+) {
+    match result {
+        Ok(report) => {
+            let grabbed = report.grabbed.len();
+            if grabbed > 0 {
+                // Show titles for ≤3 grabs, otherwise just the count —
+                // a 50-episode batch shouldn't paste a 50-line toast.
+                let body = if grabbed <= 3 {
+                    Some(
+                        report
+                            .grabbed
+                            .iter()
+                            .map(|h| format!("{}: {}", h.target_label, h.release_title))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                } else {
+                    Some(format!("{} releases queued for download", grabbed))
+                };
+                progress::emit(
+                    "done",
+                    "success",
+                    format!(
+                        "Grabbed {} release{}",
+                        grabbed,
+                        if grabbed == 1 { "" } else { "s" }
+                    ),
+                    body,
+                    true,
+                )
+                .await;
+            } else if !report.skipped.is_empty() {
+                progress::emit(
+                    "done",
+                    "warn",
+                    "No releases grabbed",
+                    Some(report.skipped.join("\n")),
+                    true,
+                )
+                .await;
+            } else {
+                progress::emit(
+                    "done",
+                    "warn",
+                    "Nothing to search",
+                    Some("No targets matched the requested scope".into()),
+                    true,
+                )
+                .await;
+            }
+        }
+        Err((_, msg)) => {
+            progress::emit("error", "error", "Auto search failed", Some(msg.clone()), true).await;
+        }
+    }
+}
+
 async fn run_auto_search_targets_with_upgrades(
     state: &AppState,
     request_id: i64,
@@ -2646,6 +2729,18 @@ async fn run_auto_search_targets_with_upgrades(
         &format!("Auto search started for {}", title),
         &format!("{} target(s), allow_batch={}", targets.len(), allow_batch),
     ).await;
+    progress::emit(
+        "search",
+        "info",
+        format!("Searching {}", title),
+        Some(format!(
+            "{} target{}",
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" }
+        )),
+        false,
+    )
+    .await;
 
     // Clone the compiled-CF Arc out from under the read lock so the
     // scoring loop below runs without holding it.
@@ -2653,9 +2748,22 @@ async fn run_auto_search_targets_with_upgrades(
 
     let mut grabbed = Vec::new();
     let mut skipped = Vec::new();
-    for target in targets {
+    let total_targets = targets.len();
+    for (idx, target) in targets.into_iter().enumerate() {
         let label = auto_search::target_label(&target);
         let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrade_classifications.contains_key(n));
+        progress::emit(
+            "search",
+            "info",
+            if total_targets > 1 {
+                format!("[{}/{}] {}", idx + 1, total_targets, label)
+            } else {
+                format!("Searching: {}", label)
+            },
+            None,
+            false,
+        )
+        .await;
         match auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, allow_batch, is_upgrade, &cfs).await {
             Some(result) => {
                 // Classify up front so both upgrade-verification and log labels
@@ -2756,6 +2864,14 @@ async fn run_auto_search_targets_with_upgrades(
                             &format!("Grabbed: {}", result.title),
                             &format!("target={}, group={}, score={}, tier={}, batch={}{}", label, result.group, result.score, incoming_classification.label(), result.is_batch, selective_suffix),
                         ).await;
+                        progress::emit(
+                            "grab",
+                            "success",
+                            format!("Grabbed: {}", label),
+                            Some(format!("{} [{}]", result.title, incoming_classification.label())),
+                            false,
+                        )
+                        .await;
                         // Record for post-processing and episode quality tags.
                         if let Some(sid) = series_id {
                             let mut ep_nums: Vec<i32> = match &target {
@@ -2909,7 +3025,15 @@ async fn run_auto_search_targets_with_upgrades(
 pub async fn auto_search_series(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
+    Query(q): Query<AutoSearchQuery>,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
+        Some(id) => Some(state.progress.register(id).await),
+        None => None,
+    };
+    if let Some(h) = &progress_handle {
+        h.emit("start", "info", "Preparing auto-search…", None, false).await;
+    }
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -3003,13 +3127,37 @@ pub async fn auto_search_series(
             _ => None,
         })
         .collect();
-    // Spawn as an independent task so the grab completes even if the client disconnects.
+    // Spawn as an independent task so the grab completes even if the client
+    // disconnects. The spawned future is wrapped in `progress::scope` when a
+    // progress handle was registered, so deep callees inside the search
+    // pipeline can `progress::emit` into the toast without threading the
+    // handle through every signature.
     let state_clone = state.clone();
-    let handle = tokio::spawn(async move {
-        run_auto_search_targets_with_upgrades(&state_clone, request_id, targets, true, series_id_for_grab, upgrade_classifications).await
-    });
-    let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
+    let progress_for_task = progress_handle.clone();
+    let handle = tokio::spawn(progress::run_with_progress(
+        progress_for_task,
+        async move {
+            let result = run_auto_search_targets_with_upgrades(
+                &state_clone,
+                request_id,
+                targets,
+                true,
+                series_id_for_grab,
+                upgrade_classifications,
+            )
+            .await;
+            emit_auto_search_terminal(&result).await;
+            result
+        },
+    ));
+    let report = handle
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Search task failed: {}", e),
+            )
+        })??;
     Ok(Json(report))
 }
 
@@ -3032,7 +3180,22 @@ pub async fn auto_search_series(
 pub async fn auto_search_episode(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
+    Query(q): Query<AutoSearchQuery>,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
+        Some(id) => Some(state.progress.register(id).await),
+        None => None,
+    };
+    if let Some(h) = &progress_handle {
+        h.emit(
+            "start",
+            "info",
+            format!("Searching episode {}…", episode_number),
+            None,
+            false,
+        )
+        .await;
+    }
     let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
@@ -3056,20 +3219,35 @@ pub async fn auto_search_episode(
     // out by the Episode(n) matching rules.
     let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
 
-    // Spawn as an independent task so the grab completes even if the client disconnects.
+    // Spawn as an independent task so the grab completes even if the client
+    // disconnects. The spawn is wrapped in `progress::run_with_progress`
+    // when a progress handle was registered above so deep callees can emit
+    // into the user's sticky toast without threading the handle down.
     let state_clone = state.clone();
-    let handle = tokio::spawn(async move {
-        run_auto_search_targets(
-            &state_clone,
-            request_id,
-            vec![target],
-            false,
-            series_id_for_grab,
-        )
+    let progress_for_task = progress_handle.clone();
+    let handle = tokio::spawn(progress::run_with_progress(
+        progress_for_task,
+        async move {
+            let result = run_auto_search_targets(
+                &state_clone,
+                request_id,
+                vec![target],
+                false,
+                series_id_for_grab,
+            )
+            .await;
+            emit_auto_search_terminal(&result).await;
+            result
+        },
+    ));
+    let report = handle
         .await
-    });
-    let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Search task failed: {}", e),
+            )
+        })??;
     Ok(Json(report))
 }
 
@@ -3091,7 +3269,16 @@ pub async fn auto_search_episode(
 pub async fn search_batch_releases(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
+    Query(q): Query<AutoSearchQuery>,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
+        Some(id) => Some(state.progress.register(id).await),
+        None => None,
+    };
+    if let Some(h) = &progress_handle {
+        h.emit("start", "info", "Searching for batch release…", None, false).await;
+    }
+
     let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
@@ -3104,6 +3291,17 @@ pub async fn search_batch_releases(
         .unwrap_or_default();
 
     let cfs = state.custom_formats.read().await.clone();
+
+    if let Some(h) = &progress_handle {
+        h.emit(
+            "search",
+            "info",
+            format!("Searching: {}", display_title_for_progress(&detail)),
+            None,
+            false,
+        )
+        .await;
+    }
 
     // Pick the best *batch* — filtering to is_batch pre-selection instead
     // of post-selection. The old code called find_best_for_target and
@@ -3121,19 +3319,56 @@ pub async fn search_batch_releases(
     let qbit = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .ok_or({
+                if let Some(h) = &progress_handle {
+                    // Fire-and-forget: we're about to Err-return, so the
+                    // toast is the only surface that tells the user why.
+                    let h = h.clone();
+                    tokio::spawn(async move {
+                        h.emit("error", "error", "qBittorrent not configured", None, true).await;
+                    });
+                }
+                (axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string())
+            })?
             .clone()
     };
 
     match best {
-        None => Err((axum::http::StatusCode::NOT_FOUND, "No batch release found".to_string())),
+        None => {
+            if let Some(h) = &progress_handle {
+                h.emit("done", "warn", "No batch release found", None, true).await;
+            }
+            Err((axum::http::StatusCode::NOT_FOUND, "No batch release found".to_string()))
+        }
         Some(result) => {
             let url = if !result.magnet.is_empty() { result.magnet.clone() } else { result.torrent.clone() };
             if url.is_empty() {
+                if let Some(h) = &progress_handle {
+                    h.emit("error", "error", "No magnet/torrent URL for batch release", None, true).await;
+                }
                 return Err((axum::http::StatusCode::BAD_GATEWAY, "No magnet/torrent URL for batch release".to_string()));
             }
+            if let Some(h) = &progress_handle {
+                h.emit(
+                    "grab",
+                    "info",
+                    format!("Grabbing {}", result.title),
+                    None,
+                    false,
+                )
+                .await;
+            }
             qbit.add_torrent(&url).await
-                .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+                .map_err(|e| {
+                    if let Some(h) = &progress_handle {
+                        let h = h.clone();
+                        let err = e.clone();
+                        tokio::spawn(async move {
+                            h.emit("error", "error", "qBittorrent rejected the torrent", Some(err), true).await;
+                        });
+                    }
+                    (axum::http::StatusCode::BAD_GATEWAY, e)
+                })?;
             let classification = crate::services::source::classify_release(
                 &state.db,
                 &result.title,
@@ -3193,6 +3428,16 @@ pub async fn search_batch_releases(
                         result.is_batch,
                     ).await;
                 }
+            }
+            if let Some(h) = &progress_handle {
+                h.emit(
+                    "done",
+                    "success",
+                    "Batch grabbed",
+                    Some(format!("{} ({})", result.title, tier_label)),
+                    true,
+                )
+                .await;
             }
             Ok(Json(auto_search::AutoSearchReport {
                 grabbed: vec![auto_search::AutoSearchHit {

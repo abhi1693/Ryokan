@@ -26,6 +26,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use services::{
     custom_formats::{self, CompiledCfCache},
     jellyfin::JellyfinClient,
+    progress::ProgressRegistry,
     qbit::QbitClient,
 };
 
@@ -87,6 +88,7 @@ use services::{
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
         handlers::system::api_logs_client,
+        handlers::progress::poll_progress,
         handlers::system::api_rss_sync,
         handlers::system::api_rss_clear_history,
         handlers::system::api_force_metadata_refresh,
@@ -107,6 +109,8 @@ use services::{
         services::qbit::Torrent,
         services::auto_search::AutoSearchReport,
         services::auto_search::AutoSearchHit,
+        services::progress::ProgressEvent,
+        services::progress::ProgressPoll,
         models::log::LogEntry,
         models::episode_tags::GrabHistoryEntry,
         handlers::system::ClientLogForm,
@@ -152,6 +156,13 @@ pub struct AppState {
     /// out on the scoring hot path so the read lock releases before the
     /// per-candidate evaluation loop begins.
     pub custom_formats: CompiledCfCache,
+    /// In-memory progress registry for long-running user-triggered jobs
+    /// (currently the manual auto-search). The frontend mints an opaque
+    /// `progress_id`, the trigger handler binds it via
+    /// `register(...).await`, and the polling endpoint at
+    /// `/api/progress/{id}` drains buffered events. See
+    /// `services::progress` for the full lifecycle.
+    pub progress: ProgressRegistry,
     /// Flip-to-true-once cache of `user::has_users`. The auth middleware
     /// runs on every protected request and was firing a `SELECT COUNT(*)
     /// FROM users` query for each one just to decide whether to redirect
@@ -285,6 +296,7 @@ async fn main() {
         qbit: Arc::new(RwLock::new(None)),
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
+        progress: ProgressRegistry::new(),
         users_exist,
     };
 
@@ -384,6 +396,7 @@ async fn main() {
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
         .route("/api/logs/client", post(handlers::system::api_logs_client))
+        .route("/api/progress/{job_id}", get(handlers::progress::poll_progress))
         .route("/media/art/{cache_key}", get(handlers::media::artwork))
         .route("/logout", get(handlers::auth::logout))
         .layer(middleware::from_fn_with_state(
@@ -894,6 +907,27 @@ async fn main() {
                             let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "error", "Failed to download mappings").await;
                         }
                         tokio::time::sleep(period).await;
+                    }
+                }
+            }).await;
+        });
+    }
+
+    // Background task: sweep finished progress jobs out of the in-memory
+    // registry. Jobs are kept for 60s past their terminal event so a
+    // frontend that's mid-poll still sees the final state on its next
+    // tick, then dropped. The sweep itself is cheap (one mutex acquire,
+    // a HashMap retain) so a 30s tick is fine.
+    {
+        let progress_state = state.clone();
+        tokio::spawn(async move {
+            supervise("progress_sweep", move || {
+                let progress = progress_state.progress.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                    loop {
+                        interval.tick().await;
+                        progress.sweep(std::time::Duration::from_secs(60)).await;
                     }
                 }
             }).await;

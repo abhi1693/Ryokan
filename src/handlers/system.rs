@@ -1,10 +1,14 @@
 use askama::Template;
 use axum::{
     extract::{Query, State},
-    response::{Html, Json},
+    http::StatusCode,
+    response::{Html, IntoResponse, Json, Response},
     Form,
 };
 use serde::Deserialize;
+use std::collections::VecDeque;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::models::{config, log::{self, LogCategory, LogLevel}, rss, scheduled_tasks};
 use crate::services::{logger, metadata_sync, post_processing, rss as rss_service, upgrade};
@@ -389,6 +393,37 @@ pub struct ClientLogForm {
     pub body: Option<String>,
 }
 
+// Field-length and rate-limit caps for `/api/logs/client`. The endpoint
+// is behind cookie auth + same-origin CSRF, so the threat model is a
+// buggy/runaway client (or a curious user with devtools open) flooding
+// the logs table — not a malicious unauthenticated attacker. The single
+// global window is sufficient for a self-hosted single-user PVR; it
+// would need to be per-session for a multi-tenant deployment.
+const CLIENT_LOG_TITLE_MAX: usize = 512;
+const CLIENT_LOG_BODY_MAX: usize = 4096;
+const CLIENT_LOG_RATE_WINDOW: Duration = Duration::from_secs(60);
+const CLIENT_LOG_RATE_MAX: usize = 30;
+
+static CLIENT_LOG_HITS: LazyLock<Mutex<VecDeque<Instant>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(CLIENT_LOG_RATE_MAX)));
+
+fn check_client_log_rate() -> bool {
+    let now = Instant::now();
+    let mut hits = CLIENT_LOG_HITS.lock().unwrap();
+    while let Some(front) = hits.front() {
+        if now.duration_since(*front) > CLIENT_LOG_RATE_WINDOW {
+            hits.pop_front();
+        } else {
+            break;
+        }
+    }
+    if hits.len() >= CLIENT_LOG_RATE_MAX {
+        return false;
+    }
+    hits.push_back(now);
+    true
+}
+
 #[utoipa::path(
     post,
     path = "/api/logs/client",
@@ -398,12 +433,22 @@ pub struct ClientLogForm {
     request_body = ClientLogForm,
     responses(
         (status = 200, description = "Toast logged", body = serde_json::Value),
+        (status = 400, description = "Title or body exceeds size cap"),
+        (status = 429, description = "Rate limit exceeded"),
     ),
 )]
 pub async fn api_logs_client(
     State(state): State<AppState>,
     Json(form): Json<ClientLogForm>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if form.title.len() > CLIENT_LOG_TITLE_MAX
+        || form.body.as_deref().map(str::len).unwrap_or(0) > CLIENT_LOG_BODY_MAX
+    {
+        return (StatusCode::BAD_REQUEST, "title or body too large").into_response();
+    }
+    if !check_client_log_rate() {
+        return (StatusCode::TOO_MANY_REQUESTS, "client log rate limit exceeded").into_response();
+    }
     let level = match form.kind.as_str() {
         "warn" => LogLevel::Warn,
         "error" => LogLevel::Error,
@@ -416,7 +461,7 @@ pub async fn api_logs_client(
         .unwrap_or(LogCategory::System);
     let detail = form.body.as_deref().unwrap_or("");
     logger::log(&state.db, level, category, &form.title, detail).await;
-    Json(serde_json::json!({"ok": true}))
+    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 

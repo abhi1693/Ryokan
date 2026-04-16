@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod downloads;
 pub mod library;
+pub mod progress;
 pub mod search;
 pub mod settings;
 pub mod system;

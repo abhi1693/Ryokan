@@ -591,6 +591,7 @@ pub async fn add_series(
             let _ = super::library::auto_search_series(
                 axum::extract::State(state_clone),
                 axum::extract::Path(id),
+                axum::extract::Query(super::library::AutoSearchQuery::default()),
             ).await;
         });
     }
@@ -661,6 +662,7 @@ pub async fn execute_command(
                 let _ = super::library::auto_search_series(
                     axum::extract::State(state_clone),
                     axum::extract::Path(series_id),
+                    axum::extract::Query(super::library::AutoSearchQuery::default()),
                 ).await;
             });
         }
