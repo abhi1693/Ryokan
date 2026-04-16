@@ -95,10 +95,10 @@ fn anilist_cooldown_active() -> bool {
     false
 }
 
-fn set_anilist_cooldown(retry_after_secs: Option<u64>) {
+fn set_anilist_cooldown(retry_after_secs: Option<u64>, default_dur: Duration) {
     let dur = retry_after_secs
         .map(Duration::from_secs)
-        .unwrap_or(ANILIST_COOLDOWN_DEFAULT)
+        .unwrap_or(default_dur)
         .min(ANILIST_COOLDOWN_MAX);
     if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
         *guard = Some(Instant::now() + dur);
@@ -233,10 +233,19 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
             "AniList search HTTP {} for query {:?} (retry-after={:?}); falling back to Jikan/MAL",
             status, query, retry_after_secs
         );
-        // Start a cooldown so subsequent searches in this window skip AL entirely.
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-            set_anilist_cooldown(retry_after_secs);
-        }
+        // Start a cooldown so subsequent searches in this window skip
+        // AL entirely. 403 (Cloudflare challenge) is the most common
+        // AniList outage mode; without this branch, every request kept
+        // round-tripping through AL just to bounce on the 403 again
+        // before falling back to Jikan. Cloudflare doesn't include
+        // Retry-After, so pick a longer default — 60s rarely outlasts
+        // a real challenge — and let ANILIST_COOLDOWN_MAX cap it.
+        let default_cooldown = if status == reqwest::StatusCode::FORBIDDEN {
+            Duration::from_secs(300)
+        } else {
+            ANILIST_COOLDOWN_DEFAULT
+        };
+        set_anilist_cooldown(retry_after_secs, default_cooldown);
         let reason = match status.as_u16() {
             429 => format!(
                 "AniList rate-limited{}",
