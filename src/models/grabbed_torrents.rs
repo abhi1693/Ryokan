@@ -38,32 +38,36 @@ pub async fn record_grab(
     is_batch: bool,
 ) -> Result<Option<i64>, sqlx::Error> {
     let eps_json = serde_json::to_string(episode_numbers).unwrap_or_else(|_| "[]".to_string());
-
-    if !hash.is_empty() {
-        let existing: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM grabbed_torrents WHERE hash = ? AND state IN ('pending', 'imported') LIMIT 1",
-        )
-        .bind(hash)
-        .fetch_optional(db)
-        .await?;
-        if existing.is_some() {
-            return Ok(None);
-        }
-    }
-
     let is_batch_i = if is_batch { 1_i64 } else { 0_i64 };
-    let result = sqlx::query(
-        "INSERT INTO grabbed_torrents (hash, torrent_name, series_id, episode_numbers, state, is_batch) VALUES (?, ?, ?, ?, 'pending', ?)",
+
+    // Atomic dedup via partial UNIQUE index on (hash) WHERE hash != ''
+    // AND state IN ('pending', 'imported') (created in models::migrate).
+    // INSERT OR IGNORE swallows the conflict and RETURNING yields no
+    // row, so fetch_optional resolves to None on the dedup path. The
+    // previous SELECT-then-INSERT pattern had a race window where two
+    // concurrent record_grab calls (RSS auto-sync racing a manual grab
+    // on the same release) both observed "no existing row" and both
+    // inserted, producing duplicate pending rows that triggered
+    // double-import attempts in post-processing.
+    //
+    // Empty-hash rows aren't covered by the partial index (the WHERE
+    // clause filters them out), so they always insert — preserving the
+    // pre-fix behavior where empty-hash grabs from legacy paths never
+    // deduped against each other.
+    let inserted_id: Option<i64> = sqlx::query_scalar(
+        "INSERT OR IGNORE INTO grabbed_torrents
+             (hash, torrent_name, series_id, episode_numbers, state, is_batch)
+         VALUES (?, ?, ?, ?, 'pending', ?)
+         RETURNING id",
     )
     .bind(hash)
     .bind(torrent_name)
     .bind(series_id)
     .bind(&eps_json)
     .bind(is_batch_i)
-    .execute(db)
+    .fetch_optional(db)
     .await?;
-
-    Ok(Some(result.last_insert_rowid()))
+    Ok(inserted_id)
 }
 
 /// Per-file routing row for a grabbed torrent. Used to drive
@@ -751,5 +755,84 @@ mod tests {
             .find(|g| g.id == batch_grab_id)
             .expect("batch grab present");
         assert!(batch.is_batch, "batch grab is_batch=true");
+    }
+
+    /// Regression: record_grab previously did SELECT-then-INSERT with no
+    /// transaction, so two concurrent calls (RSS auto-sync racing a
+    /// manual grab on the same hash) both observed "no existing row" and
+    /// both inserted. Post-processing then attempted to import the same
+    /// hash twice. The fix is a partial UNIQUE index + INSERT OR IGNORE,
+    /// which collapses the SELECT and INSERT into one atomic statement.
+    ///
+    /// This test covers the three cases the dedup window has to honour:
+    ///  - same hash, both active → second insert is rejected
+    ///  - failed grab with same hash → re-record is allowed
+    ///  - empty hash → never deduped, always inserts
+    #[tokio::test]
+    async fn record_grab_dedups_same_hash_atomically() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 12345,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2020),
+                end_year: Some(2020),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        // First active grab inserts.
+        let id1 = record_grab(&db, "racehash", "release a", series_id, &[1], false)
+            .await
+            .expect("first record_grab")
+            .expect("first must insert");
+
+        // Second active grab with same hash is dedup'd.
+        let id2 = record_grab(&db, "racehash", "release b", series_id, &[1], false)
+            .await
+            .expect("second record_grab");
+        assert!(id2.is_none(), "duplicate active hash must dedup");
+
+        // Confirm only one row exists for that hash.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents WHERE hash = 'racehash'")
+                .fetch_one(&db)
+                .await
+                .expect("count");
+        assert_eq!(count, 1);
+
+        // Mark the first one as failed; now the same hash can be
+        // re-recorded — the partial index excludes failed/removed rows.
+        mark_failed(&db, id1).await.expect("mark failed");
+        let id3 = record_grab(&db, "racehash", "release c", series_id, &[1], false)
+            .await
+            .expect("third record_grab");
+        assert!(
+            id3.is_some(),
+            "after blocklist, same hash must be re-recordable"
+        );
+
+        // Empty-hash rows aren't covered by the partial index.
+        let id4 = record_grab(&db, "", "no hash a", series_id, &[1], false)
+            .await
+            .expect("empty-hash a");
+        let id5 = record_grab(&db, "", "no hash b", series_id, &[1], false)
+            .await
+            .expect("empty-hash b");
+        assert!(id4.is_some() && id5.is_some(), "empty-hash never dedups");
     }
 }

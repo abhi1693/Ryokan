@@ -566,6 +566,38 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
 
+    // One-time backfill: deduplicate active grabs sharing a hash before
+    // creating the unique index below. Pre-fix race in record_grab could
+    // produce duplicate pending/imported rows for the same hash; the
+    // unique index would otherwise refuse to create. Keeps the oldest
+    // row per hash (lowest id), drops the rest. Idempotent — a second
+    // boot finds no duplicates and the DELETE no-ops.
+    sqlx::query(
+        r#"DELETE FROM grabbed_torrents
+           WHERE hash != ''
+             AND state IN ('pending', 'imported')
+             AND id NOT IN (
+                 SELECT MIN(id) FROM grabbed_torrents
+                 WHERE hash != '' AND state IN ('pending', 'imported')
+                 GROUP BY hash
+             )"#,
+    )
+    .execute(db)
+    .await?;
+
+    // Partial UNIQUE index that backs the atomic dedup in record_grab's
+    // INSERT OR IGNORE. Restricted to active states so a hash that's
+    // been blocklisted ('failed') or removed can still be re-recorded
+    // — preserving the prior SELECT's `state IN ('pending', 'imported')`
+    // filter as the dedup window.
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_grabbed_torrents_hash_active
+         ON grabbed_torrents (hash)
+         WHERE hash != '' AND state IN ('pending', 'imported')",
+    )
+    .execute(db)
+    .await?;
+
     // Per-file series routing for multi-series batch releases. A
     // megapack that covers e.g. JoJo S1-S5 gets one row per sibling
     // in this table, each carrying the file indices (into the
