@@ -562,9 +562,52 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
 
+    // Many hot-path queries filter on series_id (find_imported_for_episode,
+    // get_all_for_series, mark_failed_by_name, etc.) and the prior schema
+    // had no index covering it — every lookup did a full table scan. Sort
+    // key lets get_all_for_series / get_blocked / get_all_with_series read
+    // in chronological order without a separate sort.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_series ON grabbed_torrents (series_id, grabbed_at DESC)",
+    )
+    .execute(db)
+    .await?;
+
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_hash ON grabbed_torrents (hash) WHERE hash != ''")
         .execute(db)
         .await?;
+
+    // One-time backfill: deduplicate active grabs sharing a hash before
+    // creating the unique index below. Pre-fix race in record_grab could
+    // produce duplicate pending/imported rows for the same hash; the
+    // unique index would otherwise refuse to create. Keeps the oldest
+    // row per hash (lowest id), drops the rest. Idempotent — a second
+    // boot finds no duplicates and the DELETE no-ops.
+    sqlx::query(
+        r#"DELETE FROM grabbed_torrents
+           WHERE hash != ''
+             AND state IN ('pending', 'imported')
+             AND id NOT IN (
+                 SELECT MIN(id) FROM grabbed_torrents
+                 WHERE hash != '' AND state IN ('pending', 'imported')
+                 GROUP BY hash
+             )"#,
+    )
+    .execute(db)
+    .await?;
+
+    // Partial UNIQUE index that backs the atomic dedup in record_grab's
+    // INSERT OR IGNORE. Restricted to active states so a hash that's
+    // been blocklisted ('failed') or removed can still be re-recorded
+    // — preserving the prior SELECT's `state IN ('pending', 'imported')`
+    // filter as the dedup window.
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_grabbed_torrents_hash_active
+         ON grabbed_torrents (hash)
+         WHERE hash != '' AND state IN ('pending', 'imported')",
+    )
+    .execute(db)
+    .await?;
 
     // Per-file series routing for multi-series batch releases. A
     // megapack that covers e.g. JoJo S1-S5 gets one row per sibling
@@ -761,14 +804,29 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // covers the corner case where neither column is present (which
     // shouldn't happen, but keeps downstream writes safe).
     if !column_exists(db, "episode_grab_history", "file_name").await {
-        sqlx::query("ALTER TABLE episode_grab_history RENAME COLUMN torrent_name TO file_name")
-            .execute(db)
-            .await
-            .ok();
-        sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
-            .execute(db)
-            .await
-            .ok();
+        // Two paths for the legacy schema:
+        //
+        //  - `torrent_name` exists  → RENAME it to `file_name`. Propagate
+        //    any failure from the RENAME instead of swallowing with .ok():
+        //    the previous code paired the RENAME with an unconditional ADD
+        //    so a transient RENAME failure (DB lock, FK quirk, I/O hiccup)
+        //    would leave an empty `file_name` column on top of intact
+        //    `torrent_name` data and the next boot would think the
+        //    migration was already done. Refusing to start with a real
+        //    error is preferable to silent data loss.
+        //
+        //  - `torrent_name` is also missing → defensive ADD for the
+        //    corrupted-schema corner case. Without `torrent_name` to
+        //    rename from there is no data to lose, so the ADD is safe.
+        if column_exists(db, "episode_grab_history", "torrent_name").await {
+            sqlx::query("ALTER TABLE episode_grab_history RENAME COLUMN torrent_name TO file_name")
+                .execute(db)
+                .await?;
+        } else {
+            sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
+                .execute(db)
+                .await?;
+        }
     }
 
     // Episode-file size. For non-batch grabs this gets refined to the
@@ -1067,9 +1125,48 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // REPLACE statements on known legacy patterns. Fully idempotent:
     // the regen overwrites with the same value on re-runs, and the
     // REPLACE chain no-ops once its source patterns are gone.
+    // The CASE is duplicated in SET and WHERE on purpose: gating the
+    // UPDATE means SQLite only writes rows whose quality_tag would
+    // actually change, so a boot on an already-migrated database does
+    // zero WAL writes here instead of dirtying every row in the table.
+    // Without the gate, every boot churned the WAL and held the write
+    // lock long enough to delay the very first incoming request after
+    // startup.
+    //
+    // MAINTENANCE: any edit to the SET CASE must be mirrored in the
+    // WHERE CASE below (and vice versa). Diverging the two is a
+    // correctness bug — the WHERE's job is to match the SET's output
+    // exactly, so the gate only skips rows that truly don't need the
+    // rewrite.
     sqlx::query(
         r#"
         UPDATE episode_quality_tags SET quality_tag = CASE
+            WHEN TRIM(COALESCE(source, '')) = ''
+              OR LOWER(source) = 'unknown' THEN
+                CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
+                     THEN 'Unknown' ELSE resolution END
+            ELSE
+                (CASE
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd') THEN 'BD'
+                    WHEN LOWER(source) = 'web' THEN
+                        CASE
+                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webdl', 'web-dl', 'web.dl') THEN 'WEBDL'
+                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webrip', 'web-rip', 'web.rip') THEN 'WEBRip'
+                            ELSE 'WEB'
+                        END
+                    ELSE UPPER(source)
+                END)
+                || CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
+                        THEN '' ELSE '-' || resolution END
+                || CASE
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd')
+                         AND COALESCE(is_bdmv, 0) = 1 THEN ' RAW'
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd')
+                         AND COALESCE(is_remux, 0) = 1 THEN ' Remux'
+                    ELSE ''
+                END
+        END
+        WHERE COALESCE(quality_tag, '') <> CASE
             WHEN TRIM(COALESCE(source, '')) = ''
               OR LOWER(source) = 'unknown' THEN
                 CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
@@ -1205,4 +1302,84 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    /// Regression: a legacy install has `episode_grab_history.torrent_name`
+    /// populated with the release title for every historical grab. The
+    /// column-rename path previously ran
+    ///   RENAME torrent_name → file_name (.ok())
+    ///   ADD COLUMN file_name TEXT (.ok())
+    /// back-to-back. If the RENAME failed for any reason (DB lock, FK
+    /// quirk, I/O hiccup) the subsequent ADD silently created an empty
+    /// `file_name` column on top of intact `torrent_name` data and every
+    /// prior row's release title was effectively lost — `.ok()` on both
+    /// statements meant no log line, no error, nothing to alert the
+    /// operator.
+    ///
+    /// This test exercises the happy path: pre-create the table with the
+    /// legacy schema, stuff a row into it, run migrate, confirm the row's
+    /// file_name now carries what torrent_name held.
+    #[tokio::test]
+    async fn migrate_renames_legacy_torrent_name_to_file_name_preserving_data() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+
+        // Pre-create episode_grab_history with the legacy schema (column
+        // is `torrent_name`, no `file_name`). CREATE TABLE IF NOT EXISTS
+        // inside migrate() will then skip this table and migrate() will
+        // reach the rename branch under test.
+        sqlx::query(
+            r#"
+            CREATE TABLE episode_grab_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                series_id INTEGER NOT NULL,
+                episode_number INTEGER NOT NULL,
+                quality_tag TEXT NOT NULL DEFAULT '',
+                release_title TEXT NOT NULL DEFAULT '',
+                release_group TEXT NOT NULL DEFAULT '',
+                torrent_name TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'grabbed',
+                grabbed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&db)
+        .await
+        .expect("pre-create legacy table");
+
+        sqlx::query(
+            "INSERT INTO episode_grab_history
+                 (series_id, episode_number, quality_tag, release_title, release_group, torrent_name)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(1_i64)
+        .bind(1_i32)
+        .bind("WEBDL-1080p")
+        .bind("[Group] Show - 01 [WEB-DL 1080p].mkv")
+        .bind("Group")
+        .bind("[Group] Show - 01 [WEB-DL 1080p].mkv")
+        .execute(&db)
+        .await
+        .expect("insert legacy row");
+
+        migrate(&db).await.expect("migrate must succeed");
+
+        // After migrate, the data that lived in `torrent_name` must now be
+        // in `file_name`. If the rename failed and the defensive ADD
+        // branch ran instead, this value would be empty (the default).
+        let file_name: String = sqlx::query_scalar(
+            "SELECT file_name FROM episode_grab_history WHERE id = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("row 1 must still exist");
+        assert_eq!(file_name, "[Group] Show - 01 [WEB-DL 1080p].mkv");
+
+        // And the old column should no longer be there (RENAME moved it,
+        // didn't duplicate it).
+        assert!(!column_exists(&db, "episode_grab_history", "torrent_name").await);
+    }
+}

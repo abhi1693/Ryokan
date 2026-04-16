@@ -43,7 +43,14 @@ pub async fn has_users(db: &SqlitePool) -> Result<bool, sqlx::Error> {
 
 /// Create a new user with a bcrypt-hashed password.
 pub async fn create_user(db: &SqlitePool, username: &str, password: &str) -> Result<i64, String> {
-    let hash = bcrypt::hash(password, 10).map_err(|e| format!("Hash error: {}", e))?;
+    // bcrypt::hash burns ~50ms of CPU on a runtime worker. Move it to a
+    // blocking thread so a setup POST under any concurrent async load
+    // doesn't stall every other task on the same worker.
+    let password_owned = password.to_string();
+    let hash = tokio::task::spawn_blocking(move || bcrypt::hash(&password_owned, 10))
+        .await
+        .map_err(|e| format!("Hash spawn_blocking failed: {}", e))?
+        .map_err(|e| format!("Hash error: {}", e))?;
 
     let result = sqlx::query("INSERT INTO users (username, password_hash) VALUES (?, ?)")
         .bind(username)
@@ -71,9 +78,23 @@ pub async fn verify_user(db: &SqlitePool, username: &str, password: &str) -> Res
             .await
             .map_err(|e| format!("DB error: {}", e))?;
 
+    // bcrypt::verify is ~50ms of CPU work; running it on a runtime
+    // worker stalls every other async task on that worker. Wrap both
+    // branches in spawn_blocking so concurrent login attempts don't
+    // serialise behind each other on a single worker thread. The
+    // timing-equalisation invariant (the no-such-user branch must
+    // take the same wall time as the wrong-password branch) is
+    // preserved — both branches still go through one bcrypt::verify
+    // and one spawn_blocking trip.
+    let password_owned = password.to_string();
     match row {
         Some((id, uname, hash)) => {
-            let valid = bcrypt::verify(password, &hash).unwrap_or(false);
+            let hash_for_verify = hash.clone();
+            let valid = tokio::task::spawn_blocking(move || {
+                bcrypt::verify(&password_owned, &hash_for_verify).unwrap_or(false)
+            })
+            .await
+            .map_err(|e| format!("verify spawn_blocking failed: {}", e))?;
             if valid {
                 Ok(Some(User {
                     id,
@@ -85,11 +106,20 @@ pub async fn verify_user(db: &SqlitePool, username: &str, password: &str) -> Res
             }
         }
         None => {
-            // Burn equivalent CPU time against the dummy hash and discard
-            // the result. `.unwrap_or(false)` mirrors the Some-branch
-            // handling so any bcrypt error produces the same outcome as
-            // a wrong password.
-            let _ = bcrypt::verify(password, &DUMMY_BCRYPT_HASH).unwrap_or(false);
+            // Burn equivalent CPU time against the dummy hash and
+            // discard the result. DUMMY_BCRYPT_HASH is a
+            // `static LazyLock<String>` so the closure can reference it
+            // without capturing. Propagate JoinError with `?` to match
+            // the Some branch — without parity, an extremely-rare
+            // spawn_blocking panic would distinguish the two branches
+            // by both wall time AND result shape, defeating the
+            // username-enumeration timing equaliser the function
+            // exists to provide.
+            let _ = tokio::task::spawn_blocking(move || {
+                bcrypt::verify(&password_owned, &DUMMY_BCRYPT_HASH).unwrap_or(false)
+            })
+            .await
+            .map_err(|e| format!("verify spawn_blocking failed: {}", e))?;
             Ok(None)
         }
     }

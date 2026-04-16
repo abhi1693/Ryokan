@@ -27,15 +27,27 @@ pub async fn require_api_key(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // See sonarr_compat::require_api_key for the 503-vs-500 rationale.
     let cfg = match config::get_config(&state.db).await {
         Ok(Some(c)) => c,
-        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(None) | Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                "Ryokan config not yet available",
+            )
+                .into_response();
+        }
     };
 
     if !cfg.radarr_enabled || cfg.radarr_api_key.is_empty() {
         return (StatusCode::SERVICE_UNAVAILABLE, "Radarr API compatibility layer is disabled").into_response();
     }
 
+    // Mirrors sonarr_compat::require_api_key — see that function for the
+    // full rationale on percent-decoding the query-string value and on
+    // the constant-time compare. Kept duplicated rather than extracted
+    // because the only difference is the cfg field accessed.
     let api_key = req
         .headers()
         .get("x-api-key")
@@ -45,13 +57,25 @@ pub async fn require_api_key(
             let query_str = req.uri().query().unwrap_or("");
             query_str.split('&').find_map(|pair| {
                 let (key, val) = pair.split_once('=')?;
-                if key == "apikey" { Some(val.to_string()) } else { None }
+                if key == "apikey" {
+                    Some(urlencoding::decode(val).ok()?.into_owned())
+                } else {
+                    None
+                }
             })
         });
 
-    match api_key {
-        Some(key) if key == cfg.radarr_api_key => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response(),
+    let valid = match &api_key {
+        Some(key) => bool::from(subtle::ConstantTimeEq::ct_eq(
+            key.as_bytes(),
+            cfg.radarr_api_key.as_bytes(),
+        )),
+        None => false,
+    };
+    if valid {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response()
     }
 }
 

@@ -517,7 +517,12 @@ pub async fn settings_submit(
         custom_format_edit: None,
         custom_format_min_score_display,
         custom_format_import_review: None,
-        message: Some(notices.join("<br>")),
+        // Joined with " " — not "<br>" — because the template now
+        // auto-escapes `message`. Each notice is a complete sentence
+        // ending in ".", so a space-joined run reads acceptably as a
+        // single paragraph. Multi-notice POSTs are rare (only when
+        // the user changes integration settings).
+        message: Some(notices.join(" ")),
         error: None,
     };
     Html(template.render().unwrap_or_default())

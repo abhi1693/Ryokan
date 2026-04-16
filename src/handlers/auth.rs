@@ -443,8 +443,22 @@ pub async fn setup_submit(
     State(state): State<AppState>,
     Form(form): Form<SetupForm>,
 ) -> impl IntoResponse {
-    if let Ok(true) = user::has_users(&state.db).await {
-        return Redirect::to("/login").into_response();
+    // Fail closed on a transient has_users error: an Ok(true) -> redirect
+    // pattern (the prior code) treated Err(_) the same as Ok(false) and
+    // let the form proceed, so a SQLite hiccup during a second admin's
+    // setup attempt could create a second account. The UNIQUE(username)
+    // constraint catches identical usernames, but a different username
+    // through that window would have slipped past.
+    match user::has_users(&state.db).await {
+        Ok(false) => {} // proceed
+        Ok(true) => return Redirect::to("/login").into_response(),
+        Err(e) => {
+            tracing::error!("setup_submit: has_users failed: {e}");
+            let template = SetupTemplate {
+                error: Some("Database error. Try again in a moment.".into()),
+            };
+            return Html(template.render().unwrap_or_default()).into_response();
+        }
     }
 
     if form.username.trim().is_empty() || form.password.is_empty() {

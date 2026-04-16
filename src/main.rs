@@ -3,7 +3,7 @@ mod models;
 mod services;
 
 use axum::{
-    extract::FromRef,
+    extract::{DefaultBodyLimit, FromRef},
     middleware,
     routing::{get, post},
     Router,
@@ -14,7 +14,7 @@ use sqlx::SqlitePool;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -199,28 +199,43 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    // Exponential backoff for crash loops. A task that exits in <60s
+    // before its next restart is considered "unhealthy" — double the
+    // backoff (capped at MAX) so a stuck-on-startup task can't spam
+    // logs at 12 restarts/minute. A task that runs for ≥60s before
+    // exiting resets the backoff to MIN, so a one-off transient
+    // failure doesn't punish the next restart.
+    const MIN_BACKOFF: Duration = Duration::from_secs(5);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
+    const HEALTHY_RUNTIME: Duration = Duration::from_secs(60);
+
+    let mut backoff = MIN_BACKOFF;
     loop {
+        let started = Instant::now();
         let handle = tokio::spawn(make_fut());
         match handle.await {
             Err(e) if e.is_panic() => {
-                tracing::error!(
-                    "Background task '{}' panicked, restarting in 5s: {:?}",
-                    name,
-                    e
-                );
+                tracing::error!("Background task '{}' panicked: {:?}", name, e);
             }
             Err(e) => {
-                tracing::error!(
-                    "Background task '{}' join error, restarting in 5s: {:?}",
-                    name,
-                    e
-                );
+                tracing::error!("Background task '{}' join error: {:?}", name, e);
             }
             Ok(()) => {
-                tracing::warn!("Background task '{}' exited normally, restarting", name);
+                tracing::warn!("Background task '{}' exited normally", name);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        if started.elapsed() >= HEALTHY_RUNTIME {
+            backoff = MIN_BACKOFF;
+        } else {
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        }
+        tracing::warn!(
+            "supervise '{}': restarting in {:?}",
+            name,
+            backoff
+        );
+        tokio::time::sleep(backoff).await;
     }
 }
 
@@ -327,8 +342,7 @@ async fn main() {
     let public_routes = Router::new()
         .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
         .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
-        .layer(middleware::from_fn(handlers::auth::csrf_public))
-        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
+        .layer(middleware::from_fn(handlers::auth::csrf_public));
 
     // Routes that require auth.
     let protected_routes = Router::new()
@@ -373,8 +387,21 @@ async fn main() {
         .route("/settings/custom-formats/upsert", post(handlers::settings::settings_custom_formats_upsert))
         .route("/settings/custom-formats/delete", post(handlers::settings::settings_custom_formats_delete))
         .route("/settings/custom-formats/minimum-score", post(handlers::settings::settings_custom_formats_minimum_score))
-        .route("/settings/custom-formats/import", post(handlers::settings::settings_custom_formats_import))
-        .route("/settings/custom-formats/import-resolve", post(handlers::settings::settings_custom_formats_import_resolve))
+        // 256 KiB is generous for TRaSH-Guides anime CF JSON (the
+        // entire vendored set is ~70 KiB) but well below axum's 2 MiB
+        // default — keeps the hidden-field re-echo on the collision
+        // review page bounded so a pasted multi-MiB payload doesn't
+        // render a multi-MiB hidden form field.
+        .route(
+            "/settings/custom-formats/import",
+            post(handlers::settings::settings_custom_formats_import)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/settings/custom-formats/import-resolve",
+            post(handlers::settings::settings_custom_formats_import_resolve)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route("/settings/custom-formats/install-defaults", post(handlers::settings::settings_custom_formats_install_defaults))
         .route("/settings/custom-formats/reset-defaults", post(handlers::settings::settings_custom_formats_reset_defaults))
         .route("/settings/custom-formats/export", get(handlers::settings::settings_custom_formats_export))
@@ -399,6 +426,12 @@ async fn main() {
         .route("/api/progress/{job_id}", get(handlers::progress::poll_progress))
         .route("/media/art/{cache_key}", get(handlers::media::artwork))
         .route("/logout", get(handlers::auth::logout))
+        // SwaggerUI/OpenAPI live behind the auth wall: the OpenAPI doc
+        // describes the entire route surface and form schemas, including
+        // the rate-limited /login and /setup shapes. Exposing it
+        // unauthenticated would hand a passing scanner a complete map of
+        // the application before any auth check fires.
+        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             handlers::auth::require_auth,
@@ -679,6 +712,24 @@ async fn main() {
                     Err(e) => {
                         cleanup_errors.push(format!("media_probe_cache: {}", e));
                         tracing::error!("Media probe cache cleanup failed: {}", e);
+                    }
+                    _ => {}
+                }
+                // Prune orphan artwork (image_refs whose parent series
+                // is gone, and image_blobs/files no ref references after
+                // 7 days). Without this the cache only ever grows —
+                // every removed series leaves rows pointing at on-disk
+                // blob files that nothing will ever touch again.
+                match models::artwork_cache::cleanup_orphans(&cleanup_db, 7).await {
+                    Ok((refs, blobs)) if refs > 0 || blobs > 0 => {
+                        tracing::debug!(
+                            "Cleaned up {} orphan artwork refs and {} orphan blobs",
+                            refs, blobs
+                        );
+                    }
+                    Err(e) => {
+                        cleanup_errors.push(format!("artwork_cache: {}", e));
+                        tracing::error!("Artwork cleanup failed: {}", e);
                     }
                     _ => {}
                 }

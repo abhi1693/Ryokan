@@ -28,9 +28,22 @@ pub async fn require_api_key(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // 503 (with Retry-After) for transient config-load failures and
+    // for "config row missing" (fresh install, user hasn't saved
+    // settings yet). Returning 500 here would have Seerr mark the
+    // indexer broken and back off for a long window — 503 advertises
+    // "try again soon" instead. The 401 (UNAUTHORIZED) path stays
+    // for "key mismatch" so a real auth failure is still visible.
     let cfg = match config::get_config(&state.db).await {
         Ok(Some(c)) => c,
-        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(None) | Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                "Ryokan config not yet available",
+            )
+                .into_response();
+        }
     };
 
     if !cfg.sonarr_enabled || cfg.sonarr_api_key.is_empty() {
@@ -38,6 +51,11 @@ pub async fn require_api_key(
     }
 
     // Check X-Api-Key header first, then fall back to ?apikey= query param.
+    // Query-string values are percent-decoded — Seerr URL-encodes apikey
+    // values that contain `+`, `=`, `&`, or `%` (all legal in API keys
+    // and not restricted by the settings UI), so a raw string compare
+    // would silently reject every Seerr request whose key contained any
+    // of those characters.
     let api_key = req
         .headers()
         .get("x-api-key")
@@ -47,13 +65,28 @@ pub async fn require_api_key(
             let query_str = req.uri().query().unwrap_or("");
             query_str.split('&').find_map(|pair| {
                 let (key, val) = pair.split_once('=')?;
-                if key == "apikey" { Some(val.to_string()) } else { None }
+                if key == "apikey" {
+                    Some(urlencoding::decode(val).ok()?.into_owned())
+                } else {
+                    None
+                }
             })
         });
 
-    match api_key {
-        Some(key) if key == cfg.sonarr_api_key => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response(),
+    // Constant-time compare so the equality check itself never becomes a
+    // timing oracle. The threat is largely theoretical over the network,
+    // but it costs nothing to remove.
+    let valid = match &api_key {
+        Some(key) => bool::from(subtle::ConstantTimeEq::ct_eq(
+            key.as_bytes(),
+            cfg.sonarr_api_key.as_bytes(),
+        )),
+        None => false,
+    };
+    if valid {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response()
     }
 }
 
