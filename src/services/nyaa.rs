@@ -331,12 +331,28 @@ fn detect_batch(title: &str) -> bool {
 }
 
 fn extract_hash(magnet: &str) -> String {
-    if let Some(pos) = magnet.find("btih:") {
-        let rest = &magnet[pos + 5..];
-        let end = rest.find('&').unwrap_or(rest.len());
-        return rest[..end].to_lowercase();
+    // Two quirks the prior impl got wrong:
+    //   1. BTIH URN is case-insensitive (`urn:btih:` and `urn:BTIH:`
+    //      both occur in the wild); searching for a lowercase literal
+    //      missed uppercase variants entirely and returned "".
+    //   2. 40-char hex hashes are case-insensitive, but 32-char base32
+    //      hashes (uppercase A-Z + 2-7 only) are case-SENSITIVE.
+    //      Lowercasing base32 corrupts the info-hash, which breaks
+    //      dedup, blocklist re-grab detection, and SeaDex matching for
+    //      any curated release whose magnet happens to use base32.
+    let lower = magnet.to_ascii_lowercase();
+    let Some(pos) = lower.find("btih:") else {
+        return String::new();
+    };
+    let payload = &magnet[pos + 5..];
+    let end = payload.find('&').unwrap_or(payload.len());
+    let hash = &payload[..end];
+
+    match hash.len() {
+        40 => hash.to_ascii_lowercase(),
+        32 => hash.to_string(),
+        _ => hash.to_ascii_lowercase(),
     }
-    String::new()
 }
 
 fn parse_size(s: &str) -> i64 {
@@ -591,5 +607,41 @@ mod tests {
         assert!(result.is_batch, "smol pack titled with Season N should be flagged as batch");
         assert_eq!(result.resolution, "1080");
         assert_eq!(result.group, "smol");
+    }
+
+    #[test]
+    fn extract_hash_lowercases_hex() {
+        let magnet = "magnet:?xt=urn:btih:ABCDEF0123456789ABCDEF0123456789ABCDEF01&dn=thing";
+        assert_eq!(
+            extract_hash(magnet),
+            "abcdef0123456789abcdef0123456789abcdef01"
+        );
+    }
+
+    #[test]
+    fn extract_hash_accepts_uppercase_prefix() {
+        // Real-world magnets occasionally use `urn:BTIH:`; prior impl
+        // returned "" for this and broke downstream lookups.
+        let magnet = "magnet:?xt=urn:BTIH:ABCDEF0123456789ABCDEF0123456789ABCDEF01";
+        assert_eq!(
+            extract_hash(magnet),
+            "abcdef0123456789abcdef0123456789abcdef01"
+        );
+    }
+
+    #[test]
+    fn extract_hash_preserves_base32_case() {
+        // 32-char base32 info-hashes are case-sensitive. Prior impl
+        // .to_lowercase()'d them, producing a hash that didn't match
+        // what qBit actually stored.
+        let base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let magnet = format!("magnet:?xt=urn:btih:{base32}&dn=thing");
+        assert_eq!(extract_hash(&magnet), base32);
+    }
+
+    #[test]
+    fn extract_hash_no_prefix_returns_empty() {
+        assert_eq!(extract_hash("https://example.com/t.torrent"), "");
+        assert_eq!(extract_hash(""), "");
     }
 }
