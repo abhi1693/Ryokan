@@ -562,6 +562,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
 
+    // Many hot-path queries filter on series_id (find_imported_for_episode,
+    // get_all_for_series, mark_failed_by_name, etc.) and the prior schema
+    // had no index covering it — every lookup did a full table scan. Sort
+    // key lets get_all_for_series / get_blocked / get_all_with_series read
+    // in chronological order without a separate sort.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_series ON grabbed_torrents (series_id, grabbed_at DESC)",
+    )
+    .execute(db)
+    .await?;
+
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_hash ON grabbed_torrents (hash) WHERE hash != ''")
         .execute(db)
         .await?;
