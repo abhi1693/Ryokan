@@ -74,9 +74,34 @@ async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
         }
         match mode.as_str() {
             "move" => {
-                if std::fs::rename(&src, &dst).is_err() {
-                    std::fs::copy(&src, &dst)?;
-                    let _ = std::fs::remove_file(&src);
+                // Same-fs rename is atomic and instant — the happy path.
+                if std::fs::rename(&src, &dst).is_ok() {
+                    return Ok(());
+                }
+                // Cross-fs fallback: copy to a sibling tmp first then
+                // rename onto dst so a partially-copied file can't be
+                // observed at dst by a subsequent pass and mistaken for
+                // a finished import. Cleans up the tmp on rename failure.
+                let mut tmp = dst.as_os_str().to_os_string();
+                tmp.push(".ryokan-tmp");
+                let tmp = PathBuf::from(tmp);
+                std::fs::copy(&src, &tmp)?;
+                if let Err(e) = std::fs::rename(&tmp, &dst) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                // Source-remove failure is rare (qBit still holds the
+                // file open, source dir is read-only, etc.) and the
+                // file is safely at dst either way — but surface a warn
+                // so the operator can spot duplicate state in qBit's
+                // downloads directory.
+                if let Err(e) = std::fs::remove_file(&src) {
+                    tracing::warn!(
+                        target: "ryokan::post_processing",
+                        src = %src.display(),
+                        error = %e,
+                        "post-copy remove_file failed; file remains at source AND destination",
+                    );
                 }
                 Ok(())
             }
