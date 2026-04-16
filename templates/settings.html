@@ -96,7 +96,7 @@
             <div class="form-group">
                 <label for="sonarr_api_key">API Key</label>
                 <div style="display: flex; gap: 8px; align-items: center;">
-                    <input type="text" name="sonarr_api_key" id="sonarr_api_key" value="{{ config.sonarr_api_key }}" placeholder="Paste this key into Seerr's Sonarr server config" style="flex:1">
+                    <input type="password" name="sonarr_api_key" id="sonarr_api_key" value="{{ config.sonarr_api_key }}" placeholder="Paste this key into Seerr's Sonarr server config" style="flex:1">
                     <button type="button" class="btn btn-secondary" onclick="generateApiKey()" style="white-space:nowrap">Generate</button>
                 </div>
                 <span class="form-hint">Use this key as the API key when adding Ryokan as a Sonarr server in Seerr.</span>
@@ -119,7 +119,7 @@
             <div class="form-group">
                 <label for="radarr_api_key">API Key</label>
                 <div style="display: flex; gap: 8px; align-items: center;">
-                    <input type="text" name="radarr_api_key" id="radarr_api_key" value="{{ config.radarr_api_key }}" placeholder="Paste this key into Seerr's Radarr server config" style="flex:1">
+                    <input type="password" name="radarr_api_key" id="radarr_api_key" value="{{ config.radarr_api_key }}" placeholder="Paste this key into Seerr's Radarr server config" style="flex:1">
                     <button type="button" class="btn btn-secondary" onclick="generateRadarrApiKey()" style="white-space:nowrap">Generate</button>
                 </div>
                 <span class="form-hint">Use this key as the API key when adding Ryokan as a Radarr server in Seerr.</span>
