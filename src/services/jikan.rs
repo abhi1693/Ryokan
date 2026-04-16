@@ -97,6 +97,11 @@ async fn get_text_with_retry(client: &reqwest::Client, url: &str) -> Result<Stri
             .map_err(|e| format!("Jikan request failed: {}", e))?;
 
         let status = resp.status();
+        let retry_after_secs = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
         let text = resp
             .text()
             .await
@@ -119,6 +124,17 @@ async fn get_text_with_retry(client: &reqwest::Client, url: &str) -> Result<Stri
             continue;
         }
 
+        // Falling out of the retry loop on a rate-limited response
+        // (final attempt or non-retryable status). Set the global
+        // cooldown so subsequent jikan calls — including episode
+        // pagination, relations fetches, and other endpoints that go
+        // through this helper — skip the round trip entirely instead
+        // of burning another ~9s of retry sleep on the same 429 storm.
+        // The search caller already does this for its own path; this
+        // brings the rest of the helpers into the same backoff regime.
+        if is_rate_limited(status, &text) {
+            set_jikan_cooldown(retry_after_secs);
+        }
         return Err(last_err);
     }
 
