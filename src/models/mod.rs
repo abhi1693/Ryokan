@@ -1114,9 +1114,42 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // REPLACE statements on known legacy patterns. Fully idempotent:
     // the regen overwrites with the same value on re-runs, and the
     // REPLACE chain no-ops once its source patterns are gone.
+    // The CASE is duplicated in SET and WHERE on purpose: gating the
+    // UPDATE means SQLite only writes rows whose quality_tag would
+    // actually change, so a boot on an already-migrated database does
+    // zero WAL writes here instead of dirtying every row in the table.
+    // Without the gate, every boot churned the WAL and held the write
+    // lock long enough to delay the very first incoming request after
+    // startup.
     sqlx::query(
         r#"
         UPDATE episode_quality_tags SET quality_tag = CASE
+            WHEN TRIM(COALESCE(source, '')) = ''
+              OR LOWER(source) = 'unknown' THEN
+                CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
+                     THEN 'Unknown' ELSE resolution END
+            ELSE
+                (CASE
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd') THEN 'BD'
+                    WHEN LOWER(source) = 'web' THEN
+                        CASE
+                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webdl', 'web-dl', 'web.dl') THEN 'WEBDL'
+                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webrip', 'web-rip', 'web.rip') THEN 'WEBRip'
+                            ELSE 'WEB'
+                        END
+                    ELSE UPPER(source)
+                END)
+                || CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
+                        THEN '' ELSE '-' || resolution END
+                || CASE
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd')
+                         AND COALESCE(is_bdmv, 0) = 1 THEN ' RAW'
+                    WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd')
+                         AND COALESCE(is_remux, 0) = 1 THEN ' Remux'
+                    ELSE ''
+                END
+        END
+        WHERE COALESCE(quality_tag, '') <> CASE
             WHEN TRIM(COALESCE(source, '')) = ''
               OR LOWER(source) = 'unknown' THEN
                 CASE WHEN COALESCE(resolution, '') IN ('', 'Unknown')
