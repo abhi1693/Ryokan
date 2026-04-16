@@ -3,7 +3,7 @@ mod models;
 mod services;
 
 use axum::{
-    extract::FromRef,
+    extract::{DefaultBodyLimit, FromRef},
     middleware,
     routing::{get, post},
     Router,
@@ -372,8 +372,21 @@ async fn main() {
         .route("/settings/custom-formats/upsert", post(handlers::settings::settings_custom_formats_upsert))
         .route("/settings/custom-formats/delete", post(handlers::settings::settings_custom_formats_delete))
         .route("/settings/custom-formats/minimum-score", post(handlers::settings::settings_custom_formats_minimum_score))
-        .route("/settings/custom-formats/import", post(handlers::settings::settings_custom_formats_import))
-        .route("/settings/custom-formats/import-resolve", post(handlers::settings::settings_custom_formats_import_resolve))
+        // 256 KiB is generous for TRaSH-Guides anime CF JSON (the
+        // entire vendored set is ~70 KiB) but well below axum's 2 MiB
+        // default — keeps the hidden-field re-echo on the collision
+        // review page bounded so a pasted multi-MiB payload doesn't
+        // render a multi-MiB hidden form field.
+        .route(
+            "/settings/custom-formats/import",
+            post(handlers::settings::settings_custom_formats_import)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/settings/custom-formats/import-resolve",
+            post(handlers::settings::settings_custom_formats_import_resolve)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route("/settings/custom-formats/install-defaults", post(handlers::settings::settings_custom_formats_install_defaults))
         .route("/settings/custom-formats/reset-defaults", post(handlers::settings::settings_custom_formats_reset_defaults))
         .route("/settings/custom-formats/export", get(handlers::settings::settings_custom_formats_export))
