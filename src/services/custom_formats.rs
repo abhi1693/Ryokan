@@ -478,11 +478,16 @@ pub fn evaluate(cf: &CompiledCustomFormat, ctx: &EvalContext) -> bool {
 /// Sum the scores of every CF that matches the candidate. Non-matching
 /// CFs contribute 0 regardless of their score sign. Used by the Phase 6
 /// auto_search integration as a single-call overlay on `base_score`.
+///
+/// Saturating addition: SEADEX_SCORE_BOOST is 10_000, individual TRaSH
+/// CFs ship up to ±10_000, and user-authored CFs can carry arbitrary
+/// scores. Naive `.sum()` would wrap on overflow and silently demote
+/// every candidate below `minimum_score`, dropping the entire search.
 pub fn total_cf_score(cfs: &[CompiledCustomFormat], ctx: &EvalContext) -> i32 {
     cfs.iter()
         .filter(|cf| evaluate(cf, ctx))
         .map(|cf| cf.score)
-        .sum()
+        .fold(0i32, i32::saturating_add)
 }
 
 /// Same total as [`total_cf_score`], but also returns the per-CF
@@ -503,7 +508,8 @@ pub fn total_cf_score_with_breakdown(
         if !evaluate(cf, ctx) {
             continue;
         }
-        total += cf.score;
+        // saturating_add — see total_cf_score for the overflow rationale.
+        total = total.saturating_add(cf.score);
         // Zero-score matches are meaningful for CF authoring but add
         // noise to the debug line — skip them per the plan §6.3 wording
         // "every CF that matched with a nonzero score contribution."

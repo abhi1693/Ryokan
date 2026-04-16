@@ -1743,7 +1743,12 @@ async fn apply_cf_seadex_overlay(
     };
 
     let below_floor = cf < minimum_score;
-    let final_score = base + cf + seadex_bonus;
+    // saturating_add at the combine — base, cf, and seadex_bonus are
+    // each i32 and any one of them can be ±10k+. With ~22 CFs all
+    // matching positively plus the 10k SeaDex boost plus base, naive
+    // `+` can wrap to a large negative and silently demote every
+    // candidate below minimum_score.
+    let final_score = base.saturating_add(cf).saturating_add(seadex_bonus);
 
     let detail = format_scoring_detail(base, cf, &breakdown, seadex_bonus, final_score, below_floor);
     logger::debug(db, LogCategory::Scoring, &result.title, &detail).await;
