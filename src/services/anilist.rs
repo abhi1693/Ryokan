@@ -291,7 +291,17 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
     let media = match body["data"]["Page"]["media"].as_array() {
         Some(arr) => arr,
         None => {
-            search_cache_put(cache_key, Vec::new());
+            // Schema mismatch — `data.Page.media` is missing or not an
+            // array. Don't cache the empty result here: a legitimate
+            // 0-hit search hits the Some branch with an empty arr and
+            // *does* get cached at line 317 below. Caching the
+            // schema-mismatch case would lock us out of fresh requests
+            // for SEARCH_CACHE_TTL even after AniList recovers.
+            tracing::warn!(
+                target: "ryokan::anilist",
+                query = %query,
+                "AniList response missing data.Page.media; not caching empty result"
+            );
             return Ok(Vec::new());
         }
     };
