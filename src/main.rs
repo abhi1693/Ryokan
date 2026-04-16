@@ -327,8 +327,7 @@ async fn main() {
     let public_routes = Router::new()
         .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
         .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
-        .layer(middleware::from_fn(handlers::auth::csrf_public))
-        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
+        .layer(middleware::from_fn(handlers::auth::csrf_public));
 
     // Routes that require auth.
     let protected_routes = Router::new()
@@ -399,6 +398,12 @@ async fn main() {
         .route("/api/progress/{job_id}", get(handlers::progress::poll_progress))
         .route("/media/art/{cache_key}", get(handlers::media::artwork))
         .route("/logout", get(handlers::auth::logout))
+        // SwaggerUI/OpenAPI live behind the auth wall: the OpenAPI doc
+        // describes the entire route surface and form schemas, including
+        // the rate-limited /login and /setup shapes. Exposing it
+        // unauthenticated would hand a passing scanner a complete map of
+        // the application before any auth check fires.
+        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             handlers::auth::require_auth,
