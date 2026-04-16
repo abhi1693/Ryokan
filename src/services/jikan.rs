@@ -417,20 +417,37 @@ async fn fetch_relations(mal_id: i64) -> Vec<RelatedEntry> {
         Err(_) => return Vec::new(),
     };
 
+    // Jikan's documented anonymous limit is ~3 req/s AND ~60 req/min.
+    // The per-second budget is the easy one; the per-minute budget is
+    // tight enough that a 10-entry relations graph (sequels, prequels,
+    // OVAs, ONAs, side-stories) at 400 ms per call adds 10 requests in
+    // 4 s on top of whatever else the metadata path is doing — and a
+    // single 429 here flips set_jikan_cooldown, blocking every concurrent
+    // search for the cooldown window.
+    //
+    // Bump the sleep to 500 ms (2 req/s) and cap the fan-out at 8
+    // cards total. The relations panel is a "what else exists in this
+    // franchise" affordance, not a comprehensive graph; the first 8
+    // entries are plenty for the UI.
+    const MAX_RELATION_FETCHES: usize = 8;
+    const RELATION_FETCH_INTERVAL_MS: u64 = 500;
+
     let mut out = Vec::new();
-    let mut request_count = 0;
-    for group in body.data {
+    let mut request_count: usize = 0;
+    'outer: for group in body.data {
         let rel_type = group.relation.to_uppercase().replace(' ', "_");
         for entry in group.entry {
             if !entry.media_type.eq_ignore_ascii_case("ANIME") {
                 continue;
             }
-
-            // Rate-limit: Jikan public API allows ~3 req/s.  Add a delay
-            // between relation-card detail fetches to avoid 429 responses
-            // that silently drop cover images.
+            if request_count >= MAX_RELATION_FETCHES {
+                break 'outer;
+            }
             if request_count > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    RELATION_FETCH_INTERVAL_MS,
+                ))
+                .await;
             }
             request_count += 1;
 
