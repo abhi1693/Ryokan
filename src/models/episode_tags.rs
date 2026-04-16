@@ -481,8 +481,13 @@ pub async fn set_manual_override(
     .bind(series_id)
     .bind(episode_number)
     .bind(&label)
-    .bind(source)
-    .bind(resolution)
+    // Bind the *parsed* enum's canonical .as_str() instead of the raw
+    // input — defense in depth alongside the handler validation, so a
+    // future caller that bypasses the handler can't write a non-
+    // canonical string to the DB and confuse downstream column-vs-enum
+    // comparisons.
+    .bind(parsed_source.as_str())
+    .bind(parsed_resolution.as_str())
     .bind(is_remux_i)
     .bind(is_bdmv_i)
     .bind(web_kind_str)

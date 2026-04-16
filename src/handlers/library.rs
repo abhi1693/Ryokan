@@ -2040,23 +2040,61 @@ pub async fn set_manual_override(
     State(state): State<AppState>,
     Json(form): Json<SetManualOverrideForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use crate::services::source::{Resolution, Source, WebKind};
+
+    // Validate + canonicalize the form fields *before* writing. The
+    // model would otherwise bind the raw input string into the DB
+    // column even when from_str returns Unknown — so a malicious or
+    // buggy client could write a garbage `source` value that round-
+    // trips through the enum as Unknown but appears as the raw string
+    // in any SQL filter that compares against canonical names. Empty
+    // source is the explicit "clear override" path and skips
+    // validation.
+    let (source_str, resolution_str, web_kind_str) = if form.source.is_empty() {
+        (String::new(), String::new(), String::new())
+    } else {
+        let parsed_source = Source::from_str(&form.source);
+        if parsed_source == Source::Unknown {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("invalid source: {:?}", form.source),
+            ));
+        }
+        let parsed_resolution = Resolution::from_str(&form.resolution);
+        if parsed_resolution == Resolution::Unknown {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("invalid resolution: {:?}", form.resolution),
+            ));
+        }
+        // WebKind::Unknown is allowed — it's optional metadata that
+        // only applies to Source::Web; non-Web overrides leave it
+        // empty by design.
+        let parsed_web_kind = WebKind::from_str(&form.web_kind);
+        (
+            parsed_source.as_str().to_string(),
+            parsed_resolution.as_str().to_string(),
+            parsed_web_kind.as_str().to_string(),
+        )
+    };
+
     episode_tags::set_manual_override(
         &state.db,
         form.series_id,
         form.episode_number,
-        &form.source,
-        &form.resolution,
+        &source_str,
+        &resolution_str,
         form.is_remux,
         form.is_bdmv,
-        &form.web_kind,
+        &web_kind_str,
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let action = if form.source.is_empty() {
+    let action = if source_str.is_empty() {
         "cleared".to_string()
     } else {
-        format!("{} {}", form.source, form.resolution)
+        format!("{} {}", source_str, resolution_str)
     };
     logger::info(
         &state.db,
@@ -2069,8 +2107,8 @@ pub async fn set_manual_override(
         "ok": true,
         "series_id": form.series_id,
         "episode_number": form.episode_number,
-        "source": form.source,
-        "resolution": form.resolution,
+        "source": source_str,
+        "resolution": resolution_str,
         "is_remux": form.is_remux,
     })))
 }
