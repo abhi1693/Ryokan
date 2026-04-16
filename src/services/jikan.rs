@@ -106,7 +106,13 @@ async fn get_text_with_retry(client: &reqwest::Client, url: &str) -> Result<Stri
             return Ok(text);
         }
 
-        last_err = format!("HTTP {}: {}", status, &text[..text.len().min(200)]);
+        // chars().take() instead of byte-slice — Jikan error bodies
+        // often contain non-ASCII characters (curly apostrophes etc.)
+        // and a byte-slice at index 200 panics if a multi-byte char
+        // straddles the boundary. Mirrors the pattern in
+        // parse_jikan_error above.
+        let preview: String = text.chars().take(200).collect();
+        last_err = format!("HTTP {status}: {preview}");
         if is_rate_limited(status, &text) && attempt < 3 {
             tokio::time::sleep(backoff).await;
             backoff *= 2;
