@@ -44,7 +44,11 @@
                 </div>
                 <div class="form-group">
                     <label for="qbit_pass">Password</label>
-                    <input type="password" name="qbit_pass" id="qbit_pass" value="{{ config.qbit_pass }}">
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <input type="password" name="qbit_pass" id="qbit_pass" value="{{ config.qbit_pass }}" style="flex:1">
+                        <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('qbit_pass', this)" style="white-space:nowrap">Show</button>
+                        <button type="button" class="btn btn-secondary" onclick="copyApiKey('qbit_pass', this)" style="white-space:nowrap">Copy</button>
+                    </div>
                 </div>
             </div>
             <div class="form-group">
@@ -70,7 +74,11 @@
             </div>
             <div class="form-group">
                 <label for="jellyfin_api_key">API Key</label>
-                <input type="password" name="jellyfin_api_key" id="jellyfin_api_key" value="{{ config.jellyfin_api_key }}">
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="password" name="jellyfin_api_key" id="jellyfin_api_key" value="{{ config.jellyfin_api_key }}" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('jellyfin_api_key', this)" style="white-space:nowrap">Show</button>
+                    <button type="button" class="btn btn-secondary" onclick="copyApiKey('jellyfin_api_key', this)" style="white-space:nowrap">Copy</button>
+                </div>
                 <span class="form-hint">Ryokan will use this for server info, targeted lookups, and library refreshes.</span>
             </div>
             <div class="settings-inline-actions">
