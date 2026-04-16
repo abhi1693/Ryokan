@@ -14,7 +14,7 @@ use sqlx::SqlitePool;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -199,28 +199,43 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    // Exponential backoff for crash loops. A task that exits in <60s
+    // before its next restart is considered "unhealthy" — double the
+    // backoff (capped at MAX) so a stuck-on-startup task can't spam
+    // logs at 12 restarts/minute. A task that runs for ≥60s before
+    // exiting resets the backoff to MIN, so a one-off transient
+    // failure doesn't punish the next restart.
+    const MIN_BACKOFF: Duration = Duration::from_secs(5);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
+    const HEALTHY_RUNTIME: Duration = Duration::from_secs(60);
+
+    let mut backoff = MIN_BACKOFF;
     loop {
+        let started = Instant::now();
         let handle = tokio::spawn(make_fut());
         match handle.await {
             Err(e) if e.is_panic() => {
-                tracing::error!(
-                    "Background task '{}' panicked, restarting in 5s: {:?}",
-                    name,
-                    e
-                );
+                tracing::error!("Background task '{}' panicked: {:?}", name, e);
             }
             Err(e) => {
-                tracing::error!(
-                    "Background task '{}' join error, restarting in 5s: {:?}",
-                    name,
-                    e
-                );
+                tracing::error!("Background task '{}' join error: {:?}", name, e);
             }
             Ok(()) => {
-                tracing::warn!("Background task '{}' exited normally, restarting", name);
+                tracing::warn!("Background task '{}' exited normally", name);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        if started.elapsed() >= HEALTHY_RUNTIME {
+            backoff = MIN_BACKOFF;
+        } else {
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        }
+        tracing::warn!(
+            "supervise '{}': restarting in {:?}",
+            name,
+            backoff
+        );
+        tokio::time::sleep(backoff).await;
     }
 }
 
