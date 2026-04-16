@@ -27,9 +27,17 @@ pub async fn require_api_key(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // See sonarr_compat::require_api_key for the 503-vs-500 rationale.
     let cfg = match config::get_config(&state.db).await {
         Ok(Some(c)) => c,
-        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(None) | Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                "Ryokan config not yet available",
+            )
+                .into_response();
+        }
     };
 
     if !cfg.radarr_enabled || cfg.radarr_api_key.is_empty() {

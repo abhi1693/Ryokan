@@ -28,9 +28,22 @@ pub async fn require_api_key(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // 503 (with Retry-After) for transient config-load failures and
+    // for "config row missing" (fresh install, user hasn't saved
+    // settings yet). Returning 500 here would have Seerr mark the
+    // indexer broken and back off for a long window — 503 advertises
+    // "try again soon" instead. The 401 (UNAUTHORIZED) path stays
+    // for "key mismatch" so a real auth failure is still visible.
     let cfg = match config::get_config(&state.db).await {
         Ok(Some(c)) => c,
-        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(None) | Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                "Ryokan config not yet available",
+            )
+                .into_response();
+        }
     };
 
     if !cfg.sonarr_enabled || cfg.sonarr_api_key.is_empty() {
