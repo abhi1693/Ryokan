@@ -78,6 +78,15 @@ pub struct Episode {
     pub title_native: String,
     pub aired: String,
     pub on_disk: bool,
+    /// Sonarr-parity split (#14): true when the episode's download is
+    /// complete regardless of whether it's been imported into
+    /// media_root. Specifically: `on_disk OR tag.state == "completed"`.
+    /// Drives the series-page checkmark. Without this, turning
+    /// post-processing off leaves the row stuck showing "missing" even
+    /// after qBit finishes, because `on_disk` only reflects media_root
+    /// presence. Mirrors Sonarr's Activity "downloaded" indicator, which
+    /// is independent of the library-side `HasFile`.
+    pub downloaded: bool,
     pub quality: String,
     pub quality_state: String,  // "disk", "grabbed", "failed", or ""
     pub size_display: String,
@@ -1065,6 +1074,7 @@ async fn build_episodes(
         let needs_review = tag.map(|t| t.needs_review).unwrap_or(false);
         let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
 
+        let downloaded = on_disk || quality_state == "completed";
         episodes.push(Episode {
             number: ep_num,
             title: ep_title,
@@ -1073,6 +1083,7 @@ async fn build_episodes(
             title_native: ep_title_native,
             aired: ep_aired,
             on_disk,
+            downloaded,
             quality: display_quality,
             quality_state,
             size_display,
@@ -1120,6 +1131,10 @@ async fn build_episodes(
                 title_native: String::new(),
                 aired: String::new(),
                 on_disk: true,
+                // This branch only runs when the file already exists
+                // under media_root (on_disk=true), so `downloaded` is
+                // unconditionally true regardless of tag state.
+                downloaded: true,
                 quality: display_quality,
                 quality_state,
                 size_display: f.size_display.clone(),

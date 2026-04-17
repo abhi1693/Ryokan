@@ -236,10 +236,20 @@
             </thead>
             <tbody>
                 {% for ep in episodes %}
-                <tr class="{% if ep.on_disk %}ep-row-have{% else %}ep-row-missing{% endif %}">
+                {# `downloaded` is true when the file is either in the
+                   media_root library (on_disk) OR Ryokan has marked the
+                   grab state as 'completed' without it having landed in
+                   the library — the latter is the post-processing-off
+                   case. Mirrors Sonarr's Activity "downloaded" vs
+                   library "HasFile" split. #}
+                <tr class="{% if ep.downloaded %}ep-row-have{% else %}ep-row-missing{% endif %}">
                     <td class="ep-col-status">
                         {% if ep.on_disk %}
                         <span class="ep-status-icon ep-have" title="On disk">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                        </span>
+                        {% else if ep.downloaded %}
+                        <span class="ep-status-icon ep-have" title="Downloaded (post-processing disabled — file not in library root)">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
                         </span>
                         {% else %}
