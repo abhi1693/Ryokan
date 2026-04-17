@@ -606,6 +606,17 @@ pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, fo
 }
 
 async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
+    // Skip the round trip entirely when a recent 429/403/5xx has tripped
+    // the global cooldown. Without this, a metadata-refresh sweep that
+    // hits AniList's per-minute cap on the first burst keeps firing
+    // request after request — each one immediately bouncing on 429 —
+    // for the full duration of the sweep, even though we already know
+    // AniList is rate-limiting us. The error string flows up through
+    // metadata_sync's fallback chain and the warn log added in PR #31
+    // surfaces the cooldown state to the operator.
+    if anilist_cooldown_active() {
+        return Err("AniList rate-limit cooldown active; skipping detail fetch".to_string());
+    }
     let gql = serde_json::json!({
         "query": r#"
             query ($id: Int) {
@@ -668,12 +679,37 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         .map_err(|e| format!("AniList request failed: {}", e))?;
 
     let status = resp.status();
+    // Capture Retry-After before .json() consumes the response — used
+    // to set the cooldown duration on 429 so the sweep's remaining
+    // calls skip AniList until the limit window resets.
+    let retry_after_secs = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
     let body: serde_json::Value = resp
         .json()
         .await
         .map_err(|e| format!("Failed to parse AniList response: {}", e))?;
 
     if !status.is_success() {
+        // Mirror the search-path branch (lines 223-248): 403/429/5xx
+        // mean "AniList is unavailable to us right now". Set the
+        // global cooldown so subsequent fetch_anime_detail calls
+        // short-circuit with the cooldown-active error above instead
+        // of hammering an already-rate-limited endpoint. 403 gets a
+        // longer default since Cloudflare doesn't include Retry-After.
+        if status == reqwest::StatusCode::FORBIDDEN
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status.is_server_error()
+        {
+            let default_cooldown = if status == reqwest::StatusCode::FORBIDDEN {
+                Duration::from_secs(300)
+            } else {
+                ANILIST_COOLDOWN_DEFAULT
+            };
+            set_anilist_cooldown(retry_after_secs, default_cooldown);
+        }
         let msg = extract_graphql_error(&body).unwrap_or_else(|| body.to_string());
         return Err(format!("AniList detail failed (HTTP {}): {}", status, msg));
     }

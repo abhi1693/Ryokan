@@ -476,7 +476,8 @@ pub async fn refresh_all_series_metadata(db: &SqlitePool) -> (usize, usize) {
 
     let mut refreshed = 0usize;
     let mut failed = 0usize;
-    for tracked in tracked {
+    let total = tracked.len();
+    for (idx, tracked) in tracked.into_iter().enumerate() {
         match refresh_series_metadata(db, &tracked, force_mal_fallback).await {
             Ok(_) => refreshed += 1,
             Err(err) => {
@@ -488,6 +489,19 @@ pub async fn refresh_all_series_metadata(db: &SqlitePool) -> (usize, usize) {
                     &err,
                 ).await;
             }
+        }
+        // Inter-series spacing: AniList allows 30 req/min for anonymous
+        // clients, but in practice sustained bursts trip rate limits
+        // even when the per-minute average is low. A 1-second sleep
+        // between iterations paces the sweep at ~50 req/min worst-case
+        // (one request every 1 + call-duration seconds, where the call
+        // itself takes 0.5–2s for a typical entry), which empirically
+        // stays under the rate limit on a small library and only adds
+        // a handful of seconds to the total sweep time. The sleep is
+        // skipped on the last iteration so a single-series refresh
+        // doesn't pause needlessly.
+        if idx + 1 < total {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
 
