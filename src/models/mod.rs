@@ -1336,6 +1336,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // #30 — Cumulative episode count of the shortest TV-format PREQUEL
+    // chain. Used at search time to accept absolute-numbered Nyaa
+    // releases against a relative-numbered AL cour target (e.g. target
+    // JJK S3 E9 matches "[SubsPlease] Jujutsu Kaisen - 56" because
+    // S1(24) + S2(23) = 47 and 47 + 9 = 56). Populated by
+    // `metadata_sync::refresh_series_metadata` after the relation graph
+    // has been cached, and again at library-add time so first-searches
+    // don't wait for the next refresh sweep.
+    sqlx::query("ALTER TABLE series ADD COLUMN cumulative_prior_episodes INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

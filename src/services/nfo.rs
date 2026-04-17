@@ -298,6 +298,7 @@ mod tests {
             allow_upgrades: true,
             custom_query_tokens: String::new(),
             restrict_to_group: String::new(),
+            cumulative_prior_episodes: 0,
         }
     }
 
