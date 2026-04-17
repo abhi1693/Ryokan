@@ -125,6 +125,50 @@ body {
     .form-hint {
         overflow-wrap: anywhere;
     }
+
+    /* Specific overflow culprits identified during phone testing.
+     * Each of these set a fixed/min width that forced their parent
+     * past the viewport at ~500px widths. */
+
+    /* RSS-decisions "Reason" column had `min-width: 420px` which
+     * alone exceeds a 412px viewport. Let the cell shrink to its
+     * share of the table width; the text wraps via .rss-reason-text
+     * `white-space: pre-wrap` so long reasons stay readable. */
+    .rss-reason-cell {
+        min-width: 0;
+    }
+
+    /* RSS-decisions filter-row text input had `flex: 1 1 320px` so
+     * its natural size pushed siblings off-screen. Shrink to zero
+     * basis so the flex container can honor the viewport. */
+    .rss-table-controls input,
+    .rss-table-controls select {
+        flex: 1 1 0;
+        min-width: 0;
+    }
+
+    /* Logs-table fixed-width columns collectively exceed 500px
+     * (160 + 70 + 100 + content = 330+ reserved). Drop the
+     * hard widths on mobile and let content dictate width; the
+     * table wrapper keeps overflow-x: auto as a fallback. */
+    .log-col-time,
+    .log-col-level,
+    .log-col-cat {
+        width: auto;
+        min-width: 0;
+    }
+    .log-col-time {
+        font-size: 11px;
+        white-space: nowrap;
+    }
+
+    /* Password/API-key/download-path rows use inline `display: flex;
+     * gap: 8px;` with `white-space: nowrap` buttons that refuse to
+     * shrink. Allow the row to wrap so Show/Copy can drop below the
+     * input rather than fighting it for width. */
+    .form-group > div[style*="display: flex"] {
+        flex-wrap: wrap;
+    }
 }
 
 /* #20 — Mobile tab bar default (hidden). The actual phone-width swap
