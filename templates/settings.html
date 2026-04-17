@@ -475,7 +475,10 @@
                     </div>
                 </a>
                 <div class="cf-card-actions">
-                    <form method="post" action="/settings/custom-formats/delete" class="group-delete-form" onsubmit="return confirm('Delete Custom Format: {{ cf.row.name }}?');">
+                    <form method="post" action="/settings/custom-formats/delete" class="group-delete-form"
+                          data-ryokan-confirm-title="Delete Custom Format"
+                          data-ryokan-confirm-body="Delete &quot;{{ cf.row.name }}&quot;? This cannot be undone."
+                          data-ryokan-confirm-label="Delete">
                         <input type="hidden" name="id" value="{{ cf.row.id }}">
                         <button type="submit" class="btn btn-icon-danger" title="Delete {{ cf.row.name }}" aria-label="Delete {{ cf.row.name }}">×</button>
                     </form>
