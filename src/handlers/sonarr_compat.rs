@@ -427,7 +427,7 @@ pub async fn series_lookup(
             .ok()
             .flatten();
 
-        let tmdb_id = resolve_tmdb_id(r.id, r.id_mal).await;
+        let tmdb_id = anibridge::resolve_tmdb_id(r.id, r.id_mal).await;
         let title = if !r.title_english.is_empty() { &r.title_english } else { &r.title_romaji };
 
         sonarr_results.push(build_sonarr_series_from_search(
@@ -458,7 +458,7 @@ pub async fn list_series(
 
     let mut results = Vec::new();
     for s in &tracked {
-        let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+        let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
         results.push(build_sonarr_series_from_tracked(s, tmdb_id, &cfg));
     }
 
@@ -481,7 +481,7 @@ pub async fn get_series(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Series not found".to_string()))?;
 
-    let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
     Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
 }
 
@@ -677,7 +677,7 @@ pub async fn update_series(
         .flatten()
         .unwrap_or_default();
 
-    let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
     Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
 }
 
@@ -710,20 +710,6 @@ pub async fn execute_command(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-/// Resolve TMDB ID from either AniList ID or MAL ID.
-/// Tries AniList first, then MAL as fallback.
-async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64 {
-    if let Some(tmdb) = anibridge::lookup_tmdb_by_anilist(anilist_id).await {
-        return tmdb;
-    }
-    if let Some(mid) = mal_id.into()
-        && mid > 0
-            && let Some(tmdb) = anibridge::lookup_tmdb_by_mal(mid).await {
-                return tmdb;
-            }
-    0
-}
 
 /// Look up anime by external ID (TVDB or TMDB). Tries TVDB index first since
 /// Sonarr/Seerr sends real TVDB IDs, then falls back to TMDB index.
