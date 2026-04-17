@@ -339,6 +339,24 @@ async fn import_torrent(
         .collect();
 
     if video_files.is_empty() {
+        // #27 — log this at debug rather than silently looping. qBit
+        // reported the torrent state as complete but nothing here looks
+        // like a finished video file. Most of the time this is a race
+        // where the post-proc tick beat qBit's per-file progress update;
+        // the next tick will find the files. Rare pathological case is
+        // a samples/.nfo-only torrent that stays Ok(false) forever —
+        // those would need the stuck-pending timeout fix (future work,
+        // tracked separately from this commit).
+        logger::debug(
+            &state.db,
+            LogCategory::PostProcess,
+            &format!(
+                "No complete video files yet for '{}' — retrying next tick",
+                grab.torrent_name
+            ),
+            "",
+        )
+        .await;
         return Ok(false);
     }
 
@@ -996,6 +1014,19 @@ pub async fn run_once(state: &AppState) {
             Ok(true) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
+                // #27 — log every successful import so there's a trail
+                // from grab → complete in System → Logs. Before this,
+                // the only log a successful grab produced was the grab
+                // itself and maybe the Jellyfin refresh at the end.
+                // Operators who went looking for "did this episode
+                // land?" had to check the library row or disk.
+                logger::info(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!("Imported '{}'", grab.torrent_name),
+                    &format!("series_id={} episodes={:?}", grab.series_id, grab.episode_numbers),
+                )
+                .await;
                 // Episode tag "grabbed → completed" flips happen inside
                 // `import_torrent` itself so a Phase 2 routed batch can
                 // mark each sibling's tags under the sibling's own
@@ -1005,6 +1036,12 @@ pub async fn run_once(state: &AppState) {
             }
             Ok(false) => {
                 // Torrent complete but no video files yet — leave as pending.
+                // The caller (qBit) might still be finalizing the files,
+                // or the torrent could be all samples/.nfo (pathological).
+                // We intentionally don't escalate here — next post-proc
+                // tick retries. A stuck-forever failsafe would need a
+                // "pending too long" timer; covered by the plan's
+                // future work, not this commit.
             }
             Err(e) => {
                 logger::error(
