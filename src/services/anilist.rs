@@ -615,7 +615,11 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
     // metadata_sync's fallback chain and the warn log added in PR #31
     // surfaces the cooldown state to the operator.
     if anilist_cooldown_active() {
-        return Err("AniList rate-limit cooldown active; skipping detail fetch".to_string());
+        // Wording note: "skipping AniList request" — only the AniList
+        // round trip is skipped here. The caller's fallback chain
+        // (jikan/MAL → kitsu) still runs and may produce the detail
+        // from a different provider.
+        return Err("AniList rate-limit cooldown active; skipping AniList request".to_string());
     }
     let gql = serde_json::json!({
         "query": r#"
