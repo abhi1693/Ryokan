@@ -448,7 +448,7 @@
                 data-cf-score="{{ cf.row.score }}"
                 data-cf-origin="{{ cf.row.origin }}"
                 data-cf-trash-id="{% if let Some(tid) = cf.row.trash_id.as_ref() %}{{ tid|lowercase }}{% endif %}">
-                <a class="cf-card-body" href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}#cf-editor">
+                <a class="cf-card-body" href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}">
                     <div class="cf-card-header">
                         <div class="cf-card-title-row">
                             <span class="cf-origin-dot cf-origin-dot-{{ cf.row.origin }}"
@@ -483,69 +483,79 @@
             </div>
             {% endfor %}
             {# Trailing add card mirrors Sonarr's "+ Add Custom Format" tile.
-               Navigates to the same URL clearing edit_id, which scrolls
-               the #cf-editor anchor below into view. #}
-            <a class="cf-card cf-card-add" href="/settings?tab=custom_formats#cf-editor">
+               Opens the editor modal in add mode via JS — no URL change
+               so hitting Cancel just returns to the same grid view. #}
+            <button type="button" class="cf-card cf-card-add" onclick="openCfEditorModal()">
                 <div class="cf-card-add-icon">+</div>
                 <div class="cf-card-add-label">Add Custom Format</div>
-            </a>
+            </button>
         </div>
         <div id="cf-list-empty-filter" class="cf-empty-state" style="display:none">
             <p>No Custom Formats match your filter.</p>
         </div>
     </div>
 
-    <div class="cf-section" id="cf-editor">
-        <div class="cf-section-header">
-            <h3>{% if let Some(edit) = custom_format_edit %}Edit Custom Format #{{ edit.row.id }}{% else %}Add Custom Format{% endif %}</h3>
-        </div>
-        <p class="cf-section-desc">
-            Full Sonarr v4 CF object. Supported spec implementations:
-            <code>ReleaseTitleSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>ResolutionSpecification</code>, <code>SourceSpecification</code>, <code>Ryokan.SeaDexBestSpecification</code>.
-            The compiler runs before saving, so invalid JSON is rejected with an error message.
-        </p>
-        <form method="post" action="/settings/custom-formats/upsert" class="settings-form">
-            {% if let Some(edit) = custom_format_edit %}
-            <input type="hidden" name="id" value="{{ edit.row.id }}">
-            {% if let Some(desc) = edit.trash_description.as_ref() %}
-            <div class="cf-trash-description">
-                <strong>Trash Guides description</strong>
-                <div style="white-space: pre-wrap;">{{ desc }}</div>
-            </div>
-            {% endif %}
-            {% endif %}
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="cf_name">Name</label>
-                    <input type="text" name="name" id="cf_name" required
-                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.name }}{% endif %}">
-                </div>
-                <div class="form-group">
-                    <label for="cf_score">Score</label>
-                    <input type="number" name="score" id="cf_score" required
-                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.score }}{% else %}0{% endif %}">
-                </div>
-            </div>
-            <div class="form-group">
-                <label for="cf_trash_id">Trash ID <span class="form-hint">(optional)</span></label>
-                <input type="text" name="trash_id" id="cf_trash_id" placeholder="e.g. ed38b0b3..."
-                    value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.row.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
-            </div>
-            <div class="form-group">
-                <label for="cf_json">Sonarr v4 Custom Format JSON</label>
-                <textarea name="json" id="cf_json" rows="16" required spellcheck="false"
-                    placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.row.json }}{% endif %}</textarea>
-                <span class="form-hint">A top-level <code>trash_description</code> field is preserved verbatim and shown above when editing.</span>
-            </div>
-            <div class="settings-inline-actions">
-                <button type="submit" class="btn btn-primary">
-                    {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
+    {# Editor modal — opens on card click (deep-link via ?edit_id=N auto-
+       opens on load), or on "+ Add Custom Format" tile click. The form
+       still submits natively to the server; a successful save redirects
+       back to the tab (no modal) and a validation error redirects back
+       with ?edit_id=N and the modal re-opens with the error in &err. #}
+    <div class="modal-backdrop" id="cf-editor-modal" style="display:none">
+        <div class="modal cf-editor-modal" style="max-width:780px">
+            <div class="modal-header">
+                <h3 id="cf-editor-modal-title">{% if let Some(edit) = custom_format_edit %}Edit Custom Format{% else %}Add Custom Format{% endif %}</h3>
+                <button class="btn-icon" type="button" onclick="closeCfEditorModal()" aria-label="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
                 </button>
-                {% if custom_format_edit.is_some() %}
-                <a href="/settings?tab=custom_formats" class="btn btn-secondary">Cancel</a>
-                {% endif %}
             </div>
-        </form>
+            <form method="post" action="/settings/custom-formats/upsert" class="settings-form cf-editor-form">
+                <div class="modal-body" style="padding:16px 24px">
+                    <p class="cf-section-desc" style="margin-top:0">
+                        Full Sonarr v4 CF object. Supported spec implementations:
+                        <code>ReleaseTitleSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>ResolutionSpecification</code>, <code>SourceSpecification</code>, <code>Ryokan.SeaDexBestSpecification</code>.
+                        The compiler runs before saving, so invalid JSON is rejected with an error message.
+                    </p>
+                    {% if let Some(edit) = custom_format_edit %}
+                    <input type="hidden" name="id" value="{{ edit.row.id }}">
+                    {% if let Some(desc) = edit.trash_description.as_ref() %}
+                    <div class="cf-trash-description">
+                        <strong>Trash Guides description</strong>
+                        <div style="white-space: pre-wrap;">{{ desc }}</div>
+                    </div>
+                    {% endif %}
+                    {% endif %}
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="cf_name">Name</label>
+                            <input type="text" name="name" id="cf_name" required
+                                value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.name }}{% endif %}">
+                        </div>
+                        <div class="form-group">
+                            <label for="cf_score">Score</label>
+                            <input type="number" name="score" id="cf_score" required
+                                value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.score }}{% else %}0{% endif %}">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="cf_trash_id">Trash ID <span class="form-hint">(optional)</span></label>
+                        <input type="text" name="trash_id" id="cf_trash_id" placeholder="e.g. ed38b0b3..."
+                            value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.row.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
+                    </div>
+                    <div class="form-group">
+                        <label for="cf_json">Sonarr v4 Custom Format JSON</label>
+                        <textarea name="json" id="cf_json" rows="14" required spellcheck="false"
+                            placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.row.json }}{% endif %}</textarea>
+                        <span class="form-hint">A top-level <code>trash_description</code> field is preserved verbatim and shown above when editing.</span>
+                    </div>
+                </div>
+                <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
+                    <button type="button" class="btn btn-secondary" onclick="closeCfEditorModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">
+                        {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
+                    </button>
+                </div>
+            </form>
+        </div>
     </div>
     {% endif %}
 
@@ -728,6 +738,58 @@ function filterCfList(query) {
     const addCard = grid.querySelector('.cf-card-add');
     if (addCard) addCard.style.display = q ? 'none' : '';
 }
+
+// #11.1 stage 2 — modal editor open/close. The modal element itself is
+// server-rendered with the pre-filled form when ?edit_id=N is set, so
+// auto-opening is just flipping display. "+ Add Custom Format" opens a
+// fresh modal — but since the form markup is tied to server-side edit
+// state, clicking + on a page that's rendering in edit mode would
+// open the edit form, not a blank one. Fix by clearing edit_id via a
+// GET navigation first whenever the user hits + from an edit-mode page.
+function openCfEditorModal() {
+    const modal = document.getElementById('cf-editor-modal');
+    if (!modal) return;
+    const params = new URLSearchParams(window.location.search);
+    // If page is in edit mode and user clicked "+ Add", navigate to the
+    // bare CF tab first so the server re-renders the empty form.
+    if (params.has('edit_id')) {
+        window.location.href = '/settings?tab=custom_formats';
+        return;
+    }
+    modal.style.display = 'flex';
+    const name = document.getElementById('cf_name');
+    if (name) name.focus();
+}
+function closeCfEditorModal() {
+    const modal = document.getElementById('cf-editor-modal');
+    if (modal) modal.style.display = 'none';
+    // Drop ?edit_id=N from the URL without reloading so Cancel doesn't
+    // leave the user on a URL that'd re-open the modal on refresh.
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('edit_id')) {
+        params.delete('edit_id');
+        const newUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+        history.replaceState(null, '', newUrl);
+    }
+}
+// Auto-open on load when the URL carries ?edit_id=N — the server
+// already rendered the pre-filled form inside the modal markup, so
+// this is just a display flip. Also handle backdrop click + Escape
+// to dismiss.
+(function() {
+    const modal = document.getElementById('cf-editor-modal');
+    if (!modal) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('edit_id')) {
+        modal.style.display = 'flex';
+    }
+    modal.addEventListener('click', function(ev) {
+        if (ev.target === modal) closeCfEditorModal();
+    });
+    document.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Escape' && modal.style.display !== 'none') closeCfEditorModal();
+    });
+})();
 
 function generateApiKey() {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
