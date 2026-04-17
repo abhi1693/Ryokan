@@ -860,6 +860,12 @@ function closeCfEditorModal() {
         const newUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
         history.replaceState(null, '', newUrl);
     }
+    // Drop the selected-card highlight. The class was server-rendered
+    // based on ?edit_id=N, so closing without a full reload leaves the
+    // highlight stuck on the originally-edited card until next refresh.
+    document.querySelectorAll('.cf-card-selected').forEach(function(el) {
+        el.classList.remove('cf-card-selected');
+    });
 }
 // Auto-open on load when the URL carries ?edit_id=N — the server
 // already rendered the pre-filled form inside the modal markup, so
