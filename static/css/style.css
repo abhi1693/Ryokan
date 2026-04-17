@@ -59,6 +59,13 @@ body {
         /* Padding so the fixed bottom tab bar (56px tall + safe-area
          * inset for iOS home indicator) doesn't overlap page content. */
         padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        /* Safety net: anything that somehow ends up wider than the
+         * viewport (e.g. long CF JSON in an edit textarea, a wide
+         * table that escaped its scroll wrapper) gets clipped
+         * instead of forcing the whole page to h-scroll. The
+         * expected-to-scroll elements (`.rss-table-wrap`,
+         * `.system-tabs`) each manage their own overflow-x: auto. */
+        overflow-x: hidden;
     }
     input[type="text"],
     input[type="search"],
@@ -70,6 +77,30 @@ body {
     select,
     textarea {
         font-size: 16px;
+    }
+    /* Forms fill their parent on mobile. Without this, `<input>` keeps
+     * its user-agent default width (~173px for 20ch) and wanders out
+     * of its fieldset instead of filling the column. `max-width: 100%`
+     * belt-and-suspenders against inline-style widths. */
+    .form-group input,
+    .form-group select,
+    .form-group textarea,
+    .settings-form input,
+    .settings-form select,
+    .settings-form textarea {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+    /* Fieldset padding is 24px on desktop; shrink on phone so the
+     * input grid has more usable horizontal space. */
+    fieldset {
+        padding: 16px;
+    }
+    /* Content container padding tightens from 24px to 14px side-padding
+     * so forms don't get squeezed on both sides. */
+    .content {
+        padding: 24px 14px calc(80px + env(safe-area-inset-bottom, 0px));
     }
 }
 
