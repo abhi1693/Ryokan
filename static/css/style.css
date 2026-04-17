@@ -138,13 +138,26 @@ body {
         right: 0;
         bottom: 0;
         z-index: 100;
-        background: rgba(15, 15, 19, 0.96);
-        backdrop-filter: blur(10px);
+        background: var(--bg);
         border-top: 1px solid var(--border);
         padding-bottom: env(safe-area-inset-bottom, 0px);
+        /* Promote to its own GPU compositing layer so address-bar
+         * show/hide on iOS Safari doesn't repaint the blurred
+         * backdrop-filter layer on every scroll tick. Combined with
+         * dropping the blur entirely (solid bg above) to prevent the
+         * jitter users were seeing. */
+        will-change: transform;
+        transform: translateZ(0);
     }
     .mobile-tab {
-        flex: 1 1 0;
+        /* Explicit equal-width (1/5) instead of `flex: 1 1 0`. With
+         * flex-basis:0, column-flex children whose natural content
+         * width varies slightly (ICON + short label) can trigger
+         * sub-pixel rounding that makes Library/System feel further
+         * apart than Search/Downloads/Settings. Pinning each tab to
+         * 20% guarantees geometric parity regardless of content. */
+        flex: 0 0 20%;
+        width: 20%;
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -3569,68 +3582,16 @@ input[type="file"]::file-selector-button:hover {
     color: var(--green);
 }
 
-/* #20 — Collapse .rss-table rows into stacked "cards" on phone
- * viewports. Used by the downloads page (queue / history / blocklist)
- * plus the System RSS decisions and Scheduled Tasks tables. Rather
- * than dual markup — which would triple the template work for six+
- * tables — we reshape the existing rows via display: block. The
- * tradeoff: accessibility tree loses the table semantics at phone
- * widths; acceptable because the data is still per-row and the
- * desktop/tablet path keeps the real table.
- *
- * Each <tr> becomes a padded card; each <td> becomes a row inside
- * that card with the first column (usually the name) bolded, and
- * the action column pushed to a footer row with horizontal flex. */
-@media (max-width: 640px) {
-    .rss-table,
-    .rss-table tbody,
-    .rss-table tr,
-    .rss-table td {
-        display: block;
-        width: 100%;
-    }
-    .rss-table thead {
-        display: none;
-    }
-    .rss-table-wrap {
-        overflow-x: visible;
-    }
-    .rss-table tr {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 12px 14px;
-        margin-bottom: 10px;
-    }
-    .rss-table td {
-        border: none !important;
-        padding: 3px 0;
-        font-size: 13px;
-    }
-    .rss-table td:first-child {
-        font-weight: 500;
-        color: var(--text-bright);
-        padding: 0 0 8px;
-        border-bottom: 1px solid var(--border) !important;
-        margin-bottom: 8px;
-    }
-    /* Action columns (buttons) sit on their own row flex-wrapped so
-     * play/pause/delete don't collide with the text rows above. */
-    .rss-table td.dl-actions,
-    .rss-table td:last-child {
-        margin-top: 8px;
-        padding-top: 8px;
-        border-top: 1px solid var(--border) !important;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-    }
-    /* Progress bar stays full-width on its own row — it would be
-     * cramped in a columnar stack otherwise. */
-    .dl-progress-wrap {
-        width: 100%;
-    }
-}
+/* #20 follow-up — .rss-table tables (downloads, RSS decisions,
+ * scheduled tasks) keep their real table shape on mobile. An
+ * earlier attempt to reshape them as cards via display:block broke
+ * more than it fixed (form layouts overflowed, RSS status stat
+ * rows collapsed into illegible stacks). `.rss-table-wrap` already
+ * has `overflow: auto`, so content wider than the viewport scrolls
+ * naturally within the wrapper — the right UX for data tables at
+ * small widths. Dedicated dual-markup card lists live only where
+ * the table shape doesn't carry its weight (search results,
+ * episode table — see 8ca7fca and 3fc9d17). */
 
 .rss-decision-rejected,
 .rss-decision-error {
