@@ -129,8 +129,8 @@ pub async fn find_all_for_target(
     _allow_batch: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
+    let queries = build_queries_from_aliases(&aliases, target);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -418,7 +418,7 @@ pub async fn collect_scored_batches_for_target(
 
     // Standard query sweep — picks up any batches that happen to surface
     // on Nyaa page 1 alongside the singles.
-    let queries = build_queries(detail, target);
+    let queries = build_queries_from_aliases(&aliases, target);
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
 
     // Batch-targeted probes — the important addition for this function.
@@ -520,8 +520,8 @@ async fn collect_scored_for_target(
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
+    let queries = build_queries_from_aliases(&aliases, target);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -1083,10 +1083,6 @@ pub fn target_label(target: &SearchTarget) -> String {
         SearchTarget::Single => "Single".to_string(),
         SearchTarget::Episode(ep) => format!("Episode {}", ep),
     }
-}
-
-fn build_queries(detail: &AnimeDetail, target: &SearchTarget) -> Vec<String> {
-    build_queries_from_aliases(&collect_aliases(detail), target)
 }
 
 fn build_queries_from_aliases(aliases: &[String], target: &SearchTarget) -> Vec<String> {
