@@ -149,7 +149,7 @@ pub async fn find_all_for_target(
     let aliases = collect_aliases(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
     let queries = append_custom_tokens(
-        build_queries_from_aliases(&aliases, target),
+        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
         &series_ctx.custom_tokens,
     );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
@@ -229,7 +229,7 @@ pub async fn find_all_for_target(
         let extended = collect_extended_aliases(detail);
         if !extended.is_empty() {
             let ext_queries = append_custom_tokens(
-                build_queries_from_aliases(&extended, target),
+                build_queries_from_aliases(&extended, target, !series_ctx.restrict_user.is_empty()),
                 &series_ctx.custom_tokens,
             );
             let all_aliases = [aliases.clone(), extended].concat();
@@ -243,7 +243,13 @@ pub async fn find_all_for_target(
         }
     }
 
-    if !preferred_groups.is_empty() {
+    // #23 follow-up — When a Nyaa uploader restriction is active, every
+    // Nyaa request is already scoped to `/user/<name>`, so a
+    // preferred-group-prefixed query like "Erai-raws <title>" against the
+    // SubsPlease user page can only return uploads SubsPlease happened to
+    // name with "Erai-raws" in them — effectively never. Skip the whole
+    // pass to avoid paying N × round-trip cost for zero coverage.
+    if !preferred_groups.is_empty() && series_ctx.restrict_user.is_empty() {
         let group_queries = append_custom_tokens(
             build_group_queries(detail, target, &preferred_groups),
             &series_ctx.custom_tokens,
@@ -273,7 +279,7 @@ pub async fn find_all_for_target(
         absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
         franchise_precompute = SiblingRejectPrecompute::build(&series_ctx.franchise_aliases, &[]);
         let franchise_queries = append_custom_tokens(
-            build_queries_from_aliases(&series_ctx.franchise_aliases, &absolute_target),
+            build_queries_from_aliases(&series_ctx.franchise_aliases, &absolute_target, !series_ctx.restrict_user.is_empty()),
             &series_ctx.custom_tokens,
         );
         let franchise_ctx = InteractiveQueryCtx {
@@ -468,7 +474,7 @@ pub async fn collect_scored_batches_for_target(
     // Standard query sweep — picks up any batches that happen to surface
     // on Nyaa page 1 alongside the singles.
     let queries = append_custom_tokens(
-        build_queries_from_aliases(&aliases, target),
+        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
         &series_ctx.custom_tokens,
     );
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
@@ -489,7 +495,10 @@ pub async fn collect_scored_batches_for_target(
         && candidates.iter().any(|c| {
             preferred_groups.iter().any(|g| g.eq_ignore_ascii_case(&c.group))
         });
-    if !has_preferred_hit && !preferred_groups.is_empty() {
+    // #23 follow-up — see the note in `find_all_for_target`. Preferred-
+    // group queries are redundant when the `/user/<name>` scope is
+    // already active.
+    if !has_preferred_hit && !preferred_groups.is_empty() && series_ctx.restrict_user.is_empty() {
         let group_queries = append_custom_tokens(
             build_group_queries(detail, target, &preferred_groups),
             &series_ctx.custom_tokens,
@@ -582,7 +591,7 @@ async fn collect_scored_for_target(
     let aliases = collect_aliases(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
     let queries = append_custom_tokens(
-        build_queries_from_aliases(&aliases, target),
+        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
         &series_ctx.custom_tokens,
     );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
@@ -670,7 +679,7 @@ async fn collect_scored_for_target(
         let extended = collect_extended_aliases(detail);
         if !extended.is_empty() {
             let ext_queries = append_custom_tokens(
-                build_queries_from_aliases(&extended, target),
+                build_queries_from_aliases(&extended, target, !series_ctx.restrict_user.is_empty()),
                 &series_ctx.custom_tokens,
             );
             let all_aliases = [aliases.clone(), extended].concat();
@@ -690,7 +699,10 @@ async fn collect_scored_for_target(
             preferred_groups.iter().any(|g| g.eq_ignore_ascii_case(&c.group))
         });
 
-    if !has_preferred_hit && !preferred_groups.is_empty() {
+    // #23 follow-up — see the note in `find_all_for_target`. Preferred-
+    // group queries are redundant when the `/user/<name>` scope is
+    // already active.
+    if !has_preferred_hit && !preferred_groups.is_empty() && series_ctx.restrict_user.is_empty() {
         let group_queries = append_custom_tokens(
             build_group_queries(detail, target, &preferred_groups),
             &series_ctx.custom_tokens,
@@ -731,7 +743,7 @@ async fn collect_scored_for_target(
         absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
         franchise_precompute = SiblingRejectPrecompute::build(&series_ctx.franchise_aliases, &[]);
         let franchise_queries = append_custom_tokens(
-            build_queries_from_aliases(&series_ctx.franchise_aliases, &absolute_target),
+            build_queries_from_aliases(&series_ctx.franchise_aliases, &absolute_target, !series_ctx.restrict_user.is_empty()),
             &series_ctx.custom_tokens,
         );
         let franchise_ctx = AutoQueryCtx {
@@ -1363,20 +1375,46 @@ fn append_custom_tokens(queries: Vec<String>, tokens: &str) -> Vec<String> {
         .collect()
 }
 
-fn build_queries_from_aliases(aliases: &[String], target: &SearchTarget) -> Vec<String> {
+/// Build the Nyaa text-query variants for each alias. The full sweep
+/// emits four variants per alias for Episode targets (`title 9`,
+/// `title - 09`, `title 09`, `"title" 09`) to cover punctuation and
+/// padding conventions across uploaders, plus two variants for Single
+/// targets (bare + phrase-match).
+///
+/// #23 follow-up — When a Nyaa uploader restriction (`?u=<name>`) is
+/// active those variants collapse to the same token set against a
+/// single uploader's catalog: Nyaa's tokenizer ignores punctuation,
+/// and the phrase-match variant narrows a result set that's already
+/// narrowed by the server-side user filter. Running all four in
+/// sequence burned 15–25s per sweep for no additional coverage.
+/// `collapsed = true` emits a single canonical variant per alias —
+/// the zero-padded episode form (`title 09`) for Episode targets, the
+/// bare alias for Single targets — cutting the per-alias query count
+/// 4→1 (Episode) and 2→1 (Single).
+fn build_queries_from_aliases(
+    aliases: &[String],
+    target: &SearchTarget,
+    collapsed: bool,
+) -> Vec<String> {
     let mut queries = Vec::new();
 
     for alias in aliases {
         match target {
             SearchTarget::Single => {
                 queries.push(alias.clone());
-                queries.push(format!("\"{}\"", alias));
+                if !collapsed {
+                    queries.push(format!("\"{}\"", alias));
+                }
             }
             SearchTarget::Episode(ep) => {
-                queries.push(format!("{} {}", alias, ep));
-                queries.push(format!("{} - {:02}", alias, ep));
-                queries.push(format!("{} {:02}", alias, ep));
-                queries.push(format!("\"{}\" {:02}", alias, ep));
+                if collapsed {
+                    queries.push(format!("{} {:02}", alias, ep));
+                } else {
+                    queries.push(format!("{} {}", alias, ep));
+                    queries.push(format!("{} - {:02}", alias, ep));
+                    queries.push(format!("{} {:02}", alias, ep));
+                    queries.push(format!("\"{}\" {:02}", alias, ep));
+                }
             }
         }
     }
@@ -5815,4 +5853,53 @@ mod tests {
         ]);
     }
 
+    // ── #23 follow-up — collapsed query variants when ?u= is active ────
+
+    #[test]
+    fn build_queries_full_mode_emits_four_episode_variants() {
+        // Regression pin. The full sweep is what runs when no Nyaa
+        // uploader filter is set; dropping any of these variants would
+        // silently break coverage for uploaders that skip padding,
+        // use a specific separator, etc.
+        let aliases = vec!["Frieren".to_string()];
+        let out = build_queries_from_aliases(&aliases, &SearchTarget::Episode(9), false);
+        assert_eq!(out.len(), 4, "full-sweep episode target should emit 4 per alias, got {out:?}");
+        assert!(out.contains(&"Frieren 9".to_string()));
+        assert!(out.contains(&"Frieren - 09".to_string()));
+        assert!(out.contains(&"Frieren 09".to_string()));
+        assert!(out.contains(&"\"Frieren\" 09".to_string()));
+    }
+
+    #[test]
+    fn build_queries_collapsed_mode_emits_one_episode_variant() {
+        // With /user/<name> scope active, extra variants all return the
+        // same uploader's catalog so we drop from 4→1 to cut wall-time.
+        let aliases = vec!["Frieren".to_string()];
+        let out = build_queries_from_aliases(&aliases, &SearchTarget::Episode(9), true);
+        assert_eq!(out, vec!["Frieren 09".to_string()]);
+    }
+
+    #[test]
+    fn build_queries_collapsed_mode_emits_one_single_variant() {
+        let aliases = vec!["Jujutsu Kaisen 0".to_string()];
+        let out = build_queries_from_aliases(&aliases, &SearchTarget::Single, true);
+        assert_eq!(out, vec!["Jujutsu Kaisen 0".to_string()]);
+    }
+
+    #[test]
+    fn build_queries_collapsed_scales_with_alias_count() {
+        // One variant per alias — the case-insensitive dedupe on
+        // `dedupe_strings` collapses romaji/english when they share a
+        // lowercase key ("Jujutsu Kaisen" and "JUJUTSU KAISEN"), so a
+        // typical three-field AL detail still produces two distinct
+        // collapsed queries.
+        let aliases = vec![
+            "Jujutsu Kaisen".to_string(),
+            "JUJUTSU KAISEN".to_string(),
+            "呪術廻戦".to_string(),
+        ];
+        let out = build_queries_from_aliases(&aliases, &SearchTarget::Episode(56), true);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|q| q.ends_with(" 56")));
+    }
 }
