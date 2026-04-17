@@ -2296,6 +2296,36 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     font-weight: 500;
 }
 
+/* #11.5 — two-column Defaults & Threshold panel. Bundled set (install/
+ * reset buttons) on the left, Minimum Score input on the right. Stacks
+ * below --bp-tablet (reused when #20 lands). */
+.cf-defaults-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 20px;
+}
+@media (max-width: 760px) {
+    .cf-defaults-grid {
+        grid-template-columns: 1fr;
+    }
+}
+.cf-defaults-col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.cf-defaults-subtitle {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0;
+}
+.cf-min-score-form {
+    margin: 0;
+}
+
 /* #11.1 — Sonarr-style CF card grid (full-width flex-wrap of ~300px
  * cards). Replaced the earlier two-pane table layout because compressing
  * a list into 490px made names wrap ugly and the + Delete button clip.

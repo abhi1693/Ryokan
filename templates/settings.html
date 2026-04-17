@@ -559,46 +559,53 @@
     </div>
     {% endif %}
 
-    {# ── Global Minimum Score ───────────────────────────────────────── #}
+    {# ── Defaults & Threshold (#11.5) ────────────────────────────────
+       Collapses three separate cf-section cards (Install Defaults,
+       Reset Defaults, Minimum Score) into one. Minimum Score and
+       Defaults logically belong together — both are "global CF
+       configuration" knobs that don't live on any individual CF. The
+       empty-state card above also shows an Install Defaults button;
+       this section is the always-available canonical home for the
+       same action. #}
     <div class="cf-section">
         <div class="cf-section-header">
-            <h3>Global Minimum Score</h3>
-        </div>
-        <p class="cf-section-desc">
-            Auto-search drops releases whose summed CF score falls below this threshold. Interactive search still shows everything. Leave blank to disable the floor.
-        </p>
-        <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form">
-            <div class="form-group">
-                <label for="cf_min_score">Minimum Score</label>
-                <input type="number" name="minimum_score" id="cf_min_score"
-                    value="{{ custom_format_min_score_display }}" placeholder="(blank = no floor)">
-            </div>
-            <button type="submit" class="btn btn-primary">Save Minimum Score</button>
-        </form>
-    </div>
-
-    {# ── Bundled Defaults ───────────────────────────────────────────── #}
-    <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Bundled Defaults</h3>
+            <h3>Defaults &amp; Threshold</h3>
         </div>
         <p class="cf-section-desc">
             <strong>Install Defaults</strong> imports the bundled anime-tuned CF set (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit/x265, FLAC/Opus, plus the 8-bit mp4 penalty) — existing names are skipped so repeat clicks are safe.
-            <strong>Reset to Defaults</strong> drops every row whose Source column shows <em>default</em> and re-installs them from the bundled file — use this after you've edited a default CF and want the original back. Manual and imported CFs are untouched.
+            <strong>Reset to Defaults</strong> drops every row whose Source column shows <em>default</em> and re-installs them from the bundled file; manual and imported CFs are untouched.
+            <strong>Minimum Score</strong> is a floor — auto-search drops releases whose summed CF score falls below it; interactive search still shows everything. Leave blank to disable the floor.
         </p>
-        <div class="settings-inline-actions">
-            <form method="post" action="/settings/custom-formats/install-defaults"
-                  data-ryokan-confirm-title="Install bundled defaults"
-                  data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
-                  data-ryokan-confirm-label="Install">
-                <button type="submit" class="btn btn-primary">Install Defaults</button>
-            </form>
-            <form method="post" action="/settings/custom-formats/reset-defaults"
-                  data-ryokan-confirm-title="Reset bundled defaults"
-                  data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
-                  data-ryokan-confirm-label="Reset">
-                <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
-            </form>
+        <div class="cf-defaults-grid">
+            <div class="cf-defaults-col">
+                <h4 class="cf-defaults-subtitle">Bundled set</h4>
+                <div class="settings-inline-actions">
+                    <form method="post" action="/settings/custom-formats/install-defaults"
+                          data-ryokan-confirm-title="Install bundled defaults"
+                          data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
+                          data-ryokan-confirm-label="Install">
+                        <button type="submit" class="btn btn-primary">Install Defaults</button>
+                    </form>
+                    <form method="post" action="/settings/custom-formats/reset-defaults"
+                          data-ryokan-confirm-title="Reset bundled defaults"
+                          data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
+                          data-ryokan-confirm-label="Reset">
+                        <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
+                    </form>
+                </div>
+            </div>
+            <div class="cf-defaults-col">
+                <h4 class="cf-defaults-subtitle">Score floor</h4>
+                <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form cf-min-score-form">
+                    <div class="form-group" style="margin-bottom: 12px">
+                        <input type="number" name="minimum_score" id="cf_min_score"
+                            value="{{ custom_format_min_score_display }}"
+                            placeholder="(blank = no floor)"
+                            aria-label="Minimum score">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save Minimum Score</button>
+                </form>
+            </div>
         </div>
     </div>
 
