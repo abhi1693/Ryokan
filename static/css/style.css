@@ -2296,6 +2296,77 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     font-weight: 500;
 }
 
+/* #11.1 — Two-pane CF layout (list on the left, editor on the right).
+ * Proportions: 1fr list + 1.2fr editor so the editor's textarea gets
+ * enough width without starving the list name column. Collapses to a
+ * single column below 1080px because the editor form becomes unusable
+ * at narrower widths; the full mobile treatment lands in #20. */
+.cf-panes {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+    gap: 20px;
+    align-items: start;
+    margin-bottom: 20px;
+}
+@media (max-width: 1080px) {
+    .cf-panes {
+        grid-template-columns: 1fr;
+    }
+}
+.cf-pane-list,
+.cf-pane-editor {
+    margin-bottom: 0;
+}
+/* Header pill + "+ New" button live on the same right-aligned row so the
+ * list header reads as "Title | count • new-button". */
+.cf-list-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+.cf-list-filter {
+    margin-bottom: 14px;
+    width: 100%;
+}
+/* Soft cap on the list pane height so a 28-entry default set doesn't
+ * push the editor pane off-screen. The editor is the thing the user is
+ * actively typing in; the list stays scrollable. */
+.cf-list-scroll {
+    max-height: 560px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+}
+.cf-list-scroll .group-source-table {
+    margin-top: 0;
+    border-top: none;
+}
+/* Sticky header so scrolling through the list keeps the column labels
+ * visible. Requires the table to live inside .cf-list-scroll (which
+ * establishes the scroll container). */
+.cf-list-scroll .group-source-table thead {
+    position: sticky;
+    top: 0;
+    background: var(--bg-card);
+    z-index: 1;
+}
+.cf-row-link {
+    color: inherit;
+    text-decoration: none;
+    display: block;
+}
+.cf-row-link:hover {
+    color: var(--accent);
+}
+.cf-row-selected {
+    background: rgba(203, 166, 247, 0.08);
+}
+.cf-row-selected .cf-name {
+    color: var(--accent);
+}
+.cf-row-selected::after {
+    content: none;
+}
+
 /* Trash-Guides description callout shown above the edit form when the
    CF carries a `trash_description` field. Replaces the inline-styled
    white box that broke the dark theme. */

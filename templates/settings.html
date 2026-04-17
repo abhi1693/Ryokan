@@ -407,13 +407,18 @@
         Sonarr v4-compatible Custom Formats. Every matching spec contributes its score to the release total during auto-search. Paste JSON exports from Sonarr or <a href="https://trash-guides.info" target="_blank" rel="noopener">Trash Guides</a>, or build your own from scratch.
     </p>
 
-    {# ── Current Custom Formats ─────────────────────────────────────── #}
+    {# ── List + Editor panes (#11.1) ─────────────────────────────────
+       Two-column layout: the CF list (with a live client-side filter)
+       sits on the left; the Add/Edit form for the currently-selected
+       CF sits on the right. Row click → `?edit_id=N` (server re-renders
+       the right pane). "+ New" clears `edit_id` so the right pane shows
+       the fresh "Add" form. Mobile fallback: stack (full tuning in #20). #}
+    {% if custom_formats.is_empty() %}
     <div class="cf-section">
         <div class="cf-section-header">
             <h3>Current Custom Formats</h3>
-            <span class="cf-count-pill">{{ custom_formats.len() }} total</span>
+            <span class="cf-count-pill">0 total</span>
         </div>
-        {% if custom_formats.is_empty() %}
         <div class="cf-empty-state">
             <p>You don't have any Custom Formats yet. Install the bundled anime-tuned defaults to get started with SeaDex, tier-S BD groups, 10-bit/x265, FLAC/Opus, and other curated rules.</p>
             <form method="post" action="/settings/custom-formats/install-defaults"
@@ -423,113 +428,134 @@
                 <button type="submit" class="btn btn-primary">Install Bundled Defaults</button>
             </form>
         </div>
-        {% else %}
-        <table class="group-source-table cf-table">
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Score</th>
-                    <th>Specs</th>
-                    <th>Source</th>
-                    <th>Trash ID</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for cf in custom_formats %}
-                <tr>
-                    <td class="cf-name">{{ cf.row.name }}</td>
-                    <td class="cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
-                        {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
-                    </td>
-                    <td>
-                        {% if let Some(err) = cf.parse_error.as_ref() %}
-                        <span class="cf-parse-error" title="{{ err }}">parse error</span>
-                        {% else %}
-                        {{ cf.specs_count }}
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if cf.row.origin == "defaults" %}
-                        <span class="cf-origin-badge cf-origin-default" title="Installed from the bundled default set">default</span>
-                        {% else if cf.row.origin == "import" %}
-                        <span class="cf-origin-badge cf-origin-import" title="Imported from a Sonarr v4 JSON export">import</span>
-                        {% else %}
-                        <span class="cf-origin-badge cf-origin-manual" title="Created via the Add Custom Format form">manual</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if let Some(tid) = cf.row.trash_id.as_ref() %}<code>{{ tid }}</code>{% else %}<span class="form-hint">—</span>{% endif %}
-                    </td>
-                    <td>
-                        <div class="settings-inline-actions">
-                            <a href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}" class="btn btn-secondary">Edit</a>
-                            <form method="post" action="/settings/custom-formats/delete" class="group-delete-form" onsubmit="return confirm('Delete Custom Format: {{ cf.row.name }}?');">
-                                <input type="hidden" name="id" value="{{ cf.row.id }}">
-                                <button type="submit" class="btn btn-danger">Delete</button>
-                            </form>
-                        </div>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% endif %}
     </div>
-
-    {# ── Add / Edit ─────────────────────────────────────────────────── #}
-    <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>{% if let Some(edit) = custom_format_edit %}Edit Custom Format #{{ edit.row.id }}{% else %}Add Custom Format{% endif %}</h3>
+    {% else %}
+    <div class="cf-panes">
+        <div class="cf-pane-list cf-section">
+            <div class="cf-section-header">
+                <h3>Current Custom Formats</h3>
+                <div class="cf-list-header-actions">
+                    <span class="cf-count-pill"><span id="cf-visible-count">{{ custom_formats.len() }}</span> / {{ custom_formats.len() }}</span>
+                    <a href="/settings?tab=custom_formats" class="btn btn-primary btn-sm">+ New</a>
+                </div>
+            </div>
+            <input type="search" id="cf-list-filter" class="settings-input cf-list-filter"
+                placeholder="Filter by name, score, trash ID, or source"
+                oninput="filterCfList(this.value)">
+            <div class="cf-list-scroll">
+                <table class="group-source-table cf-table cf-list-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Score</th>
+                            <th>Specs</th>
+                            <th>Source</th>
+                            <th>Trash ID</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="cf-list-tbody">
+                        {% for cf in custom_formats %}
+                        <tr class="cf-row{% if let Some(edit) = custom_format_edit %}{% if edit.row.id == cf.row.id %} cf-row-selected{% endif %}{% endif %}"
+                            data-cf-name="{{ cf.row.name|lowercase }}"
+                            data-cf-score="{{ cf.row.score }}"
+                            data-cf-origin="{{ cf.row.origin }}"
+                            data-cf-trash-id="{% if let Some(tid) = cf.row.trash_id.as_ref() %}{{ tid|lowercase }}{% endif %}">
+                            <td class="cf-name">
+                                <a class="cf-row-link" href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}">{{ cf.row.name }}</a>
+                            </td>
+                            <td class="cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
+                                {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
+                            </td>
+                            <td>
+                                {% if let Some(err) = cf.parse_error.as_ref() %}
+                                <span class="cf-parse-error" title="{{ err }}">parse error</span>
+                                {% else %}
+                                {{ cf.specs_count }}
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if cf.row.origin == "defaults" %}
+                                <span class="cf-origin-badge cf-origin-default" title="Installed from the bundled default set">default</span>
+                                {% else if cf.row.origin == "import" %}
+                                <span class="cf-origin-badge cf-origin-import" title="Imported from a Sonarr v4 JSON export">import</span>
+                                {% else %}
+                                <span class="cf-origin-badge cf-origin-manual" title="Created via the Add Custom Format form">manual</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if let Some(tid) = cf.row.trash_id.as_ref() %}<code>{{ tid }}</code>{% else %}<span class="form-hint">—</span>{% endif %}
+                            </td>
+                            <td>
+                                <form method="post" action="/settings/custom-formats/delete" class="group-delete-form" onsubmit="return confirm('Delete Custom Format: {{ cf.row.name }}?');">
+                                    <input type="hidden" name="id" value="{{ cf.row.id }}">
+                                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div id="cf-list-empty-filter" class="cf-empty-state" style="display:none">
+                    <p>No Custom Formats match your filter.</p>
+                </div>
+            </div>
         </div>
-        <p class="cf-section-desc">
-            Full Sonarr v4 CF object. Supported spec implementations:
-            <code>ReleaseTitleSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>ResolutionSpecification</code>, <code>SourceSpecification</code>, <code>Ryokan.SeaDexBestSpecification</code>.
-            The compiler runs before saving, so invalid JSON is rejected with an error message.
-        </p>
-        <form method="post" action="/settings/custom-formats/upsert" class="settings-form">
-            {% if let Some(edit) = custom_format_edit %}
-            <input type="hidden" name="id" value="{{ edit.row.id }}">
-            {% if let Some(desc) = edit.trash_description.as_ref() %}
-            <div class="cf-trash-description">
-                <strong>Trash Guides description</strong>
-                <div style="white-space: pre-wrap;">{{ desc }}</div>
+
+        <div class="cf-pane-editor cf-section">
+            <div class="cf-section-header">
+                <h3>{% if let Some(edit) = custom_format_edit %}Edit Custom Format #{{ edit.row.id }}{% else %}Add Custom Format{% endif %}</h3>
             </div>
-            {% endif %}
-            {% endif %}
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="cf_name">Name</label>
-                    <input type="text" name="name" id="cf_name" required
-                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.name }}{% endif %}">
+            <p class="cf-section-desc">
+                Full Sonarr v4 CF object. Supported spec implementations:
+                <code>ReleaseTitleSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>ResolutionSpecification</code>, <code>SourceSpecification</code>, <code>Ryokan.SeaDexBestSpecification</code>.
+                The compiler runs before saving, so invalid JSON is rejected with an error message.
+            </p>
+            <form method="post" action="/settings/custom-formats/upsert" class="settings-form">
+                {% if let Some(edit) = custom_format_edit %}
+                <input type="hidden" name="id" value="{{ edit.row.id }}">
+                {% if let Some(desc) = edit.trash_description.as_ref() %}
+                <div class="cf-trash-description">
+                    <strong>Trash Guides description</strong>
+                    <div style="white-space: pre-wrap;">{{ desc }}</div>
                 </div>
-                <div class="form-group">
-                    <label for="cf_score">Score</label>
-                    <input type="number" name="score" id="cf_score" required
-                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.score }}{% else %}0{% endif %}">
-                </div>
-            </div>
-            <div class="form-group">
-                <label for="cf_trash_id">Trash ID <span class="form-hint">(optional)</span></label>
-                <input type="text" name="trash_id" id="cf_trash_id" placeholder="e.g. ed38b0b3..."
-                    value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.row.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
-            </div>
-            <div class="form-group">
-                <label for="cf_json">Sonarr v4 Custom Format JSON</label>
-                <textarea name="json" id="cf_json" rows="16" required spellcheck="false"
-                    placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.row.json }}{% endif %}</textarea>
-                <span class="form-hint">A top-level <code>trash_description</code> field is preserved verbatim and shown above when editing.</span>
-            </div>
-            <div class="settings-inline-actions">
-                <button type="submit" class="btn btn-primary">
-                    {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
-                </button>
-                {% if custom_format_edit.is_some() %}
-                <a href="/settings?tab=custom_formats" class="btn btn-secondary">Cancel</a>
                 {% endif %}
-            </div>
-        </form>
+                {% endif %}
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="cf_name">Name</label>
+                        <input type="text" name="name" id="cf_name" required
+                            value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.name }}{% endif %}">
+                    </div>
+                    <div class="form-group">
+                        <label for="cf_score">Score</label>
+                        <input type="number" name="score" id="cf_score" required
+                            value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.score }}{% else %}0{% endif %}">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="cf_trash_id">Trash ID <span class="form-hint">(optional)</span></label>
+                    <input type="text" name="trash_id" id="cf_trash_id" placeholder="e.g. ed38b0b3..."
+                        value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.row.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
+                </div>
+                <div class="form-group">
+                    <label for="cf_json">Sonarr v4 Custom Format JSON</label>
+                    <textarea name="json" id="cf_json" rows="16" required spellcheck="false"
+                        placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.row.json }}{% endif %}</textarea>
+                    <span class="form-hint">A top-level <code>trash_description</code> field is preserved verbatim and shown above when editing.</span>
+                </div>
+                <div class="settings-inline-actions">
+                    <button type="submit" class="btn btn-primary">
+                        {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
+                    </button>
+                    {% if custom_format_edit.is_some() %}
+                    <a href="/settings?tab=custom_formats" class="btn btn-secondary">Cancel</a>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
     </div>
+    {% endif %}
 
     {# ── Global Minimum Score ───────────────────────────────────────── #}
     <div class="cf-section">
@@ -671,6 +697,41 @@
         });
     });
 })();
+
+// #11.1 — Client-side filter for the CF list pane. Matches against the
+// `data-cf-*` attributes on each row (name is pre-lowercased server-side,
+// score/trash_id/origin match case-insensitively). Empty query = show all.
+// Updates the `#cf-visible-count` pill and toggles the "no matches"
+// placeholder so the pane doesn't render as a blank void when every row
+// is filtered out.
+function filterCfList(query) {
+    const q = (query || '').trim().toLowerCase();
+    const tbody = document.getElementById('cf-list-tbody');
+    if (!tbody) return;
+    const rows = tbody.querySelectorAll('tr.cf-row');
+    let visible = 0;
+    rows.forEach(function(row) {
+        if (!q) {
+            row.style.display = '';
+            visible++;
+            return;
+        }
+        const name = row.dataset.cfName || '';
+        const score = (row.dataset.cfScore || '').toLowerCase();
+        const trashId = row.dataset.cfTrashId || '';
+        const origin = (row.dataset.cfOrigin || '').toLowerCase();
+        const hit = name.includes(q)
+            || score.includes(q)
+            || trashId.includes(q)
+            || origin.includes(q);
+        row.style.display = hit ? '' : 'none';
+        if (hit) visible++;
+    });
+    const countEl = document.getElementById('cf-visible-count');
+    if (countEl) countEl.textContent = visible;
+    const emptyEl = document.getElementById('cf-list-empty-filter');
+    if (emptyEl) emptyEl.style.display = (visible === 0 && rows.length > 0) ? '' : 'none';
+}
 
 function generateApiKey() {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
