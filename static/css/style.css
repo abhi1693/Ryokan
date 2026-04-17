@@ -2296,34 +2296,48 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     font-weight: 500;
 }
 
-/* #11.5 — two-column Defaults & Threshold panel. Bundled set (install/
- * reset buttons) on the left, Minimum Score input on the right. Stacks
- * below --bp-tablet (reused when #20 lands). */
-.cf-defaults-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 20px;
-}
-@media (max-width: 760px) {
-    .cf-defaults-grid {
-        grid-template-columns: 1fr;
-    }
-}
-.cf-defaults-col {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
+/* #11.5 — Defaults & Threshold vertical stack. Two subsections
+ * (Bundled defaults + Minimum score) share one card, separated by
+ * the subtitle + paragraph rhythm. The 2-column grid attempt read
+ * as an orphan floating block for Min Score; stacking is cleaner. */
 .cf-defaults-subtitle {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-dim);
+    color: var(--text-bright);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    margin: 0;
+    margin: 0 0 10px;
 }
 .cf-min-score-form {
     margin: 0;
+}
+/* Score-floor input + inline Save button. max-width so the number
+ * field doesn't stretch across the whole card at desktop widths. */
+.cf-min-score-group {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    max-width: 360px;
+    margin: 0;
+}
+.cf-min-score-group input[type="number"] {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.cf-min-score-group .btn {
+    flex-shrink: 0;
+}
+
+/* #11.1 modal — the CF editor form wraps BOTH .modal-body and
+ * .modal-footer, so the .modal's flex-column rule can't keep the footer
+ * stuck at the bottom without the form itself being a flex child too.
+ * Without this, long textareas push the footer past the modal's
+ * max-height: 80vh and the Save/Cancel buttons clip. (#11.1 follow-up) */
+.cf-editor-form {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 /* #11.4 — Export selector card. Mode radio row, per-CF checkbox list,
@@ -2460,6 +2474,39 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     padding: 4px 8px;
     border-radius: 4px;
     margin-top: 4px;
+}
+
+/* Style the native file input so the "Choose File" button isn't a
+ * white OS-default block on the dark theme. Can't style the button
+ * directly (browser UA shadow DOM), but we can style the input's
+ * ::file-selector-button pseudo-element which both Chromium and
+ * Firefox expose. The rest of the input is the selected-file text
+ * that sits next to the button. */
+input[type="file"] {
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 13px;
+    max-width: 100%;
+}
+input[type="file"]::file-selector-button {
+    background: var(--bg-card);
+    color: var(--text-bright);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 12px;
+    margin-right: 10px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+input[type="file"]::file-selector-button:hover {
+    background: var(--bg-elevated);
+    border-color: var(--border-accent);
+    color: var(--accent);
 }
 
 /* #11.1 — Sonarr-style CF card grid (full-width flex-wrap of ~300px
@@ -2727,10 +2774,14 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
    reused, but CF rows have a badge column that needs a bit more room
    and the actions column should align its buttons cleanly. */
 .cf-table .cf-name { font-weight: 600; color: var(--text-bright); }
-.cf-table .cf-score { font-variant-numeric: tabular-nums; }
-.cf-table .cf-score-positive { color: var(--green); }
-.cf-table .cf-score-negative { color: var(--red); }
-.cf-table .cf-score-zero { color: var(--text-dim); }
+/* Score coloring. Applies wherever a `.cf-score` element also carries a
+ * positive/negative/zero modifier — the CF card grid (#11.1), the
+ * export selector row (#11.4), the import preview (#11.3), and the
+ * legacy .cf-table if it ever returns. */
+.cf-score { font-variant-numeric: tabular-nums; }
+.cf-score-positive { color: var(--green); }
+.cf-score-negative { color: var(--red); }
+.cf-score-zero { color: var(--text-dim); }
 
 .cf-origin-badge {
     display: inline-block;

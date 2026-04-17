@@ -181,7 +181,7 @@
                     <option value="bluray_bdmv" {% if config.cutoff_source == "bluray_bdmv" %}selected{% endif %}>BD-RAW</option>
                     <option value="dvd" {% if config.cutoff_source == "dvd" %}selected{% endif %}>DVD</option>
                 </select>
-                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source. BD-Remux and BD-RAW require a matching sub-tier — plain BD encodes will stay upgradeable.</span>
+                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source. BD-Remux and BD-RAW require a matching sub-tier. Plain BD encodes will stay upgradeable.</span>
             </div>
             <div class="form-group">
                 <label for="cutoff_resolution">Cutoff Resolution</label>
@@ -260,12 +260,12 @@
                     <input type="checkbox" name="post_processing_enabled" id="post_processing_enabled" {% if config.post_processing_enabled %}checked{% endif %}>
                     <span>Enable post-processing</span>
                 </label>
-                <span class="form-hint">When enabled, Ryokan will rename and move completed downloads into your media library and write NFO sidecar files for Jellyfin. No external metadata providers are queried — data already in the database is used. Requires a configured media root and qBittorrent.</span>
+                <span class="form-hint">When enabled, Ryokan will rename and move completed downloads into your media library and write NFO sidecar files for Jellyfin. No external metadata providers are queried; data already in the database is used. Requires a configured media root and qBittorrent.</span>
             </div>
             <div class="form-group">
                 <label for="post_processing_mode">File operation mode</label>
                 <select name="post_processing_mode" id="post_processing_mode">
-                    <option value="hardlink" {% if config.post_processing_mode == "hardlink" %}selected{% endif %}>Hardlink (recommended — preserves seeding, no extra disk space)</option>
+                    <option value="hardlink" {% if config.post_processing_mode == "hardlink" %}selected{% endif %}>Hardlink (recommended; preserves seeding, no extra disk space)</option>
                     <option value="copy" {% if config.post_processing_mode == "copy" %}selected{% endif %}>Copy (safe across filesystems, uses extra disk space)</option>
                     <option value="move" {% if config.post_processing_mode == "move" %}selected{% endif %}>Move (frees download space, breaks seeding)</option>
                 </select>
@@ -320,7 +320,7 @@
                         {% if let Some(existing) = s.existing_source %}
                         <span class="tag tag-res" title="Accepting will overwrite the existing mapping">conflicts: {{ existing.as_str() }}</span>
                         {% else %}
-                        <span class="form-hint">— (new)</span>
+                        <span class="form-hint">(new)</span>
                         {% endif %}
                     </td>
                     <td>
@@ -563,53 +563,51 @@
     {% endif %}
 
     {# ── Defaults & Threshold (#11.5) ────────────────────────────────
-       Collapses three separate cf-section cards (Install Defaults,
-       Reset Defaults, Minimum Score) into one. Minimum Score and
-       Defaults logically belong together — both are "global CF
-       configuration" knobs that don't live on any individual CF. The
-       empty-state card above also shows an Install Defaults button;
-       this section is the always-available canonical home for the
-       same action. #}
+       Stacks two blocks vertically: Bundled Defaults on top (install
+       and reset actions), Minimum Score below. Originally tried a
+       two-column grid but the Min Score block ended up reading as an
+       orphan on the right; a vertical stack is cleaner and keeps the
+       related Install/Reset copy next to its buttons. #}
     <div class="cf-section">
         <div class="cf-section-header">
             <h3>Defaults &amp; Threshold</h3>
         </div>
+
+        <h4 class="cf-defaults-subtitle">Bundled defaults</h4>
         <p class="cf-section-desc">
-            <strong>Install Defaults</strong> imports the bundled anime-tuned CF set (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit/x265, FLAC/Opus, plus the 8-bit mp4 penalty) — existing names are skipped so repeat clicks are safe.
-            <strong>Reset to Defaults</strong> drops every row whose Source column shows <em>default</em> and re-installs them from the bundled file; manual and imported CFs are untouched.
-            <strong>Minimum Score</strong> is a floor — auto-search drops releases whose summed CF score falls below it; interactive search still shows everything. Leave blank to disable the floor.
+            <strong>Install Defaults</strong> adds the bundled anime-tuned Custom Formats (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit / x265, FLAC / Opus, plus an 8-bit mp4 penalty). Repeat clicks are safe: existing names are skipped.
         </p>
-        <div class="cf-defaults-grid">
-            <div class="cf-defaults-col">
-                <h4 class="cf-defaults-subtitle">Bundled set</h4>
-                <div class="settings-inline-actions">
-                    <form method="post" action="/settings/custom-formats/install-defaults"
-                          data-ryokan-confirm-title="Install bundled defaults"
-                          data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
-                          data-ryokan-confirm-label="Install">
-                        <button type="submit" class="btn btn-primary">Install Defaults</button>
-                    </form>
-                    <form method="post" action="/settings/custom-formats/reset-defaults"
-                          data-ryokan-confirm-title="Reset bundled defaults"
-                          data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
-                          data-ryokan-confirm-label="Reset">
-                        <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
-                    </form>
-                </div>
-            </div>
-            <div class="cf-defaults-col">
-                <h4 class="cf-defaults-subtitle">Score floor</h4>
-                <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form cf-min-score-form">
-                    <div class="form-group" style="margin-bottom: 12px">
-                        <input type="number" name="minimum_score" id="cf_min_score"
-                            value="{{ custom_format_min_score_display }}"
-                            placeholder="(blank = no floor)"
-                            aria-label="Minimum score">
-                    </div>
-                    <button type="submit" class="btn btn-primary">Save Minimum Score</button>
-                </form>
-            </div>
+        <p class="cf-section-desc">
+            <strong>Reset to Defaults</strong> drops every row with Source = <em>default</em> and re-installs the bundled set from scratch. Useful if you edited a default CF and want the original back. Manual and imported CFs are untouched.
+        </p>
+        <div class="settings-inline-actions">
+            <form method="post" action="/settings/custom-formats/install-defaults"
+                  data-ryokan-confirm-title="Install bundled defaults"
+                  data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
+                  data-ryokan-confirm-label="Install">
+                <button type="submit" class="btn btn-primary">Install Defaults</button>
+            </form>
+            <form method="post" action="/settings/custom-formats/reset-defaults"
+                  data-ryokan-confirm-title="Reset bundled defaults"
+                  data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
+                  data-ryokan-confirm-label="Reset">
+                <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
+            </form>
         </div>
+
+        <h4 class="cf-defaults-subtitle" style="margin-top: 24px">Minimum score</h4>
+        <p class="cf-section-desc">
+            Auto-search drops any release whose summed CF score falls below this floor. Interactive search still shows everything. Leave blank to disable the floor entirely.
+        </p>
+        <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form cf-min-score-form">
+            <div class="form-group cf-min-score-group">
+                <input type="number" name="minimum_score" id="cf_min_score"
+                    value="{{ custom_format_min_score_display }}"
+                    placeholder="(blank = no floor)"
+                    aria-label="Minimum score">
+                <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+        </form>
     </div>
 
     {# ── Export (#11.4) ─────────────────────────────────────────────
@@ -623,7 +621,7 @@
         </div>
         <p class="cf-section-desc">
             <strong>Ryokan (native)</strong> keeps every selected CF verbatim (including Ryokan-only specs like <code>Ryokan.SeaDexBestSpecification</code>) and round-trips into another Ryokan instance.
-            <strong>Sonarr-safe</strong> drops selected CFs that contain Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance — dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
+            <strong>Sonarr-safe</strong> drops selected CFs that contain Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance. Dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
         </p>
 
         <div class="cf-export-mode-row">
@@ -751,10 +749,10 @@
         {% else %}
         <form method="post" action="/settings/custom-formats/import" class="settings-form">
             <p class="cf-section-desc" style="margin-top:0">
-                Paste a Sonarr v4 CF export or upload a .json file. Accepts a single object, an array, or <code>{"custom_formats":[…]}</code> wrapper. Every entry runs through the same compiler as the create form — invalid entries are flagged for review before any are written.
+                Paste a Sonarr v4 CF export or upload a .json file. Accepts a single object, an array, or <code>{"custom_formats":[…]}</code> wrapper. Every entry runs through the same compiler as the create form. Invalid entries are flagged for review before any are written.
             </p>
             <div class="form-group">
-                <label for="cf_import_file">Upload JSON file <span class="form-hint">(optional — fills the textarea below)</span></label>
+                <label for="cf_import_file">Upload JSON file <span class="form-hint">(optional; fills the textarea below)</span></label>
                 <input type="file" id="cf_import_file" accept="application/json,.json"
                     onchange="cfImportFilePicked(this)">
             </div>

@@ -208,7 +208,7 @@
             <button class="monitor-all-btn {% if all_monitored %}is-active{% endif %}" type="button"
                 id="btn-monitor-all"
                 onclick="toggleMonitorAll({{ id }}, {{ all_monitored }})"
-                title="{% if all_monitored %}All monitored — click to unmonitor all{% else %}Click to monitor all episodes{% endif %}"
+                title="{% if all_monitored %}All monitored. Click to unmonitor all{% else %}Click to monitor all episodes{% endif %}"
                 aria-label="Toggle monitor all episodes">
                 {% if all_monitored %}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
@@ -253,7 +253,7 @@
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
                         </span>
                         {% else if ep.downloaded %}
-                        <span class="ep-status-icon ep-have" title="Downloaded (post-processing disabled — file not in library root)">
+                        <span class="ep-status-icon ep-have" title="Downloaded (post-processing disabled; file not in library root)">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
                         </span>
                         {% else %}
