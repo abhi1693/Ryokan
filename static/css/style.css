@@ -56,6 +56,9 @@ body {
 @media (max-width: 640px) {
     body {
         font-size: 16px;
+        /* Padding so the fixed bottom tab bar (56px tall + safe-area
+         * inset for iOS home indicator) doesn't overlap page content. */
+        padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
     }
     input[type="text"],
     input[type="search"],
@@ -68,6 +71,15 @@ body {
     textarea {
         font-size: 16px;
     }
+}
+
+/* #20 — Mobile tab bar default (hidden). The actual phone-width swap
+ * (hide .nav-links, show tab bar) lives further down after the
+ * default `.nav-links { display: flex }` rule so the cascade works
+ * out — an earlier media-query rule loses to a later unscoped rule
+ * with equal specificity. */
+.mobile-tabbar {
+    display: none;
 }
 
 /* --- Nav --- */
@@ -110,6 +122,58 @@ body {
 .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
 .nav-links a.active { color: var(--accent); background: rgba(203, 166, 247, 0.08); }
 .nav-logout { color: var(--text-dim) !important; }
+
+/* #20 — Below --bp-phone, hide the top nav's link strip and show
+ * the fixed bottom tab bar declared at the top of the file. This
+ * block must live AFTER the default `.nav-links { display: flex }`
+ * rule above or the cascade reorders it out of effect. */
+@media (max-width: 640px) {
+    .nav-links {
+        display: none;
+    }
+    .mobile-tabbar {
+        display: flex;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 100;
+        background: rgba(15, 15, 19, 0.96);
+        backdrop-filter: blur(10px);
+        border-top: 1px solid var(--border);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    .mobile-tab {
+        flex: 1 1 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        padding: 8px 4px 6px;
+        color: var(--text-dim);
+        text-decoration: none;
+        min-height: 56px;
+        transition: color 0.15s;
+    }
+    .mobile-tab svg {
+        flex-shrink: 0;
+    }
+    .mobile-tab-label {
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.2px;
+    }
+    .mobile-tab.active {
+        color: var(--accent);
+    }
+    .mobile-tab:hover {
+        color: var(--text-bright);
+    }
+    .mobile-tab.active:hover {
+        color: var(--accent);
+    }
+}
 
 /* --- Content --- */
 .content {
