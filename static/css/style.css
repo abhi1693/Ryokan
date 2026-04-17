@@ -3452,6 +3452,69 @@ input[type="file"]::file-selector-button:hover {
     color: var(--green);
 }
 
+/* #20 — Collapse .rss-table rows into stacked "cards" on phone
+ * viewports. Used by the downloads page (queue / history / blocklist)
+ * plus the System RSS decisions and Scheduled Tasks tables. Rather
+ * than dual markup — which would triple the template work for six+
+ * tables — we reshape the existing rows via display: block. The
+ * tradeoff: accessibility tree loses the table semantics at phone
+ * widths; acceptable because the data is still per-row and the
+ * desktop/tablet path keeps the real table.
+ *
+ * Each <tr> becomes a padded card; each <td> becomes a row inside
+ * that card with the first column (usually the name) bolded, and
+ * the action column pushed to a footer row with horizontal flex. */
+@media (max-width: 640px) {
+    .rss-table,
+    .rss-table tbody,
+    .rss-table tr,
+    .rss-table td {
+        display: block;
+        width: 100%;
+    }
+    .rss-table thead {
+        display: none;
+    }
+    .rss-table-wrap {
+        overflow-x: visible;
+    }
+    .rss-table tr {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px 14px;
+        margin-bottom: 10px;
+    }
+    .rss-table td {
+        border: none !important;
+        padding: 3px 0;
+        font-size: 13px;
+    }
+    .rss-table td:first-child {
+        font-weight: 500;
+        color: var(--text-bright);
+        padding: 0 0 8px;
+        border-bottom: 1px solid var(--border) !important;
+        margin-bottom: 8px;
+    }
+    /* Action columns (buttons) sit on their own row flex-wrapped so
+     * play/pause/delete don't collide with the text rows above. */
+    .rss-table td.dl-actions,
+    .rss-table td:last-child {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--border) !important;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    /* Progress bar stays full-width on its own row — it would be
+     * cramped in a columnar stack otherwise. */
+    .dl-progress-wrap {
+        width: 100%;
+    }
+}
+
 .rss-decision-rejected,
 .rss-decision-error {
     background: rgba(211, 125, 125, 0.12);
