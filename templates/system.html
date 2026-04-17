@@ -418,7 +418,12 @@ function forceRunTask(btn, taskKey) {
 </script>
 {% else if tab == "debug" %}
 <div class="debug-panel">
-    <form method="post" action="/system" class="settings-form">
+    {# The form wraps just the two checkbox cards. Maintenance and RSS
+       cards live outside the form since each of their buttons posts to
+       its own endpoint. The Save button at the bottom uses the HTML5
+       `form="debug-settings-form"` attribute to submit the form from
+       outside, so visually it sits at the end of the debug tab. #}
+    <form id="debug-settings-form" method="post" action="/system" class="settings-form">
         <div class="cf-section">
             <div class="cf-section-header">
                 <h3>Provider fallback</h3>
@@ -460,17 +465,13 @@ function forceRunTask(btn, taskKey) {
                 <span class="form-hint">When disabled (default), auto-search and RSS use Nyaa's English-translated category. Enable to search all anime categories instead. Interactive search always searches all categories.</span>
             </div>
         </div>
-
-        <div class="settings-inline-actions" style="margin-top:16px">
-            <button type="submit" class="btn btn-primary">Save Debug Settings</button>
-        </div>
     </form>
 
     <div class="cf-section">
         <div class="cf-section-header">
             <h3>Maintenance actions</h3>
         </div>
-        <p class="cf-section-desc">One-shot operations against the library and metadata cache. Each runs outside the form — they take effect immediately, not on Save.</p>
+        <p class="cf-section-desc">One-shot operations against the library and metadata cache. Each runs immediately — independent of the Save button below.</p>
         <div class="debug-actions-group">
             <div class="debug-action-row">
                 <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
@@ -495,6 +496,10 @@ function forceRunTask(btn, taskKey) {
         <div class="debug-action-row">
             <button type="button" class="btn btn-secondary" onclick="clearRssHistory(this)">Clear grab history</button>
         </div>
+    </div>
+
+    <div class="settings-inline-actions" style="margin-top:16px">
+        <button type="submit" form="debug-settings-form" class="btn btn-primary">Save Debug Settings</button>
     </div>
 </div>
 

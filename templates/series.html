@@ -609,27 +609,36 @@ function showEpisodeDetail(epNum, btn) {
     // Show/hide delete button
     if (deleteBtn) deleteBtn.style.display = onDisk ? '' : 'none';
 
-    if (onDisk && filename) {
-        const mediaRoot = document.getElementById('series-data').dataset.mediaRoot || '';
-        const folderName = document.getElementById('series-data').dataset.folderName || '';
-        const fullPath = [mediaRoot, folderName, filename].filter(Boolean).join('/');
-        body.innerHTML =
-            '<div class="ep-detail-two-col">' +
-            '<div class="ep-detail-row ep-detail-full"><span class="ep-detail-label">File</span><span class="ep-detail-value ep-detail-path">' + escHtml(fullPath) + '</span></div>' +
-            // The Size row starts with the on-disk file size and is
-            // patched in place by `renderGrabHistory` once the grab
-            // history loads: if the latest grab was a batch, the row is
-            // rewritten to show the whole-torrent total with a
-            // "(batch total)" hint. Always rendered (even when size is
-            // empty) so the batch-patch has a stable target to find.
-            '<div class="ep-detail-row"><span class="ep-detail-label">Size</span><span class="ep-detail-value ep-detail-size-value">' + escHtml(size || '—') + '</span></div>' +
-            '</div>' +
-            '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
-    } else {
-        body.innerHTML =
-            '<div class="ep-detail-row"><span class="ep-detail-label">Status</span><span class="ep-detail-value" style="color:var(--text-dim)">Not on disk</span></div>' +
-            '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
-    }
+    // Two stable slots the grab-history loader patches in place once
+    // data arrives: the library-side file path (media_root-relative,
+    // rendered here when on_disk) and the qBit-side content_path
+    // (rendered by renderGrabHistory if the current grab has a
+    // qbit_content_path). Both can coexist when post-processing uses
+    // hardlinks — the user wants to see both; the Sonarr dual-path
+    // split (#14 follow-up) makes this possible.
+    const mediaRoot = document.getElementById('series-data').dataset.mediaRoot || '';
+    const folderName = document.getElementById('series-data').dataset.folderName || '';
+    const libraryPath = (onDisk && filename)
+        ? [mediaRoot, folderName, filename].filter(Boolean).join('/')
+        : '';
+    body.innerHTML =
+        '<div class="ep-detail-two-col">' +
+        (libraryPath
+            ? '<div class="ep-detail-row ep-detail-full"><span class="ep-detail-label">Library path</span><span class="ep-detail-value ep-detail-path">' + escHtml(libraryPath) + '</span></div>'
+            : '<div class="ep-detail-row ep-detail-full" id="ep-detail-library-placeholder"><span class="ep-detail-label">Library path</span><span class="ep-detail-value" style="color:var(--text-dim)">Not in library root</span></div>') +
+        // qBit path row is always rendered as a placeholder; renderGrabHistory
+        // fills it in when the current grab has a qbit_content_path. Hidden
+        // until then so empty state doesn't render for pre-qBit-complete rows.
+        '<div class="ep-detail-row ep-detail-full" id="ep-detail-qbit-path" style="display:none"><span class="ep-detail-label">qBit output path</span><span class="ep-detail-value ep-detail-path" id="ep-detail-qbit-path-value"></span></div>' +
+        // The Size row starts with the on-disk file size and is
+        // patched in place by `renderGrabHistory` once the grab
+        // history loads: if the latest grab was a batch, the row is
+        // rewritten to show the whole-torrent total with a
+        // "(batch total)" hint. Always rendered (even when size is
+        // empty) so the batch-patch has a stable target to find.
+        '<div class="ep-detail-row"><span class="ep-detail-label">Size</span><span class="ep-detail-value ep-detail-size-value">' + escHtml(size || '—') + '</span></div>' +
+        '</div>' +
+        '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
     modal.style.display = 'flex';
 
     // Load grab history
@@ -716,6 +725,21 @@ function renderGrabHistory(entries, epNum) {
         if (sizeValueEl) {
             sizeValueEl.innerHTML = escHtml(formatBytes(current.size_bytes))
                 + ' <span style="color:var(--text-dim);font-size:11px">(batch total)</span>';
+        }
+    }
+
+    // Dual-path display: if the current grab has a qBit content path
+    // (populated by post-processing when qBit reports complete), reveal
+    // the qBit path row in the detail header. Shown whenever present —
+    // with post-proc on + hardlink mode both paths point at the same
+    // bytes but are still worth surfacing so the operator can find the
+    // torrent in qBit without guessing.
+    if (current && current.qbit_content_path) {
+        const qbitRow = document.getElementById('ep-detail-qbit-path');
+        const qbitValue = document.getElementById('ep-detail-qbit-path-value');
+        if (qbitRow && qbitValue) {
+            qbitValue.textContent = current.qbit_content_path;
+            qbitRow.style.display = '';
         }
     }
 }

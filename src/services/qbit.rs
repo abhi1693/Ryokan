@@ -63,6 +63,13 @@ pub struct Torrent {
     pub eta: i64,
     #[serde(default)]
     pub save_path: String,
+    /// Top-level path of the torrent's content (API ≥ 2.6.1). For a
+    /// single-file torrent this is the file itself; for a multi-file
+    /// torrent it's the directory containing the files. Empty on older
+    /// qBit builds — callers should fall back to `save_path` joined
+    /// with the torrent's `name` in that case.
+    #[serde(default)]
+    pub content_path: String,
 }
 
 #[derive(Debug, Deserialize)]

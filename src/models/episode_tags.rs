@@ -77,6 +77,16 @@ pub struct GrabHistoryEntry {
     pub is_batch: bool,
     pub grabbed_at: String,
     pub state: String,
+    /// qBit-side path of the completed torrent (`grabbed_torrents.qbit_content_path`).
+    /// Empty until the post-processing sweep observes the torrent as
+    /// complete. Sourced via a correlated subquery on this row's
+    /// `release_title` + `series_id` so each grab history row shows the
+    /// qBit path of *its* torrent, not the most recent one. Sonarr-parity
+    /// dual-path tracking: this is the "DownloadClientItem.OutputPath"
+    /// side; the `file_name` column above is the library path.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub qbit_content_path: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -259,14 +269,27 @@ pub async fn get_grab_history(
     episode_number: i32,
 ) -> Result<Vec<GrabHistoryEntry>, sqlx::Error> {
     sqlx::query_as::<_, GrabHistoryEntry>(
-        "SELECT id, quality_tag, release_title, release_group,
-                COALESCE(file_name, '') AS file_name,
-                COALESCE(size_bytes, 0) AS size_bytes,
-                COALESCE(is_batch, 0) AS is_batch,
-                grabbed_at, state
-         FROM episode_grab_history
-         WHERE series_id = ? AND episode_number = ?
-         ORDER BY grabbed_at DESC",
+        "SELECT egh.id,
+                egh.quality_tag,
+                egh.release_title,
+                egh.release_group,
+                COALESCE(egh.file_name, '') AS file_name,
+                COALESCE(egh.size_bytes, 0) AS size_bytes,
+                COALESCE(egh.is_batch, 0) AS is_batch,
+                egh.grabbed_at,
+                egh.state,
+                COALESCE((
+                    SELECT gt.qbit_content_path
+                      FROM grabbed_torrents gt
+                     WHERE gt.series_id = egh.series_id
+                       AND gt.torrent_name = egh.release_title
+                       AND COALESCE(gt.qbit_content_path, '') <> ''
+                     ORDER BY gt.grabbed_at DESC
+                     LIMIT 1
+                ), '') AS qbit_content_path
+         FROM episode_grab_history egh
+         WHERE egh.series_id = ? AND egh.episode_number = ?
+         ORDER BY egh.grabbed_at DESC",
     )
     .bind(series_id)
     .bind(episode_number)

@@ -976,6 +976,22 @@ pub async fn run_once(state: &AppState) {
             continue;
         }
 
+        // Stamp qBit's output path on the grab row before we move/
+        // hardlink the file into the library. Done BEFORE import so
+        // that even if import errors out mid-way, the UI still has a
+        // record of where qBit left the file.
+        let qbit_path = if !torrent.content_path.is_empty() {
+            torrent.content_path.clone()
+        } else {
+            torrent.save_path.clone()
+        };
+        let _ = grabbed_torrents::stamp_qbit_content_path(
+            &state.db,
+            grab.id,
+            &qbit_path,
+        )
+        .await;
+
         match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
             Ok(true) => {
                 any_imported = true;
@@ -1070,6 +1086,21 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         if !is_complete(&torrent.state) {
             continue;
         }
+
+        // Stamp the qBit-side path for the episode detail modal. Prefer
+        // content_path (qBit ≥ 2.6.1 — the actual file or container
+        // folder) and fall back to save_path for older qBit builds.
+        let qbit_path = if !torrent.content_path.is_empty() {
+            torrent.content_path.clone()
+        } else {
+            torrent.save_path.clone()
+        };
+        let _ = grabbed_torrents::stamp_qbit_content_path(
+            &state.db,
+            grab.id,
+            &qbit_path,
+        )
+        .await;
 
         // Mark the grab row as imported so we stop polling it and the
         // UI stops treating it as in-flight. Then flip the episode
