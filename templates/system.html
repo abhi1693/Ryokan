@@ -81,7 +81,7 @@
         </thead>
         <tbody id="log-tbody">
             {% for entry in logs %}
-            <tr class="log-row log-level-{{ entry.level }}" data-id="{{ entry.id }}" onclick="toggleLogRowExpand(event)" role="button" tabindex="0">
+            <tr class="log-row log-level-{{ entry.level }}{% if !entry.detail.is_empty() %} log-row-has-detail{% endif %}" data-id="{{ entry.id }}"{% if !entry.detail.is_empty() %} onclick="toggleLogRowExpand(event)" role="button" tabindex="0"{% endif %}>
                 <td class="log-col-time" title="{{ entry.timestamp }}">{{ entry.timestamp }}</td>
                 <td class="log-col-level"><span class="log-badge log-badge-{{ entry.level }}">{{ entry.level }}</span></td>
                 <td class="log-col-cat">{{ entry.category }}</td>
@@ -89,6 +89,7 @@
                     <span class="log-message">{{ entry.message }}</span>
                     {% if !entry.detail.is_empty() %}
                     <span class="log-detail" title="{{ entry.detail }}">{{ entry.detail }}</span>
+                    <span class="log-expand-hint" aria-hidden="true">▾</span>
                     {% endif %}
                 </td>
             </tr>
@@ -169,19 +170,22 @@ function pollLogs() {
             for (let i = entries.length - 1; i >= 0; i--) {
                 const e = entries[i];
                 if (e.id > latestId) latestId = e.id;
+                const hasDetail = !!(e.detail && e.detail.length);
                 const tr = document.createElement('tr');
-                tr.className = `log-row log-level-${e.level} log-row-new`;
+                tr.className = `log-row log-level-${e.level} log-row-new${hasDetail ? ' log-row-has-detail' : ''}`;
                 tr.dataset.id = e.id;
-                tr.setAttribute('role', 'button');
-                tr.setAttribute('tabindex', '0');
-                tr.onclick = toggleLogRowExpand;
+                if (hasDetail) {
+                    tr.setAttribute('role', 'button');
+                    tr.setAttribute('tabindex', '0');
+                    tr.onclick = toggleLogRowExpand;
+                }
                 tr.innerHTML = `
                     <td class="log-col-time" title="${escapeHtml(e.timestamp)}">${escapeHtml(e.timestamp)}</td>
                     <td class="log-col-level"><span class="log-badge log-badge-${e.level}">${escapeHtml(e.level)}</span></td>
                     <td class="log-col-cat">${escapeHtml(e.category)}</td>
                     <td class="log-col-msg">
                         <span class="log-message">${escapeHtml(e.message)}</span>
-                        ${e.detail ? `<span class="log-detail" title="${escapeHtml(e.detail)}">${escapeHtml(e.detail)}</span>` : ''}
+                        ${hasDetail ? `<span class="log-detail" title="${escapeHtml(e.detail)}">${escapeHtml(e.detail)}</span><span class="log-expand-hint" aria-hidden="true">▾</span>` : ''}
                     </td>`;
                 tbody.insertBefore(tr, tbody.firstChild);
                 // Remove new-row highlight after animation.

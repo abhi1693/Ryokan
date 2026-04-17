@@ -300,6 +300,7 @@
         {% if !suggestions.is_empty() %}
         <h3 class="settings-subheading">Suggested Mappings ({{ suggestions.len() }})</h3>
         <p class="form-hint">Inferred from your manual classification overrides. When you've pinned multiple episodes from the same release group to the same source, Ryokan surfaces it here so you can teach the identity table.</p>
+        <div class="table-scroll-wrap">
         <table class="group-source-table">
             <thead>
                 <tr>
@@ -336,6 +337,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
         {% endif %}
 
         <h3 class="settings-subheading">Add or Update Group</h3>
@@ -368,6 +370,7 @@
         </form>
 
         <h3 class="settings-subheading">Current Entries ({{ groups.len() }})</h3>
+        <div class="table-scroll-wrap">
         <table class="group-source-table">
             <thead>
                 <tr>
@@ -397,6 +400,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </fieldset>
 </div>
 {% endif %}
@@ -641,6 +645,7 @@
                 <input type="hidden" name="decisions" id="cf_import_resolve_decisions" value="">
                 <input type="hidden" name="renames" id="cf_import_resolve_renames" value="">
                 {% if !review.collisions.is_empty() %}
+                <div class="table-scroll-wrap">
                 <table class="group-source-table cf-table">
                     <thead>
                         <tr>
@@ -665,6 +670,7 @@
                         {% endfor %}
                     </tbody>
                 </table>
+                </div>
                 {% endif %}
                 <div class="settings-inline-actions" style="margin-top: 16px;">
                     <button type="submit" class="btn btn-primary">Apply &amp; Import</button>
