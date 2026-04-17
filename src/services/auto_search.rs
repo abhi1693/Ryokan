@@ -128,8 +128,8 @@ pub async fn find_all_for_target(
     _allow_batch: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
+    let queries = build_queries_from_aliases(&aliases, target);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -258,7 +258,6 @@ pub async fn find_all_for_target(
         );
         // No CF floor on the interactive path — see comment above.
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -266,9 +265,7 @@ pub async fn find_all_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             i32::MIN,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -397,7 +394,7 @@ pub async fn collect_scored_batches_for_target(
 
     // Standard query sweep — picks up any batches that happen to surface
     // on Nyaa page 1 alongside the singles.
-    let queries = build_queries(detail, target);
+    let queries = build_queries_from_aliases(&aliases, target);
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
 
     // Batch-targeted probes — the important addition for this function.
@@ -463,7 +460,6 @@ pub async fn collect_scored_batches_for_target(
             cutoff_resolution_enum,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -471,9 +467,7 @@ pub async fn collect_scored_batches_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             config.custom_format_minimum_score,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -502,8 +496,8 @@ async fn collect_scored_for_target(
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
+    let queries = build_queries_from_aliases(&aliases, target);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -669,7 +663,6 @@ async fn collect_scored_for_target(
             cutoff_resolution_enum,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -677,9 +670,7 @@ async fn collect_scored_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             config.custom_format_minimum_score,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -1068,10 +1059,6 @@ pub fn target_label(target: &SearchTarget) -> String {
         SearchTarget::Single => "Single".to_string(),
         SearchTarget::Episode(ep) => format!("Episode {}", ep),
     }
-}
-
-fn build_queries(detail: &AnimeDetail, target: &SearchTarget) -> Vec<String> {
-    build_queries_from_aliases(&collect_aliases(detail), target)
 }
 
 fn build_queries_from_aliases(aliases: &[String], target: &SearchTarget) -> Vec<String> {
@@ -1728,13 +1715,15 @@ fn display_title(detail: &AnimeDetail) -> &str {
 /// `SeaDexBestSpecification` — the user has taken ownership of that
 /// number and double-counting would be a silent regression.
 ///
-/// On the way through, emits one `LogCategory::Scoring` debug row per
-/// candidate with a CF-aware breakdown line (plan §6.3). Dropped
-/// candidates are logged too so the user can introspect "why did this
-/// candidate get cut from the results" in addition to "why did X win."
+/// On the way through, emits one tracing::debug! line per candidate with
+/// a CF-aware breakdown (plan §6.3). Operators who want to introspect
+/// "why did X win / Y lose" can set
+/// `RUST_LOG=ryokan::auto_search::scoring=debug`. The previous code
+/// wrote to the DB log table here, but at 50-200 candidates per search
+/// that was a sustained INSERT stream the `logs` UI flooded with rather
+/// than aided.
 #[allow(clippy::too_many_arguments)]
-async fn apply_cf_seadex_overlay(
-    db: &SqlitePool,
+fn apply_cf_seadex_overlay(
     base: i32,
     result: &SearchResult,
     classification: &ClassificationResult,
@@ -1771,7 +1760,17 @@ async fn apply_cf_seadex_overlay(
     let final_score = base.saturating_add(cf).saturating_add(seadex_bonus);
 
     let detail = format_scoring_detail(base, cf, &breakdown, seadex_bonus, final_score, below_floor);
-    logger::debug(db, LogCategory::Scoring, &result.title, &detail).await;
+    // tracing::debug! instead of logger::debug — 50-200 candidates per
+    // search × one debug row each meant a sustained INSERT stream into
+    // the `logs` table on every auto-search. Terminal/container logs
+    // are the right surface for this granularity of detail; operators
+    // who want it can set RUST_LOG=ryokan::auto_search=debug.
+    tracing::debug!(
+        target: "ryokan::auto_search::scoring",
+        title = %result.title,
+        "{}",
+        detail
+    );
 
     if below_floor {
         None
@@ -5083,6 +5082,7 @@ mod tests {
 
     fn pinned_720p_web_tag(manual_override: bool) -> crate::models::episode_tags::EpisodeQualityTag {
         crate::models::episode_tags::EpisodeQualityTag {
+            episode_number: 1,
             quality_tag: "WEBDL-720p".to_string(),
             release_title: "[Group] Show - 01 [WEB-DL 720p].mkv".to_string(),
             release_group: "Group".to_string(),

@@ -6,7 +6,7 @@ use crate::services::source::ClassificationResult;
 /// to render a row: series identity for the link, episode number, and the
 /// current (uncertain) classification for context. Produced by
 /// [`get_needs_review`].
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
 pub struct NeedsReviewEntry {
     pub series_id: i64,
     pub series_anilist_id: i64,
@@ -34,7 +34,7 @@ pub struct NeedsReviewEntry {
 pub async fn get_needs_review(
     db: &SqlitePool,
 ) -> Result<Vec<NeedsReviewEntry>, sqlx::Error> {
-    let rows = sqlx::query(
+    sqlx::query_as::<_, NeedsReviewEntry>(
         "SELECT t.series_id, t.episode_number, t.quality_tag, t.release_title, t.release_group,
                 t.source, t.resolution, t.classification_confidence,
                 COALESCE(t.classification_evidence, '') AS classification_evidence,
@@ -48,31 +48,10 @@ pub async fn get_needs_review(
          ORDER BY s.title_english, t.episode_number",
     )
     .fetch_all(db)
-    .await?;
-
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let confidence: f64 = row.get("classification_confidence");
-            NeedsReviewEntry {
-                series_id: row.get("series_id"),
-                series_anilist_id: row.get("series_anilist_id"),
-                series_title: row.get("series_title"),
-                cover_url: row.get("cover_url"),
-                episode_number: row.get("episode_number"),
-                quality_tag: row.get("quality_tag"),
-                release_title: row.get("release_title"),
-                release_group: row.get("release_group"),
-                source: row.get("source"),
-                resolution: row.get("resolution"),
-                classification_confidence: confidence as f32,
-                classification_evidence: row.get("classification_evidence"),
-            }
-        })
-        .collect())
+    .await
 }
 
-#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema, sqlx::FromRow)]
 pub struct GrabHistoryEntry {
     pub id: i64,
     pub quality_tag: String,
@@ -100,9 +79,14 @@ pub struct GrabHistoryEntry {
     pub state: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 #[allow(dead_code)]
 pub struct EpisodeQualityTag {
+    /// Convenience for callers that hold a `Vec<EpisodeQualityTag>` and
+    /// want to know which episode a row belongs to without rebuilding
+    /// a HashMap. `get_for_series` still returns a HashMap keyed by
+    /// this value for the in-memory lookup hot path.
+    pub episode_number: i32,
     pub quality_tag: String,
     pub release_title: String,
     pub release_group: String,
@@ -249,7 +233,7 @@ pub async fn get_for_series(
     db: &SqlitePool,
     series_id: i64,
 ) -> Result<std::collections::HashMap<i32, EpisodeQualityTag>, sqlx::Error> {
-    let rows = sqlx::query(
+    let rows: Vec<EpisodeQualityTag> = sqlx::query_as(
         "SELECT episode_number, quality_tag, release_title, release_group, state,
                 source, resolution, is_remux,
                 COALESCE(is_bdmv, 0) AS is_bdmv,
@@ -263,34 +247,7 @@ pub async fn get_for_series(
     .fetch_all(db)
     .await?;
 
-    let mut map = std::collections::HashMap::new();
-    for row in rows {
-        let ep_num: i32 = row.get("episode_number");
-        let is_remux_i: i64 = row.get("is_remux");
-        let is_bdmv_i: i64 = row.get("is_bdmv");
-        let needs_review_i: i64 = row.get("needs_review");
-        let manual_override_i: i64 = row.get("manual_override");
-        let confidence: f64 = row.get("classification_confidence");
-        map.insert(
-            ep_num,
-            EpisodeQualityTag {
-                quality_tag: row.get("quality_tag"),
-                release_title: row.get("release_title"),
-                release_group: row.get("release_group"),
-                state: row.get("state"),
-                source: row.get("source"),
-                resolution: row.get("resolution"),
-                is_remux: is_remux_i != 0,
-                is_bdmv: is_bdmv_i != 0,
-                web_kind: row.get("web_kind"),
-                classification_confidence: confidence as f32,
-                needs_review: needs_review_i != 0,
-                manual_override: manual_override_i != 0,
-                classification_evidence: row.get("classification_evidence"),
-            },
-        );
-    }
-    Ok(map)
+    Ok(rows.into_iter().map(|t| (t.episode_number, t)).collect())
 }
 
 /// Get grab history for a specific episode, newest first. No LIMIT — the
@@ -301,7 +258,7 @@ pub async fn get_grab_history(
     series_id: i64,
     episode_number: i32,
 ) -> Result<Vec<GrabHistoryEntry>, sqlx::Error> {
-    let rows = sqlx::query(
+    sqlx::query_as::<_, GrabHistoryEntry>(
         "SELECT id, quality_tag, release_title, release_group,
                 COALESCE(file_name, '') AS file_name,
                 COALESCE(size_bytes, 0) AS size_bytes,
@@ -314,25 +271,7 @@ pub async fn get_grab_history(
     .bind(series_id)
     .bind(episode_number)
     .fetch_all(db)
-    .await?;
-
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let is_batch_i: i64 = row.get("is_batch");
-            GrabHistoryEntry {
-                id: row.get("id"),
-                quality_tag: row.get("quality_tag"),
-                release_title: row.get("release_title"),
-                release_group: row.get("release_group"),
-                file_name: row.get("file_name"),
-                size_bytes: row.get("size_bytes"),
-                is_batch: is_batch_i != 0,
-                grabbed_at: row.get("grabbed_at"),
-                state: row.get("state"),
-            }
-        })
-        .collect())
+    .await
 }
 
 /// Overwrite the structured classification columns on an existing tag row.
@@ -498,21 +437,39 @@ pub async fn set_manual_override(
 
 /// Mark episode quality tags as "completed" for the given episodes of a series.
 /// Called by post-processing after a torrent is successfully imported.
+///
+/// Single UPDATE with `episode_number IN (?, ?, ...)` instead of one
+/// query per episode — a batch import of a 24-episode BD pack used to
+/// fire 24 round-trips here, all of which serialise behind SQLite's
+/// single-writer lock.
 pub async fn mark_completed(
     db: &SqlitePool,
     series_id: i64,
     episode_numbers: &[i32],
 ) -> Result<(), sqlx::Error> {
-    for &ep in episode_numbers {
-        sqlx::query(
-            "UPDATE episode_quality_tags SET state = 'completed', updated_at = CURRENT_TIMESTAMP
-             WHERE series_id = ? AND episode_number = ? AND state = 'grabbed'",
-        )
-        .bind(series_id)
-        .bind(ep)
-        .execute(db)
-        .await?;
+    if episode_numbers.is_empty() {
+        return Ok(());
     }
+    // Build the IN-list placeholders at runtime; episode numbers are
+    // i32s from trusted upstream parsing, no injection surface. sqlx
+    // doesn't expand slice bindings on SQLite, so we splice the
+    // placeholder count into the SQL and bind each value.
+    let placeholders = std::iter::repeat_n("?", episode_numbers.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "UPDATE episode_quality_tags
+         SET state = 'completed', updated_at = CURRENT_TIMESTAMP
+         WHERE series_id = ?
+           AND state = 'grabbed'
+           AND episode_number IN ({})",
+        placeholders
+    );
+    let mut q = sqlx::query(&sql).bind(series_id);
+    for &ep in episode_numbers {
+        q = q.bind(ep);
+    }
+    q.execute(db).await?;
     Ok(())
 }
 

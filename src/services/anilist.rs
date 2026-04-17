@@ -36,6 +36,15 @@ struct CacheEntry {
 static DETAIL_CACHE: LazyLock<RwLock<HashMap<i64, CacheEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Shared reqwest client. Each `reqwest::Client::new()` call previously
+/// rebuilt the TLS context and connection pool from scratch — wasteful
+/// across the search / detail / fallback paths that all hit
+/// graphql.anilist.co. Using a single Lazy client lets the pool reuse
+/// connections across calls. No timeout configured here — callers own
+/// retry/cooldown semantics that interact in non-obvious ways with a
+/// blanket per-request timeout.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+
 type SearchCacheEntry = (Instant, Vec<AnimeEntry>);
 
 /// Search result cache, keyed on (provider-mode, normalized query).
@@ -492,7 +501,7 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
         "variables": { "search": query }
     });
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let resp = match client
         .post(ANILIST_API)
         .header("User-Agent", "Ryokan/0.1")
@@ -701,7 +710,7 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
         "variables": { "idMal": mal_id }
     });
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let resp = client
         .post(ANILIST_API)
         .header("User-Agent", "Ryokan/0.1")
@@ -983,7 +992,7 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
     // window and burst limits.
     throttle_before_anilist_request().await;
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let resp = client
         .post(ANILIST_API)
         .header("User-Agent", "Ryokan/0.1")

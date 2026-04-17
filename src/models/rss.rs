@@ -109,12 +109,24 @@ pub async fn finish_run(
     Ok(())
 }
 
-pub async fn item_was_grabbed(db: &SqlitePool, item_key: &str) -> Result<bool, sqlx::Error> {
-    let row: Option<(i64,)> = sqlx::query_as("SELECT id FROM rss_seen WHERE item_key = ? AND decision = 'grabbed'")
-        .bind(item_key)
-        .fetch_optional(db)
-        .await?;
-    Ok(row.is_some())
+/// Returns every item_key in `rss_seen` with `decision = 'grabbed'`
+/// as a `HashSet` so callers can do membership checks in O(1) without
+/// a DB round-trip per lookup. The hourly cleanup task prunes rows
+/// older than 30 days, so the working set stays bounded for any active
+/// install.
+///
+/// Used by the RSS sync loop, which previously did one SELECT per
+/// feed item — Nyaa returns ~100 items per feed × multiple categories,
+/// so a single sync was ~100+ sequential round-trips against the same
+/// table before any other work happened.
+pub async fn grabbed_item_keys(
+    db: &SqlitePool,
+) -> Result<std::collections::HashSet<String>, sqlx::Error> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT item_key FROM rss_seen WHERE decision = 'grabbed'")
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().map(|(k,)| k).collect())
 }
 
 /// Payload for `record_decision`. Named fields instead of six `&str`s

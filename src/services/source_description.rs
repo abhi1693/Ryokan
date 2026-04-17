@@ -37,9 +37,9 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::models::nyaa_description_cache;
-use crate::services::source::{Source, SourceEvidence};
+use crate::services::source::{Origin, Source, SourceEvidence};
 
-const ORIGIN: &str = "description";
+const ORIGIN: Origin = Origin::Description;
 
 /// Minimum spacing between live Nyaa fetches. Nyaa doesn't publish a rate
 /// limit, but an unsolicited-scrape-looking pattern gets IPs tarpitted fast.

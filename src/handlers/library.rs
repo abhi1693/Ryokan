@@ -472,6 +472,41 @@ async fn reconcile_all_fallback_entries(db: &SqlitePool) -> ReconcileReport {
     report
 }
 
+/// Fill each item's cover URL with the cached `/media/art/...` URL when
+/// one exists for `series-<id>-cover`. Wraps the build-cache-keys →
+/// batch-fetch → zip-write pattern shared by `index` and
+/// `needs_review_page` — both used to fire one
+/// `artwork::cached_or_source_url` per series, which on a 200-series
+/// library was 200 sequential SQLite queries before the topbar even
+/// rendered.
+async fn populate_series_cover_urls<T, S, M>(
+    db: &sqlx::SqlitePool,
+    items: &mut [T],
+    series_id_of: S,
+    set_cover: M,
+) where
+    S: Fn(&T) -> i64,
+    M: Fn(&mut T, String),
+{
+    if items.is_empty() {
+        return;
+    }
+    let cache_keys: Vec<String> = items
+        .iter()
+        .map(|item| format!("series-{}-cover", series_id_of(item)))
+        .collect();
+    let Ok(url_map) =
+        crate::models::artwork_cache::get_local_urls_batch(db, &cache_keys).await
+    else {
+        return;
+    };
+    for (item, key) in items.iter_mut().zip(cache_keys.iter()) {
+        if let Some(url) = url_map.get(key) {
+            set_cover(item, url.clone());
+        }
+    }
+}
+
 pub async fn index(State(state): State<AppState>) -> Html<String> {
     // Fetch the library list and config concurrently — they're independent
     // and each was previously serialized on the other. `get_all` is the
@@ -484,25 +519,13 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
     let mut library = library_res.unwrap_or_default();
     let cfg = cfg_res.ok().flatten();
 
-    // Batch the cover-art lookups into a single SQL round trip. The old
-    // code fired one `artwork::cached_or_source_url` per series — a 200-
-    // series library meant 200 sequential SQLite queries just to render
-    // the topbar's Library tab.
-    if !library.is_empty() {
-        let cache_keys: Vec<String> = library
-            .iter()
-            .map(|item| format!("series-{}-cover", item.id))
-            .collect();
-        if let Ok(url_map) =
-            crate::models::artwork_cache::get_local_urls_batch(&state.db, &cache_keys).await
-        {
-            for (item, key) in library.iter_mut().zip(cache_keys.iter()) {
-                if let Some(url) = url_map.get(key) {
-                    item.cover_url = url.clone();
-                }
-            }
-        }
-    }
+    populate_series_cover_urls(
+        &state.db,
+        &mut library,
+        |item| item.id,
+        |item, url| item.cover_url = url,
+    )
+    .await;
 
     let template = IndexTemplate {
         page: "library".to_string(),
@@ -518,24 +541,13 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
 pub async fn needs_review_page(State(state): State<AppState>) -> Html<String> {
     let mut entries = episode_tags::get_needs_review(&state.db).await.unwrap_or_default();
 
-    // Same batch-artwork treatment as `index` — the previous serial per-
-    // entry lookup was one of the reasons this page felt slow when the
-    // backlog was large.
-    if !entries.is_empty() {
-        let cache_keys: Vec<String> = entries
-            .iter()
-            .map(|e| format!("series-{}-cover", e.series_id))
-            .collect();
-        if let Ok(url_map) =
-            crate::models::artwork_cache::get_local_urls_batch(&state.db, &cache_keys).await
-        {
-            for (entry, key) in entries.iter_mut().zip(cache_keys.iter()) {
-                if let Some(url) = url_map.get(key) {
-                    entry.cover_url = url.clone();
-                }
-            }
-        }
-    }
+    populate_series_cover_urls(
+        &state.db,
+        &mut entries,
+        |e| e.series_id,
+        |entry, url| entry.cover_url = url,
+    )
+    .await;
 
     let template = NeedsReviewTemplate {
         page: "library".to_string(),
