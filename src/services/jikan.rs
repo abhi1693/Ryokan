@@ -775,9 +775,17 @@ async fn cache_episodes(
     mal_id: i64,
     episodes: &HashMap<i32, EpisodeInfo>,
 ) -> Result<(), sqlx::Error> {
+    // Wrap DELETE + N INSERTs in one transaction. SQLite's WAL only
+    // fsyncs at commit, so a 1100-episode One Piece refresh becomes
+    // one fsync instead of 1101 — orders-of-magnitude difference on
+    // any non-tmpfs disk. As a bonus the writer lock is held once and
+    // released once, which keeps concurrent readers (the rest of the
+    // app) from being chunked into 1100 tiny windows.
+    let mut tx = db.begin().await?;
+
     sqlx::query("DELETE FROM episode_cache WHERE mal_id = ?")
         .bind(mal_id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
 
     if episodes.is_empty() {
@@ -786,8 +794,9 @@ async fn cache_episodes(
         )
         .bind(mal_id)
         .bind(NEGATIVE_CACHE_SENTINEL)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         return Ok(());
     }
 
@@ -799,10 +808,11 @@ async fn cache_episodes(
         .bind(num)
         .bind(&info.title)
         .bind(&info.aired)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     }
 
+    tx.commit().await?;
     Ok(())
 }
 
