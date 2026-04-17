@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use crate::services::html::sanitize_rich_description;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 use crate::services::jikan;
@@ -61,6 +61,214 @@ static SEARCH_CACHE: LazyLock<StdMutex<HashMap<String, SearchCacheEntry>>> =
 static ANILIST_COOLDOWN_UNTIL: LazyLock<StdMutex<Option<Instant>>> =
     LazyLock::new(|| StdMutex::new(None));
 
+/// Safety margin added to AL's `Retry-After` value (or to the default
+/// cooldown when no Retry-After is present). Without this, waiting
+/// exactly the duration AL hands back consistently lands the next
+/// request at the window boundary and trips a fresh 429 — observed
+/// live during a sweep where the second 429 followed the first by
+/// roughly the original Retry-After value. 2s clears the boundary in
+/// practice without meaningfully extending sweep time.
+const COOLDOWN_SAFETY_MARGIN: Duration = Duration::from_secs(2);
+
+/// Below this many `X-RateLimit-Remaining`, switch from "minimum
+/// inter-request spacing" to "wait until window reset." Picked low so
+/// we mostly run at full headroom-driven speed and only slow down when
+/// we're about to bump the cap.
+const REMAINING_HEADROOM_THRESHOLD: u32 = 3;
+
+/// Fallback per-minute limit used when AL hasn't told us its current
+/// limit yet. Conservative — matches the documented "currently degraded
+/// to 30 req/min" state. Once we see `X-RateLimit-Limit` we use that
+/// instead, so during normal AL operation (90 req/min) we adapt up.
+const ANILIST_LIMIT_FALLBACK: u32 = 30;
+
+/// Per-response snapshot of AniList's rate-limit headers, used by
+/// `throttle_before_anilist_request` to pace the next call without
+/// guessing.
+#[derive(Clone, Copy)]
+struct RateLimitState {
+    /// `X-RateLimit-Limit` — total requests in the current window.
+    limit: u32,
+    /// `X-RateLimit-Remaining` from the latest response.
+    remaining: u32,
+    /// `X-RateLimit-Reset` translated from a Unix timestamp into our
+    /// monotonic clock at recording time. None when the header was
+    /// absent, which AL only sends on 429s in normal operation.
+    reset_at: Option<Instant>,
+}
+
+static RATE_LIMIT_STATE: LazyLock<StdMutex<Option<RateLimitState>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+/// Last time we sent a request to AniList. Used to enforce a minimum
+/// inter-request spacing derived from the current per-minute limit, so
+/// a relation walk that fires N back-to-back AL calls can't burst over
+/// AL's burst limiter (which is documented but not header-exposed).
+static LAST_AL_REQUEST: LazyLock<StdMutex<Option<Instant>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+/// Compute the minimum spacing between AL requests for a given
+/// per-minute limit. 60s / limit, with a 10% safety pad on top so that
+/// clock drift / measurement noise can't accidentally push us above
+/// the cap. Returns a defensive 2s when limit is 0 (shouldn't happen).
+fn min_inter_request(limit: u32) -> Duration {
+    if limit == 0 {
+        return Duration::from_secs(2);
+    }
+    Duration::from_millis((66_000 / limit as u64).max(100))
+}
+
+/// Capture rate-limit headers from the latest AL response. Called for
+/// every AL response (success or error) so the next throttle decision
+/// is based on AL's fresh count rather than our stale belief. Headers
+/// AL doesn't send (e.g. `X-RateLimit-Reset` outside of throttling)
+/// just leave the corresponding field at None / unchanged.
+fn record_rate_limit_headers(headers: &reqwest::header::HeaderMap) {
+    let parse = |name: &str| -> Option<u64> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+
+    let limit = parse("x-ratelimit-limit").map(|v| v as u32);
+    let remaining = parse("x-ratelimit-remaining").map(|v| v as u32);
+    let reset_unix = parse("x-ratelimit-reset");
+
+    // If AL didn't send anything useful, leave existing state alone.
+    if limit.is_none() && remaining.is_none() && reset_unix.is_none() {
+        return;
+    }
+
+    let reset_at = reset_unix.and_then(|reset| {
+        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        if reset > now_unix {
+            Some(Instant::now() + Duration::from_secs(reset - now_unix))
+        } else {
+            None
+        }
+    });
+
+    if let Ok(mut guard) = RATE_LIMIT_STATE.lock() {
+        let prev = *guard;
+        *guard = Some(RateLimitState {
+            limit: limit.or(prev.map(|s| s.limit)).unwrap_or(ANILIST_LIMIT_FALLBACK),
+            remaining: remaining.or(prev.map(|s| s.remaining)).unwrap_or(0),
+            // Keep the prior reset_at if AL didn't send one this time —
+            // it's the most recent ground truth we have for when the
+            // window flips.
+            reset_at: reset_at.or(prev.and_then(|s| s.reset_at)),
+        });
+    }
+}
+
+/// Pure throttle decision. Returns how long to sleep before the next
+/// AniList request, given the latest rate-limit snapshot, the
+/// timestamp of our last request (if any), and the current instant.
+/// Extracted from `throttle_before_anilist_request` so the branching
+/// is unit-testable without `tokio::time::sleep`.
+///
+/// Two strategies, in priority order:
+///   - **Window-flip** (`remaining <= REMAINING_HEADROOM_THRESHOLD`
+///     and `reset_at` is in the future): wait until the next window
+///     opens. Returns the larger of (window-wait, burst-guard) so we
+///     don't accidentally undercut burst spacing.
+///   - **Burst guard** (always): don't exceed `60s / limit` between
+///     consecutive requests. Returns 0 if the last request was long
+///     enough ago.
+fn decide_wait(
+    state: Option<RateLimitState>,
+    last_request: Option<Instant>,
+    now: Instant,
+) -> Duration {
+    let limit = state.map(|s| s.limit).unwrap_or(ANILIST_LIMIT_FALLBACK);
+    let min_spacing = min_inter_request(limit);
+
+    let burst_wait = match last_request {
+        Some(last) => {
+            let elapsed = now.saturating_duration_since(last);
+            min_spacing.saturating_sub(elapsed)
+        }
+        None => Duration::ZERO,
+    };
+
+    if let Some(s) = state
+        && s.remaining <= REMAINING_HEADROOM_THRESHOLD
+        && let Some(reset_at) = s.reset_at
+        && reset_at > now
+    {
+        let window_wait = reset_at.saturating_duration_since(now) + Duration::from_secs(1);
+        return window_wait.max(burst_wait);
+    }
+
+    burst_wait
+}
+
+/// Pace the next AniList request to stay inside the documented window
+/// and burst limits, using the latest rate-limit headers as the source
+/// of truth. Without this, a relation walk burst-fires N calls in
+/// seconds — even when N is well under the per-minute limit, AL's
+/// burst limiter trips and we eat a full minute of cooldown for what
+/// would've been a 1-second pause if we'd just paced ourselves.
+async fn throttle_before_anilist_request() {
+    let snap = RATE_LIMIT_STATE.lock().ok().and_then(|g| *g);
+    let last = LAST_AL_REQUEST.lock().ok().and_then(|g| *g);
+    let wait = decide_wait(snap, last, Instant::now());
+
+    if !wait.is_zero() {
+        // Only log the headroom-low case — burst-guard waits are
+        // sub-second and dominate normal operation, no point spamming.
+        if let Some(s) = snap
+            && s.remaining <= REMAINING_HEADROOM_THRESHOLD
+            && wait > Duration::from_secs(1)
+        {
+            tracing::info!(
+                target: "ryokan::anilist",
+                remaining = s.remaining,
+                wait_secs = wait.as_secs(),
+                "AniList rate-limit headroom low; pausing until window resets"
+            );
+        }
+        tokio::time::sleep(wait).await;
+    }
+
+    if let Ok(mut guard) = LAST_AL_REQUEST.lock() {
+        *guard = Some(Instant::now());
+    }
+}
+
+/// Compute cooldown duration on a 429 from AL's headers, preferring
+/// `X-RateLimit-Reset` (absolute timestamp, the most precise signal AL
+/// gives us) over `Retry-After` (relative seconds), with the configured
+/// default as the last fallback. The result is capped and padded the
+/// same way as the default-only path.
+fn cooldown_from_headers(
+    headers: &reqwest::header::HeaderMap,
+    default_dur: Duration,
+) -> Duration {
+    let parse_u64 = |name: &str| -> Option<u64> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+
+    if let Some(reset_unix) = parse_u64("x-ratelimit-reset") {
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if reset_unix > now_unix {
+            let raw = Duration::from_secs(reset_unix - now_unix).min(ANILIST_COOLDOWN_MAX);
+            return raw + COOLDOWN_SAFETY_MARGIN;
+        }
+    }
+
+    let retry_after = parse_u64("retry-after");
+    compute_cooldown_duration(retry_after, default_dur)
+}
+
 fn normalize_search_key(force_fallback: bool, query: &str) -> String {
     let folded: String = query
         .split_whitespace()
@@ -96,7 +304,7 @@ fn search_cache_put(key: String, results: Vec<AnimeEntry>) {
     }
 }
 
-fn anilist_cooldown_active() -> bool {
+pub fn anilist_cooldown_active() -> bool {
     if let Ok(guard) = ANILIST_COOLDOWN_UNTIL.lock()
         && let Some(until) = *guard {
             return Instant::now() < until;
@@ -104,11 +312,127 @@ fn anilist_cooldown_active() -> bool {
     false
 }
 
-fn set_anilist_cooldown(retry_after_secs: Option<u64>, default_dur: Duration) {
-    let dur = retry_after_secs
+/// Single source of truth for "this AniList error means we're being
+/// throttled / blocked." Callers use this to decide whether to
+/// defer-and-retry (preserve AL fidelity) vs. treat AL as down and fall
+/// back to MAL.
+///
+/// All errors classified as throttle by `classify_anilist_failure` carry
+/// the `AniList rate-limited` prefix; the in-process cooldown short-circuit
+/// uses `cooldown active`. Non-throttle failures (5xx, 403 with
+/// non-Cloudflare body, parse errors) deliberately do *not* match — those
+/// are "AL is genuinely down" and fallback callers should substitute MAL.
+pub fn is_rate_limit_error(err: &str) -> bool {
+    err.contains("AniList rate-limited") || err.contains("cooldown active")
+}
+
+/// Classification of an AniList failure response. Drives both the
+/// error-string wording and whether `set_anilist_cooldown` is called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AniListFailureKind {
+    /// Throttle: 429, Cloudflare challenge, or GraphQL-level "too many
+    /// requests". Caller should defer-and-retry; do not substitute MAL.
+    RateLimited,
+    /// AL itself is unhealthy: 5xx, body parse failure, or a 403 whose
+    /// body doesn't look like Cloudflare (suggests an AL-side problem
+    /// rather than upstream throttling). Caller may fall back to MAL.
+    Unavailable,
+    /// AL responded successfully but the requested entity doesn't exist.
+    NotFound,
+}
+
+/// Inspect status + body to figure out *why* AniList rejected the call.
+/// Status alone is ambiguous (especially 403 — Cloudflare vs. AL itself
+/// vs. auth issue), so we also look for body markers. Returns the kind
+/// plus a tagged error string the caller can return to its consumers;
+/// downstream code matches on the tag prefix (`AniList rate-limited` /
+/// `AniList unavailable` / `AniList not found`) rather than HTTP codes,
+/// so adding new wordings doesn't break the policy.
+fn classify_anilist_failure(
+    status: reqwest::StatusCode,
+    body_text: &str,
+) -> (AniListFailureKind, String) {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body_text).ok();
+    let gql_msg = parsed.as_ref().and_then(extract_graphql_error);
+
+    // Cloudflare HTML challenge — distinctive body markers, can come back
+    // with any 4xx/5xx status. Treat as throttle.
+    let lower = body_text.to_ascii_lowercase();
+    let is_cloudflare = lower.contains("cf-ray")
+        || lower.contains("just a moment")
+        || lower.contains("attention required")
+        || (lower.contains("cloudflare") && lower.contains("<html"));
+    if is_cloudflare {
+        return (
+            AniListFailureKind::RateLimited,
+            format!("AniList rate-limited: Cloudflare challenge (HTTP {})", status),
+        );
+    }
+
+    // GraphQL-level throttle hint, regardless of status.
+    if let Some(msg) = &gql_msg {
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("too many requests")
+            || lower.contains("rate limit")
+            || lower.contains("throttled")
+        {
+            return (
+                AniListFailureKind::RateLimited,
+                format!("AniList rate-limited: {} (HTTP {})", msg, status),
+            );
+        }
+    }
+
+    let detail = gql_msg.unwrap_or_else(|| excerpt(body_text));
+    match status.as_u16() {
+        429 => (
+            AniListFailureKind::RateLimited,
+            format!("AniList rate-limited (HTTP 429): {}", detail),
+        ),
+        404 => (
+            AniListFailureKind::NotFound,
+            format!("AniList not found (HTTP 404): {}", detail),
+        ),
+        // 403 lands here when the body wasn't Cloudflare-shaped — that's
+        // AL-side (auth / blocked at the app layer), not upstream
+        // throttling, so it's "unavailable" and callers may MAL-fallback.
+        // 5xx is the same family.
+        _ => (
+            AniListFailureKind::Unavailable,
+            format!("AniList unavailable (HTTP {}): {}", status, detail),
+        ),
+    }
+}
+
+/// Truncate a body string for inclusion in an error message. Char-aware
+/// so it can't slice in the middle of a multi-byte UTF-8 sequence.
+fn excerpt(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let trimmed = text.trim();
+    let mut iter = trimmed.chars();
+    let prefix: String = iter.by_ref().take(MAX_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{}…", prefix)
+    } else {
+        prefix
+    }
+}
+
+/// Pure cooldown-duration computation. Extracted from `set_anilist_cooldown`
+/// for unit-testability — the wall-clock side effect lives in the caller.
+fn compute_cooldown_duration(
+    retry_after_secs: Option<u64>,
+    default_dur: Duration,
+) -> Duration {
+    let base = retry_after_secs
         .map(Duration::from_secs)
         .unwrap_or(default_dur)
         .min(ANILIST_COOLDOWN_MAX);
+    base + COOLDOWN_SAFETY_MARGIN
+}
+
+fn set_anilist_cooldown(retry_after_secs: Option<u64>, default_dur: Duration) {
+    let dur = compute_cooldown_duration(retry_after_secs, default_dur);
     if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
         *guard = Some(Instant::now() + dur);
     }
@@ -198,6 +522,11 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
         "variables": { "search": query }
     });
 
+    // Pace via the same shared rate-limit state that fetch_anime_detail
+    // uses — search-path 429s would otherwise leave the detail-path
+    // throttle decisions working off a stale `remaining`.
+    throttle_before_anilist_request().await;
+
     let client = &*HTTP_CLIENT;
     let resp = match client
         .post(ANILIST_API)
@@ -222,6 +551,7 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
     };
 
     let status = resp.status();
+    record_rate_limit_headers(resp.headers());
 
     // Silently fall back to Jikan/MAL on transient AniList outages:
     //   403 — Cloudflare challenge / geo-block
@@ -383,6 +713,12 @@ fn compose_search_error(anilist_reason: Option<&str>, jikan_err: &str) -> String
 
 
 pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, String> {
+    // Same cooldown short-circuit as the search and detail paths — no
+    // point burning a guaranteed 429 on a known-unavailable AniList.
+    if anilist_cooldown_active() {
+        return Err("AniList rate-limit cooldown active; skipping AniList request".to_string());
+    }
+
     let gql = serde_json::json!({
         "query": r#"
             query ($idMal: Int) {
@@ -407,6 +743,8 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
         "variables": { "idMal": mal_id }
     });
 
+    throttle_before_anilist_request().await;
+
     let client = &*HTTP_CLIENT;
     let resp = client
         .post(ANILIST_API)
@@ -417,6 +755,7 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
         .map_err(|e| format!("AniList request failed: {}", e))?;
 
     let status = resp.status();
+    record_rate_limit_headers(resp.headers());
     let body: serde_json::Value = resp
         .json()
         .await
@@ -615,6 +954,21 @@ pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, fo
 }
 
 async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
+    // Skip the round trip entirely when a recent 429/403/5xx has tripped
+    // the global cooldown. Without this, a metadata-refresh sweep that
+    // hits AniList's per-minute cap on the first burst keeps firing
+    // request after request — each one immediately bouncing on 429 —
+    // for the full duration of the sweep, even though we already know
+    // AniList is rate-limiting us. The error string flows up through
+    // metadata_sync's fallback chain and the warn log added in PR #31
+    // surfaces the cooldown state to the operator.
+    if anilist_cooldown_active() {
+        // Wording note: "skipping AniList request" — only the AniList
+        // round trip is skipped here. The caller's fallback chain
+        // (jikan/MAL → kitsu) still runs and may produce the detail
+        // from a different provider.
+        return Err("AniList rate-limit cooldown active; skipping AniList request".to_string());
+    }
     let gql = serde_json::json!({
         "query": r#"
             query ($id: Int) {
@@ -667,6 +1021,13 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         "variables": { "id": id }
     });
 
+    // Pace the request based on the latest X-RateLimit-Remaining /
+    // X-RateLimit-Reset we've seen. This is the primary defense against
+    // 429s — by the time AL hands back a 429 we've already wasted the
+    // round trip; throttling proactively keeps the sweep inside AL's
+    // window and burst limits.
+    throttle_before_anilist_request().await;
+
     let client = &*HTTP_CLIENT;
     let resp = client
         .post(ANILIST_API)
@@ -677,18 +1038,83 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         .map_err(|e| format!("AniList request failed: {}", e))?;
 
     let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse AniList response: {}", e))?;
+    // Headers carry both the rate-limit snapshot (used by future
+    // throttles) and Retry-After / X-RateLimit-Reset for cooldown
+    // computation. Clone so we can use them after the body has been
+    // consumed.
+    let headers = resp.headers().clone();
+    record_rate_limit_headers(&headers);
+
+    // Read as text first (not .json()) so a Cloudflare HTML challenge
+    // doesn't blow up at the parse step — we need the body to classify
+    // the failure correctly.
+    let body_text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            // Body-read failure: the status header was already received,
+            // so preserve the rate-limit signal when the status itself
+            // told us we were throttled. Without this branch a connection
+            // reset partway through a 429 body would erase the throttle
+            // signal — `is_rate_limit_error` returns false, the caller
+            // happily MAL-falls-back, and the whole "no MAL on rate-limit"
+            // invariant collapses on a flaky network.
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let dur = cooldown_from_headers(&headers, ANILIST_COOLDOWN_DEFAULT);
+                if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
+                    *guard = Some(Instant::now() + dur);
+                }
+                return Err(format!(
+                    "AniList rate-limited (HTTP 429): body read failed: {}",
+                    e
+                ));
+            }
+            return Err(format!("AniList unavailable: failed to read response: {}", e));
+        }
+    };
 
     if !status.is_success() {
-        let msg = extract_graphql_error(&body).unwrap_or_else(|| body.to_string());
-        return Err(format!("AniList detail failed (HTTP {}): {}", status, msg));
+        let (kind, msg) = classify_anilist_failure(status, &body_text);
+        // Cooldown only on real throttling. 5xx and AL-side 403s are
+        // "AL is down" — letting them set the cooldown would convert
+        // subsequent calls into deferred-rate-limit errors and prevent
+        // the MAL fallback the caller actually wants.
+        if kind == AniListFailureKind::RateLimited {
+            // 403 (Cloudflare) doesn't include Retry-After, so pick a
+            // longer default — 60s rarely outlasts a real challenge —
+            // and let ANILIST_COOLDOWN_MAX cap it. Only Cloudflare 403s
+            // reach this branch (non-CF 403s classify as Unavailable).
+            let default_cooldown = if status == reqwest::StatusCode::FORBIDDEN {
+                Duration::from_secs(300)
+            } else {
+                ANILIST_COOLDOWN_DEFAULT
+            };
+            let dur = cooldown_from_headers(&headers, default_cooldown);
+            if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
+                *guard = Some(Instant::now() + dur);
+            }
+        }
+        return Err(msg);
     }
 
-    if let Some(msg) = extract_graphql_error(&body) {
-        return Err(format!("AniList detail failed: {}", msg));
+    let body: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| format!("AniList unavailable: parse error: {} (body: {})", e, excerpt(&body_text)))?;
+
+    if extract_graphql_error(&body).is_some() {
+        // Run the classifier even on 2xx responses: AL has been observed
+        // to return throttle messages in the GraphQL `errors[]` array
+        // with a 200 status (no 429 at the transport layer). Without
+        // this branch we'd surface a generic "AniList detail failed"
+        // that doesn't match `is_rate_limit_error`, the caller would
+        // MAL-fall-back, and the cooldown wouldn't trigger to short-
+        // circuit the rest of the sweep.
+        let (kind, msg) = classify_anilist_failure(status, &body_text);
+        if kind == AniListFailureKind::RateLimited {
+            let dur = cooldown_from_headers(&headers, ANILIST_COOLDOWN_DEFAULT);
+            if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
+                *guard = Some(Instant::now() + dur);
+            }
+        }
+        return Err(msg);
     }
 
     let m = &body["data"]["Media"];
@@ -863,5 +1289,248 @@ mod tests {
         // A different normalized key should miss.
         let other = normalize_search_key(false, "completely different");
         assert!(search_cache_get(&other).is_none());
+    }
+
+    #[test]
+    fn classify_429_is_rate_limited() {
+        let (kind, msg) = classify_anilist_failure(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"errors":[{"message":"Too Many Requests"}]}"#,
+        );
+        assert_eq!(kind, AniListFailureKind::RateLimited);
+        assert!(is_rate_limit_error(&msg), "tag missing: {}", msg);
+    }
+
+    #[test]
+    fn classify_5xx_is_unavailable_not_throttle() {
+        let (kind, msg) = classify_anilist_failure(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "<html><body>502 Bad Gateway</body></html>",
+        );
+        assert_eq!(kind, AniListFailureKind::Unavailable);
+        assert!(!is_rate_limit_error(&msg), "5xx must not match throttle: {}", msg);
+    }
+
+    #[test]
+    fn classify_403_with_cloudflare_body_is_rate_limited() {
+        let body = r#"<html><head><title>Just a moment...</title></head>
+                      <body data-translate="checking_browser">
+                      cf-ray: abc123 cloudflare</body></html>"#;
+        let (kind, msg) = classify_anilist_failure(reqwest::StatusCode::FORBIDDEN, body);
+        assert_eq!(kind, AniListFailureKind::RateLimited);
+        assert!(is_rate_limit_error(&msg), "tag missing: {}", msg);
+    }
+
+    #[test]
+    fn classify_403_without_cloudflare_body_is_unavailable() {
+        // AL-side 403 (e.g. application-layer block) — caller should
+        // MAL-fallback, not defer.
+        let (kind, msg) = classify_anilist_failure(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"errors":[{"message":"Forbidden"}]}"#,
+        );
+        assert_eq!(kind, AniListFailureKind::Unavailable);
+        assert!(!is_rate_limit_error(&msg), "non-CF 403 must not match throttle: {}", msg);
+    }
+
+    #[test]
+    fn classify_404_is_not_found() {
+        let (kind, _msg) = classify_anilist_failure(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"errors":[{"message":"Not Found"}]}"#,
+        );
+        assert_eq!(kind, AniListFailureKind::NotFound);
+    }
+
+    #[test]
+    fn classify_graphql_throttle_message_overrides_status() {
+        // AL has been observed to return rate-limit messages with
+        // unexpected status codes; trust the body when it says so.
+        let (kind, _msg) = classify_anilist_failure(
+            reqwest::StatusCode::OK,
+            r#"{"errors":[{"message":"Too Many Requests"}]}"#,
+        );
+        assert_eq!(kind, AniListFailureKind::RateLimited);
+    }
+
+    #[test]
+    fn is_rate_limit_error_matches_cooldown_string() {
+        assert!(is_rate_limit_error(
+            "AniList rate-limit cooldown active; skipping AniList request"
+        ));
+    }
+
+    #[test]
+    fn cooldown_pads_retry_after_with_safety_margin() {
+        // AL hands back e.g. 60s; we wait 62s. The 2s margin clears the
+        // window boundary that would otherwise trip a fresh 429 on the
+        // immediate retry.
+        let dur = compute_cooldown_duration(Some(60), ANILIST_COOLDOWN_DEFAULT);
+        assert_eq!(dur, Duration::from_secs(60) + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn cooldown_falls_back_to_default_when_no_retry_after() {
+        // The default also gets padded — no Retry-After header doesn't
+        // mean we can risk hitting the boundary.
+        let dur = compute_cooldown_duration(None, Duration::from_secs(45));
+        assert_eq!(dur, Duration::from_secs(45) + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn cooldown_caps_retry_after_at_max_then_pads() {
+        // AL could theoretically tell us to wait an hour; we cap at
+        // ANILIST_COOLDOWN_MAX and *then* layer the safety margin on
+        // (so a runaway Retry-After can't bypass the cap, but the
+        // boundary protection still applies).
+        let dur = compute_cooldown_duration(Some(3600), ANILIST_COOLDOWN_DEFAULT);
+        assert_eq!(dur, ANILIST_COOLDOWN_MAX + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    fn state(limit: u32, remaining: u32, reset_at: Option<Instant>) -> RateLimitState {
+        RateLimitState { limit, remaining, reset_at }
+    }
+
+    #[test]
+    fn decide_wait_no_state_no_last_request_is_zero() {
+        // Cold start: no prior knowledge → fire immediately.
+        let now = Instant::now();
+        assert_eq!(decide_wait(None, None, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn decide_wait_burst_guard_applies_when_recent_request() {
+        // Plenty of headroom but we just fired a request — must wait
+        // out the per-limit minimum spacing.
+        let now = Instant::now();
+        let last = now - Duration::from_millis(500);
+        let s = state(30, 25, None);
+        let w = decide_wait(Some(s), Some(last), now);
+        // 30 req/min → ~2.2s spacing; we waited 0.5s; ~1.7s remaining.
+        assert!(w >= Duration::from_millis(1500), "got {:?}", w);
+        assert!(w <= Duration::from_millis(2000), "got {:?}", w);
+    }
+
+    #[test]
+    fn decide_wait_burst_guard_zero_when_enough_elapsed() {
+        // Last request was ages ago — no spacing wait needed.
+        let now = Instant::now();
+        let last = now - Duration::from_secs(10);
+        let s = state(30, 25, None);
+        assert_eq!(decide_wait(Some(s), Some(last), now), Duration::ZERO);
+    }
+
+    #[test]
+    fn decide_wait_window_flip_fires_when_remaining_low_and_reset_in_future() {
+        // remaining=2 (≤ threshold) and reset 30s out → wait until reset
+        // (plus 1s slack), regardless of elapsed time since last request.
+        let now = Instant::now();
+        let s = state(30, 2, Some(now + Duration::from_secs(30)));
+        let w = decide_wait(Some(s), None, now);
+        // 30s + 1s slack, with at most 1s of measurement noise either way.
+        assert!(w >= Duration::from_secs(30), "got {:?}", w);
+        assert!(w <= Duration::from_secs(32), "got {:?}", w);
+    }
+
+    #[test]
+    fn decide_wait_stale_reset_falls_through_to_burst_guard() {
+        // remaining is low but reset_at is in the past — don't sleep
+        // for a window that's already over; just respect burst spacing.
+        let now = Instant::now();
+        let s = state(30, 0, Some(now - Duration::from_secs(5)));
+        // No prior request → no burst wait either.
+        assert_eq!(decide_wait(Some(s), None, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn decide_wait_no_reset_at_with_low_remaining_falls_to_burst_guard() {
+        // remaining=0 but we have no idea when the window resets — best
+        // we can do is the per-limit spacing; the cooldown layer above
+        // handles the inevitable 429.
+        let now = Instant::now();
+        let s = state(30, 0, None);
+        assert_eq!(decide_wait(Some(s), None, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn decide_wait_window_flip_dominates_over_burst_guard() {
+        // Window-flip wait (30s) is much larger than burst guard
+        // (~2s) — the helper should pick the larger of the two so we
+        // don't undercut the window wait by accident.
+        let now = Instant::now();
+        let last = now - Duration::from_millis(100);
+        let s = state(30, 1, Some(now + Duration::from_secs(30)));
+        let w = decide_wait(Some(s), Some(last), now);
+        assert!(w >= Duration::from_secs(30), "got {:?}", w);
+    }
+
+    #[test]
+    fn min_inter_request_scales_with_limit() {
+        // 60s window, 30 req/min degraded state → ~2.2s spacing.
+        // 60s window, 90 req/min normal state → ~733ms spacing.
+        // 10% padding on both keeps us comfortably inside.
+        let degraded = min_inter_request(30);
+        let normal = min_inter_request(90);
+        assert!(degraded >= Duration::from_millis(2000));
+        assert!(degraded <= Duration::from_millis(2500));
+        assert!(normal >= Duration::from_millis(700));
+        assert!(normal <= Duration::from_millis(800));
+        // Defensive: limit=0 must not divide-by-zero.
+        assert_eq!(min_inter_request(0), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn cooldown_from_headers_prefers_x_ratelimit_reset() {
+        use reqwest::header::HeaderMap;
+        let mut h = HeaderMap::new();
+        // Reset 30s in the future.
+        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        h.insert("x-ratelimit-reset", (now_unix + 30).to_string().parse().unwrap());
+        h.insert("retry-after", "999".parse().unwrap());  // should be ignored
+        let dur = cooldown_from_headers(&h, ANILIST_COOLDOWN_DEFAULT);
+        // Allow ±2s slack for clock measurement noise plus the 2s safety margin.
+        let lower = Duration::from_secs(30) + COOLDOWN_SAFETY_MARGIN - Duration::from_secs(2);
+        let upper = Duration::from_secs(30) + COOLDOWN_SAFETY_MARGIN + Duration::from_secs(2);
+        assert!(
+            dur >= lower && dur <= upper,
+            "expected ~32s, got {:?}",
+            dur
+        );
+    }
+
+    #[test]
+    fn cooldown_from_headers_falls_back_to_retry_after() {
+        use reqwest::header::HeaderMap;
+        let mut h = HeaderMap::new();
+        h.insert("retry-after", "45".parse().unwrap());
+        let dur = cooldown_from_headers(&h, ANILIST_COOLDOWN_DEFAULT);
+        assert_eq!(dur, Duration::from_secs(45) + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn cooldown_from_headers_falls_back_to_default_when_no_headers() {
+        use reqwest::header::HeaderMap;
+        let h = HeaderMap::new();
+        let dur = cooldown_from_headers(&h, Duration::from_secs(60));
+        assert_eq!(dur, Duration::from_secs(60) + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn cooldown_from_headers_caps_runaway_reset_at_max() {
+        use reqwest::header::HeaderMap;
+        let mut h = HeaderMap::new();
+        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        h.insert("x-ratelimit-reset", (now_unix + 3600).to_string().parse().unwrap());
+        let dur = cooldown_from_headers(&h, ANILIST_COOLDOWN_DEFAULT);
+        assert_eq!(dur, ANILIST_COOLDOWN_MAX + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn excerpt_is_char_boundary_safe() {
+        // Build a string longer than MAX_CHARS that's mostly multi-byte
+        // chars. Naïve byte-slicing would panic.
+        let s: String = std::iter::repeat_n('日', 300).collect();
+        let out = excerpt(&s);
+        assert!(out.ends_with('…'));
     }
 }
