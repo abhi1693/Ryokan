@@ -298,6 +298,40 @@ async fn main() {
     // Run migrations.
     models::migrate(&db).await.expect("Failed to run migrations");
 
+    // Password-recovery boot path (#22). When RYOKAN_RESET_AUTH=1 or
+    // --reset-auth is passed AND a `data/.reset-auth` sentinel file exists,
+    // wipe users + sessions before the router mounts. `has_users()` then
+    // returns false and `/setup` re-renders, letting the locked-out user
+    // re-create the admin account.
+    //
+    // The sentinel file is the footgun guard: without it, a stuck-on
+    // env var in a compose file would wipe auth on every boot. Users
+    // touch the sentinel for a one-shot recovery, then remove it after
+    // logging back in. Config (Jellyfin / qBit / media_root) is NOT
+    // touched — only the admin account needs to be reset.
+    let reset_auth_requested = std::env::var("RYOKAN_RESET_AUTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || std::env::args().any(|a| a == "--reset-auth");
+    if reset_auth_requested {
+        let sentinel = std::path::Path::new("data/.reset-auth");
+        if sentinel.exists() {
+            tracing::warn!(
+                "RYOKAN_RESET_AUTH is set and data/.reset-auth sentinel present; \
+                 wiping users and sessions. Remove the sentinel and unset the \
+                 env var after logging back in."
+            );
+            if let Err(e) = models::user::reset_all(&db).await {
+                tracing::error!("reset_all failed: {e}");
+            }
+        } else {
+            tracing::warn!(
+                "RYOKAN_RESET_AUTH is set but data/.reset-auth sentinel is missing; \
+                 refusing to reset auth. See /help for the recovery recipe."
+            );
+        }
+    }
+
     // Warm the bcrypt dummy-hash LazyLock so the first failed-username login
     // probe doesn't pay a cold-start ~50ms extra on top of the normal bcrypt
     // cost — that extra delay on the very first probe would itself be a

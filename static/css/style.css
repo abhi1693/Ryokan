@@ -123,6 +123,20 @@ body {
 
 .auth-form { display: flex; flex-direction: column; gap: 16px; }
 
+.auth-forgot {
+    text-align: center;
+    margin-top: 16px;
+    font-size: 13px;
+}
+.auth-forgot a {
+    color: var(--text-dim);
+    text-decoration: none;
+}
+.auth-forgot a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
 /* --- Forms --- */
 .form-group {
     display: flex;
