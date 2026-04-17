@@ -3331,6 +3331,38 @@ input[type="file"]::file-selector-button:hover {
     font-size: 13px;
 }
 
+/* #20 commit 9 — Touch-target minimums. Below --bp-phone every tappable
+ * button gets bumped to at least a 40x40 hit area (WCAG 2.5.5
+ * recommends 44x44; .btn-sm at 40 is our compromise for density).
+ * Icon-only buttons get the full 44x44 since the visible control
+ * is already small and fingers are imprecise. Checkbox rows gain
+ * vertical padding so the whole row is tappable, not just the 16px
+ * checkbox square. */
+@media (max-width: 640px) {
+    .btn-sm {
+        min-height: 40px;
+        padding: 8px 14px;
+        font-size: 14px;
+    }
+    .btn-ghost,
+    .btn-icon,
+    .btn-icon-sm,
+    .btn-icon-danger {
+        min-width: 44px;
+        min-height: 44px;
+    }
+    .checkbox-row,
+    .checkbox-label {
+        padding: 8px 0;
+    }
+    /* Card-level action clusters (Grab button, etc.) go full-width so
+     * the thumb has the whole row to aim at. */
+    .result-card-footer .btn-grab {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+}
+
 /* Log Table */
 .logs-container {
     border: 1px solid var(--border);
