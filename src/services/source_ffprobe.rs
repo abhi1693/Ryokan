@@ -42,9 +42,9 @@ use sqlx::SqlitePool;
 use tokio::process::Command;
 
 use crate::models::media_probe_cache;
-use crate::services::source::{Resolution, Source, SourceEvidence};
+use crate::services::source::{Origin, Resolution, Source, SourceEvidence};
 
-const ORIGIN: &str = "ffprobe";
+const ORIGIN: Origin = Origin::Ffprobe;
 
 /// Public output of Layer 5.
 #[derive(Debug, Clone, Default)]
