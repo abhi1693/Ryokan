@@ -2667,7 +2667,11 @@ input[type="file"]::file-selector-button:hover {
 .cf-card-title-row {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
+    /* Wider gap so the × button that replaces the dot on hover
+     * doesn't crowd the name text. The dot is 8px, the × is ~20px;
+     * matching the × width in the gap keeps the name visually anchored
+     * at the same position regardless of hover state. */
+    gap: 16px;
     min-width: 0;
     flex: 1 1 auto;
 }
@@ -2745,7 +2749,10 @@ input[type="file"]::file-selector-button:hover {
  * the delete action. */
 .cf-card-actions {
     position: absolute;
-    top: 12px;
+    top: 13px;
+    /* Left-align the × with the dot's natural position. Card body has
+     * padding-left: 16px; the dot is 8px so its center is at ~x=20.
+     * The 20px × button centered on that center = left:10px. */
     left: 10px;
     opacity: 0;
     transition: opacity 0.15s;
@@ -2814,10 +2821,10 @@ input[type="file"]::file-selector-button:hover {
  * lets the content behind (e.g. the CF name or score) bleed
  * through, which reads as a glitch. */
 .btn-icon-danger {
-    width: 22px;
-    height: 22px;
+    width: 20px;
+    height: 20px;
     padding: 0;
-    border-radius: 6px;
+    border-radius: 5px;
     border: 1px solid var(--border);
     background: var(--bg-card);
     color: var(--text-dim);
