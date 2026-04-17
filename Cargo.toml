@@ -8,6 +8,10 @@ rust-version = "1.88"
 # Web framework + async runtime
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
+# Stream combinators — buffer_unordered for bounded-concurrency
+# fan-out, used in services/auto_search to parallelise per-candidate
+# classification.
+futures = "0.3"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace", "compression-br", "compression-gzip", "set-header"] }
 
