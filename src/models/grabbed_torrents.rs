@@ -461,36 +461,57 @@ pub async fn find_imported_for_episode(
         .collect())
 }
 
-/// Return the torrent name of the most recent imported grab for this
-/// series, regardless of which episodes the grab's `episode_numbers`
-/// column claims it covers. Used by
-/// `scan_library_for_unclassified` as a fallback to
-/// [`find_imported_for_episode`] when the per-episode lookup misses:
-/// pre-fix batch grabs were recorded with `episode_numbers = []`, so
-/// `json_each` yields nothing and the precise lookup returns empty
-/// even though there's a perfectly good batch grab with a real
-/// release name sitting in the table. For those stale rows we want
-/// to classify against that release name instead of the sanitized
-/// on-disk filename.
+/// Bulk variant for post-processing's library scan: fetch every
+/// imported grab covering this series in one round-trip, including
+/// grabs that reach the series via the sibling-routes path. Returns
+/// `(torrent_name, episode_numbers)` for each, sorted most-recent
+/// first by `grabbed_at`.
 ///
-/// Returns `None` when the series has never had an imported grab,
-/// in which case the scanner falls back to the sanitized filename
-/// (correct behavior for externally-imported files Ryokan never
-/// grabbed).
-pub async fn most_recent_imported_torrent_name_for_series(
+/// scan_library_for_unclassified used to do *two* per-file queries
+/// (`find_imported_for_episode` + a fallback `most_recent_…`) per
+/// disk file inside a held POST_PROC_LOCK. For a 100-series, 24-ep
+/// library that's ~4800 sequential round-trips per pass. With this
+/// helper the caller pre-builds an in-memory map per series and the
+/// per-file path is lock-free dictionary lookups.
+///
+/// `UNION ALL` (not `UNION`) because dedup falls naturally out of the
+/// caller's `entry().or_insert_with()` first-write-wins semantics; we
+/// don't pay for SQLite's UNION-side sort/hash.
+pub async fn imported_grabs_for_series(
     db: &SqlitePool,
     series_id: i64,
-) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT torrent_name FROM grabbed_torrents
-         WHERE series_id = ? AND state = 'imported'
-         ORDER BY grabbed_at DESC LIMIT 1",
+) -> Result<Vec<(String, Vec<i32>)>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT torrent_name, episode_numbers, grabbed_at FROM (
+             SELECT g.torrent_name AS torrent_name,
+                    g.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at
+             FROM grabbed_torrents g
+             WHERE g.series_id = ? AND g.state = 'imported'
+             UNION ALL
+             SELECT g.torrent_name AS torrent_name,
+                    r.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at
+             FROM grabbed_torrents g
+             JOIN grabbed_torrent_series r ON r.grab_id = g.id
+             WHERE r.series_id = ? AND g.state = 'imported'
+           )
+           ORDER BY grabbed_at DESC"#,
     )
     .bind(series_id)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten()
+    .bind(series_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let torrent_name: String = row.get("torrent_name");
+            let eps_json: String = row.get("episode_numbers");
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            (torrent_name, episode_numbers)
+        })
+        .collect())
 }
 
 /// Remove a grabbed torrent record entirely.
