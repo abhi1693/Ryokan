@@ -95,6 +95,112 @@ pub fn anilist_cooldown_active() -> bool {
     false
 }
 
+/// Single source of truth for "this AniList error means we're being
+/// throttled / blocked." Callers use this to decide whether to
+/// defer-and-retry (preserve AL fidelity) vs. treat AL as down and fall
+/// back to MAL.
+///
+/// All errors classified as throttle by `classify_anilist_failure` carry
+/// the `AniList rate-limited` prefix; the in-process cooldown short-circuit
+/// uses `cooldown active`. Non-throttle failures (5xx, 403 with
+/// non-Cloudflare body, parse errors) deliberately do *not* match — those
+/// are "AL is genuinely down" and fallback callers should substitute MAL.
+pub fn is_rate_limit_error(err: &str) -> bool {
+    err.contains("AniList rate-limited") || err.contains("cooldown active")
+}
+
+/// Classification of an AniList failure response. Drives both the
+/// error-string wording and whether `set_anilist_cooldown` is called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AniListFailureKind {
+    /// Throttle: 429, Cloudflare challenge, or GraphQL-level "too many
+    /// requests". Caller should defer-and-retry; do not substitute MAL.
+    RateLimited,
+    /// AL itself is unhealthy: 5xx, body parse failure, or a 403 whose
+    /// body doesn't look like Cloudflare (suggests an AL-side problem
+    /// rather than upstream throttling). Caller may fall back to MAL.
+    Unavailable,
+    /// AL responded successfully but the requested entity doesn't exist.
+    NotFound,
+}
+
+/// Inspect status + body to figure out *why* AniList rejected the call.
+/// Status alone is ambiguous (especially 403 — Cloudflare vs. AL itself
+/// vs. auth issue), so we also look for body markers. Returns the kind
+/// plus a tagged error string the caller can return to its consumers;
+/// downstream code matches on the tag prefix (`AniList rate-limited` /
+/// `AniList unavailable` / `AniList not found`) rather than HTTP codes,
+/// so adding new wordings doesn't break the policy.
+fn classify_anilist_failure(
+    status: reqwest::StatusCode,
+    body_text: &str,
+) -> (AniListFailureKind, String) {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body_text).ok();
+    let gql_msg = parsed.as_ref().and_then(extract_graphql_error);
+
+    // Cloudflare HTML challenge — distinctive body markers, can come back
+    // with any 4xx/5xx status. Treat as throttle.
+    let lower = body_text.to_ascii_lowercase();
+    let is_cloudflare = lower.contains("cf-ray")
+        || lower.contains("just a moment")
+        || lower.contains("attention required")
+        || (lower.contains("cloudflare") && lower.contains("<html"));
+    if is_cloudflare {
+        return (
+            AniListFailureKind::RateLimited,
+            format!("AniList rate-limited: Cloudflare challenge (HTTP {})", status),
+        );
+    }
+
+    // GraphQL-level throttle hint, regardless of status.
+    if let Some(msg) = &gql_msg {
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("too many requests")
+            || lower.contains("rate limit")
+            || lower.contains("throttled")
+        {
+            return (
+                AniListFailureKind::RateLimited,
+                format!("AniList rate-limited: {} (HTTP {})", msg, status),
+            );
+        }
+    }
+
+    let detail = gql_msg.unwrap_or_else(|| excerpt(body_text));
+    match status.as_u16() {
+        429 => (
+            AniListFailureKind::RateLimited,
+            format!("AniList rate-limited (HTTP 429): {}", detail),
+        ),
+        404 => (
+            AniListFailureKind::NotFound,
+            format!("AniList not found (HTTP 404): {}", detail),
+        ),
+        // 403 lands here when the body wasn't Cloudflare-shaped — that's
+        // AL-side (auth / blocked at the app layer), not upstream
+        // throttling, so it's "unavailable" and callers may MAL-fallback.
+        // 5xx is the same family.
+        _ => (
+            AniListFailureKind::Unavailable,
+            format!("AniList unavailable (HTTP {}): {}", status, detail),
+        ),
+    }
+}
+
+/// Truncate a body string for inclusion in an error message. Char-aware
+/// so it can't slice in the middle of a multi-byte UTF-8 sequence.
+fn excerpt(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let trimmed = text.trim();
+    let mut iter = trimmed.chars();
+    let prefix: String = iter.by_ref().take(MAX_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{}…", prefix)
+    } else {
+        prefix
+    }
+}
+
 fn set_anilist_cooldown(retry_after_secs: Option<u64>, default_dur: Duration) {
     let dur = retry_after_secs
         .map(Duration::from_secs)
@@ -683,30 +789,32 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         .map_err(|e| format!("AniList request failed: {}", e))?;
 
     let status = resp.status();
-    // Capture Retry-After before .json() consumes the response — used
-    // to set the cooldown duration on 429 so the sweep's remaining
-    // calls skip AniList until the limit window resets.
+    // Capture Retry-After before consuming the response body — used to
+    // set the cooldown duration so the sweep's remaining calls skip
+    // AniList until the limit window resets.
     let retry_after_secs = resp
         .headers()
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
-    let body: serde_json::Value = resp
-        .json()
+    // Read as text first (not .json()) so a Cloudflare HTML challenge
+    // doesn't blow up at the parse step — we need the body to classify
+    // the failure correctly.
+    let body_text = resp
+        .text()
         .await
-        .map_err(|e| format!("Failed to parse AniList response: {}", e))?;
+        .map_err(|e| format!("AniList unavailable: failed to read response: {}", e))?;
 
     if !status.is_success() {
-        // Mirror the search-path branch (lines 223-248): 403/429/5xx
-        // mean "AniList is unavailable to us right now". Set the
-        // global cooldown so subsequent fetch_anime_detail calls
-        // short-circuit with the cooldown-active error above instead
-        // of hammering an already-rate-limited endpoint. 403 gets a
-        // longer default since Cloudflare doesn't include Retry-After.
-        if status == reqwest::StatusCode::FORBIDDEN
-            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || status.is_server_error()
-        {
+        let (kind, msg) = classify_anilist_failure(status, &body_text);
+        // Cooldown only on real throttling. 5xx and AL-side 403s are
+        // "AL is down" — letting them set the cooldown would convert
+        // subsequent calls into deferred-rate-limit errors and prevent
+        // the MAL fallback the caller actually wants.
+        if kind == AniListFailureKind::RateLimited {
+            // 403 (Cloudflare) doesn't include Retry-After, so pick a
+            // longer default — 60s rarely outlasts a real challenge —
+            // and let ANILIST_COOLDOWN_MAX cap it.
             let default_cooldown = if status == reqwest::StatusCode::FORBIDDEN {
                 Duration::from_secs(300)
             } else {
@@ -714,9 +822,11 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
             };
             set_anilist_cooldown(retry_after_secs, default_cooldown);
         }
-        let msg = extract_graphql_error(&body).unwrap_or_else(|| body.to_string());
-        return Err(format!("AniList detail failed (HTTP {}): {}", status, msg));
+        return Err(msg);
     }
+
+    let body: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| format!("AniList unavailable: parse error: {} (body: {})", e, excerpt(&body_text)))?;
 
     if let Some(msg) = extract_graphql_error(&body) {
         return Err(format!("AniList detail failed: {}", msg));
@@ -894,5 +1004,83 @@ mod tests {
         // A different normalized key should miss.
         let other = normalize_search_key(false, "completely different");
         assert!(search_cache_get(&other).is_none());
+    }
+
+    #[test]
+    fn classify_429_is_rate_limited() {
+        let (kind, msg) = classify_anilist_failure(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"errors":[{"message":"Too Many Requests"}]}"#,
+        );
+        assert_eq!(kind, AniListFailureKind::RateLimited);
+        assert!(is_rate_limit_error(&msg), "tag missing: {}", msg);
+    }
+
+    #[test]
+    fn classify_5xx_is_unavailable_not_throttle() {
+        let (kind, msg) = classify_anilist_failure(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "<html><body>502 Bad Gateway</body></html>",
+        );
+        assert_eq!(kind, AniListFailureKind::Unavailable);
+        assert!(!is_rate_limit_error(&msg), "5xx must not match throttle: {}", msg);
+    }
+
+    #[test]
+    fn classify_403_with_cloudflare_body_is_rate_limited() {
+        let body = r#"<html><head><title>Just a moment...</title></head>
+                      <body data-translate="checking_browser">
+                      cf-ray: abc123 cloudflare</body></html>"#;
+        let (kind, msg) = classify_anilist_failure(reqwest::StatusCode::FORBIDDEN, body);
+        assert_eq!(kind, AniListFailureKind::RateLimited);
+        assert!(is_rate_limit_error(&msg), "tag missing: {}", msg);
+    }
+
+    #[test]
+    fn classify_403_without_cloudflare_body_is_unavailable() {
+        // AL-side 403 (e.g. application-layer block) — caller should
+        // MAL-fallback, not defer.
+        let (kind, msg) = classify_anilist_failure(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"errors":[{"message":"Forbidden"}]}"#,
+        );
+        assert_eq!(kind, AniListFailureKind::Unavailable);
+        assert!(!is_rate_limit_error(&msg), "non-CF 403 must not match throttle: {}", msg);
+    }
+
+    #[test]
+    fn classify_404_is_not_found() {
+        let (kind, _msg) = classify_anilist_failure(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"errors":[{"message":"Not Found"}]}"#,
+        );
+        assert_eq!(kind, AniListFailureKind::NotFound);
+    }
+
+    #[test]
+    fn classify_graphql_throttle_message_overrides_status() {
+        // AL has been observed to return rate-limit messages with
+        // unexpected status codes; trust the body when it says so.
+        let (kind, _msg) = classify_anilist_failure(
+            reqwest::StatusCode::OK,
+            r#"{"errors":[{"message":"Too Many Requests"}]}"#,
+        );
+        assert_eq!(kind, AniListFailureKind::RateLimited);
+    }
+
+    #[test]
+    fn is_rate_limit_error_matches_cooldown_string() {
+        assert!(is_rate_limit_error(
+            "AniList rate-limit cooldown active; skipping AniList request"
+        ));
+    }
+
+    #[test]
+    fn excerpt_is_char_boundary_safe() {
+        // Build a string longer than MAX_CHARS that's mostly multi-byte
+        // chars. Naïve byte-slicing would panic.
+        let s: String = std::iter::repeat_n('日', 300).collect();
+        let out = excerpt(&s);
+        assert!(out.ends_with('…'));
     }
 }

@@ -67,12 +67,7 @@ async fn fetch_live_detail_for_ids(
         match anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
             Ok(detail) => return Ok(detail),
             Err(err) => {
-                // The error string format comes from
-                // anilist::fetch_anime_detail — keep this matcher in
-                // sync if that wording changes.
-                let is_rate_limited = err.contains("HTTP 429")
-                    || err.contains("cooldown active");
-                if is_rate_limited {
+                if anilist::is_rate_limit_error(&err) {
                     tracing::warn!(
                         target: "ryokan::metadata_sync",
                         provider_id,
@@ -336,12 +331,10 @@ async fn hydrate_relation_tree(
                 {
                     Ok(detail) => detail,
                     Err(err) => {
-                        let is_rate_limited = err.contains("HTTP 429")
-                            || err.contains("cooldown active");
                         // Only AL rate-limits are worth retrying. MAL
                         // failures or genuine AL-down errors are already
                         // terminal by the time this returns.
-                        if is_rate_limited && !mal_mode {
+                        if anilist::is_rate_limit_error(&err) && !mal_mode {
                             deferred.push_back((provider_id, mal_id));
                         }
                         continue;
@@ -372,6 +365,17 @@ async fn hydrate_relation_tree(
             // of this sweep's cache — the next periodic refresh picks it
             // up. We don't substitute MAL on rate-limit (would mix trees
             // and downgrade fidelity).
+            if !deferred.is_empty() {
+                tracing::warn!(
+                    target: "ryokan::metadata_sync",
+                    root_provider_id,
+                    dropped = deferred.len(),
+                    retry_rounds = al_round,
+                    "relation hydration left {} relations unfetched after AniList \
+                     retry budget exhausted; next sweep will retry",
+                    deferred.len()
+                );
+            }
             break;
         }
 
