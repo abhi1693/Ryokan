@@ -3482,9 +3482,20 @@ input[type="file"]::file-selector-button:hover {
     background: rgba(203, 166, 247, 0.04);
 }
 
-.log-row:hover .log-detail {
+/* Expand the wrapped detail on hover (desktop) OR on tap via the
+ * `log-row-expanded` class toggled by the delegated click handler in
+ * system.html's log script (mobile — :hover doesn't fire on touch). */
+.log-row:hover .log-detail,
+.log-row.log-row-expanded .log-detail {
     white-space: normal;
     word-break: break-word;
+}
+.log-row.log-row-expanded {
+    background: rgba(203, 166, 247, 0.04);
+}
+/* Give tap rows a little visual hint they're interactive on mobile. */
+@media (max-width: 640px) {
+    .log-row { cursor: pointer; }
 }
 
 /* RSS */
