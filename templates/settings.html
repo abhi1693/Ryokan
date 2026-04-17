@@ -557,7 +557,14 @@
                     </div>
                 </div>
             </form>
-            <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:space-between;align-items:center">
+            {# Footer uses `margin-left: auto` on the right-side button
+               group to pin it to the right regardless of whether the
+               Delete form is rendered or display:none'd. Using
+               `justify-content: space-between` here left Cancel+Save
+               stuck at the start when the Delete form was JS-hidden
+               during the in-place Add reset (flex space-between with
+               one child aligns to start). #}
+            <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;align-items:center">
                 {# Delete lives on the left so it doesn't sit adjacent to
                    Save Changes (reduces the chance of a misclick). Only
                    rendered when editing; hidden by JS for the in-place
@@ -571,10 +578,8 @@
                     <input type="hidden" name="id" value="{{ edit.row.id }}">
                     <button type="submit" class="btn btn-danger">Delete</button>
                 </form>
-                {% else %}
-                <span id="cf-delete-form-placeholder"></span>
                 {% endif %}
-                <div style="display:flex;gap:8px">
+                <div style="display:flex;gap:8px;margin-left:auto">
                     <button type="button" class="btn btn-secondary" onclick="closeCfEditorModal()">Cancel</button>
                     <button type="submit" form="cf-upsert-form" class="btn btn-primary" id="cf-upsert-submit">
                         {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
