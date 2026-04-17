@@ -258,7 +258,6 @@ pub async fn find_all_for_target(
         );
         // No CF floor on the interactive path — see comment above.
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -266,9 +265,7 @@ pub async fn find_all_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             i32::MIN,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -463,7 +460,6 @@ pub async fn collect_scored_batches_for_target(
             cutoff_resolution_enum,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -471,9 +467,7 @@ pub async fn collect_scored_batches_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             config.custom_format_minimum_score,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -669,7 +663,6 @@ async fn collect_scored_for_target(
             cutoff_resolution_enum,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -677,9 +670,7 @@ async fn collect_scored_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             config.custom_format_minimum_score,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -1728,13 +1719,15 @@ fn display_title(detail: &AnimeDetail) -> &str {
 /// `SeaDexBestSpecification` — the user has taken ownership of that
 /// number and double-counting would be a silent regression.
 ///
-/// On the way through, emits one `LogCategory::Scoring` debug row per
-/// candidate with a CF-aware breakdown line (plan §6.3). Dropped
-/// candidates are logged too so the user can introspect "why did this
-/// candidate get cut from the results" in addition to "why did X win."
+/// On the way through, emits one tracing::debug! line per candidate with
+/// a CF-aware breakdown (plan §6.3). Operators who want to introspect
+/// "why did X win / Y lose" can set
+/// `RUST_LOG=ryokan::auto_search::scoring=debug`. The previous code
+/// wrote to the DB log table here, but at 50-200 candidates per search
+/// that was a sustained INSERT stream the `logs` UI flooded with rather
+/// than aided.
 #[allow(clippy::too_many_arguments)]
-async fn apply_cf_seadex_overlay(
-    db: &SqlitePool,
+fn apply_cf_seadex_overlay(
     base: i32,
     result: &SearchResult,
     classification: &ClassificationResult,
@@ -1771,7 +1764,17 @@ async fn apply_cf_seadex_overlay(
     let final_score = base.saturating_add(cf).saturating_add(seadex_bonus);
 
     let detail = format_scoring_detail(base, cf, &breakdown, seadex_bonus, final_score, below_floor);
-    logger::debug(db, LogCategory::Scoring, &result.title, &detail).await;
+    // tracing::debug! instead of logger::debug — 50-200 candidates per
+    // search × one debug row each meant a sustained INSERT stream into
+    // the `logs` table on every auto-search. Terminal/container logs
+    // are the right surface for this granularity of detail; operators
+    // who want it can set RUST_LOG=ryokan::auto_search=debug.
+    tracing::debug!(
+        target: "ryokan::auto_search::scoring",
+        title = %result.title,
+        "{}",
+        detail
+    );
 
     if below_floor {
         None

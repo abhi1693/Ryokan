@@ -1142,6 +1142,16 @@ async fn log_classification_to_db(
     title: &str,
     result: &ClassificationResult,
 ) {
+    // Only persist to the DB log table when the row actually needs
+    // the user's attention — needs_review is the one that drives the
+    // Needs-Review UI. Routine classification chatter is handled by
+    // the synchronous `log_classification` tracing helper called
+    // alongside this, so we aren't losing visibility — just not paying
+    // a per-candidate INSERT (50-200 candidates per search × 2 calls
+    // per candidate through classify_release + classify_post_download).
+    if !result.needs_review {
+        return;
+    }
     let detail = format!(
         "phase={}\nrule={}\nlabel={}\nconfidence={:.2}\nresolution={}\nis_remux={}\nis_bdmv={}\nweb_kind={}\nevidence:\n{}",
         phase,
@@ -1166,23 +1176,13 @@ async fn log_classification_to_db(
             .join("\n"),
     );
     let summary = format!("Classified \"{}\" → {}", title, result.label());
-    if result.needs_review {
-        crate::services::logger::info(
-            db,
-            crate::models::log::LogCategory::Quality,
-            &format!("Needs review: {}", summary),
-            &detail,
-        )
-        .await;
-    } else {
-        crate::services::logger::debug(
-            db,
-            crate::models::log::LogCategory::Quality,
-            &summary,
-            &detail,
-        )
-        .await;
-    }
+    crate::services::logger::info(
+        db,
+        crate::models::log::LogCategory::Quality,
+        &format!("Needs review: {}", summary),
+        &detail,
+    )
+    .await;
 }
 
 /// Formatted single-line evidence trail. Shared by both the tracing
@@ -2146,13 +2146,12 @@ mod tests {
             result.evidence,
         );
 
-        // And the audit log row was actually written — end-to-end proof
-        // that the classifier's DB side effects reach the `logs` table.
-        let log_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM logs WHERE category = 'quality'")
-                .fetch_one(&db)
-                .await
-                .expect("count logs");
-        assert!(log_count >= 1, "expected classifier to write an audit log");
+        // The DB log assertion that lived here was dropped along with
+        // the per-candidate INSERT in log_classification_to_db: that
+        // function now only persists rows where `needs_review` is true,
+        // and a confidently-corroborated release by definition isn't
+        // one. The classifier's structural correctness is what this
+        // test exercises; the side-effect-to-logs contract belongs in
+        // a needs_review-specific test (covered separately).
     }
 }
