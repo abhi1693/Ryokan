@@ -8,7 +8,7 @@ This project's being actively developed. Expect rough edges around features and 
 ## Screenshots
 
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/ab8d0588-a896-477e-b264-79d2a44fc118" />
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f78ae78f-08ff-49c6-801c-f92d3eb1f07d" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/1601ca73-1c47-4831-bd3d-4fcf3d2a6ad1" />
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/0a54684f-8bb9-4083-a7d7-8760e35fcfef" />
 
 ## What it does
