@@ -47,15 +47,43 @@ async fn fetch_live_detail_for_ids(
     episode_count: Option<i32>,
     force_mal_fallback: bool,
 ) -> Result<anilist::AnimeDetail, String> {
-    if provider_id > 0 && !force_mal_fallback
-        && let Ok(detail) = anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
-            return Ok(detail);
+    // Each fallback step logs at warn so the operator can see *why* a
+    // series fell through to a lower-fidelity provider. The previous
+    // `if let Ok(...) = ... { return ... }` shape was silent — a
+    // sweep-time AniList error (slow GraphQL response for a huge
+    // entry like One Piece, transient 5xx, partial JSON) just dropped
+    // the entry to MAL with no breadcrumb, leaving the operator with
+    // a `provider_id=-21, episodes=None` row and no way to know
+    // whether AniList was genuinely down or whether one specific
+    // series was just slow to assemble.
+    if provider_id > 0 && !force_mal_fallback {
+        match anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
+            Ok(detail) => return Ok(detail),
+            Err(err) => {
+                tracing::warn!(
+                    target: "ryokan::metadata_sync",
+                    provider_id,
+                    mal_id = ?mal_id,
+                    error = %err,
+                    "AniList detail fetch failed; falling back to MAL/Kitsu"
+                );
+            }
         }
+    }
 
-    if let Some(mal_id) = mal_id
-        && let Ok(detail) = jikan::get_anime_detail_cached(mal_id).await {
-            return Ok(detail);
+    if let Some(mid) = mal_id {
+        match jikan::get_anime_detail_cached(mid).await {
+            Ok(detail) => return Ok(detail),
+            Err(err) => {
+                tracing::warn!(
+                    target: "ryokan::metadata_sync",
+                    mal_id = mid,
+                    error = %err,
+                    "Jikan/MAL detail fetch failed; falling back to Kitsu by title"
+                );
+            }
         }
+    }
 
     if !title_candidates.is_empty() {
         return kitsu::get_anime_detail_by_titles(title_candidates, None, episode_count).await;
