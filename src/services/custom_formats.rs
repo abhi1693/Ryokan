@@ -1377,8 +1377,8 @@ mod tests {
             .expect("defaults file top-level must be an array");
         assert_eq!(
             entries.len(),
-            8,
-            "plan §7.2 specifies exactly 8 default CFs"
+            7,
+            "bundled default CFs after #12 removed the casual-group CF"
         );
         for (i, entry) in entries.iter().enumerate() {
             let name = entry
