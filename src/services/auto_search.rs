@@ -147,7 +147,11 @@ pub async fn find_all_for_target(
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let aliases = collect_aliases(detail);
-    let queries = build_queries_from_aliases(&aliases, target);
+    let (custom_tokens, restrict_user) = resolve_search_overrides(db, detail, config).await;
+    let queries = append_custom_tokens(
+        build_queries_from_aliases(&aliases, target),
+        &custom_tokens,
+    );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -205,6 +209,7 @@ pub async fn find_all_for_target(
         target,
         expected_season,
         seadex_hashes: &seadex_hashes,
+        restrict_user: &restrict_user,
     };
 
     // Interactive search: allow batch results so user can see & pick them,
@@ -220,7 +225,10 @@ pub async fn find_all_for_target(
     if candidates.is_empty() {
         let extended = collect_extended_aliases(detail);
         if !extended.is_empty() {
-            let ext_queries = build_queries_from_aliases(&extended, target);
+            let ext_queries = append_custom_tokens(
+                build_queries_from_aliases(&extended, target),
+                &custom_tokens,
+            );
             let all_aliases = [aliases.clone(), extended].concat();
             let ext_precompute = SiblingRejectPrecompute::build(&all_aliases, &sibling_aliases);
             let ext_ctx = InteractiveQueryCtx {
@@ -233,7 +241,10 @@ pub async fn find_all_for_target(
     }
 
     if !preferred_groups.is_empty() {
-        let group_queries = build_group_queries(detail, target, &preferred_groups);
+        let group_queries = append_custom_tokens(
+            build_group_queries(detail, target, &preferred_groups),
+            &custom_tokens,
+        );
         run_queries_interactive(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
@@ -352,6 +363,7 @@ pub async fn collect_scored_batches_for_target(
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let aliases = collect_aliases(detail);
+    let (custom_tokens, restrict_user) = resolve_search_overrides(db, detail, config).await;
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -408,17 +420,24 @@ pub async fn collect_scored_batches_for_target(
         categories: &categories,
         batch_episode_match: false,
         seadex_hashes: &seadex_hashes,
+        restrict_user: &restrict_user,
     };
 
     // Standard query sweep — picks up any batches that happen to surface
     // on Nyaa page 1 alongside the singles.
-    let queries = build_queries_from_aliases(&aliases, target);
+    let queries = append_custom_tokens(
+        build_queries_from_aliases(&aliases, target),
+        &custom_tokens,
+    );
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
 
     // Batch-targeted probes — the important addition for this function.
     // Explicit "batch" / "complete" keywords push the Nyaa search toward
     // listings that wouldn't appear on page 1 for a plain title query.
-    let batch_queries = quality::batch_probe_queries(&aliases);
+    let batch_queries = append_custom_tokens(
+        quality::batch_probe_queries(&aliases),
+        &custom_tokens,
+    );
     run_queries(&batch_queries, ctx, &mut seen, &mut candidates).await;
 
     // Preferred-group queries, scoped to batches. Same fallback rule as
@@ -429,7 +448,10 @@ pub async fn collect_scored_batches_for_target(
             preferred_groups.iter().any(|g| g.eq_ignore_ascii_case(&c.group))
         });
     if !has_preferred_hit && !preferred_groups.is_empty() {
-        let group_queries = build_group_queries(detail, target, &preferred_groups);
+        let group_queries = append_custom_tokens(
+            build_group_queries(detail, target, &preferred_groups),
+            &custom_tokens,
+        );
         run_queries(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
@@ -515,7 +537,11 @@ async fn collect_scored_for_target(
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let aliases = collect_aliases(detail);
-    let queries = build_queries_from_aliases(&aliases, target);
+    let (custom_tokens, restrict_user) = resolve_search_overrides(db, detail, config).await;
+    let queries = append_custom_tokens(
+        build_queries_from_aliases(&aliases, target),
+        &custom_tokens,
+    );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -586,6 +612,7 @@ async fn collect_scored_for_target(
         categories: &categories,
         batch_episode_match,
         seadex_hashes: &seadex_hashes,
+        restrict_user: &restrict_user,
     };
 
     // Phase 1: standard queries (primary aliases + episode variants).
@@ -598,7 +625,10 @@ async fn collect_scored_for_target(
     if candidates.is_empty() {
         let extended = collect_extended_aliases(detail);
         if !extended.is_empty() {
-            let ext_queries = build_queries_from_aliases(&extended, target);
+            let ext_queries = append_custom_tokens(
+                build_queries_from_aliases(&extended, target),
+                &custom_tokens,
+            );
             let all_aliases = [aliases.clone(), extended].concat();
             let ext_precompute = SiblingRejectPrecompute::build(&all_aliases, &sibling_aliases);
             let ext_ctx = AutoQueryCtx {
@@ -617,7 +647,10 @@ async fn collect_scored_for_target(
         });
 
     if !has_preferred_hit && !preferred_groups.is_empty() {
-        let group_queries = build_group_queries(detail, target, &preferred_groups);
+        let group_queries = append_custom_tokens(
+            build_group_queries(detail, target, &preferred_groups),
+            &custom_tokens,
+        );
         run_queries(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
@@ -630,7 +663,10 @@ async fn collect_scored_for_target(
             .any(|c| source::looks_like_bluray_filename(&c.title));
 
         if !has_bd_candidate {
-            let bd_queries = quality::bd_probe_queries(&aliases);
+            let bd_queries = append_custom_tokens(
+                quality::bd_probe_queries(&aliases),
+                &custom_tokens,
+            );
             run_queries(&bd_queries, ctx, &mut seen, &mut candidates).await;
         }
     }
@@ -735,6 +771,12 @@ struct AutoQueryCtx<'a> {
     /// `parse_release_season` would see "Season 9" and disagree
     /// with the Part-2 expected season.
     seadex_hashes: &'a HashSet<String>,
+    /// #23 — Nyaa uploader name to restrict searches to. Goes straight
+    /// into `SearchOptions.user`, which Nyaa translates to `?u=<name>`
+    /// — server-side filter, so fewer/faster responses. Empty string
+    /// means no restriction. Resolved from the per-series override or
+    /// the global default at the entry point.
+    restrict_user: &'a str,
 }
 
 /// Same idea, but for the interactive-search helper which has a
@@ -756,6 +798,8 @@ struct InteractiveQueryCtx<'a> {
     /// vanished from interactive search even though auto search
     /// surfaced it.
     seadex_hashes: &'a HashSet<String>,
+    /// #23 — see `AutoQueryCtx::restrict_user`.
+    restrict_user: &'a str,
 }
 
 /// Run a set of queries against Nyaa page 1, collecting valid candidates.
@@ -771,7 +815,7 @@ async fn run_queries(
                 query: query.clone(),
                 category: category.clone(),
                 filter: "0".to_string(),
-                user: String::new(),
+                user: ctx.restrict_user.to_string(),
                 preferred_groups: ctx.preferred_groups.to_vec(),
                 preferred_resolution: ctx.preferred_resolution.to_string(),
                 prefer_subs: true,
@@ -849,7 +893,7 @@ async fn run_queries_interactive(
             query: query.clone(),
             category: "1_0".to_string(),
             filter: "0".to_string(),
-            user: String::new(),
+            user: ctx.restrict_user.to_string(),
             preferred_groups: ctx.preferred_groups.to_vec(),
             preferred_resolution: ctx.preferred_resolution.to_string(),
             prefer_subs: true,
@@ -1077,6 +1121,70 @@ pub fn target_label(target: &SearchTarget) -> String {
         SearchTarget::Single => "Single".to_string(),
         SearchTarget::Episode(ep) => format!("Episode {}", ep),
     }
+}
+
+/// #23 — Resolve per-series search overrides, falling back to global
+/// defaults from `config`. Per-series wins when non-empty.
+///
+/// Two outputs:
+///  - Extra tokens appended verbatim to every Nyaa query after the
+///    title aliases. Empty means no extra tokens.
+///  - Nyaa uploader name (`?u=<name>`) — server-side filter that
+///    narrows the result set without a second round-trip. Empty
+///    means no restriction.
+///
+/// One DB hit per search call (scoped to `series WHERE anilist_id =
+/// ?`). Callers that already have the series row can pass it directly
+/// to `resolve_search_overrides_from_row` to skip the lookup.
+async fn resolve_search_overrides(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+    config: &Config,
+) -> (String, String) {
+    let row = crate::models::series::get_by_anilist_id(db, detail.id)
+        .await
+        .ok()
+        .flatten();
+    match row {
+        Some(s) => resolve_search_overrides_from_row(&s, config),
+        None => (
+            config.default_custom_query_tokens.clone(),
+            config.default_restrict_to_group.clone(),
+        ),
+    }
+}
+
+fn resolve_search_overrides_from_row(
+    series: &crate::models::series::Series,
+    config: &Config,
+) -> (String, String) {
+    let tokens = if series.custom_query_tokens.is_empty() {
+        config.default_custom_query_tokens.clone()
+    } else {
+        series.custom_query_tokens.clone()
+    };
+    let user = if series.restrict_to_group.is_empty() {
+        config.default_restrict_to_group.clone()
+    } else {
+        series.restrict_to_group.clone()
+    };
+    (tokens, user)
+}
+
+/// #23 — Append user-supplied custom query tokens to every query in
+/// the list. Empty tokens is a no-op so the common path stays
+/// allocation-free. Tokens are appended verbatim — users can pass any
+/// Nyaa query syntax (quoted phrases, minus-prefix exclusions, etc.)
+/// that `build_queries_from_aliases` didn't generate.
+fn append_custom_tokens(queries: Vec<String>, tokens: &str) -> Vec<String> {
+    let trimmed = tokens.trim();
+    if trimmed.is_empty() {
+        return queries;
+    }
+    queries
+        .into_iter()
+        .map(|q| format!("{} {}", q, trimmed))
+        .collect()
 }
 
 fn build_queries_from_aliases(aliases: &[String], target: &SearchTarget) -> Vec<String> {
@@ -5306,5 +5414,82 @@ mod tests {
         assert!(!season_mismatch("[Group] Monogatari II - 01 (1080p).mkv", 2));
         // Part N match.
         assert!(!season_mismatch("[Group] Show Part 3 - 01.mkv", 3));
+    }
+
+    // ── #23 — Search override resolver + token append ──────────────────────
+
+    fn series_with_overrides(tokens: &str, user: &str) -> crate::models::series::Series {
+        crate::models::series::Series {
+            id: 1,
+            anilist_id: 1,
+            mal_id: None,
+            title: String::new(),
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            format: "TV".to_string(),
+            status: String::new(),
+            episodes: None,
+            season_year: None,
+            end_year: None,
+            folder_name: String::new(),
+            monitor_mode: "future".to_string(),
+            allow_upgrades: true,
+            custom_query_tokens: tokens.to_string(),
+            restrict_to_group: user.to_string(),
+        }
+    }
+
+    fn cfg_with_defaults(tokens: &str, user: &str) -> Config {
+        let mut c = Config::default();
+        c.default_custom_query_tokens = tokens.to_string();
+        c.default_restrict_to_group = user.to_string();
+        c
+    }
+
+    #[test]
+    fn resolve_overrides_per_series_wins_over_global() {
+        let series = series_with_overrides("bd 1080p", "SubsPlease");
+        let cfg = cfg_with_defaults("web 720p", "Erai-raws");
+        let (tokens, user) = resolve_search_overrides_from_row(&series, &cfg);
+        assert_eq!(tokens, "bd 1080p");
+        assert_eq!(user, "SubsPlease");
+    }
+
+    #[test]
+    fn resolve_overrides_falls_back_to_global_when_series_blank() {
+        let series = series_with_overrides("", "");
+        let cfg = cfg_with_defaults("web 720p", "Erai-raws");
+        let (tokens, user) = resolve_search_overrides_from_row(&series, &cfg);
+        assert_eq!(tokens, "web 720p");
+        assert_eq!(user, "Erai-raws");
+    }
+
+    #[test]
+    fn resolve_overrides_per_field_independent_fallback() {
+        // One field set, the other blank — blank inherits, set wins.
+        let series = series_with_overrides("", "SubsPlease");
+        let cfg = cfg_with_defaults("web 720p", "Erai-raws");
+        let (tokens, user) = resolve_search_overrides_from_row(&series, &cfg);
+        assert_eq!(tokens, "web 720p", "blank field should inherit global");
+        assert_eq!(user, "SubsPlease", "set field should beat global");
+    }
+
+    #[test]
+    fn append_tokens_is_noop_when_empty() {
+        let qs = vec!["Frieren 01".to_string(), "Frieren - 01".to_string()];
+        assert_eq!(append_custom_tokens(qs.clone(), ""), qs);
+        assert_eq!(append_custom_tokens(qs.clone(), "   "), qs);
+    }
+
+    #[test]
+    fn append_tokens_adds_to_each_query() {
+        let qs = vec!["Frieren 01".to_string(), "Frieren - 01".to_string()];
+        let out = append_custom_tokens(qs, "bd 1080p");
+        assert_eq!(out, vec![
+            "Frieren 01 bd 1080p".to_string(),
+            "Frieren - 01 bd 1080p".to_string(),
+        ]);
     }
 }

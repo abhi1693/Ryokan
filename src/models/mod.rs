@@ -1312,6 +1312,30 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         }
     }
 
+    // #23 — Custom search tokens + release-group restriction.
+    // Global defaults live on `config`; per-series overrides live on
+    // `series`. Both are plain text for flexibility — the user pastes
+    // whatever Nyaa query syntax they want (`bd`, `1080p`, `h.264`)
+    // and the nyaa query builder appends it verbatim after the title.
+    // Empty string means "no override / no tokens", which is the
+    // existing behavior.
+    sqlx::query("ALTER TABLE config ADD COLUMN default_custom_query_tokens TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN default_restrict_to_group TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE series ADD COLUMN custom_query_tokens TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE series ADD COLUMN restrict_to_group TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

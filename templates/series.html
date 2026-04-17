@@ -159,6 +159,31 @@
                 <span class="form-hint" id="allow-upgrades-status"></span>
             </div>
         </div>
+        {# #23 — Per-series search overrides. Both fields are blank by
+           default; leaving them blank inherits the global defaults from
+           Settings → Quality (rendered as placeholders here). #}
+        <div class="monitoring-divider"></div>
+        <details class="monitoring-row" id="advanced-search-panel">
+            <summary class="folder-label" style="cursor:pointer">Advanced search overrides</summary>
+            <div class="monitoring-controls" style="flex-direction:column;align-items:stretch;gap:12px;margin-top:10px">
+                <div class="form-group" style="margin:0">
+                    <label for="series-restrict-to-group">Restrict to Nyaa uploader</label>
+                    <input type="text" id="series-restrict-to-group" value="{{ restrict_to_group }}"
+                        placeholder="{% if !default_restrict_to_group.is_empty() %}global: {{ default_restrict_to_group }}{% else %}(none){% endif %}">
+                    <span class="form-hint">Per-series override of the global default. Ryokan sets <code>?u=&lt;name&gt;</code> on every Nyaa search for this show so only this uploader's releases come back. Leave blank to inherit the global default.</span>
+                </div>
+                <div class="form-group" style="margin:0">
+                    <label for="series-custom-query-tokens">Custom query tokens</label>
+                    <input type="text" id="series-custom-query-tokens" value="{{ custom_query_tokens }}"
+                        placeholder="{% if !default_custom_query_tokens.is_empty() %}global: {{ default_custom_query_tokens }}{% else %}e.g. bd 1080p{% endif %}">
+                    <span class="form-hint">Extra keywords appended to every Nyaa search for this series. Leave blank to inherit the global default.</span>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <button type="button" class="btn btn-primary" onclick="saveSeriesSearchOverrides(this)">Save</button>
+                    <span class="form-hint" id="series-search-overrides-status"></span>
+                </div>
+            </div>
+        </details>
     </div>
 </div>
 {% endif %}
@@ -1466,6 +1491,43 @@ function setAllowUpgrades(allow) {
             checkbox.checked = !allow;
             checkbox.disabled = false;
         }
+    });
+}
+
+// #23 — Save per-series search overrides (Nyaa uploader + custom tokens).
+// Empty inputs clear the override server-side so the series falls back
+// to the global default in Settings → Quality.
+function saveSeriesSearchOverrides(btn) {
+    const dbId = parseInt(SD.dbId);
+    if (!dbId) return;
+    const tokens = (document.getElementById('series-custom-query-tokens')?.value || '').trim();
+    const restrict = (document.getElementById('series-restrict-to-group')?.value || '').trim();
+    const status = document.getElementById('series-search-overrides-status');
+    btn.disabled = true;
+    if (status) status.textContent = 'Saving…';
+
+    fetch('/api/library/search-overrides', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            series_id: dbId,
+            custom_query_tokens: tokens,
+            restrict_to_group: restrict,
+        }),
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Failed to save overrides');
+        return data;
+    })
+    .then(_ => {
+        if (status) status.textContent = 'Saved';
+        btn.disabled = false;
+    })
+    .catch(err => {
+        if (status) status.textContent = err.message || 'Failed to save overrides';
+        btn.disabled = false;
     });
 }
 

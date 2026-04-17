@@ -296,6 +296,8 @@ mod tests {
             folder_name: "english-title".to_string(),
             monitor_mode: "future".to_string(),
             allow_upgrades: true,
+            custom_query_tokens: String::new(),
+            restrict_to_group: String::new(),
         }
     }
 

@@ -29,6 +29,15 @@ pub struct Series {
     /// skips this series entirely, even if a higher-quality release is
     /// available. Defaults to true to preserve historical behavior.
     pub allow_upgrades: bool,
+    /// #23 — Per-series custom Nyaa query tokens appended after the
+    /// title aliases. Overrides the global
+    /// `config.default_custom_query_tokens` when non-empty.
+    pub custom_query_tokens: String,
+    /// #23 — Per-series Nyaa uploader restriction. When non-empty,
+    /// Ryokan sets `?u=<name>` on every search for this series so only
+    /// that account's uploads come back. Overrides the global
+    /// `config.default_restrict_to_group`.
+    pub restrict_to_group: String,
 }
 
 impl Series {
@@ -57,13 +66,15 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
         // Default to true so series from before the column existed (migration
         // backfills via ADD COLUMN DEFAULT 1) opt *in* to upgrades.
         allow_upgrades: row.try_get::<i64, _>("allow_upgrades").map(|v| v != 0).unwrap_or(true),
+        custom_query_tokens: row.try_get("custom_query_tokens").unwrap_or_default(),
+        restrict_to_group: row.try_get("restrict_to_group").unwrap_or_default(),
     }
 }
 
 /// Get all tracked series, ordered by most recently added.
 pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_group FROM series ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -73,7 +84,7 @@ pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_group FROM series WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
@@ -84,7 +95,7 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx:
 
 pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE anilist_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_group FROM series WHERE anilist_id = ?",
     )
     .bind(anilist_id)
     .fetch_optional(db)
@@ -95,7 +106,7 @@ pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Optio
 
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE mal_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_group FROM series WHERE mal_id = ?",
     )
     .bind(mal_id)
     .fetch_optional(db)
@@ -351,7 +362,7 @@ pub async fn refresh_core_metadata(
 
 pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_group FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -376,6 +387,26 @@ pub async fn update_allow_upgrades(db: &SqlitePool, id: i64, allow: bool) -> Res
         .bind(id)
         .execute(db)
         .await?;
+    Ok(())
+}
+
+/// #23 — Update the per-series search overrides. Empty strings clear
+/// the override and make the series fall back to the global defaults
+/// in `config.default_custom_query_tokens` / `default_restrict_to_group`.
+pub async fn update_search_overrides(
+    db: &SqlitePool,
+    id: i64,
+    custom_query_tokens: &str,
+    restrict_to_group: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE series SET custom_query_tokens = ?, restrict_to_group = ? WHERE id = ?",
+    )
+    .bind(custom_query_tokens.trim())
+    .bind(restrict_to_group.trim())
+    .bind(id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

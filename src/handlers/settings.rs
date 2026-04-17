@@ -209,6 +209,8 @@ pub struct SettingsForm {
     radarr_api_key: Option<String>,
     upgrade_search_enabled: Option<String>,
     seadex_enabled: Option<String>,
+    default_custom_query_tokens: Option<String>,
+    default_restrict_to_group: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -493,6 +495,18 @@ pub async fn settings_submit(
             form.seadex_enabled.is_some()
         } else {
             existing_cfg.as_ref().map(|c| c.seadex_enabled).unwrap_or(false)
+        },
+        // #23 — Search defaults live on the Quality tab alongside the
+        // other search-scoped knobs. Preserve on other-tab saves.
+        default_custom_query_tokens: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
+            form.default_custom_query_tokens.unwrap_or_default().trim().to_string()
+        } else {
+            existing_cfg.as_ref().map(|c| c.default_custom_query_tokens.clone()).unwrap_or_default()
+        },
+        default_restrict_to_group: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
+            form.default_restrict_to_group.unwrap_or_default().trim().to_string()
+        } else {
+            existing_cfg.as_ref().map(|c| c.default_restrict_to_group.clone()).unwrap_or_default()
         },
     };
 

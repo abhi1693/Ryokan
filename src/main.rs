@@ -48,6 +48,7 @@ use services::{
         handlers::library::set_monitoring,
         handlers::library::set_episode_monitoring,
         handlers::library::set_allow_upgrades,
+        handlers::library::set_search_overrides,
         handlers::library::set_manual_override,
         handlers::library::list_folders,
         handlers::library::auto_search_series,
@@ -406,6 +407,7 @@ async fn main() {
         .route("/api/library/monitoring", post(handlers::library::set_monitoring))
         .route("/api/library/episode-monitoring", post(handlers::library::set_episode_monitoring))
         .route("/api/library/allow-upgrades", post(handlers::library::set_allow_upgrades))
+        .route("/api/library/search-overrides", post(handlers::library::set_search_overrides))
         .route("/api/library/manual-override", post(handlers::library::set_manual_override))
         .route("/api/series/{anilist_id}/auto-search", post(handlers::library::auto_search_series))
         .route("/api/series/{anilist_id}/auto-search/{episode_number}", post(handlers::library::auto_search_episode))

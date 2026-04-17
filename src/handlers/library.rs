@@ -61,6 +61,17 @@ struct SeriesTemplate {
     /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the
     /// series detail page; toggled via POST /api/library/allow-upgrades.
     allow_upgrades: bool,
+    /// #23 — Per-series custom Nyaa query tokens. Empty string means
+    /// "use the global default in config." Rendered in the Advanced
+    /// search panel on the series detail page.
+    custom_query_tokens: String,
+    /// #23 — Per-series Nyaa uploader restriction. Empty string means
+    /// "use the global default in config."
+    restrict_to_group: String,
+    /// #23 — Global defaults, surfaced as placeholder hints so the user
+    /// can see what the per-series field will inherit when left blank.
+    default_custom_query_tokens: String,
+    default_restrict_to_group: String,
     /// Whether post-processing (file move + rename + NFO) is enabled in
     /// config. Rendered into the page as a JS global so the episode-row
     /// poller knows whether to show "Importing…" between a 100%-download
@@ -191,6 +202,18 @@ pub struct SetEpisodeMonitoringForm {
 pub struct SetAllowUpgradesForm {
     series_id: i64,
     allow: bool,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SetSearchOverridesForm {
+    series_id: i64,
+    /// Empty string clears the override and makes the series use the global
+    /// `config.default_custom_query_tokens` default.
+    #[serde(default)]
+    custom_query_tokens: String,
+    /// Nyaa uploader to restrict to (`?u=<name>`). Empty string clears.
+    #[serde(default)]
+    restrict_to_group: String,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -746,6 +769,22 @@ pub async fn series_detail(
 
     let all_monitored = ep_total > 0 && monitored_count >= ep_total;
     let allow_upgrades = db_series.as_ref().map(|s| s.allow_upgrades).unwrap_or(true);
+    let custom_query_tokens = db_series
+        .as_ref()
+        .map(|s| s.custom_query_tokens.clone())
+        .unwrap_or_default();
+    let restrict_to_group = db_series
+        .as_ref()
+        .map(|s| s.restrict_to_group.clone())
+        .unwrap_or_default();
+    let default_custom_query_tokens = cfg
+        .as_ref()
+        .map(|c| c.default_custom_query_tokens.clone())
+        .unwrap_or_default();
+    let default_restrict_to_group = cfg
+        .as_ref()
+        .map(|c| c.default_restrict_to_group.clone())
+        .unwrap_or_default();
     let post_processing_enabled = cfg
         .as_ref()
         .map(|c| c.post_processing_enabled)
@@ -772,6 +811,10 @@ pub async fn series_detail(
         monitored_count,
         all_monitored,
         allow_upgrades,
+        custom_query_tokens,
+        restrict_to_group,
+        default_custom_query_tokens,
+        default_restrict_to_group,
         post_processing_enabled,
     };
     Html(template.render().unwrap_or_default())
@@ -2066,6 +2109,51 @@ pub async fn set_allow_upgrades(
         "ok": true,
         "series_id": form.series_id,
         "allow_upgrades": form.allow,
+    })))
+}
+
+/// #23 — Update the per-series search overrides (custom Nyaa tokens +
+/// uploader restriction). Empty strings clear the overrides, which
+/// makes the series fall back to the global `config` defaults.
+#[utoipa::path(
+    post,
+    path = "/api/library/search-overrides",
+    tag = "Library",
+    summary = "Update series search overrides",
+    description = "Set or clear the per-series Nyaa uploader restriction and custom query tokens. Empty strings clear the override.",
+    request_body = SetSearchOverridesForm,
+    responses(
+        (status = 200, description = "Search overrides updated", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
+pub async fn set_search_overrides(
+    State(state): State<AppState>,
+    Json(form): Json<SetSearchOverridesForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    series::update_search_overrides(
+        &state.db,
+        form.series_id,
+        &form.custom_query_tokens,
+        &form.restrict_to_group,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!("Search overrides updated for series {}", form.series_id),
+        &format!(
+            "tokens={:?} restrict_to={:?}",
+            form.custom_query_tokens.trim(),
+            form.restrict_to_group.trim(),
+        ),
+    ).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "series_id": form.series_id,
+        "custom_query_tokens": form.custom_query_tokens.trim(),
+        "restrict_to_group": form.restrict_to_group.trim(),
     })))
 }
 
