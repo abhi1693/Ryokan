@@ -287,10 +287,19 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
 
     logger::info(&state.db, LogCategory::System, "RSS sync started", &format!("trigger={} items={}", trigger, items.len())).await;
 
+    // One SELECT instead of N: pre-load every previously-grabbed item_key
+    // so the per-item dedup check is an in-memory HashSet lookup rather
+    // than a round-trip per feed item. Nyaa typically returns ~100 items
+    // per feed × multiple categories per sync, so this collapses 100+
+    // sequential SELECTs into one.
+    let already_grabbed = rss::grabbed_item_keys(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+
     for item in items {
         items_seen += 1;
         let item_key = build_item_key(&item);
-        if rss::item_was_grabbed(&state.db, &item_key).await.map_err(|e| e.to_string())? {
+        if already_grabbed.contains(&item_key) {
             skipped += 1;
             let _ = rss::record_decision(&state.db, rss::DecisionRecord {
                 item_key: &item_key,
