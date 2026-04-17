@@ -3580,7 +3580,7 @@ pub async fn interactive_search_episode(
     // Same single-entry collapse as auto_search_episode — the interactive
     // picker otherwise returns zero results for movies.
     let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
-    let results = auto_search::find_all_for_target(
+    let mut results = auto_search::find_all_for_target(
         &state.db,
         &detail,
         &cfg,
@@ -3588,6 +3588,14 @@ pub async fn interactive_search_episode(
         false,
         &cfs,
     ).await;
+
+    // Layer 3 (group-map) enrichment. Auto-search already runs the full
+    // source pipeline so its classification is complete, but the interactive
+    // picker shows results straight from nyaa::parse_results where only
+    // Layer 1 (anitomy filename tokens) has fired. Filling source via the
+    // group table here is what lets SubsPlease releases label as WEB-DL
+    // and VCB-Studio as BluRay when the filename alone is silent.
+    crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
 
     Ok(Json(results))
 }
@@ -3626,13 +3634,15 @@ pub async fn interactive_search_batches(
 
     let cfs = state.custom_formats.read().await.clone();
 
-    let results = auto_search::collect_scored_batches_for_target(
+    let mut results = auto_search::collect_scored_batches_for_target(
         &state.db,
         &detail,
         &cfg,
         &auto_search::SearchTarget::Single,
         &cfs,
     ).await;
+
+    crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
 
     Ok(Json(results))
 }

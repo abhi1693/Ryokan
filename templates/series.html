@@ -990,7 +990,7 @@ function renderInteractiveResults(results, epNum) {
             <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
             <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
-            <td class="col-quality">${escHtml(parseQualityFromTitle(r.title, r.resolution))}</td>
+            <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
             <td class="col-seeds">${renderPeers(r.seeders, r.leechers)}</td>
             <td class="col-grab"><button class="btn-grab" data-idx="${idx}" onclick="grabInteractiveResult(${epNum}, ${idx}, this)">Grab</button></td>
@@ -1101,7 +1101,7 @@ function renderInteractiveBatchResults(results) {
             <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
             <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
-            <td class="col-quality">${escHtml(parseQualityFromTitle(r.title, r.resolution))}</td>
+            <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
             <td class="col-seeds">${renderPeers(r.seeders, r.leechers)}</td>
             <td class="col-grab"><button class="btn-grab" data-idx="${idx}" onclick="grabInteractiveBatchResult(${idx}, this)">Grab</button></td>
