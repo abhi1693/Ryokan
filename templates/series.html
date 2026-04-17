@@ -500,6 +500,12 @@
 <script>
 const SD = document.getElementById('series-data').dataset;
 
+// Server-rendered flag: when post-processing is disabled, the episode-row
+// poller skips the "Importing…" label between a 100%-download and the
+// completion checkmark, because there's no post-processing pass to wait
+// on — advance_state_without_import flips the state directly (#14).
+window.POST_PROCESSING_ENABLED = {% if post_processing_enabled %}true{% else %}false{% endif %};
+
 // Title-language switching is handled entirely by CSS via the
 // `html[data-title-language]` attribute set by the inline head script in
 // base.html. No DOM walking here — doing it post-parse caused a visible
@@ -1805,11 +1811,21 @@ function pollDownloadProgress() {
                     }
                     const isComplete = item.state.includes('UP') || item.state === 'uploading' || item.progress >= 1.0;
                     if (isComplete) {
-                        // qBit has finished but post-processing hasn't imported
-                        // the release into the library yet. Show a full bar with
-                        // an "Importing..." label so the user isn't staring at a
-                        // stale 0.0% until the next post-processing tick.
-                        qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:100%"></div></div><span class="dl-progress-text">Importing…</span></div>';
+                        if (window.POST_PROCESSING_ENABLED) {
+                            // qBit finished but post-processing hasn't imported
+                            // the release into the library yet. Show a full bar with
+                            // an "Importing..." label so the user isn't staring at a
+                            // stale 0.0% until the next post-processing tick.
+                            qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:100%"></div></div><span class="dl-progress-text">Importing…</span></div>';
+                        } else {
+                            // Post-processing is off — there is no import step to
+                            // wait on. The lightweight post-proc sweep
+                            // (advance_state_without_import) flips the tag state
+                            // to 'completed' on the next tick; trigger a refresh
+                            // so the checkmark appears without flashing a
+                            // spurious "Importing…" that'll never advance.
+                            needsRefresh = true;
+                        }
                     } else {
                         const pct = (item.progress * 100).toFixed(1);
                         qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;

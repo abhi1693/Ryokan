@@ -52,6 +52,12 @@ struct SeriesTemplate {
     /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the
     /// series detail page; toggled via POST /api/library/allow-upgrades.
     allow_upgrades: bool,
+    /// Whether post-processing (file move + rename + NFO) is enabled in
+    /// config. Rendered into the page as a JS global so the episode-row
+    /// poller knows whether to show "Importing…" between a 100%-download
+    /// and the completion checkmark, or to skip straight to the
+    /// checkmark when post-proc is off (#14).
+    post_processing_enabled: bool,
 }
 
 #[derive(Template)]
@@ -722,6 +728,10 @@ pub async fn series_detail(
 
     let all_monitored = ep_total > 0 && monitored_count >= ep_total;
     let allow_upgrades = db_series.as_ref().map(|s| s.allow_upgrades).unwrap_or(true);
+    let post_processing_enabled = cfg
+        .as_ref()
+        .map(|c| c.post_processing_enabled)
+        .unwrap_or(false);
     let template = SeriesTemplate {
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
@@ -743,6 +753,7 @@ pub async fn series_detail(
         monitored_count,
         all_monitored,
         allow_upgrades,
+        post_processing_enabled,
     };
     Html(template.render().unwrap_or_default())
 }
