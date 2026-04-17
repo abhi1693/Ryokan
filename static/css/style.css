@@ -2334,6 +2334,31 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 .system-tab:hover { color: var(--text); }
 .system-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+/* #20 commit 7 — On phone the tab strip wraps to 2-3 lines (Connections
+ * / Preferred Quality & Releases / Custom Formats / Release Groups /
+ * General at 412px is way too much for one row). Convert to a
+ * horizontally-scrolling strip with snap points so each tab lands
+ * cleanly at the left edge. Same treatment for .settings-tabs and
+ * .system-tabs since they share the same class. */
+@media (max-width: 640px) {
+    .system-tabs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scroll-snap-type: x proximity;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+    .system-tabs::-webkit-scrollbar {
+        display: none;
+    }
+    .system-tab {
+        flex-shrink: 0;
+        scroll-snap-align: start;
+        padding: 10px 14px;
+        font-size: 13px;
+    }
+}
+
 .settings-tabs {
     margin-bottom: 24px;
 }
