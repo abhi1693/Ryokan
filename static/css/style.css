@@ -1896,10 +1896,49 @@ fieldset legend {
     .detail-banner { height: 160px; margin-bottom: -40px; }
     .ep-filename { max-width: 180px; }
     .ep-col-size { display: none; }
-    .ep-col-aired { display: none; }
     .folder-row { flex-wrap: wrap; }
     .folder-select { max-width: none; width: 100%; }
     .season-header { padding: 12px 14px; }
+
+    /* #20 commit 6 — Episode table collapse on phone. Each row
+     * becomes a card: status icon + episode number + title on top,
+     * then quality badge, then the action buttons on the last row.
+     * thead hides, size/aired columns already hid above; the
+     * monitor button moves into the card's top-right corner. */
+    .episode-table,
+    .episode-table tbody,
+    .episode-table tr,
+    .episode-table td {
+        display: block;
+        width: 100%;
+    }
+    .episode-table thead {
+        display: none;
+    }
+    .episode-table tbody tr {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        display: grid;
+        grid-template-columns: auto auto 1fr auto;
+        grid-template-areas:
+            "status num title monitor"
+            "quality quality quality quality"
+            "actions actions actions actions";
+        gap: 6px 8px;
+        align-items: center;
+    }
+    .episode-table tbody tr:last-child { border: 1px solid var(--border); }
+    .episode-table td { border: none !important; padding: 0; }
+    .ep-col-status { grid-area: status; width: auto; }
+    .ep-col-num { grid-area: num; width: auto; text-align: left; }
+    .ep-col-title { grid-area: title; min-width: 0; overflow-wrap: anywhere; }
+    .ep-col-monitor { grid-area: monitor; width: auto; }
+    .ep-col-aired { display: none; }
+    .ep-col-quality { grid-area: quality; width: auto; text-align: left; }
+    .ep-col-actions { grid-area: actions; width: auto; text-align: left; display: flex; flex-wrap: wrap; gap: 6px; padding-top: 6px; border-top: 1px solid var(--border); margin-top: 2px; }
 }
 
 
