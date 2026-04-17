@@ -838,10 +838,17 @@ function filterCfList(query) {
 function openCfEditorModal() {
     const modal = document.getElementById('cf-editor-modal');
     if (!modal) return;
-    const params = new URLSearchParams(window.location.search);
-    // If page is in edit mode and user clicked "+ Add", navigate to the
-    // bare CF tab first so the server re-renders the empty form.
-    if (params.has('edit_id')) {
+    // Check the FORM state, not the URL. closeCfEditorModal drops
+    // ?edit_id=N from the URL via history.replaceState, but the form
+    // HTML was server-rendered with the previous edit's id/name/score/
+    // json pre-filled. If we open the modal in-place now, the user
+    // sees the previously-edited CF's values and submitting would
+    // update that CF rather than create a new one. Any hidden
+    // `name="id"` input in the form means we're carrying stale edit
+    // state — force a server re-render with a clean URL.
+    const editorForm = modal.querySelector('form');
+    const stale = editorForm && editorForm.querySelector('input[type="hidden"][name="id"]');
+    if (stale) {
         window.location.href = '/settings?tab=custom_formats';
         return;
     }
