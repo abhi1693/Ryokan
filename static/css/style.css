@@ -810,6 +810,27 @@ fieldset legend {
     flex: 1;
 }
 
+/* #20 commit 8 — Full-screen modals on phone. Below --bp-phone the
+ * modal-backdrop padding drops to 0 and the modal fills the viewport
+ * edge-to-edge. Improves tap targets and avoids the fiddly
+ * floating-card feel on small screens. Applies to the shared
+ * .modal / .modal-backdrop primitives so ryokanConfirm / ryokanAlert
+ * / ryokanPrompt and the CF editor modal all pick it up
+ * automatically. */
+@media (max-width: 640px) {
+    .modal-backdrop {
+        padding: 0;
+    }
+    .modal {
+        max-width: none;
+        width: 100%;
+        height: 100%;
+        max-height: 100vh;
+        border-radius: 0;
+        border: none;
+    }
+}
+
 .modal-header .btn-icon {
     background: var(--bg-elevated);
     border: 1px solid var(--border);
