@@ -102,6 +102,24 @@ body {
     .content {
         padding: 24px 14px calc(80px + env(safe-area-inset-bottom, 0px));
     }
+
+    /* Wide data tables (Groups, CF import collision review) become
+     * independently scrollable on mobile so they don't push the form
+     * above them past the viewport. `display: block` sacrifices the
+     * accessibility tree's table semantics at this width — worth it
+     * to stop the parent-container width leak. */
+    .group-source-table {
+        display: block;
+        overflow-x: auto;
+        max-width: 100%;
+        -webkit-overflow-scrolling: touch;
+    }
+    /* Pre-wrap form-hint so it doesn't get dragged wider when a
+     * sibling (e.g. a wide table below) temporarily forces the
+     * parent container past viewport during layout. */
+    .form-hint {
+        overflow-wrap: anywhere;
+    }
 }
 
 /* #20 — Mobile tab bar default (hidden). The actual phone-width swap
