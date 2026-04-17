@@ -196,6 +196,7 @@ body {
         display: block;
         padding: 10px 12px;
         border-bottom: 1px solid rgba(42, 42, 58, 0.4);
+        background: var(--bg-card);
     }
     .log-table td {
         display: block;
@@ -215,11 +216,17 @@ body {
     }
     .log-table td.log-col-time { white-space: nowrap; }
     .log-table td.log-col-msg { margin-top: 6px; }
-    .log-row .log-message { display: block; overflow-wrap: anywhere; }
+    .log-row .log-message {
+        display: block;
+        overflow-wrap: break-word;
+        word-break: normal;
+        color: var(--text);
+    }
     .log-row .log-detail {
         display: block;
         white-space: normal;
-        word-break: break-word;
+        overflow-wrap: break-word;
+        word-break: normal;
         margin-top: 4px;
     }
     .log-expand-hint { display: none; }
@@ -2116,7 +2123,11 @@ fieldset legend {
     .ep-col-status { width: 24px; }
     .ep-col-num { width: 28px; }
     .ep-col-monitor { width: auto; }
-    .ep-col-title { min-width: 0; overflow-wrap: anywhere; }
+    /* `overflow-wrap: anywhere` would drop the cell's min-content width
+     * to one character, which table layout then happily collapses to
+     * one-char-per-line. `break-word` lets long words break but keeps
+     * min-content as the longest word so the column stays usable. */
+    .ep-col-title { overflow-wrap: break-word; word-break: normal; }
     .ep-filename { max-width: 140px; }
     .ep-col-quality { width: auto; min-width: 0; text-align: center; }
     .tag-quality { padding: 1px 5px; font-size: 9px; }
