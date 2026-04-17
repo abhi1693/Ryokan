@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use crate::services::html::sanitize_rich_description;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 use crate::services::jikan;
@@ -60,6 +60,184 @@ static ANILIST_COOLDOWN_UNTIL: LazyLock<StdMutex<Option<Instant>>> =
 /// roughly the original Retry-After value. 2s clears the boundary in
 /// practice without meaningfully extending sweep time.
 const COOLDOWN_SAFETY_MARGIN: Duration = Duration::from_secs(2);
+
+/// Below this many `X-RateLimit-Remaining`, switch from "minimum
+/// inter-request spacing" to "wait until window reset." Picked low so
+/// we mostly run at full headroom-driven speed and only slow down when
+/// we're about to bump the cap.
+const REMAINING_HEADROOM_THRESHOLD: u32 = 3;
+
+/// Fallback per-minute limit used when AL hasn't told us its current
+/// limit yet. Conservative — matches the documented "currently degraded
+/// to 30 req/min" state. Once we see `X-RateLimit-Limit` we use that
+/// instead, so during normal AL operation (90 req/min) we adapt up.
+const ANILIST_LIMIT_FALLBACK: u32 = 30;
+
+/// Per-response snapshot of AniList's rate-limit headers, used by
+/// `throttle_before_anilist_request` to pace the next call without
+/// guessing.
+#[derive(Clone, Copy)]
+struct RateLimitState {
+    /// `X-RateLimit-Limit` — total requests in the current window.
+    limit: u32,
+    /// `X-RateLimit-Remaining` from the latest response.
+    remaining: u32,
+    /// `X-RateLimit-Reset` translated from a Unix timestamp into our
+    /// monotonic clock at recording time. None when the header was
+    /// absent, which AL only sends on 429s in normal operation.
+    reset_at: Option<Instant>,
+}
+
+static RATE_LIMIT_STATE: LazyLock<StdMutex<Option<RateLimitState>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+/// Last time we sent a request to AniList. Used to enforce a minimum
+/// inter-request spacing derived from the current per-minute limit, so
+/// a relation walk that fires N back-to-back AL calls can't burst over
+/// AL's burst limiter (which is documented but not header-exposed).
+static LAST_AL_REQUEST: LazyLock<StdMutex<Option<Instant>>> =
+    LazyLock::new(|| StdMutex::new(None));
+
+/// Compute the minimum spacing between AL requests for a given
+/// per-minute limit. 60s / limit, with a 10% safety pad on top so that
+/// clock drift / measurement noise can't accidentally push us above
+/// the cap. Returns a defensive 2s when limit is 0 (shouldn't happen).
+fn min_inter_request(limit: u32) -> Duration {
+    if limit == 0 {
+        return Duration::from_secs(2);
+    }
+    Duration::from_millis((66_000 / limit as u64).max(100))
+}
+
+/// Capture rate-limit headers from the latest AL response. Called for
+/// every AL response (success or error) so the next throttle decision
+/// is based on AL's fresh count rather than our stale belief. Headers
+/// AL doesn't send (e.g. `X-RateLimit-Reset` outside of throttling)
+/// just leave the corresponding field at None / unchanged.
+fn record_rate_limit_headers(headers: &reqwest::header::HeaderMap) {
+    let parse = |name: &str| -> Option<u64> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+
+    let limit = parse("x-ratelimit-limit").map(|v| v as u32);
+    let remaining = parse("x-ratelimit-remaining").map(|v| v as u32);
+    let reset_unix = parse("x-ratelimit-reset");
+
+    // If AL didn't send anything useful, leave existing state alone.
+    if limit.is_none() && remaining.is_none() && reset_unix.is_none() {
+        return;
+    }
+
+    let reset_at = reset_unix.and_then(|reset| {
+        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        if reset > now_unix {
+            Some(Instant::now() + Duration::from_secs(reset - now_unix))
+        } else {
+            None
+        }
+    });
+
+    if let Ok(mut guard) = RATE_LIMIT_STATE.lock() {
+        let prev = *guard;
+        *guard = Some(RateLimitState {
+            limit: limit.or(prev.map(|s| s.limit)).unwrap_or(ANILIST_LIMIT_FALLBACK),
+            remaining: remaining.or(prev.map(|s| s.remaining)).unwrap_or(0),
+            // Keep the prior reset_at if AL didn't send one this time —
+            // it's the most recent ground truth we have for when the
+            // window flips.
+            reset_at: reset_at.or(prev.and_then(|s| s.reset_at)),
+        });
+    }
+}
+
+/// Pace the next AniList request to stay inside the documented window
+/// and burst limits, using the latest rate-limit headers as the source
+/// of truth. Two strategies, picked dynamically:
+///   - **Headroom strategy** (the common case): AL still has plenty of
+///     `remaining`. Sleep just long enough since the last request to keep
+///     us under the per-minute limit (60s/limit, with a 10% pad).
+///   - **Window-flip strategy** (when `remaining <= REMAINING_HEADROOM_
+///     THRESHOLD`): AL is about to refuse us. Sleep until `reset_at`
+///     (plus a 1s slack) so we resume right when the next window opens.
+///
+/// Without this, a relation walk burst-fires N calls in seconds — even
+/// when N is well under the per-minute limit, AL's burst limiter trips
+/// and we eat a full minute of cooldown for what would've been a
+/// 1-second pause if we'd just paced ourselves.
+async fn throttle_before_anilist_request() {
+    let snap = RATE_LIMIT_STATE.lock().ok().and_then(|g| *g);
+
+    if let Some(state) = snap
+        && state.remaining <= REMAINING_HEADROOM_THRESHOLD
+        && let Some(reset_at) = state.reset_at
+    {
+        let now = Instant::now();
+        if reset_at > now {
+            let wait = reset_at.saturating_duration_since(now) + Duration::from_secs(1);
+            tracing::info!(
+                target: "ryokan::anilist",
+                remaining = state.remaining,
+                wait_secs = wait.as_secs(),
+                "AniList rate-limit headroom low; pausing until window resets"
+            );
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    // Burst guard: even with headroom, don't fire requests faster than
+    // the per-minute limit allows. The limit comes from the latest
+    // X-RateLimit-Limit response header, falling back to the
+    // currently-degraded 30 req/min ceiling.
+    let limit = snap.map(|s| s.limit).unwrap_or(ANILIST_LIMIT_FALLBACK);
+    let min_spacing = min_inter_request(limit);
+    let elapsed = LAST_AL_REQUEST
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .map(|last| last.elapsed())
+        .unwrap_or(Duration::MAX);
+    if elapsed < min_spacing {
+        tokio::time::sleep(min_spacing - elapsed).await;
+    }
+    if let Ok(mut guard) = LAST_AL_REQUEST.lock() {
+        *guard = Some(Instant::now());
+    }
+}
+
+/// Compute cooldown duration on a 429 from AL's headers, preferring
+/// `X-RateLimit-Reset` (absolute timestamp, the most precise signal AL
+/// gives us) over `Retry-After` (relative seconds), with the configured
+/// default as the last fallback. The result is capped and padded the
+/// same way as the default-only path.
+fn cooldown_from_headers(
+    headers: &reqwest::header::HeaderMap,
+    default_dur: Duration,
+) -> Duration {
+    let parse_u64 = |name: &str| -> Option<u64> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+
+    if let Some(reset_unix) = parse_u64("x-ratelimit-reset") {
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if reset_unix > now_unix {
+            let raw = Duration::from_secs(reset_unix - now_unix).min(ANILIST_COOLDOWN_MAX);
+            return raw + COOLDOWN_SAFETY_MARGIN;
+        }
+    }
+
+    let retry_after = parse_u64("retry-after");
+    compute_cooldown_duration(retry_after, default_dur)
+}
 
 fn normalize_search_key(force_fallback: bool, query: &str) -> String {
     let folded: String = query
@@ -798,6 +976,13 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         "variables": { "id": id }
     });
 
+    // Pace the request based on the latest X-RateLimit-Remaining /
+    // X-RateLimit-Reset we've seen. This is the primary defense against
+    // 429s — by the time AL hands back a 429 we've already wasted the
+    // round trip; throttling proactively keeps the sweep inside AL's
+    // window and burst limits.
+    throttle_before_anilist_request().await;
+
     let client = reqwest::Client::new();
     let resp = client
         .post(ANILIST_API)
@@ -808,14 +993,13 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         .map_err(|e| format!("AniList request failed: {}", e))?;
 
     let status = resp.status();
-    // Capture Retry-After before consuming the response body — used to
-    // set the cooldown duration so the sweep's remaining calls skip
-    // AniList until the limit window resets.
-    let retry_after_secs = resp
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+    // Headers carry both the rate-limit snapshot (used by future
+    // throttles) and Retry-After / X-RateLimit-Reset for cooldown
+    // computation. Clone so we can use them after the body has been
+    // consumed.
+    let headers = resp.headers().clone();
+    record_rate_limit_headers(&headers);
+
     // Read as text first (not .json()) so a Cloudflare HTML challenge
     // doesn't blow up at the parse step — we need the body to classify
     // the failure correctly.
@@ -830,7 +1014,10 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
             // happily MAL-falls-back, and the whole "no MAL on rate-limit"
             // invariant collapses on a flaky network.
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                set_anilist_cooldown(retry_after_secs, ANILIST_COOLDOWN_DEFAULT);
+                let dur = cooldown_from_headers(&headers, ANILIST_COOLDOWN_DEFAULT);
+                if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
+                    *guard = Some(Instant::now() + dur);
+                }
                 return Err(format!(
                     "AniList rate-limited (HTTP 429): body read failed: {}",
                     e
@@ -856,7 +1043,10 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
             } else {
                 ANILIST_COOLDOWN_DEFAULT
             };
-            set_anilist_cooldown(retry_after_secs, default_cooldown);
+            let dur = cooldown_from_headers(&headers, default_cooldown);
+            if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
+                *guard = Some(Instant::now() + dur);
+            }
         }
         return Err(msg);
     }
@@ -874,7 +1064,10 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         // circuit the rest of the sweep.
         let (kind, msg) = classify_anilist_failure(status, &body_text);
         if kind == AniListFailureKind::RateLimited {
-            set_anilist_cooldown(retry_after_secs, ANILIST_COOLDOWN_DEFAULT);
+            let dur = cooldown_from_headers(&headers, ANILIST_COOLDOWN_DEFAULT);
+            if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
+                *guard = Some(Instant::now() + dur);
+            }
         }
         return Err(msg);
     }
@@ -1146,6 +1339,67 @@ mod tests {
         // (so a runaway Retry-After can't bypass the cap, but the
         // boundary protection still applies).
         let dur = compute_cooldown_duration(Some(3600), ANILIST_COOLDOWN_DEFAULT);
+        assert_eq!(dur, ANILIST_COOLDOWN_MAX + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn min_inter_request_scales_with_limit() {
+        // 60s window, 30 req/min degraded state → ~2.2s spacing.
+        // 60s window, 90 req/min normal state → ~733ms spacing.
+        // 10% padding on both keeps us comfortably inside.
+        let degraded = min_inter_request(30);
+        let normal = min_inter_request(90);
+        assert!(degraded >= Duration::from_millis(2000));
+        assert!(degraded <= Duration::from_millis(2500));
+        assert!(normal >= Duration::from_millis(700));
+        assert!(normal <= Duration::from_millis(800));
+        // Defensive: limit=0 must not divide-by-zero.
+        assert_eq!(min_inter_request(0), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn cooldown_from_headers_prefers_x_ratelimit_reset() {
+        use reqwest::header::HeaderMap;
+        let mut h = HeaderMap::new();
+        // Reset 30s in the future.
+        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        h.insert("x-ratelimit-reset", (now_unix + 30).to_string().parse().unwrap());
+        h.insert("retry-after", "999".parse().unwrap());  // should be ignored
+        let dur = cooldown_from_headers(&h, ANILIST_COOLDOWN_DEFAULT);
+        // Allow ±2s slack for clock measurement noise plus the 2s safety margin.
+        let lower = Duration::from_secs(30) + COOLDOWN_SAFETY_MARGIN - Duration::from_secs(2);
+        let upper = Duration::from_secs(30) + COOLDOWN_SAFETY_MARGIN + Duration::from_secs(2);
+        assert!(
+            dur >= lower && dur <= upper,
+            "expected ~32s, got {:?}",
+            dur
+        );
+    }
+
+    #[test]
+    fn cooldown_from_headers_falls_back_to_retry_after() {
+        use reqwest::header::HeaderMap;
+        let mut h = HeaderMap::new();
+        h.insert("retry-after", "45".parse().unwrap());
+        let dur = cooldown_from_headers(&h, ANILIST_COOLDOWN_DEFAULT);
+        assert_eq!(dur, Duration::from_secs(45) + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn cooldown_from_headers_falls_back_to_default_when_no_headers() {
+        use reqwest::header::HeaderMap;
+        let h = HeaderMap::new();
+        let dur = cooldown_from_headers(&h, Duration::from_secs(60));
+        assert_eq!(dur, Duration::from_secs(60) + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn cooldown_from_headers_caps_runaway_reset_at_max() {
+        use reqwest::header::HeaderMap;
+        let mut h = HeaderMap::new();
+        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        h.insert("x-ratelimit-reset", (now_unix + 3600).to_string().parse().unwrap());
+        let dur = cooldown_from_headers(&h, ANILIST_COOLDOWN_DEFAULT);
         assert_eq!(dur, ANILIST_COOLDOWN_MAX + COOLDOWN_SAFETY_MARGIN);
     }
 
