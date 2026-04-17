@@ -25,6 +25,16 @@
     --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
     --radius: 6px;
     --radius-lg: 10px;
+    /* #20 — Breakpoint system. Exposed as custom properties so JS that
+     * needs to know "am I on mobile" can read them via getComputedStyle
+     * instead of duplicating pixel values. The @media queries throughout
+     * the stylesheet still hardcode these numbers because `@media
+     * (max-width: var(--bp-phone))` is only supported in very recent
+     * browsers; a comment at each @media block references which
+     * breakpoint it's targeting. */
+    --bp-phone: 640px;
+    --bp-tablet: 900px;
+    --bp-desktop: 1100px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -36,6 +46,28 @@ body {
     font-size: 15px;
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
+}
+
+/* #20 — Mobile reset. Below --bp-phone iOS Safari will auto-zoom on
+ * any form input whose font-size is < 16px, so everything that accepts
+ * keyboard input gets bumped to 16px. Also scale body font-size up
+ * slightly so copy is legible at phone widths without the browser's
+ * own text-zoom fallback kicking in. */
+@media (max-width: 640px) {
+    body {
+        font-size: 16px;
+    }
+    input[type="text"],
+    input[type="search"],
+    input[type="number"],
+    input[type="password"],
+    input[type="email"],
+    input[type="url"],
+    input[type="tel"],
+    select,
+    textarea {
+        font-size: 16px;
+    }
 }
 
 /* --- Nav --- */
