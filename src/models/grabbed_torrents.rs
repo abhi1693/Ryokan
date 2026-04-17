@@ -295,6 +295,24 @@ pub async fn mark_imported(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
+/// Mark a grab as finalized without recording an actual import. Used by
+/// `advance_state_without_import` when post-processing is disabled: the
+/// torrent is complete on qBit's side and we want to stop polling it
+/// (hence the `state = 'imported'` flip, which matches the unique-index
+/// and pending-filter semantics elsewhere), but Ryokan never moved a
+/// file, so `imported_at` stays NULL. Any future report or filter keyed
+/// on `imported_at IS NOT NULL` will correctly see this grab as "not
+/// imported by us."
+pub async fn mark_completed_no_import(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE grabbed_torrents SET state = 'imported' WHERE id = ?",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Stamp the qBit-reported content_path (or save_path fallback) on the
 /// grabbed_torrents row the first time we observe the torrent as
 /// complete. Sonarr-parity dual-path tracking: the qBit-side path is

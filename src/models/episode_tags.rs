@@ -386,8 +386,15 @@ pub async fn set_manual_override(
         // Re-derivation uses `classify_release_sync` over the stored
         // release title — the grab_history row doesn't carry the
         // structured `(source, resolution, is_remux, …)` columns, so
-        // we re-parse from the release title. The 6h `library_classify`
-        // sweep will upgrade this to a richer classification later.
+        // we re-parse from the release title. This is weaker than a
+        // full post-download classify (no group/ffprobe/dir layers)
+        // but the result is persisted once and does NOT self-heal:
+        // `scan_library_for_unclassified` skips rows with non-empty
+        // `source` (see `services/post_processing.rs` around the
+        // "Skip when ... a tag exists with a non-empty source" guard),
+        // so the 6h sweep leaves these rows alone. A stronger
+        // reclassification requires a new grab (which goes through
+        // `record_grab`'s full pipeline) or a manual re-override.
         let existing = sqlx::query(
             "SELECT release_title FROM episode_grab_history
              WHERE series_id = ? AND episode_number = ?
@@ -610,10 +617,15 @@ pub async fn mark_grab_history_completed(
 
 /// Clear the current quality tag for an episode (e.g. after file deletion).
 ///
-/// Rows with `manual_override = 1` are kept. The file on disk being gone
-/// is a separate assertion from the user's pinned classification — the
-/// pin says "regardless of what landed here, this is the correct tag",
-/// which still holds when the file is deleted.
+/// Split behavior by `manual_override`:
+/// - Non-pinned rows: DELETE the row entirely. No pin to preserve.
+/// - Pinned rows: UPDATE `state = ''` but keep the classification
+///   columns (source, resolution, is_remux, is_bdmv, web_kind,
+///   manual_override). The pin protects the user's *classification*
+///   assertion; the file being gone is a separate fact that must
+///   reflect in `state` so the series page's `downloaded` flag
+///   (on_disk OR state == 'completed') stops rendering a checkmark
+///   for a file that no longer exists.
 pub async fn clear_episode_tag(
     db: &SqlitePool,
     series_id: i64,
@@ -628,6 +640,15 @@ pub async fn clear_episode_tag(
     .bind(episode_number)
     .execute(db)
     .await?;
+    sqlx::query(
+        "UPDATE episode_quality_tags SET state = '', updated_at = CURRENT_TIMESTAMP
+         WHERE series_id = ? AND episode_number = ?
+           AND COALESCE(manual_override, 0) = 1",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -635,9 +656,11 @@ pub async fn clear_episode_tag(
 /// associated with a grabbed torrent (identified by series_id + episode_numbers).
 ///
 /// Rows with `manual_override = 1` are kept — blocklisting a release must
-/// not silently destroy a pinned tag. The grab_history state flip to
-/// 'removed' still runs unconditionally; that history is about the
-/// release, not the episode's ground truth.
+/// not silently destroy a pinned tag. Unlike [`clear_episode_tag`] this
+/// does NOT clear `state` on pinned rows: the torrent going away doesn't
+/// imply the file left disk (post-processing may have already moved it).
+/// The grab_history state flip to 'removed' still runs unconditionally;
+/// that history is about the release, not the episode's ground truth.
 pub async fn clear_tags_for_removal(
     db: &SqlitePool,
     series_id: i64,
@@ -786,6 +809,57 @@ mod tests {
 
         let tags = get_for_series(&db, sid).await.expect("get for series");
         assert!(tags.contains_key(&1), "manual_override row was wiped");
+    }
+
+    /// PR #35 review: pin an episode's classification, then delete the
+    /// file on disk. The pin must survive (classification columns
+    /// intact, manual_override stays 1) but `state` must clear so the
+    /// series-page `downloaded` flag (on_disk OR state == 'completed')
+    /// stops rendering a checkmark for a file that no longer exists.
+    #[tokio::test]
+    async fn clear_episode_tag_resets_state_on_pinned_row() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        // Grab + complete, then pin. record_grab writes state='grabbed'
+        // and the full classification; mark_completed flips to completed.
+        let cls = synthetic_classification(Source::Web, Resolution::R1080p);
+        record_grab(
+            &db,
+            sid,
+            1,
+            &cls,
+            "[SubsPlease] Test - 01 (1080p).mkv",
+            "SubsPlease",
+            1_000_000,
+            false,
+        )
+        .await
+        .expect("record grab");
+        mark_completed(&db, sid, &[1]).await.expect("mark completed");
+        set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
+            .await
+            .expect("pin override");
+
+        // Sanity: state should be 'completed' (set_manual_override
+        // upserts the row with state='completed' via its INSERT branch).
+        let before = get_for_series(&db, sid).await.expect("get");
+        assert!(before[&1].manual_override);
+        assert_eq!(before[&1].state, "completed");
+
+        // User deletes the file on disk — the handler calls clear_episode_tag.
+        clear_episode_tag(&db, sid, 1).await.expect("clear tag");
+
+        let after = get_for_series(&db, sid).await.expect("get");
+        let row = after.get(&1).expect("pinned row must survive");
+        assert!(row.manual_override, "pin must survive");
+        assert_eq!(row.source, "BluRay", "classification must survive");
+        assert_eq!(row.resolution, "1080p", "classification must survive");
+        assert_eq!(
+            row.state, "",
+            "state must clear so downloaded-flag stops rendering checkmark"
+        );
     }
 
     /// Bug B: clearing an override on an episode with no live grab

@@ -1102,12 +1102,15 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         )
         .await;
 
-        // Mark the grab row as imported so we stop polling it and the
-        // UI stops treating it as in-flight. Then flip the episode
-        // tag(s) to 'completed' so the checkmark appears on next
-        // refresh. If there are Phase-2 sibling routes recorded for
-        // this grab, flip each route's per-series episodes too.
-        let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
+        // Mark the grab row as finalized so we stop polling it and the
+        // UI stops treating it as in-flight. Use `mark_completed_no_import`
+        // rather than `mark_imported` — we never moved a file, so
+        // `imported_at` stays NULL and future reports keyed on that
+        // column don't see a false positive for this grab. Then flip
+        // the episode tag(s) to 'completed' so the checkmark appears
+        // on the next poll. Phase-2 sibling routes get the per-series
+        // treatment too.
+        let _ = grabbed_torrents::mark_completed_no_import(&state.db, grab.id).await;
 
         let routes = grabbed_torrents::get_series_routes(&state.db, grab.id)
             .await
