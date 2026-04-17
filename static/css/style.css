@@ -229,8 +229,6 @@ body {
         word-break: normal;
         margin-top: 4px;
     }
-    .log-expand-hint { display: none; }
-    .log-row-has-detail { cursor: default; }
 
     /* Series detail: strip the outer season-section card on phone so
      * the rounded-border container doesn't nest around the already-
@@ -3641,22 +3639,6 @@ input[type="file"]::file-selector-button:hover {
     max-width: 100%;
 }
 
-/* Chevron indicator so rows with hidden detail look tappable. Rotates
- * 180° when the row is expanded. Only visible on rows carrying the
- * `log-row-has-detail` class (rows without detail have nothing to
- * expand and don't get an onclick handler either). */
-.log-expand-hint {
-    display: inline-block;
-    margin-left: 6px;
-    color: var(--text-dim);
-    font-size: 10px;
-    transition: transform 0.15s ease;
-    vertical-align: middle;
-}
-.log-row.log-row-expanded .log-expand-hint {
-    transform: rotate(180deg);
-}
-
 /* Log Level Badges */
 .log-badge {
     display: inline-block;
@@ -3700,21 +3682,12 @@ input[type="file"]::file-selector-button:hover {
     background: rgba(203, 166, 247, 0.04);
 }
 
-/* Expand the wrapped detail on hover (desktop) OR on tap via the
- * `log-row-expanded` class toggled by the delegated click handler in
- * system.html's log script (mobile — :hover doesn't fire on touch). */
-.log-row:hover .log-detail,
-.log-row.log-row-expanded .log-detail {
+/* Expand the wrapped detail on hover (desktop only — touch targets
+ * get fully wrapped detail via the phone-width override). */
+.log-row:hover .log-detail {
     white-space: normal;
     word-break: break-word;
 }
-.log-row.log-row-expanded {
-    background: rgba(203, 166, 247, 0.04);
-}
-/* Only log rows carrying detail get an onclick + interactive cursor.
- * Rows without detail have nothing to expand, so tapping them doing
- * nothing was the previous confusing behavior — hide the affordance. */
-.log-row-has-detail { cursor: pointer; }
 
 /* RSS */
 .rss-panel {
