@@ -562,106 +562,6 @@
     </div>
     {% endif %}
 
-    {# ── Bundled Defaults (#11.5) ────────────────────────────────── #}
-    <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Bundled Defaults</h3>
-        </div>
-        <p class="cf-section-desc">
-            <strong>Install Defaults</strong> adds the bundled anime-tuned Custom Formats (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit / x265, FLAC / Opus, plus an 8-bit mp4 penalty). Repeat clicks are safe: existing names are skipped.
-        </p>
-        <p class="cf-section-desc">
-            <strong>Reset to Defaults</strong> drops every row with Source = <em>default</em> and re-installs the bundled set from scratch. Useful if you edited a default CF and want the original back. Manual and imported CFs are untouched.
-        </p>
-        <div class="settings-inline-actions">
-            <form method="post" action="/settings/custom-formats/install-defaults"
-                  data-ryokan-confirm-title="Install bundled defaults"
-                  data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
-                  data-ryokan-confirm-label="Install">
-                <button type="submit" class="btn btn-primary">Install Defaults</button>
-            </form>
-            <form method="post" action="/settings/custom-formats/reset-defaults"
-                  data-ryokan-confirm-title="Reset bundled defaults"
-                  data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
-                  data-ryokan-confirm-label="Reset">
-                <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
-            </form>
-        </div>
-    </div>
-
-    {# ── Minimum Score ───────────────────────────────────────────── #}
-    <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Minimum Score</h3>
-        </div>
-        <p class="cf-section-desc">
-            Auto-search drops any release whose summed CF score falls below this floor. Interactive search still shows everything. Leave blank to disable the floor entirely.
-        </p>
-        <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form cf-min-score-form">
-            <div class="form-group cf-min-score-group">
-                <input type="number" name="minimum_score" id="cf_min_score"
-                    value="{{ custom_format_min_score_display }}"
-                    placeholder="(blank = no floor)"
-                    aria-label="Minimum score">
-                <button type="submit" class="btn btn-primary">Save</button>
-            </div>
-        </form>
-    </div>
-
-    {# ── Export (#11.4) ─────────────────────────────────────────────
-       Per-CF checkbox selector + mode radio + two actions (download
-       file / copy to clipboard). The selector only renders when at
-       least one CF exists — exporting 0 rows isn't useful. #}
-    {% if !custom_formats.is_empty() %}
-    <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Export</h3>
-        </div>
-        <p class="cf-section-desc">
-            <strong>Ryokan (native)</strong> keeps every selected CF verbatim (including Ryokan-only specs like <code>Ryokan.SeaDexBestSpecification</code>) and round-trips into another Ryokan instance.
-            <strong>Sonarr-safe</strong> drops selected CFs that contain Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance. Dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
-        </p>
-
-        <div class="cf-export-mode-row">
-            <label class="cf-export-mode">
-                <input type="radio" name="cf_export_mode" value="" checked>
-                <span>Ryokan (native)</span>
-            </label>
-            <label class="cf-export-mode">
-                <input type="radio" name="cf_export_mode" value="sonarr-safe">
-                <span>Sonarr-safe</span>
-            </label>
-        </div>
-
-        <div class="cf-export-selector">
-            <div class="cf-export-selector-head">
-                <span class="cf-defaults-subtitle" style="margin:0">Custom formats to include</span>
-                <div class="settings-inline-actions">
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="cfExportSelectAll(true)">Select all</button>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="cfExportSelectAll(false)">Select none</button>
-                </div>
-            </div>
-            <div class="cf-export-list">
-                {% for cf in custom_formats %}
-                <label class="cf-export-check">
-                    <input type="checkbox" name="cf_export_ids" value="{{ cf.row.id }}" checked>
-                    <span class="cf-origin-dot cf-origin-dot-{{ cf.row.origin }}"></span>
-                    <span class="cf-export-check-name">{{ cf.row.name }}</span>
-                    <span class="cf-export-check-score cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
-                        {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
-                    </span>
-                </label>
-                {% endfor %}
-            </div>
-        </div>
-
-        <div class="settings-inline-actions" style="margin-top: 16px">
-            <button type="button" class="btn btn-primary" onclick="cfExportDownload()">Export JSON</button>
-            <button type="button" class="btn btn-secondary" onclick="cfExportClipboard(this)">Copy to clipboard</button>
-        </div>
-    </div>
-    {% endif %}
-
     {# ── Import (#11.3) ─────────────────────────────────────────────
        Two-stage flow:
        1. Paste / Upload → POST /settings/custom-formats/import.
@@ -762,6 +662,106 @@
             <button type="submit" class="btn btn-primary">Preview &amp; Import</button>
         </form>
         {% endif %}
+    </div>
+
+    {# ── Export (#11.4) ─────────────────────────────────────────────
+       Per-CF checkbox selector + mode radio + two actions (download
+       file / copy to clipboard). The selector only renders when at
+       least one CF exists — exporting 0 rows isn't useful. #}
+    {% if !custom_formats.is_empty() %}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Export</h3>
+        </div>
+        <p class="cf-section-desc">
+            <strong>Ryokan (native)</strong> keeps every selected CF verbatim (including Ryokan-only specs like <code>Ryokan.SeaDexBestSpecification</code>) and round-trips into another Ryokan instance.
+            <strong>Sonarr-safe</strong> drops selected CFs that contain Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance. Dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
+        </p>
+
+        <div class="cf-export-mode-row">
+            <label class="cf-export-mode">
+                <input type="radio" name="cf_export_mode" value="" checked>
+                <span>Ryokan (native)</span>
+            </label>
+            <label class="cf-export-mode">
+                <input type="radio" name="cf_export_mode" value="sonarr-safe">
+                <span>Sonarr-safe</span>
+            </label>
+        </div>
+
+        <div class="cf-export-selector">
+            <div class="cf-export-selector-head">
+                <span class="cf-defaults-subtitle" style="margin:0">Custom formats to include</span>
+                <div class="settings-inline-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="cfExportSelectAll(true)">Select all</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="cfExportSelectAll(false)">Select none</button>
+                </div>
+            </div>
+            <div class="cf-export-list">
+                {% for cf in custom_formats %}
+                <label class="cf-export-check">
+                    <input type="checkbox" name="cf_export_ids" value="{{ cf.row.id }}" checked>
+                    <span class="cf-origin-dot cf-origin-dot-{{ cf.row.origin }}"></span>
+                    <span class="cf-export-check-name">{{ cf.row.name }}</span>
+                    <span class="cf-export-check-score cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
+                        {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
+                    </span>
+                </label>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="settings-inline-actions" style="margin-top: 16px">
+            <button type="button" class="btn btn-primary" onclick="cfExportDownload()">Export JSON</button>
+            <button type="button" class="btn btn-secondary" onclick="cfExportClipboard(this)">Copy to clipboard</button>
+        </div>
+    </div>
+    {% endif %}
+
+    {# ── Minimum Score ───────────────────────────────────────────── #}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Minimum Score</h3>
+        </div>
+        <p class="cf-section-desc">
+            Auto-search drops any release whose summed CF score falls below this floor. Interactive search still shows everything. Leave blank to disable the floor entirely.
+        </p>
+        <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form cf-min-score-form">
+            <div class="form-group cf-min-score-group">
+                <input type="number" name="minimum_score" id="cf_min_score"
+                    value="{{ custom_format_min_score_display }}"
+                    placeholder="(blank = no floor)"
+                    aria-label="Minimum score">
+                <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+        </form>
+    </div>
+
+    {# ── Bundled Defaults (#11.5) ────────────────────────────────── #}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Bundled Defaults</h3>
+        </div>
+        <p class="cf-section-desc">
+            <strong>Install Defaults</strong> adds the bundled anime-tuned Custom Formats (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit / x265, FLAC / Opus, plus an 8-bit mp4 penalty). Repeat clicks are safe: existing names are skipped.
+        </p>
+        <p class="cf-section-desc">
+            <strong>Reset to Defaults</strong> drops every row with Source = <em>default</em> and re-installs the bundled set from scratch. Useful if you edited a default CF and want the original back. Manual and imported CFs are untouched.
+        </p>
+        <div class="settings-inline-actions">
+            <form method="post" action="/settings/custom-formats/install-defaults"
+                  data-ryokan-confirm-title="Install bundled defaults"
+                  data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
+                  data-ryokan-confirm-label="Install">
+                <button type="submit" class="btn btn-primary">Install Defaults</button>
+            </form>
+            <form method="post" action="/settings/custom-formats/reset-defaults"
+                  data-ryokan-confirm-title="Reset bundled defaults"
+                  data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
+                  data-ryokan-confirm-label="Reset">
+                <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
+            </form>
+        </div>
     </div>
 </div>
 {% endif %}
