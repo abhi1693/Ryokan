@@ -2737,18 +2737,34 @@ input[type="file"]::file-selector-button:hover {
     font-style: italic;
     opacity: 0.7;
 }
-/* Delete sits in the top-right corner, revealed on card hover so the
- * grid doesn't scream "× × × ×" to the eye at rest. */
+/* Delete × replaces the origin dot at the top-left on hover. The dot
+ * and the × share the same position so the card's top-right score
+ * badge stays untouched (otherwise the × would overlap the score).
+ * The dot fades out on hover and the × fades in — same pixel slot,
+ * two affordances: at-rest the user sees origin, on hover they get
+ * the delete action. */
 .cf-card-actions {
     position: absolute;
-    top: 8px;
-    right: 8px;
+    top: 12px;
+    left: 10px;
     opacity: 0;
     transition: opacity 0.15s;
+    pointer-events: none;
 }
 .cf-card:hover .cf-card-actions,
 .cf-card:focus-within .cf-card-actions {
     opacity: 1;
+    pointer-events: auto;
+}
+/* Fade the origin dot out on hover so the × isn't stacked on top of
+ * it. visibility:hidden would drop the element from hit-testing; we
+ * just need visual suppression, so opacity is enough. */
+.cf-card .cf-origin-dot {
+    transition: opacity 0.15s;
+}
+.cf-card:hover .cf-origin-dot,
+.cf-card:focus-within .cf-origin-dot {
+    opacity: 0;
 }
 /* Trailing "+ Add" tile — same dimensions as a CF card but dashed border
  * and centered label so it reads as a create affordance, not a real
@@ -2792,26 +2808,31 @@ input[type="file"]::file-selector-button:hover {
 .cf-origin-dot-defaults { background: var(--accent); }
 .cf-origin-dot-import { background: #8ccc97; }
 .cf-origin-dot-manual { background: var(--text-dim); }
-/* Icon-only danger button (× for Delete). Kept from the earlier
- * tightening commit — used here on the absolutely-positioned card
- * action stack so the × isn't in the primary click path. */
+/* Icon-only danger button (× for Delete). Sits on top of the card
+ * content via absolute positioning on .cf-card-actions, so the
+ * background MUST be fully opaque — an rgba() fill with alpha <1
+ * lets the content behind (e.g. the CF name or score) bleed
+ * through, which reads as a glitch. */
 .btn-icon-danger {
-    width: 26px;
-    height: 26px;
+    width: 22px;
+    height: 22px;
     padding: 0;
     border-radius: 6px;
-    border: 1px solid transparent;
+    border: 1px solid var(--border);
     background: var(--bg-card);
     color: var(--text-dim);
-    font-size: 16px;
+    font-size: 14px;
     line-height: 1;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 .btn-icon-danger:hover {
-    background: rgba(220, 70, 70, 0.15);
-    color: #e06b6b;
-    border-color: rgba(220, 70, 70, 0.35);
+    background: #5a2b2b;
+    color: #ffb3b3;
+    border-color: #8a3a3a;
 }
 
 /* Trash-Guides description callout shown above the edit form when the
