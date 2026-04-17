@@ -2296,91 +2296,171 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     font-weight: 500;
 }
 
-/* #11.1 — Two-pane CF layout (list on the left, editor on the right).
- * Proportions: 1fr list + 1.2fr editor so the editor's textarea gets
- * enough width without starving the list name column. Collapses to a
- * single column below 1080px because the editor form becomes unusable
- * at narrower widths; the full mobile treatment lands in #20. */
-.cf-panes {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
-    gap: 20px;
-    align-items: start;
-    margin-bottom: 20px;
-}
-@media (max-width: 1080px) {
-    .cf-panes {
-        grid-template-columns: 1fr;
-    }
-}
-.cf-pane-list,
-.cf-pane-editor {
-    margin-bottom: 0;
-}
-/* Header pill + "+ New" button live on the same right-aligned row so the
- * list header reads as "Title | count • new-button". */
-.cf-list-header-actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-}
+/* #11.1 — Sonarr-style CF card grid (full-width flex-wrap of ~300px
+ * cards). Replaced the earlier two-pane table layout because compressing
+ * a list into 490px made names wrap ugly and the + Delete button clip.
+ * Each card is a clickable tile that deep-links to ?edit_id=N; the
+ * editor form still lives below the grid (modal-ified in stage 2). */
 .cf-list-filter {
     margin-bottom: 14px;
     width: 100%;
+    max-width: 520px;
 }
-/* Soft cap on the list pane height so a 28-entry default set doesn't
- * push the editor pane off-screen. The editor is the thing the user is
- * actively typing in; the list stays scrollable. */
-.cf-list-scroll {
-    max-height: 560px;
-    overflow-y: auto;
-    border-top: 1px solid var(--border);
+.cf-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
 }
-.cf-list-scroll .group-source-table {
-    margin-top: 0;
-    border-top: none;
+.cf-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: border-color 0.15s, background 0.15s;
+    min-height: 120px;
 }
-/* Sticky header so scrolling through the list keeps the column labels
- * visible. Requires the table to live inside .cf-list-scroll (which
- * establishes the scroll container). */
-.cf-list-scroll .group-source-table thead {
-    position: sticky;
-    top: 0;
-    background: var(--bg-card);
-    z-index: 1;
+.cf-card:hover {
+    border-color: var(--border-accent);
+    background: var(--bg);
 }
-.cf-row-link {
+.cf-card-selected {
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.06);
+}
+.cf-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 16px;
     color: inherit;
     text-decoration: none;
+    flex: 1 1 auto;
+}
+.cf-card-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+.cf-card-title-row {
+    display: flex;
+    align-items: flex-start;
     gap: 8px;
     min-width: 0;
-}
-.cf-row-link:hover {
-    color: var(--accent);
-}
-.cf-row-name {
-    overflow-wrap: anywhere;
     flex: 1 1 auto;
-    min-width: 0;
 }
-.cf-row-spec-count {
-    color: var(--text-dim);
-    font-size: 11px;
-    font-weight: 400;
-    white-space: nowrap;
-    flex-shrink: 0;
+/* Nudge the origin dot down slightly so it sits on the x-height of the
+ * name's first line instead of clinging to the cap height. Only matters
+ * when the name wraps to 2+ lines — otherwise the center-vs-baseline
+ * difference is imperceptible. */
+.cf-card-title-row .cf-origin-dot {
+    margin-top: 6px;
 }
-.cf-row-selected {
-    background: rgba(203, 166, 247, 0.08);
+.cf-card-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin: 0;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
 }
-.cf-row-selected .cf-name {
+.cf-card-selected .cf-card-name {
     color: var(--accent);
 }
-/* Origin indicator as a colored dot inline with the name so the list pane
- * doesn't need a standalone Source column at tablet widths. Hover shows the
- * full label via the title attribute. */
+.cf-card-score {
+    font-size: 13px;
+    font-weight: 600;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+.cf-card-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: auto;
+}
+/* Condition pill shape mirrors Sonarr's Labels: default grey, green
+ * when `required`, red when `negate`. One pill per spec; the title
+ * attribute carries the implementation type for hover inspection. */
+.cf-pill {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.cf-pill-required {
+    background: rgba(140, 204, 151, 0.12);
+    color: #8ccc97;
+    border-color: rgba(140, 204, 151, 0.3);
+}
+.cf-pill-negate {
+    background: rgba(220, 70, 70, 0.12);
+    color: #e06b6b;
+    border-color: rgba(220, 70, 70, 0.3);
+}
+.cf-pill-error {
+    background: rgba(220, 70, 70, 0.2);
+    color: #e06b6b;
+    border-color: rgba(220, 70, 70, 0.4);
+}
+.cf-pill-muted {
+    font-style: italic;
+    opacity: 0.7;
+}
+/* Delete sits in the top-right corner, revealed on card hover so the
+ * grid doesn't scream "× × × ×" to the eye at rest. */
+.cf-card-actions {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.cf-card:hover .cf-card-actions,
+.cf-card:focus-within .cf-card-actions {
+    opacity: 1;
+}
+/* Trailing "+ Add" tile — same dimensions as a CF card but dashed border
+ * and centered label so it reads as a create affordance, not a real
+ * entry. */
+.cf-card-add {
+    border-style: dashed;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    text-decoration: none;
+    padding: 14px 16px;
+    text-align: center;
+    cursor: pointer;
+}
+.cf-card-add:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.04);
+}
+.cf-card-add-icon {
+    font-size: 28px;
+    font-weight: 300;
+    line-height: 1;
+    margin-bottom: 6px;
+}
+.cf-card-add-label {
+    font-size: 13px;
+    font-weight: 500;
+}
+/* Origin indicator: colored dot inline with the card name. Filter still
+ * matches on origin via data-cf-origin so removing the dedicated column
+ * doesn't hurt discoverability. */
 .cf-origin-dot {
     width: 8px;
     height: 8px;
@@ -2392,38 +2472,26 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 .cf-origin-dot-defaults { background: var(--accent); }
 .cf-origin-dot-import { background: #8ccc97; }
 .cf-origin-dot-manual { background: var(--text-dim); }
-
-/* Tighten Score + Delete action columns so the Name column keeps as much
- * width as possible inside the ~490px list pane. */
-.cf-list-score-col {
-    width: 64px;
-    text-align: right;
-    white-space: nowrap;
-}
-.cf-list-action-col {
-    width: 36px;
-    text-align: right;
-    padding-right: 8px !important;
-}
-/* Icon-only danger button (the × for Delete). Matches the btn-danger
- * color scheme at a tighter footprint. */
+/* Icon-only danger button (× for Delete). Kept from the earlier
+ * tightening commit — used here on the absolutely-positioned card
+ * action stack so the × isn't in the primary click path. */
 .btn-icon-danger {
-    width: 28px;
-    height: 28px;
+    width: 26px;
+    height: 26px;
     padding: 0;
     border-radius: 6px;
     border: 1px solid transparent;
-    background: transparent;
+    background: var(--bg-card);
     color: var(--text-dim);
-    font-size: 18px;
+    font-size: 16px;
     line-height: 1;
     cursor: pointer;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 .btn-icon-danger:hover {
-    background: rgba(220, 70, 70, 0.12);
+    background: rgba(220, 70, 70, 0.15);
     color: #e06b6b;
-    border-color: rgba(220, 70, 70, 0.3);
+    border-color: rgba(220, 70, 70, 0.35);
 }
 
 /* Trash-Guides description callout shown above the edit form when the

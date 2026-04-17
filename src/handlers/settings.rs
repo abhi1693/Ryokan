@@ -14,14 +14,68 @@ use crate::services::{
 };
 use crate::AppState;
 
-/// View-model wrapper rendered on the Custom Formats tab. Pairs each
-/// stored CF row with its parsed spec count (or parse error), so the
-/// table can surface "3 specs" next to well-formed rows and a red
-/// "parse error: ..." marker next to ones the user needs to fix.
+/// View-model wrapper rendered on the Custom Formats tab. Surfaces
+/// parse errors (so the user can spot broken CFs without tailing logs)
+/// and carries the per-spec label list used by the card-grid UI to
+/// render condition pills.
 pub struct CustomFormatView {
     pub row: cf_model::CustomFormatRow,
-    pub specs_count: usize,
     pub parse_error: Option<String>,
+    /// Sonarr-style condition pills shown on the CF card. Extracted
+    /// directly from the row's JSON `specifications[]` array (the
+    /// compiled form drops the per-spec `name` field, which is exactly
+    /// what the pill needs to render). Empty for parse-error rows; the
+    /// template uses `.len()` for the count display too.
+    pub spec_labels: Vec<SpecLabelView>,
+}
+
+pub struct SpecLabelView {
+    pub name: String,
+    pub implementation: String,
+    pub negate: bool,
+    pub required: bool,
+}
+
+/// Extract the per-spec labels used by CF card pills. Pulls
+/// `name`/`implementation`/`negate`/`required` straight out of the
+/// JSON — the compiled form at this layer already dropped the `name`
+/// field, so re-parsing as a loose `Value` is the simplest path.
+/// Returns an empty vec on any parse failure; the caller already
+/// surfaces the parse error via `parse_error`.
+fn extract_spec_labels(json: &str) -> Vec<SpecLabelView> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let specs = match value.get("specifications").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+    specs
+        .iter()
+        .map(|s| {
+            let name = s
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let implementation = s
+                .get("implementation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let negate = s.get("negate").and_then(|v| v.as_bool()).unwrap_or(false);
+            let required = s
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            SpecLabelView {
+                name,
+                implementation,
+                negate,
+                required,
+            }
+        })
+        .collect()
 }
 
 /// View-model wrapper rendered when the Custom Formats tab is in edit
@@ -175,15 +229,16 @@ async fn load_custom_formats_view(db: &sqlx::SqlitePool) -> Vec<CustomFormatView
     let rows = cf_model::list_with_scores(db).await.unwrap_or_default();
     rows.into_iter()
         .map(|row| {
+            let spec_labels = extract_spec_labels(&row.json);
             match cf_service::compile_from_json(&row.json, row.score as i32, row.id) {
-                Ok(cf) => CustomFormatView {
-                    specs_count: cf.specs.len(),
+                Ok(_) => CustomFormatView {
                     parse_error: None,
+                    spec_labels,
                     row,
                 },
                 Err(e) => CustomFormatView {
-                    specs_count: 0,
                     parse_error: Some(e),
+                    spec_labels,
                     row,
                 },
             }
