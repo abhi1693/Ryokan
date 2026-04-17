@@ -179,14 +179,48 @@ body {
         flex-wrap: wrap;
     }
 
-    /* Logs: there is no :hover on touch, and tr-level onclick on mobile
-     * Firefox was unreliable even when wired up directly. Drop the
-     * tap-to-expand pattern on phone and just always show detail fully
-     * wrapped — the desktop's ellipsis+hover exists to save vertical
-     * space, and mobile rows are already one-per-screen-width anyway. */
+    /* Logs: the desktop table uses `table-layout: fixed` with per-cell
+     * `overflow: hidden`, which at phone widths collapses columns into
+     * equal-split boxes that then clip the message to a few characters
+     * (often to nothing visible). On phone, convert the table into a
+     * stacked card per row: top metadata strip (level + timestamp +
+     * category) over a full-width wrapped message and detail block.
+     * There's no :hover on touch, so always show detail fully. */
+    .log-table {
+        table-layout: auto;
+        display: block;
+    }
+    .log-table thead { display: none; }
+    .log-table tbody { display: block; }
+    .log-table tr.log-row {
+        display: block;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(42, 42, 58, 0.4);
+    }
+    .log-table td {
+        display: block;
+        padding: 0;
+        border: none;
+        overflow: visible;
+        text-overflow: clip;
+        background: transparent;
+    }
+    .log-table td.log-col-time,
+    .log-table td.log-col-level,
+    .log-table td.log-col-cat {
+        display: inline-block;
+        vertical-align: middle;
+        margin-right: 8px;
+        font-size: 11px;
+    }
+    .log-table td.log-col-time { white-space: nowrap; }
+    .log-table td.log-col-msg { margin-top: 6px; }
+    .log-row .log-message { display: block; overflow-wrap: anywhere; }
     .log-row .log-detail {
+        display: block;
         white-space: normal;
         word-break: break-word;
+        margin-top: 4px;
     }
     .log-expand-hint { display: none; }
     .log-row-has-detail { cursor: default; }
