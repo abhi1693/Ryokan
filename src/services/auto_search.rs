@@ -54,6 +54,24 @@ static RE_RELEASE_SEASON_N: LazyLock<Regex> = LazyLock::new(||
 static RE_RELEASE_NTH_SEASON: LazyLock<Regex> = LazyLock::new(||
     Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap()
 );
+/// #27 additions: release titles also use `Part N` / `Cour N` as season
+/// synonyms (matches the same token `infer_season_from_title` already
+/// accepts on the AL side — the parsers were asymmetric before, which
+/// let a release titled "JJK Part 2" slip past the reject layer as
+/// season 0 because neither regex fired on `parse_release_season`).
+static RE_RELEASE_PART_COUR: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"\b(?:part|cour)\s+(\d+)").unwrap()
+);
+/// Roman numerals II–IX at a word boundary, terminated by space/dot/
+/// punctuation/end-of-string. Single-letter Romans (`I`, `V`, `X`) are
+/// deliberately excluded — matching bare `I` would fire on any title
+/// containing the English pronoun and silently reject every release
+/// whose filename has no other season indicator. The Roman-numeral
+/// arm is for *rejecting* a release whose title explicitly names cour
+/// II/III/IV when the target is cour 1, not for pinning cour 1.
+static RE_RELEASE_ROMAN: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"(?i)\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-\s\.]|$)").unwrap()
+);
 
 #[derive(Debug, Clone)]
 pub enum SearchTarget {
@@ -2030,11 +2048,34 @@ fn infer_season_from_title(title: &str) -> i32 {
                 return n;
             }
 
+    // #27 — Roman numeral II–IX at word boundary. Keeps AL-side inference
+    // in sync with the release-side parser so e.g. an AL entry titled
+    // "Made in Abyss: Retsujitsu no Ougonkyou" (no marker, season 1) and
+    // "Made in Abyss III" (season 3, Roman numeral) disambiguate against
+    // each other's releases instead of both reporting 0.
+    if let Some(caps) = RE_RELEASE_ROMAN.captures(&lower)
+        && let Some(m) = caps.get(1) {
+            let n = roman_to_i32(m.as_str());
+            if n >= 2 {
+                return n;
+            }
+        }
+
     0
 }
 
-/// Parse the season number from a release title.
-/// Returns 0 if no season indicator is found.
+/// Parse the season/cour number from a release title.
+/// Returns 0 if no season indicator is found — callers treat 0 as
+/// "absolute numbering / single cour, don't reject."
+///
+/// Signals tried in order (first hit wins):
+///  1. `SXXEXX` (`s2e03`)
+///  2. Standalone `SN` (` s3 `, `.s3.`, `[s3]`)
+///  3. `Season N`
+///  4. `Nth Season`
+///  5. `Part N` / `Cour N` *(#27 — symmetric with [`infer_season_from_title`])*
+///  6. Roman numeral II–IX at a word boundary *(#27 — catches "JJK II",
+///     "Rebuild III", "Kizumonogatari Part II")*
 pub fn parse_release_season(title: &str) -> i32 {
     let lower = title.to_lowercase();
 
@@ -2063,7 +2104,39 @@ pub fn parse_release_season(title: &str) -> i32 {
             return n;
         }
 
+    // "Part 2", "Cour 2"
+    if let Some(caps) = RE_RELEASE_PART_COUR.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+            && n >= 2 {
+                return n;
+            }
+
+    // Roman numeral II–IX.
+    if let Some(caps) = RE_RELEASE_ROMAN.captures(&lower)
+        && let Some(m) = caps.get(1) {
+            let n = roman_to_i32(m.as_str());
+            if n >= 2 {
+                return n;
+            }
+        }
+
     0
+}
+
+/// Tiny II–IX Roman-numeral decoder. Callers validate `n >= 2` before
+/// treating the result as a season indicator, so `I` (=1) and anything
+/// that doesn't parse returns 0 and gets filtered upstream.
+fn roman_to_i32(s: &str) -> i32 {
+    match s.to_ascii_lowercase().as_str() {
+        "ii" => 2,
+        "iii" => 3,
+        "iv" => 4,
+        "vi" => 6,
+        "vii" => 7,
+        "viii" => 8,
+        "ix" => 9,
+        _ => 0,
+    }
 }
 
 // ── Pre-compiled regexes for extract_part_number ───────────────────────────
@@ -5157,5 +5230,81 @@ mod tests {
             &tags,
         );
         assert_eq!(targets.len(), 1, "auto-classified row should be upgraded");
+    }
+
+    // ── #27 — cour-aware reject parser coverage ────────────────────────────
+    //
+    // The existing `season_mismatch` reject is hard, but its parsers were
+    // missing `Part N`, `Cour N`, and Roman numerals on the release side,
+    // and Roman numerals on the AL side. These tests pin the JJK / Bleach
+    // TYBW / Demon Slayer / Made in Abyss corpus so a future change that
+    // weakens the parsers shows up as a red test, not as a wrong-cour
+    // grab reported by a user.
+
+    #[test]
+    fn parse_release_season_catches_part_n() {
+        assert_eq!(parse_release_season("Jujutsu Kaisen Part 2 - 01 (1080p).mkv"), 2);
+        assert_eq!(parse_release_season("Chainsaw Man Part 3 - 07.mkv"), 3);
+    }
+
+    #[test]
+    fn parse_release_season_catches_cour_n() {
+        assert_eq!(parse_release_season("Show Name Cour 2 - 01.mkv"), 2);
+    }
+
+    #[test]
+    fn parse_release_season_catches_roman_numerals() {
+        // Rebuild of Evangelion III is season 3. Was returning 0 before.
+        assert_eq!(parse_release_season("Evangelion III.mkv"), 3);
+        // "Monogatari II" (season 2). Trailing dash terminator.
+        assert_eq!(parse_release_season("Monogatari II - 01.mkv"), 2);
+        // "JJK II" inside brackets.
+        assert_eq!(parse_release_season("[Group] JJK II [1080p].mkv"), 2);
+    }
+
+    #[test]
+    fn parse_release_season_rejects_bare_single_letter_romans() {
+        // "I" inside a title must not be read as cour 1 — that's the
+        // whole reason we excluded single-letter Romans. A bare "V" or
+        // "X" would also be ambiguous.
+        assert_eq!(parse_release_season("I Want to Eat Your Pancreas.mkv"), 0);
+    }
+
+    #[test]
+    fn season_mismatch_rejects_subsplease_jjk_s3_when_target_is_s1() {
+        // Motivating case: JJK S1 target, SubsPlease releases cour 2
+        // (which AniList calls "Jujutsu Kaisen 2nd Season") as S2. The
+        // existing `Season 2` path catches this; test pins the behavior.
+        assert!(season_mismatch(
+            "[SubsPlease] Jujutsu Kaisen Season 2 - 12 (1080p).mkv",
+            1,
+        ));
+    }
+
+    #[test]
+    fn season_mismatch_rejects_roman_numeral_release_against_s1_target() {
+        // A release titled "Monogatari II" against an S1 target must
+        // reject — this is the new signal #27 adds to the reject layer.
+        assert!(season_mismatch("[Group] Monogatari II - 01 (1080p).mkv", 1));
+    }
+
+    #[test]
+    fn season_mismatch_allows_absolute_numbered_release_without_season_token() {
+        // Release carries no season indicator — allow (absolute numbering
+        // or single-cour). Conservative choice to avoid rejecting the
+        // common `[Group] Show - 12 (1080p).mkv` shape.
+        assert!(!season_mismatch("[Group] Show - 12 (1080p).mkv", 2));
+    }
+
+    #[test]
+    fn season_mismatch_allows_matching_cour() {
+        assert!(!season_mismatch(
+            "[SubsPlease] Jujutsu Kaisen Season 2 - 12 (1080p).mkv",
+            2,
+        ));
+        // Roman numeral match.
+        assert!(!season_mismatch("[Group] Monogatari II - 01 (1080p).mkv", 2));
+        // Part N match.
+        assert!(!season_mismatch("[Group] Show Part 3 - 01.mkv", 3));
     }
 }
