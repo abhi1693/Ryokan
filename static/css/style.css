@@ -2961,20 +2961,6 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     color: var(--text-bright);
 }
 
-/* --- System section framing (matches Logs; replaces fieldset/legend) --- */
-.system-section-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin: 0 0 12px;
-}
-
-.system-section {
-    margin-bottom: 24px;
-}
-
 /* Wrapper for Debug-tab checkbox rows. Deliberately NOT `.form-group`
  * because `.form-group label` (0,1,1) overrode `.checkbox-row` (0,1,0)
  * on specificity, forcing checkbox labels uppercase/dimmed. Keeping a
