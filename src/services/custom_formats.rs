@@ -1558,7 +1558,7 @@ mod tests {
     #[test]
     fn kizumonogatari_regression_cf_ordering() {
         let cfs = load_default_cfs();
-        assert_eq!(cfs.len(), 8, "default CF set must be 8 CFs");
+        assert_eq!(cfs.len(), 7, "default CF set must be 7 CFs");
 
         // Expected totals are computed from plan §7.2's score values:
         //   Tier-S BD   = 1200 (Tier S) + 600 (BD source)
@@ -1566,8 +1566,9 @@ mod tests {
         //   WEB HEVC    = 400 (WEB groups) + 300 (hevc/10-bit) = 700
         //   WEB plain   = 400 (WEB groups) = 400
         //   WEB neutral = 0 (matches no CF)
-        //   Casual WEB  = -1000 (casual groups)
-        //   Casual 8bit = -1000 (casual) + -500 (8-bit mp4) = -1500
+        //   HorribleSubs WEB = 0 (not penalized by bundled defaults —
+        //       users install anime-web-tier-05.json from TRaSH Guides
+        //       for that signal; see #12)
         //
         // Groups are attached via the SearchResult.group field (the
         // 2nd argument to make_fixture), not the title. Titles are
@@ -1600,20 +1601,6 @@ mod tests {
             Resolution::R1080p,
             "dddd",
         );
-        let casual_web = make_fixture(
-            "fixture-web-1080p.mkv",
-            "HorribleSubs",
-            Source::Web,
-            Resolution::R1080p,
-            "eeee",
-        );
-        let casual_8bit_mp4 = make_fixture(
-            "fixture-web-1080p-8bit.mp4",
-            "NoobSubs",
-            Source::Web,
-            Resolution::R1080p,
-            "ffff",
-        );
         // Build the flat list of (label, candidate, classification,
         // expected) tuples used for both scoring and ordering checks.
         let fixture: Vec<(&str, &SearchResult, &ClassificationResult, i32)> = vec![
@@ -1621,8 +1608,6 @@ mod tests {
             ("WEB HEVC",       &web_hevc.0,        &web_hevc.1,        700),
             ("WEB plain",      &web_plain.0,       &web_plain.1,       400),
             ("WEB neutral",    &web_neutral.0,     &web_neutral.1,     0),
-            ("Casual WEB",     &casual_web.0,      &casual_web.1,      -1000),
-            ("Casual 8bit mp4", &casual_8bit_mp4.0, &casual_8bit_mp4.1, -1500),
         ];
 
         // Per-candidate score assertion — each row's total must match
@@ -1653,20 +1638,47 @@ mod tests {
                 "WEB HEVC",
                 "WEB plain",
                 "WEB neutral",
-                "Casual WEB",
-                "Casual 8bit mp4",
             ],
             "default CF set must produce the expected regression ordering"
         );
+    }
 
-        // Finally, the single most important pairwise check — the
-        // literal regression from plan §1: Tier-S BluRay > Casual
-        // 8-bit mp4 by a strictly dominating margin.
-        let bd_score = score_against_defaults(&cfs, &tier_s_bd.0, &tier_s_bd.1);
-        let mp4_score = score_against_defaults(&cfs, &casual_8bit_mp4.0, &casual_8bit_mp4.1);
-        assert!(
-            bd_score > mp4_score + 3000,
-            "Tier-S BD ({bd_score}) must dominate Casual 8bit mp4 ({mp4_score}) by > 3000 points"
+    /// Post-#12 pin: HorribleSubs (and NoobSubs) WEB releases must
+    /// score 0 against the bundled defaults — neither penalised nor
+    /// rewarded. The old `-1000` casual-group CF was removed because
+    /// it conflated "unmaintained but technically fine" (HorribleSubs)
+    /// with "low-effort re-encode" (NoobSubs). Users who want a
+    /// HorribleSubs penalty install the TRaSH Guides `anime-web-tier-05`
+    /// CF, which is shipped as a fixture but not part of the bundled
+    /// defaults.
+    #[test]
+    fn casual_groups_unpenalised_by_bundled_defaults() {
+        let cfs = load_default_cfs();
+        let horrible = make_fixture(
+            "fixture-web-1080p.mkv",
+            "HorribleSubs",
+            Source::Web,
+            Resolution::R1080p,
+            "eeee",
+        );
+        let noob_8bit = make_fixture(
+            "fixture-web-1080p-8bit.mp4",
+            "NoobSubs",
+            Source::Web,
+            Resolution::R1080p,
+            "ffff",
+        );
+        assert_eq!(
+            score_against_defaults(&cfs, &horrible.0, &horrible.1),
+            0,
+            "HorribleSubs WEB must not be penalised by bundled defaults after #12"
+        );
+        // NoobSubs with 8-bit mp4 still trips the 8-bit mp4 penalty
+        // (-500) which is independent of the casual-group CF.
+        assert_eq!(
+            score_against_defaults(&cfs, &noob_8bit.0, &noob_8bit.1),
+            -500,
+            "NoobSubs 8-bit mp4 must only incur the 8-bit mp4 penalty, not the removed casual-group penalty"
         );
     }
 
