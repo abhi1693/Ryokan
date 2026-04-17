@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::services::html::sanitize_rich_description;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -51,6 +52,18 @@ static SEARCH_CACHE: LazyLock<StdMutex<HashMap<String, SearchCacheEntry>>> =
 /// rate-limit bucket too).
 static ANILIST_COOLDOWN_UNTIL: LazyLock<StdMutex<Option<Instant>>> =
     LazyLock::new(|| StdMutex::new(None));
+
+/// Counter of consecutive cooldown-set events (i.e. throttle-class
+/// failures) without an intervening successful AniList call. Used by
+/// `set_anilist_cooldown` to add a small safety margin starting on the
+/// 2nd consecutive 429, since the first 429 implies our previous wait
+/// (or zero wait) wasn't enough to clear AniList's window. Reset by
+/// `note_anilist_success`.
+static CONSECUTIVE_RATE_LIMITS: AtomicU32 = AtomicU32::new(0);
+
+/// Per-repeat margin added to AL's `Retry-After` value to avoid landing
+/// at the window boundary. Empirically 2s clears the per-minute window.
+const COOLDOWN_REPEAT_MARGIN: Duration = Duration::from_secs(2);
 
 fn normalize_search_key(force_fallback: bool, query: &str) -> String {
     let folded: String = query
@@ -201,14 +214,40 @@ fn excerpt(text: &str) -> String {
     }
 }
 
-fn set_anilist_cooldown(retry_after_secs: Option<u64>, default_dur: Duration) {
-    let dur = retry_after_secs
+/// Pure cooldown-duration computation. Extracted from `set_anilist_cooldown`
+/// for unit-testability — the wall-clock side effect lives in the caller.
+fn compute_cooldown_duration(
+    retry_after_secs: Option<u64>,
+    default_dur: Duration,
+    consecutive_count: u32,
+) -> Duration {
+    let base = retry_after_secs
         .map(Duration::from_secs)
         .unwrap_or(default_dur)
         .min(ANILIST_COOLDOWN_MAX);
+    if consecutive_count > 0 {
+        base + COOLDOWN_REPEAT_MARGIN
+    } else {
+        // First 429 in a streak: trust AL's retry-after as-is. We only
+        // pad on repeats, where the empirical evidence (the *second*
+        // 429) tells us the previous wait was just shy of the window.
+        base
+    }
+}
+
+fn set_anilist_cooldown(retry_after_secs: Option<u64>, default_dur: Duration) {
+    let prior_count = CONSECUTIVE_RATE_LIMITS.fetch_add(1, Ordering::Relaxed);
+    let dur = compute_cooldown_duration(retry_after_secs, default_dur, prior_count);
     if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
         *guard = Some(Instant::now() + dur);
     }
+}
+
+/// Reset the consecutive-429 counter. Called after every fully-successful
+/// AniList response so the *next* 429 (which presumably comes from a
+/// fresh window much later) gets the no-margin treatment again.
+fn note_anilist_success() {
+    CONSECUTIVE_RATE_LIMITS.store(0, Ordering::Relaxed);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -865,6 +904,11 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         return Err("Anime not found".into());
     }
 
+    // Reset the consecutive-429 counter once we have a real Media object
+    // back. The next 429 in a future window starts fresh with no margin
+    // (only repeats in a streak get the safety pad).
+    note_anilist_success();
+
     let streaming_episodes = m["streamingEpisodes"]
         .as_array()
         .map(|arr| {
@@ -1101,6 +1145,46 @@ mod tests {
         assert!(is_rate_limit_error(
             "AniList rate-limit cooldown active; skipping AniList request"
         ));
+    }
+
+    #[test]
+    fn cooldown_first_429_uses_retry_after_unmodified() {
+        // Trust AL's word on the first throttle of a streak — no margin.
+        let dur = compute_cooldown_duration(Some(60), ANILIST_COOLDOWN_DEFAULT, 0);
+        assert_eq!(dur, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn cooldown_repeat_429_adds_safety_margin() {
+        // Second-and-later 429s in the same streak get padded so the
+        // retry doesn't land at AL's window boundary and trip a fresh
+        // 429 immediately on exit.
+        let dur = compute_cooldown_duration(Some(60), ANILIST_COOLDOWN_DEFAULT, 1);
+        assert_eq!(dur, Duration::from_secs(60) + COOLDOWN_REPEAT_MARGIN);
+
+        let dur = compute_cooldown_duration(Some(60), ANILIST_COOLDOWN_DEFAULT, 5);
+        assert_eq!(dur, Duration::from_secs(60) + COOLDOWN_REPEAT_MARGIN);
+    }
+
+    #[test]
+    fn cooldown_falls_back_to_default_when_no_retry_after() {
+        let dur = compute_cooldown_duration(None, Duration::from_secs(45), 0);
+        assert_eq!(dur, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn cooldown_caps_retry_after_at_max() {
+        // AL could theoretically tell us to wait an hour; we ignore
+        // anything past ANILIST_COOLDOWN_MAX.
+        let dur = compute_cooldown_duration(Some(3600), ANILIST_COOLDOWN_DEFAULT, 0);
+        assert_eq!(dur, ANILIST_COOLDOWN_MAX);
+    }
+
+    #[test]
+    fn cooldown_margin_added_on_top_of_cap() {
+        // Cap applies to AL's value; safety margin is layered on after.
+        let dur = compute_cooldown_duration(Some(3600), ANILIST_COOLDOWN_DEFAULT, 1);
+        assert_eq!(dur, ANILIST_COOLDOWN_MAX + COOLDOWN_REPEAT_MARGIN);
     }
 
     #[test]
