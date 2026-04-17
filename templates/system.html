@@ -447,10 +447,12 @@ function forceRunTask(btn, taskKey) {
             </div>
             <div class="debug-actions-group">
                 <div class="debug-action-row">
-                    <button type="button" class="btn btn-secondary" onclick="reconcileFallbacks(this)">Reconcile fallback entries</button>
+                    <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
+                    <span class="form-hint">Re-fetch AniList (and MAL/Kitsu fallback) metadata for every tracked series. Use when you've noticed stale titles, wrong episode counts, or missing relations after a provider outage or schema change.</span>
                 </div>
                 <div class="debug-action-row">
-                    <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
+                    <button type="button" class="btn btn-secondary" onclick="reconcileFallbacks(this)">Reconcile fallback entries</button>
+                    <span class="form-hint">Look at every series that was added under a MAL or Kitsu fallback ID and try to upgrade it to its AniList entry. Safe to click repeatedly; only upgrades entries that now resolve on AniList.</span>
                 </div>
                 <div class="debug-action-row">
                     <button type="button" class="btn btn-secondary" onclick="classifyLibrary(this)">Classify imported files</button>
