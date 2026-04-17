@@ -5110,6 +5110,7 @@ mod tests {
 
     fn pinned_720p_web_tag(manual_override: bool) -> crate::models::episode_tags::EpisodeQualityTag {
         crate::models::episode_tags::EpisodeQualityTag {
+            episode_number: 1,
             quality_tag: "WEBDL-720p".to_string(),
             release_title: "[Group] Show - 01 [WEB-DL 720p].mkv".to_string(),
             release_group: "Group".to_string(),
