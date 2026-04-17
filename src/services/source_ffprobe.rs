@@ -81,7 +81,7 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
     // Snapshot mtime + size to key the cache. An rmdir-then-recreate (same
     // path, new file) invalidates on either mtime or size. If stat fails,
     // treat it as "can't probe" rather than blindly going to the network.
-    let meta = match std::fs::metadata(path) {
+    let meta = match tokio::fs::metadata(path).await {
         Ok(m) => m,
         Err(err) => {
             tracing::warn!(

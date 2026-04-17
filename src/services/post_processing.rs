@@ -638,7 +638,8 @@ async fn import_torrent(
                     &ep_title,
                     &aired,
                     ctx.runtime_minutes,
-                );
+                )
+                .await;
                 imported_count += 1;
                 touched_series.insert(target_series_id);
                 logger::info(
@@ -808,7 +809,7 @@ async fn import_torrent(
         };
         let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
         let series_nfo = series_root.join("tvshow.nfo");
-        let _ = nfo::write_series_nfo(&series_nfo, &ctx.series, ctx.cached_detail.as_ref());
+        let _ = nfo::write_series_nfo(&series_nfo, &ctx.series, ctx.cached_detail.as_ref()).await;
 
         let poster_dest = series_root.join("poster.jpg");
         if !poster_dest.exists() {
@@ -1285,7 +1286,8 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
         // 'completed' since the file is already on disk.
         if !item.row_exists {
             // Best-effort single stat — failure just leaves size at 0.
-            let file_size = std::fs::metadata(&item.file_path)
+            let file_size = tokio::fs::metadata(&item.file_path)
+                .await
                 .map(|m| m.len() as i64)
                 .unwrap_or(0);
             // Externally-imported file — we're creating both the quality
