@@ -162,55 +162,76 @@ fn record_rate_limit_headers(headers: &reqwest::header::HeaderMap) {
     }
 }
 
+/// Pure throttle decision. Returns how long to sleep before the next
+/// AniList request, given the latest rate-limit snapshot, the
+/// timestamp of our last request (if any), and the current instant.
+/// Extracted from `throttle_before_anilist_request` so the branching
+/// is unit-testable without `tokio::time::sleep`.
+///
+/// Two strategies, in priority order:
+///   - **Window-flip** (`remaining <= REMAINING_HEADROOM_THRESHOLD`
+///     and `reset_at` is in the future): wait until the next window
+///     opens. Returns the larger of (window-wait, burst-guard) so we
+///     don't accidentally undercut burst spacing.
+///   - **Burst guard** (always): don't exceed `60s / limit` between
+///     consecutive requests. Returns 0 if the last request was long
+///     enough ago.
+fn decide_wait(
+    state: Option<RateLimitState>,
+    last_request: Option<Instant>,
+    now: Instant,
+) -> Duration {
+    let limit = state.map(|s| s.limit).unwrap_or(ANILIST_LIMIT_FALLBACK);
+    let min_spacing = min_inter_request(limit);
+
+    let burst_wait = match last_request {
+        Some(last) => {
+            let elapsed = now.saturating_duration_since(last);
+            min_spacing.saturating_sub(elapsed)
+        }
+        None => Duration::ZERO,
+    };
+
+    if let Some(s) = state
+        && s.remaining <= REMAINING_HEADROOM_THRESHOLD
+        && let Some(reset_at) = s.reset_at
+        && reset_at > now
+    {
+        let window_wait = reset_at.saturating_duration_since(now) + Duration::from_secs(1);
+        return window_wait.max(burst_wait);
+    }
+
+    burst_wait
+}
+
 /// Pace the next AniList request to stay inside the documented window
 /// and burst limits, using the latest rate-limit headers as the source
-/// of truth. Two strategies, picked dynamically:
-///   - **Headroom strategy** (the common case): AL still has plenty of
-///     `remaining`. Sleep just long enough since the last request to keep
-///     us under the per-minute limit (60s/limit, with a 10% pad).
-///   - **Window-flip strategy** (when `remaining <= REMAINING_HEADROOM_
-///     THRESHOLD`): AL is about to refuse us. Sleep until `reset_at`
-///     (plus a 1s slack) so we resume right when the next window opens.
-///
-/// Without this, a relation walk burst-fires N calls in seconds — even
-/// when N is well under the per-minute limit, AL's burst limiter trips
-/// and we eat a full minute of cooldown for what would've been a
-/// 1-second pause if we'd just paced ourselves.
+/// of truth. Without this, a relation walk burst-fires N calls in
+/// seconds — even when N is well under the per-minute limit, AL's
+/// burst limiter trips and we eat a full minute of cooldown for what
+/// would've been a 1-second pause if we'd just paced ourselves.
 async fn throttle_before_anilist_request() {
     let snap = RATE_LIMIT_STATE.lock().ok().and_then(|g| *g);
+    let last = LAST_AL_REQUEST.lock().ok().and_then(|g| *g);
+    let wait = decide_wait(snap, last, Instant::now());
 
-    if let Some(state) = snap
-        && state.remaining <= REMAINING_HEADROOM_THRESHOLD
-        && let Some(reset_at) = state.reset_at
-    {
-        let now = Instant::now();
-        if reset_at > now {
-            let wait = reset_at.saturating_duration_since(now) + Duration::from_secs(1);
+    if !wait.is_zero() {
+        // Only log the headroom-low case — burst-guard waits are
+        // sub-second and dominate normal operation, no point spamming.
+        if let Some(s) = snap
+            && s.remaining <= REMAINING_HEADROOM_THRESHOLD
+            && wait > Duration::from_secs(1)
+        {
             tracing::info!(
                 target: "ryokan::anilist",
-                remaining = state.remaining,
+                remaining = s.remaining,
                 wait_secs = wait.as_secs(),
                 "AniList rate-limit headroom low; pausing until window resets"
             );
-            tokio::time::sleep(wait).await;
         }
+        tokio::time::sleep(wait).await;
     }
 
-    // Burst guard: even with headroom, don't fire requests faster than
-    // the per-minute limit allows. The limit comes from the latest
-    // X-RateLimit-Limit response header, falling back to the
-    // currently-degraded 30 req/min ceiling.
-    let limit = snap.map(|s| s.limit).unwrap_or(ANILIST_LIMIT_FALLBACK);
-    let min_spacing = min_inter_request(limit);
-    let elapsed = LAST_AL_REQUEST
-        .lock()
-        .ok()
-        .and_then(|g| *g)
-        .map(|last| last.elapsed())
-        .unwrap_or(Duration::MAX);
-    if elapsed < min_spacing {
-        tokio::time::sleep(min_spacing - elapsed).await;
-    }
     if let Ok(mut guard) = LAST_AL_REQUEST.lock() {
         *guard = Some(Instant::now());
     }
@@ -501,6 +522,11 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
         "variables": { "search": query }
     });
 
+    // Pace via the same shared rate-limit state that fetch_anime_detail
+    // uses — search-path 429s would otherwise leave the detail-path
+    // throttle decisions working off a stale `remaining`.
+    throttle_before_anilist_request().await;
+
     let client = &*HTTP_CLIENT;
     let resp = match client
         .post(ANILIST_API)
@@ -525,6 +551,7 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
     };
 
     let status = resp.status();
+    record_rate_limit_headers(resp.headers());
 
     // Silently fall back to Jikan/MAL on transient AniList outages:
     //   403 — Cloudflare challenge / geo-block
@@ -686,6 +713,12 @@ fn compose_search_error(anilist_reason: Option<&str>, jikan_err: &str) -> String
 
 
 pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, String> {
+    // Same cooldown short-circuit as the search and detail paths — no
+    // point burning a guaranteed 429 on a known-unavailable AniList.
+    if anilist_cooldown_active() {
+        return Err("AniList rate-limit cooldown active; skipping AniList request".to_string());
+    }
+
     let gql = serde_json::json!({
         "query": r#"
             query ($idMal: Int) {
@@ -710,6 +743,8 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
         "variables": { "idMal": mal_id }
     });
 
+    throttle_before_anilist_request().await;
+
     let client = &*HTTP_CLIENT;
     let resp = client
         .post(ANILIST_API)
@@ -720,6 +755,7 @@ pub async fn find_anime_by_mal_id(mal_id: i64) -> Result<Option<AnimeEntry>, Str
         .map_err(|e| format!("AniList request failed: {}", e))?;
 
     let status = resp.status();
+    record_rate_limit_headers(resp.headers());
     let body: serde_json::Value = resp
         .json()
         .await
@@ -1349,6 +1385,83 @@ mod tests {
         // boundary protection still applies).
         let dur = compute_cooldown_duration(Some(3600), ANILIST_COOLDOWN_DEFAULT);
         assert_eq!(dur, ANILIST_COOLDOWN_MAX + COOLDOWN_SAFETY_MARGIN);
+    }
+
+    fn state(limit: u32, remaining: u32, reset_at: Option<Instant>) -> RateLimitState {
+        RateLimitState { limit, remaining, reset_at }
+    }
+
+    #[test]
+    fn decide_wait_no_state_no_last_request_is_zero() {
+        // Cold start: no prior knowledge → fire immediately.
+        let now = Instant::now();
+        assert_eq!(decide_wait(None, None, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn decide_wait_burst_guard_applies_when_recent_request() {
+        // Plenty of headroom but we just fired a request — must wait
+        // out the per-limit minimum spacing.
+        let now = Instant::now();
+        let last = now - Duration::from_millis(500);
+        let s = state(30, 25, None);
+        let w = decide_wait(Some(s), Some(last), now);
+        // 30 req/min → ~2.2s spacing; we waited 0.5s; ~1.7s remaining.
+        assert!(w >= Duration::from_millis(1500), "got {:?}", w);
+        assert!(w <= Duration::from_millis(2000), "got {:?}", w);
+    }
+
+    #[test]
+    fn decide_wait_burst_guard_zero_when_enough_elapsed() {
+        // Last request was ages ago — no spacing wait needed.
+        let now = Instant::now();
+        let last = now - Duration::from_secs(10);
+        let s = state(30, 25, None);
+        assert_eq!(decide_wait(Some(s), Some(last), now), Duration::ZERO);
+    }
+
+    #[test]
+    fn decide_wait_window_flip_fires_when_remaining_low_and_reset_in_future() {
+        // remaining=2 (≤ threshold) and reset 30s out → wait until reset
+        // (plus 1s slack), regardless of elapsed time since last request.
+        let now = Instant::now();
+        let s = state(30, 2, Some(now + Duration::from_secs(30)));
+        let w = decide_wait(Some(s), None, now);
+        // 30s + 1s slack, with at most 1s of measurement noise either way.
+        assert!(w >= Duration::from_secs(30), "got {:?}", w);
+        assert!(w <= Duration::from_secs(32), "got {:?}", w);
+    }
+
+    #[test]
+    fn decide_wait_stale_reset_falls_through_to_burst_guard() {
+        // remaining is low but reset_at is in the past — don't sleep
+        // for a window that's already over; just respect burst spacing.
+        let now = Instant::now();
+        let s = state(30, 0, Some(now - Duration::from_secs(5)));
+        // No prior request → no burst wait either.
+        assert_eq!(decide_wait(Some(s), None, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn decide_wait_no_reset_at_with_low_remaining_falls_to_burst_guard() {
+        // remaining=0 but we have no idea when the window resets — best
+        // we can do is the per-limit spacing; the cooldown layer above
+        // handles the inevitable 429.
+        let now = Instant::now();
+        let s = state(30, 0, None);
+        assert_eq!(decide_wait(Some(s), None, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn decide_wait_window_flip_dominates_over_burst_guard() {
+        // Window-flip wait (30s) is much larger than burst guard
+        // (~2s) — the helper should pick the larger of the two so we
+        // don't undercut the window wait by accident.
+        let now = Instant::now();
+        let last = now - Duration::from_millis(100);
+        let s = state(30, 1, Some(now + Duration::from_secs(30)));
+        let w = decide_wait(Some(s), Some(last), now);
+        assert!(w >= Duration::from_secs(30), "got {:?}", w);
     }
 
     #[test]
