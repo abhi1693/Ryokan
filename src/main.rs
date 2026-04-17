@@ -850,9 +850,12 @@ async fn main() {
                             "Every 1 minute (when enabled)",
                             enabled,
                         ).await;
-                        if !enabled {
-                            continue;
-                        }
+                        // Call run_once unconditionally so the #14 lightweight
+                        // `advance_state_without_import` sweep can fire when
+                        // post-processing is disabled. run_once internally
+                        // branches on cfg.post_processing_enabled to choose
+                        // between the full import flow and the state-only
+                        // advance.
                         let _ = models::scheduled_tasks::mark_started(&pp_state.db, "post_processing", "Checking for completed downloads").await;
                         services::post_processing::run_once(&pp_state).await;
                         let _ = models::scheduled_tasks::mark_finished(&pp_state.db, "post_processing", "ok", "").await;
