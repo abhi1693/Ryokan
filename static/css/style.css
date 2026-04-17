@@ -565,6 +565,18 @@ fieldset legend {
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 20px;
 }
+/* #20 — Tighter minimum below --bp-phone so 375px-wide viewports
+ * (iPhone SE and friends) show two posters per row with healthy
+ * spacing. At 160px min, a 375px viewport drops to a single
+ * column; at 120px min, it cleanly fits 2. Gap also tightens from
+ * 20px → 12px so the reduced poster width isn't dominated by the
+ * gap itself. */
+@media (max-width: 640px) {
+    .library-grid {
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 12px;
+    }
+}
 
 .series-card {
     display: block;
