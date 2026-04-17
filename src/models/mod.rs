@@ -1105,6 +1105,55 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // #34: Backfill `web_kind` for rows that predate the WebDL/WEBRip
+    // distinction. Older rows have `source = 'Web'` and `web_kind = ''`
+    // because the `web_kind` column was added later with DEFAULT ''; the
+    // quality_tag regen below then emits the generic `WEB-1080p` label
+    // instead of the richer `WEBDL-1080p` / `WEBRip-1080p`. Re-parse
+    // `release_title` through the filename classifier and fill in
+    // `web_kind` when the filename carries a clear token. Rows where
+    // the parser can't tell (bare `[Group] Title - 01 (1080p).mkv`
+    // with no WEB-DL/WEBRip token) stay empty and end up tagged
+    // `WEB-1080p` — which is honest.
+    //
+    // Scoped to `manual_override = 0` so user-pinned classifications
+    // survive untouched. Naturally idempotent: the WHERE excludes rows
+    // whose `web_kind` has already been filled in, so re-runs are
+    // no-ops without a separate `migrations_applied` marker.
+    //
+    // Runs BEFORE the quality_tag regen below so the regen picks up
+    // the upgraded web_kind on the same startup.
+    let stale_web_rows: Vec<(i64, i32, String)> = sqlx::query_as(
+        r#"
+        SELECT series_id, episode_number, release_title
+          FROM episode_quality_tags
+         WHERE LOWER(COALESCE(source, '')) = 'web'
+           AND COALESCE(web_kind, '') = ''
+           AND COALESCE(release_title, '') <> ''
+           AND COALESCE(manual_override, 0) = 0
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    for (series_id, episode_number, release_title) in stale_web_rows {
+        let cls =
+            crate::services::source::classify_release_sync(&release_title, None);
+        if cls.web_kind != crate::services::source::WebKind::Unknown {
+            sqlx::query(
+                "UPDATE episode_quality_tags SET web_kind = ?
+                 WHERE series_id = ? AND episode_number = ?
+                   AND COALESCE(manual_override, 0) = 0",
+            )
+            .bind(cls.web_kind.as_str())
+            .bind(series_id)
+            .bind(episode_number)
+            .execute(db)
+            .await
+            .ok();
+        }
+    }
+
     // Rewrite denormalized `quality_tag` strings on pre-existing
     // `episode_quality_tags` / `episode_grab_history` rows to match the
     // Sonarr-parity label format the classifier now emits:
@@ -1381,5 +1430,111 @@ mod tests {
         // And the old column should no longer be there (RENAME moved it,
         // didn't duplicate it).
         assert!(!column_exists(&db, "episode_grab_history", "torrent_name").await);
+    }
+
+    /// #34: rows predating the WEBDL/WEBRip distinction have
+    /// `source='Web'` and `web_kind=''`, which the quality_tag regen
+    /// renders as the generic `WEB-1080p`. The boot-time backfill
+    /// re-parses `release_title` and fills in `web_kind` when the
+    /// filename has a clear token, so the follow-on regen can upgrade
+    /// to `WEBDL-1080p`.
+    #[tokio::test]
+    async fn backfill_web_kind_upgrades_generic_web_tag() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        migrate(&db).await.expect("first migrate");
+
+        crate::models::series::upsert(
+            &db,
+            crate::models::series::SeriesCore {
+                anilist_id: 100,
+                mal_id: None,
+                title: "Test",
+                title_romaji: "Test",
+                title_english: "Test",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2020),
+                end_year: Some(2020),
+            },
+        )
+        .await
+        .expect("seed series");
+
+        // Simulate a legacy row: source=Web, web_kind empty, generic
+        // quality_tag. `SubsPlease` releases are WEB-DL and the
+        // classifier picks that up from the group — but the filename
+        // token "WEB-DL" is also present here for the sync classifier.
+        sqlx::query(
+            "INSERT INTO episode_quality_tags
+                (series_id, episode_number, quality_tag, release_title, release_group,
+                 state, source, resolution, is_remux, is_bdmv, web_kind,
+                 classification_confidence, needs_review, manual_override)
+             VALUES (1, 1, 'WEB-1080p',
+                     '[SubsPlease] Test - 01 (1080p) [WEB-DL].mkv',
+                     'SubsPlease', 'grabbed', 'Web', '1080p', 0, 0, '',
+                     0.9, 0, 0)",
+        )
+        .execute(&db)
+        .await
+        .expect("seed legacy row");
+
+        // Pinned row that must not be touched.
+        sqlx::query(
+            "INSERT INTO episode_quality_tags
+                (series_id, episode_number, quality_tag, release_title, release_group,
+                 state, source, resolution, is_remux, is_bdmv, web_kind,
+                 classification_confidence, needs_review, manual_override)
+             VALUES (1, 2, 'WEB-1080p',
+                     '[SubsPlease] Test - 02 (1080p) [WEB-DL].mkv',
+                     'SubsPlease', 'grabbed', 'Web', '1080p', 0, 0, '',
+                     1.0, 0, 1)",
+        )
+        .execute(&db)
+        .await
+        .expect("seed pinned row");
+
+        // Re-run migrate — this is what a boot looks like on an
+        // upgraded install with a legacy DB. Idempotent; safe to run
+        // again.
+        migrate(&db).await.expect("second migrate");
+
+        let (upgraded_kind, upgraded_tag): (String, String) = sqlx::query_as(
+            "SELECT web_kind, quality_tag FROM episode_quality_tags
+             WHERE series_id = 1 AND episode_number = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("legacy row");
+        assert_eq!(upgraded_kind, "WEB-DL", "web_kind must be backfilled");
+        assert_eq!(
+            upgraded_tag, "WEBDL-1080p",
+            "regen must upgrade the quality_tag once web_kind is filled"
+        );
+
+        let (pinned_kind, pinned_tag): (String, String) = sqlx::query_as(
+            "SELECT web_kind, quality_tag FROM episode_quality_tags
+             WHERE series_id = 1 AND episode_number = 2",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("pinned row");
+        assert_eq!(pinned_kind, "", "manual_override row must be skipped");
+        assert_eq!(pinned_tag, "WEB-1080p", "pinned quality_tag stays put");
+
+        // Idempotency: a third migrate on the already-fixed DB is a
+        // no-op (no panic, no regression).
+        migrate(&db).await.expect("third migrate is a no-op");
+        let recheck_kind: String = sqlx::query_scalar(
+            "SELECT web_kind FROM episode_quality_tags WHERE series_id = 1 AND episode_number = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("row still there");
+        assert_eq!(recheck_kind, "WEB-DL");
     }
 }
