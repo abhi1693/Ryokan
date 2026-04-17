@@ -511,7 +511,12 @@
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
                 </button>
             </div>
-            <form method="post" action="/settings/custom-formats/upsert" class="settings-form cf-editor-form">
+            {# Upsert form wraps only the body. The Save button in the
+               footer uses the HTML5 `form="cf-upsert-form"` attribute to
+               submit from outside the form element, which lets the
+               Delete form sit in the same footer without being nested
+               (invalid HTML) or colliding on submit. #}
+            <form id="cf-upsert-form" method="post" action="/settings/custom-formats/upsert" class="settings-form cf-editor-form">
                 <div class="modal-body" style="padding:16px 24px">
                     <p class="cf-section-desc" style="margin-top:0">
                         Full Sonarr v4 CF object. Supported spec implementations:
@@ -551,13 +556,31 @@
                         <span class="form-hint">A top-level <code>trash_description</code> field is preserved verbatim and shown above when editing.</span>
                     </div>
                 </div>
-                <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
+            </form>
+            <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:space-between;align-items:center">
+                {# Delete lives on the left so it doesn't sit adjacent to
+                   Save Changes (reduces the chance of a misclick). Only
+                   rendered when editing; hidden by JS for the in-place
+                   Add reset. #}
+                {% if let Some(edit) = custom_format_edit %}
+                <form id="cf-delete-form" method="post" action="/settings/custom-formats/delete"
+                      data-ryokan-confirm-title="Delete Custom Format"
+                      data-ryokan-confirm-body="Delete &quot;{{ edit.row.name }}&quot;? This cannot be undone."
+                      data-ryokan-confirm-label="Delete"
+                      style="margin:0">
+                    <input type="hidden" name="id" value="{{ edit.row.id }}">
+                    <button type="submit" class="btn btn-danger">Delete</button>
+                </form>
+                {% else %}
+                <span id="cf-delete-form-placeholder"></span>
+                {% endif %}
+                <div style="display:flex;gap:8px">
                     <button type="button" class="btn btn-secondary" onclick="closeCfEditorModal()">Cancel</button>
-                    <button type="submit" class="btn btn-primary">
+                    <button type="submit" form="cf-upsert-form" class="btn btn-primary" id="cf-upsert-submit">
                         {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
                     </button>
                 </div>
-            </form>
+            </div>
         </div>
     </div>
     {% endif %}
@@ -861,8 +884,15 @@ function openCfEditorModal() {
     }
     const title = document.getElementById('cf-editor-modal-title');
     if (title) title.textContent = 'Add Custom Format';
-    const submit = modal.querySelector('button[type="submit"]');
+    const submit = document.getElementById('cf-upsert-submit');
     if (submit) submit.textContent = 'Create Custom Format';
+    // Hide the Delete form — nothing to delete when we haven't saved
+    // yet. Leaving it visible in Add mode would let the user click
+    // Delete with the previously-edited CF's hidden id still in the
+    // form (server-rendered). Hiding also collapses the footer to the
+    // single-button layout on the right.
+    const deleteForm = document.getElementById('cf-delete-form');
+    if (deleteForm) deleteForm.style.display = 'none';
 
     modal.style.display = 'flex';
     const nameEl = document.getElementById('cf_name');
