@@ -612,18 +612,67 @@
         </div>
     </div>
 
-    {# ── Import / Export ────────────────────────────────────────────── #}
+    {# ── Export (#11.4) ─────────────────────────────────────────────
+       Per-CF checkbox selector + mode radio + two actions (download
+       file / copy to clipboard). The selector only renders when at
+       least one CF exists — exporting 0 rows isn't useful. #}
+    {% if !custom_formats.is_empty() %}
     <div class="cf-section">
         <div class="cf-section-header">
-            <h3>Import / Export</h3>
+            <h3>Export</h3>
         </div>
         <p class="cf-section-desc">
-            <strong>Export All</strong> keeps every saved CF verbatim (including Ryokan-only specs like <code>Ryokan.SeaDexBestSpecification</code>) and round-trips into another Ryokan instance.
-            <strong>Sonarr-safe</strong> drops whole CFs containing Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance — dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
+            <strong>Ryokan (native)</strong> keeps every selected CF verbatim (including Ryokan-only specs like <code>Ryokan.SeaDexBestSpecification</code>) and round-trips into another Ryokan instance.
+            <strong>Sonarr-safe</strong> drops selected CFs that contain Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance — dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
         </p>
-        <div class="settings-inline-actions" style="margin-bottom: 16px;">
-            <a href="/settings/custom-formats/export" class="btn btn-secondary">Export All as JSON</a>
-            <a href="/settings/custom-formats/export?mode=sonarr-safe" class="btn btn-secondary">Export (Sonarr-safe)</a>
+
+        <div class="cf-export-mode-row">
+            <label class="cf-export-mode">
+                <input type="radio" name="cf_export_mode" value="" checked>
+                <span>Ryokan (native)</span>
+            </label>
+            <label class="cf-export-mode">
+                <input type="radio" name="cf_export_mode" value="sonarr-safe">
+                <span>Sonarr-safe</span>
+            </label>
+        </div>
+
+        <div class="cf-export-selector">
+            <div class="cf-export-selector-head">
+                <span class="cf-defaults-subtitle" style="margin:0">Custom formats to include</span>
+                <div class="settings-inline-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="cfExportSelectAll(true)">Select all</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="cfExportSelectAll(false)">Select none</button>
+                </div>
+            </div>
+            <div class="cf-export-list">
+                {% for cf in custom_formats %}
+                <label class="cf-export-check">
+                    <input type="checkbox" name="cf_export_ids" value="{{ cf.row.id }}" checked>
+                    <span class="cf-origin-dot cf-origin-dot-{{ cf.row.origin }}"></span>
+                    <span class="cf-export-check-name">{{ cf.row.name }}</span>
+                    <span class="cf-export-check-score cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
+                        {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
+                    </span>
+                </label>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="settings-inline-actions" style="margin-top: 16px">
+            <button type="button" class="btn btn-primary" onclick="cfExportDownload()">Export JSON</button>
+            <button type="button" class="btn btn-secondary" onclick="cfExportClipboard(this)">Copy to clipboard</button>
+        </div>
+    </div>
+    {% endif %}
+
+    {# ── Import ─────────────────────────────────────────────────────
+       Import flow redesign (preview + status badges + inline collision
+       resolution) lives in #11.3. For this commit the existing
+       paste-and-submit form stays as-is. #}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Import</h3>
         </div>
 
         {% if let Some(review) = custom_format_import_review %}
@@ -800,6 +849,77 @@ function closeCfEditorModal() {
         if (ev.key === 'Escape' && modal.style.display !== 'none') closeCfEditorModal();
     });
 })();
+
+// #11.4 — CF export selector. Radios pick the mode, checkboxes pick the
+// ids, then two actions: download the file (via the existing GET endpoint)
+// or copy the pretty-printed JSON to the clipboard (same endpoint, fetch
+// then navigator.clipboard.writeText).
+
+function cfExportSelectAll(state) {
+    document.querySelectorAll('input[name="cf_export_ids"]').forEach(function(cb) {
+        cb.checked = state;
+    });
+}
+
+function cfExportBuildUrl() {
+    const mode = document.querySelector('input[name="cf_export_mode"]:checked');
+    const ids = Array.from(
+        document.querySelectorAll('input[name="cf_export_ids"]:checked')
+    ).map(function(cb) { return cb.value; });
+    const params = new URLSearchParams();
+    if (mode && mode.value) params.set('mode', mode.value);
+    // Only attach `ids` when the user has deselected at least one; an
+    // empty `ids` param would be interpreted by the server as "all" (by
+    // design — keeps curl workflows unchanged), but sending the full list
+    // as the default is also harmless.
+    if (ids.length > 0) params.set('ids', ids.join(','));
+    const qs = params.toString();
+    return '/settings/custom-formats/export' + (qs ? '?' + qs : '');
+}
+
+function cfExportDownload() {
+    // Simplest possible "download file" trigger: navigate to the URL —
+    // the server sets Content-Disposition: attachment and the browser
+    // handles the rest. Guards against "select none, click export" by
+    // bailing with a toast.
+    const ids = document.querySelectorAll('input[name="cf_export_ids"]:checked');
+    if (ids.length === 0) {
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'warn', title: 'Export', body: 'Select at least one Custom Format to export.' });
+        }
+        return;
+    }
+    window.location.href = cfExportBuildUrl();
+}
+
+async function cfExportClipboard(btn) {
+    const ids = document.querySelectorAll('input[name="cf_export_ids"]:checked');
+    if (ids.length === 0) {
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'warn', title: 'Export', body: 'Select at least one Custom Format to copy.' });
+        }
+        return;
+    }
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Copying…';
+    try {
+        const resp = await fetch(cfExportBuildUrl(), { credentials: 'same-origin' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const text = await resp.text();
+        await navigator.clipboard.writeText(text);
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'success', title: 'Copied', body: ids.length + ' Custom Format(s) copied to clipboard.' });
+        }
+    } catch (e) {
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'error', title: 'Copy failed', body: String(e && e.message ? e.message : e) });
+        }
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
 
 function generateApiKey() {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';

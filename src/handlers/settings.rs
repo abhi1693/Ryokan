@@ -1694,6 +1694,12 @@ pub struct CfExportQuery {
     /// `"sonarr-safe"` triggers the Sonarr-safe branch; anything else
     /// (or absent) falls through to the default Ryokan-compatible mode.
     mode: Option<String>,
+    /// Comma-separated row IDs to include. `None` or empty string =
+    /// export all rows (backwards-compatible with curl-based scripts
+    /// that just call `/settings/custom-formats/export`). Non-numeric
+    /// tokens are skipped silently. #11.4 — the UI populates this
+    /// from the per-CF checkbox list; unchecked CFs drop out here.
+    ids: Option<String>,
 }
 
 /// Normalize a parsed CF import payload into a flat list of per-CF
@@ -1780,6 +1786,20 @@ pub async fn settings_custom_formats_export(
         .map(|s| s.eq_ignore_ascii_case("sonarr-safe"))
         .unwrap_or(false);
 
+    // #11.4 — parse the `ids` query into an optional allow-set. None
+    // means "export all" (legacy behaviour). Empty / unparseable tokens
+    // are silently dropped; an `ids` value containing only garbage ends
+    // up filtering to zero rows, which produces a `[]` export — honest.
+    let id_filter: Option<std::collections::HashSet<i64>> = query
+        .ids
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            s.split(',')
+                .filter_map(|tok| tok.trim().parse::<i64>().ok())
+                .collect()
+        });
+
     let rows = cf_model::list_with_scores(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1791,6 +1811,11 @@ pub async fn settings_custom_formats_export(
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
     let mut dropped_for_sonarr: Vec<String> = Vec::new();
     for row in rows {
+        if let Some(ref allow) = id_filter {
+            if !allow.contains(&row.id) {
+                continue;
+            }
+        }
         match serde_json::from_str::<serde_json::Value>(&row.json) {
             Ok(mut v) => {
                 // In Sonarr-safe mode, drop the whole CF if any spec
