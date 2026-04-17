@@ -134,12 +134,26 @@ pub struct ImportCollision {
     pub name: String,
 }
 
+/// One row of the import preview panel (#11.3). Status is one of
+/// `"new"` / `"collision"` / `"invalid"`; `error` is populated for the
+/// `"invalid"` case so the UI can surface the parse reason inline.
+/// `specs_count` renders as "N specs" next to the name.
+pub struct ImportPreviewEntry {
+    pub name: String,
+    pub score: i32,
+    pub specs_count: usize,
+    pub status: String,
+    pub error: Option<String>,
+}
+
 /// View model for the import review block. Holds the original payload
 /// (echoed back into a hidden field so the resolve handler can re-parse
-/// it) plus the list of collisions the user needs to act on.
+/// it) plus the full entries list (for the preview panel) and the
+/// collisions subset (for the resolve form).
 pub struct ImportReviewView {
     pub payload: String,
     pub collisions: Vec<ImportCollision>,
+    pub entries: Vec<ImportPreviewEntry>,
 }
 
 fn min_score_display(score: i32) -> String {
@@ -1145,10 +1159,13 @@ pub async fn settings_custom_formats_import(
         .map(|r| (r.name, r.id))
         .collect();
 
-    // Scan for collisions before touching the database. If any exist,
-    // render the review page inline — the user picks a decision per
-    // conflict and submits the resolve form.
+    // Scan every entry up-front: classify as new / collision / invalid.
+    // collisions[] feeds the existing resolve form; preview[] feeds the
+    // #11.3 preview panel that shows all rows with status badges so the
+    // user can see what they're about to import before picking actions
+    // per-collision.
     let mut collisions: Vec<ImportCollision> = Vec::new();
+    let mut preview: Vec<ImportPreviewEntry> = Vec::with_capacity(entries.len());
     for (idx, entry) in entries.iter().enumerate() {
         let name = entry
             .get("name")
@@ -1156,18 +1173,56 @@ pub async fn settings_custom_formats_import(
             .unwrap_or("")
             .trim()
             .to_string();
-        if !name.is_empty() && existing_by_name.contains_key(&name) {
-            collisions.push(ImportCollision { index: idx, name });
+        let score = entry
+            .get("score")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let specs_count = entry
+            .get("specifications")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        // Dry-run compile so parse/regex errors surface in the preview
+        // with their actual message. The real import loop below re-runs
+        // the compile for the "apply" step — fine, compile is cheap.
+        let compile_err = cf_service::compile_from_json(&entry.to_string(), score, 0).err();
+        let (status, error) = if let Some(e) = compile_err.as_ref() {
+            ("invalid".to_string(), Some(e.clone()))
+        } else if name.is_empty() {
+            (
+                "invalid".to_string(),
+                Some("CF is missing a non-empty `name` field.".to_string()),
+            )
+        } else if existing_by_name.contains_key(&name) {
+            ("collision".to_string(), None)
+        } else {
+            ("new".to_string(), None)
+        };
+        if status == "collision" {
+            collisions.push(ImportCollision {
+                index: idx,
+                name: name.clone(),
+            });
         }
+        preview.push(ImportPreviewEntry {
+            name,
+            score,
+            specs_count,
+            status,
+            error,
+        });
     }
 
-    if !collisions.is_empty() {
-        // Re-render the settings page with the review block populated.
-        // The original payload rides along in a hidden form field so the
-        // resolve handler can re-parse it without server-side state.
+    // Only re-render inline when there's something for the user to act
+    // on — a collision (pick skip/overwrite/rename) or an invalid entry
+    // (fix and re-paste). If every entry is cleanly "new", fall through
+    // to the silent-apply branch below as before.
+    let has_invalid = preview.iter().any(|p| p.status == "invalid");
+    if !collisions.is_empty() || has_invalid {
         let review = ImportReviewView {
             payload: payload.to_string(),
             collisions,
+            entries: preview,
         };
         let template = build_settings_template(
             &state,

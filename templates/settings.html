@@ -666,10 +666,17 @@
     </div>
     {% endif %}
 
-    {# ── Import ─────────────────────────────────────────────────────
-       Import flow redesign (preview + status badges + inline collision
-       resolution) lives in #11.3. For this commit the existing
-       paste-and-submit form stays as-is. #}
+    {# ── Import (#11.3) ─────────────────────────────────────────────
+       Two-stage flow:
+       1. Paste / Upload → POST /settings/custom-formats/import.
+          - If every entry is cleanly new, server imports silently and
+            flash-toasts the summary on redirect (unchanged behavior).
+          - If any entry collides or fails to parse, server re-renders
+            this tab with custom_format_import_review populated.
+       2. Review panel shows every parsed entry with a status badge
+          (new / collision / invalid) and error message where applicable,
+          plus per-collision skip/overwrite/rename controls. Single
+          "Apply & Import" button commits everything the user chose. #}
     <div class="cf-section">
         <div class="cf-section-header">
             <h3>Import</h3>
@@ -677,16 +684,39 @@
 
         {% if let Some(review) = custom_format_import_review %}
         <div class="cf-import-review">
-            <h4>Review Import Collisions</h4>
+            <h4 style="margin-top:0">Preview</h4>
             <p class="form-hint">
-                {{ review.collisions.len() }} Custom Format(s) in your import share a name with an existing row.
-                Pick an action per collision. Entries with no collision will import as new rows regardless of these choices.
+                {{ review.entries.len() }} entry in the import payload.
+                Entries marked <strong>new</strong> will import as-is; entries marked <strong>collision</strong> need a per-row action below; entries marked <strong>invalid</strong> failed to parse and are skipped regardless.
             </p>
+            <div class="cf-import-preview">
+                {% for e in review.entries %}
+                <div class="cf-import-preview-row cf-import-status-{{ e.status }}">
+                    <span class="cf-import-status-badge cf-import-status-{{ e.status }}">{{ e.status }}</span>
+                    <span class="cf-import-name">{{ e.name }}{% if e.name.is_empty() %}<em class="form-hint">(unnamed)</em>{% endif %}</span>
+                    <span class="cf-import-meta">
+                        <span class="cf-score {% if e.score > 0 %}cf-score-positive{% else if e.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">{% if e.score > 0 %}+{% endif %}{{ e.score }}</span>
+                        <span class="form-hint">{{ e.specs_count }} spec{% if e.specs_count != 1 %}s{% endif %}</span>
+                    </span>
+                    {% if let Some(err) = e.error.as_ref() %}
+                    <div class="cf-import-error">{{ err }}</div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+
+            {% if !review.collisions.is_empty() %}
+            <h4 style="margin-top:24px">Resolve collisions</h4>
+            <p class="form-hint">
+                {{ review.collisions.len() }} Custom Format(s) share a name with an existing row. Pick an action per collision.
+            </p>
+            {% endif %}
             <form method="post" action="/settings/custom-formats/import-resolve" class="settings-form"
                   onsubmit="return buildCfImportResolvePayload(this);">
                 <input type="hidden" name="payload" value="{{ review.payload }}">
                 <input type="hidden" name="decisions" id="cf_import_resolve_decisions" value="">
                 <input type="hidden" name="renames" id="cf_import_resolve_renames" value="">
+                {% if !review.collisions.is_empty() %}
                 <table class="group-source-table cf-table">
                     <thead>
                         <tr>
@@ -711,27 +741,31 @@
                         {% endfor %}
                     </tbody>
                 </table>
-                <div class="settings-inline-actions" style="margin-top: 12px;">
+                {% endif %}
+                <div class="settings-inline-actions" style="margin-top: 16px;">
                     <button type="submit" class="btn btn-primary">Apply &amp; Import</button>
                     <a href="/settings?tab=custom_formats" class="btn btn-secondary">Cancel</a>
                 </div>
             </form>
         </div>
-        {% endif %}
-
+        {% else %}
         <form method="post" action="/settings/custom-formats/import" class="settings-form">
+            <p class="cf-section-desc" style="margin-top:0">
+                Paste a Sonarr v4 CF export or upload a .json file. Accepts a single object, an array, or <code>{"custom_formats":[…]}</code> wrapper. Every entry runs through the same compiler as the create form — invalid entries are flagged for review before any are written.
+            </p>
             <div class="form-group">
-                <label for="cf_import_payload">Paste Sonarr v4 CF Export</label>
-                <textarea name="payload" id="cf_import_payload" rows="10" spellcheck="false"
-                    placeholder='[{"name": "...", "specifications": [...], "score": 100}, ...]'></textarea>
-                <span class="form-hint">
-                    Accepts a single object, an array, or <code>{"custom_formats":[…]}</code> wrapper.
-                    Each entry is compiled via the same parser as the create form. Per-entry failures are counted and the first error is reported.
-                    CFs whose name matches an existing row trigger a review page where you can pick <em>overwrite</em>, <em>rename</em>, or <em>skip</em> per conflict before anything is written.
-                </span>
+                <label for="cf_import_file">Upload JSON file <span class="form-hint">(optional — fills the textarea below)</span></label>
+                <input type="file" id="cf_import_file" accept="application/json,.json"
+                    onchange="cfImportFilePicked(this)">
             </div>
-            <button type="submit" class="btn btn-primary">Import</button>
+            <div class="form-group">
+                <label for="cf_import_payload">Paste Sonarr v4 CF export</label>
+                <textarea name="payload" id="cf_import_payload" rows="10" spellcheck="false"
+                    placeholder='[{"name": "...", "specifications": [...], "score": 100}, ...]' required></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary">Preview &amp; Import</button>
         </form>
+        {% endif %}
     </div>
 </div>
 {% endif %}
@@ -854,6 +888,28 @@ function closeCfEditorModal() {
 // ids, then two actions: download the file (via the existing GET endpoint)
 // or copy the pretty-printed JSON to the clipboard (same endpoint, fetch
 // then navigator.clipboard.writeText).
+
+// #11.3 — When a JSON file is picked, read it and drop into the paste
+// textarea so the user doesn't need a two-step ceremony. The server-side
+// flow stays the same (POST payload → preview → resolve).
+function cfImportFilePicked(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+        const target = document.getElementById('cf_import_payload');
+        if (target && ev.target && typeof ev.target.result === 'string') {
+            target.value = ev.target.result;
+            target.focus();
+        }
+    };
+    reader.onerror = function() {
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'error', title: 'Import', body: 'Could not read the file.' });
+        }
+    };
+    reader.readAsText(file);
+}
 
 function cfExportSelectAll(state) {
     document.querySelectorAll('input[name="cf_export_ids"]').forEach(function(cb) {

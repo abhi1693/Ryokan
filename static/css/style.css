@@ -2383,6 +2383,85 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     font-size: 12px;
 }
 
+/* #11.3 — Import preview panel. One row per parsed entry with a
+ * status badge on the left (new / collision / invalid), the CF name
+ * and score/spec-count in the middle, and an inline error message
+ * below for invalid rows. */
+.cf-import-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    background: var(--bg-elevated);
+}
+.cf-import-preview-row {
+    display: grid;
+    grid-template-columns: 90px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--border);
+}
+.cf-import-preview-row:last-child {
+    border-bottom: none;
+}
+.cf-import-status-badge {
+    display: inline-block;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-dim);
+}
+.cf-import-status-badge.cf-import-status-new {
+    background: rgba(140, 204, 151, 0.12);
+    color: #8ccc97;
+    border-color: rgba(140, 204, 151, 0.3);
+}
+.cf-import-status-badge.cf-import-status-collision {
+    background: rgba(234, 179, 8, 0.14);
+    color: #e6c86b;
+    border-color: rgba(234, 179, 8, 0.35);
+}
+.cf-import-status-badge.cf-import-status-invalid {
+    background: rgba(220, 70, 70, 0.12);
+    color: #e06b6b;
+    border-color: rgba(220, 70, 70, 0.3);
+}
+.cf-import-name {
+    font-weight: 500;
+    color: var(--text-bright);
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+.cf-import-meta {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.cf-import-error {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    color: #e06b6b;
+    font-family: monospace;
+    word-break: break-word;
+    background: rgba(220, 70, 70, 0.06);
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-top: 4px;
+}
+
 /* #11.1 — Sonarr-style CF card grid (full-width flex-wrap of ~300px
  * cards). Replaced the earlier two-pane table layout because compressing
  * a list into 490px made names wrap ugly and the + Delete button clip.
