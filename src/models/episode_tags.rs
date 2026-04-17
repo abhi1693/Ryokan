@@ -77,6 +77,16 @@ pub struct GrabHistoryEntry {
     pub is_batch: bool,
     pub grabbed_at: String,
     pub state: String,
+    /// qBit-side path of the completed torrent (`grabbed_torrents.qbit_content_path`).
+    /// Empty until the post-processing sweep observes the torrent as
+    /// complete. Sourced via a correlated subquery on this row's
+    /// `release_title` + `series_id` so each grab history row shows the
+    /// qBit path of *its* torrent, not the most recent one. Sonarr-parity
+    /// dual-path tracking: this is the "DownloadClientItem.OutputPath"
+    /// side; the `file_name` column above is the library path.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub qbit_content_path: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -259,14 +269,27 @@ pub async fn get_grab_history(
     episode_number: i32,
 ) -> Result<Vec<GrabHistoryEntry>, sqlx::Error> {
     sqlx::query_as::<_, GrabHistoryEntry>(
-        "SELECT id, quality_tag, release_title, release_group,
-                COALESCE(file_name, '') AS file_name,
-                COALESCE(size_bytes, 0) AS size_bytes,
-                COALESCE(is_batch, 0) AS is_batch,
-                grabbed_at, state
-         FROM episode_grab_history
-         WHERE series_id = ? AND episode_number = ?
-         ORDER BY grabbed_at DESC",
+        "SELECT egh.id,
+                egh.quality_tag,
+                egh.release_title,
+                egh.release_group,
+                COALESCE(egh.file_name, '') AS file_name,
+                COALESCE(egh.size_bytes, 0) AS size_bytes,
+                COALESCE(egh.is_batch, 0) AS is_batch,
+                egh.grabbed_at,
+                egh.state,
+                COALESCE((
+                    SELECT gt.qbit_content_path
+                      FROM grabbed_torrents gt
+                     WHERE gt.series_id = egh.series_id
+                       AND gt.torrent_name = egh.release_title
+                       AND COALESCE(gt.qbit_content_path, '') <> ''
+                     ORDER BY gt.grabbed_at DESC
+                     LIMIT 1
+                ), '') AS qbit_content_path
+         FROM episode_grab_history egh
+         WHERE egh.series_id = ? AND egh.episode_number = ?
+         ORDER BY egh.grabbed_at DESC",
     )
     .bind(series_id)
     .bind(episode_number)
@@ -354,16 +377,89 @@ pub async fn set_manual_override(
     web_kind: &str,
 ) -> Result<(), sqlx::Error> {
     if source.is_empty() {
-        // Clear override — leave the row and its current classification in
-        // place, just flip the lock off.
-        sqlx::query(
-            "UPDATE episode_quality_tags SET manual_override = 0, updated_at = CURRENT_TIMESTAMP
-             WHERE series_id = ? AND episode_number = ?",
+        // Clear override. Semantics chosen 2026-04-15: read as
+        // unclassified/missing unless a pre-existing grab already
+        // classified this episode. If a live grab exists (grabbed or
+        // completed state), fall back to its classification; otherwise
+        // the row is deleted so the UI shows the episode as missing.
+        //
+        // Re-derivation uses `classify_release_sync` over the stored
+        // release title — the grab_history row doesn't carry the
+        // structured `(source, resolution, is_remux, …)` columns, so
+        // we re-parse from the release title. This is weaker than a
+        // full post-download classify (no group/ffprobe/dir layers)
+        // but the result is persisted once and does NOT self-heal:
+        // `scan_library_for_unclassified` skips rows with non-empty
+        // `source` (see `services/post_processing.rs` around the
+        // "Skip when ... a tag exists with a non-empty source" guard),
+        // so the 6h sweep leaves these rows alone. A stronger
+        // reclassification requires a new grab (which goes through
+        // `record_grab`'s full pipeline) or a manual re-override.
+        let existing = sqlx::query(
+            "SELECT release_title FROM episode_grab_history
+             WHERE series_id = ? AND episode_number = ?
+               AND state IN ('grabbed', 'completed')
+             ORDER BY grabbed_at DESC LIMIT 1",
         )
         .bind(series_id)
         .bind(episode_number)
-        .execute(db)
+        .fetch_optional(db)
         .await?;
+
+        match existing {
+            None => {
+                // No live grab — delete the tag row entirely so the
+                // episode reads as missing/unclassified.
+                sqlx::query(
+                    "DELETE FROM episode_quality_tags
+                     WHERE series_id = ? AND episode_number = ?",
+                )
+                .bind(series_id)
+                .bind(episode_number)
+                .execute(db)
+                .await?;
+            }
+            Some(row) => {
+                let release_title: String = row.get("release_title");
+                let fallback =
+                    crate::services::source::classify_release_sync(&release_title, None);
+                let derived_tag = fallback.label();
+                let src_str = fallback.source.as_str();
+                let res_str = fallback.resolution.as_str();
+                let remux_i = if fallback.is_remux { 1_i64 } else { 0_i64 };
+                let bdmv_i = if fallback.is_bdmv { 1_i64 } else { 0_i64 };
+                let wk_str = fallback.web_kind.as_str();
+                let conf = fallback.confidence as f64;
+                let nr_i = if fallback.needs_review { 1_i64 } else { 0_i64 };
+                sqlx::query(
+                    "UPDATE episode_quality_tags SET
+                         manual_override = 0,
+                         quality_tag = ?,
+                         source = ?,
+                         resolution = ?,
+                         is_remux = ?,
+                         is_bdmv = ?,
+                         web_kind = ?,
+                         classification_confidence = ?,
+                         needs_review = ?,
+                         classification_evidence = '',
+                         updated_at = CURRENT_TIMESTAMP
+                     WHERE series_id = ? AND episode_number = ?",
+                )
+                .bind(&derived_tag)
+                .bind(src_str)
+                .bind(res_str)
+                .bind(remux_i)
+                .bind(bdmv_i)
+                .bind(wk_str)
+                .bind(conf)
+                .bind(nr_i)
+                .bind(series_id)
+                .bind(episode_number)
+                .execute(db)
+                .await?;
+            }
+        }
         return Ok(());
     }
 
@@ -520,13 +616,34 @@ pub async fn mark_grab_history_completed(
 }
 
 /// Clear the current quality tag for an episode (e.g. after file deletion).
+///
+/// Split behavior by `manual_override`:
+/// - Non-pinned rows: DELETE the row entirely. No pin to preserve.
+/// - Pinned rows: UPDATE `state = ''` but keep the classification
+///   columns (source, resolution, is_remux, is_bdmv, web_kind,
+///   manual_override). The pin protects the user's *classification*
+///   assertion; the file being gone is a separate fact that must
+///   reflect in `state` so the series page's `downloaded` flag
+///   (on_disk OR state == 'completed') stops rendering a checkmark
+///   for a file that no longer exists.
 pub async fn clear_episode_tag(
     db: &SqlitePool,
     series_id: i64,
     episode_number: i32,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "DELETE FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+        "DELETE FROM episode_quality_tags
+         WHERE series_id = ? AND episode_number = ?
+           AND COALESCE(manual_override, 0) = 0",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "UPDATE episode_quality_tags SET state = '', updated_at = CURRENT_TIMESTAMP
+         WHERE series_id = ? AND episode_number = ?
+           AND COALESCE(manual_override, 0) = 1",
     )
     .bind(series_id)
     .bind(episode_number)
@@ -537,6 +654,13 @@ pub async fn clear_episode_tag(
 
 /// Clear episode quality tags and mark grab history as "removed" for all episodes
 /// associated with a grabbed torrent (identified by series_id + episode_numbers).
+///
+/// Rows with `manual_override = 1` are kept — blocklisting a release must
+/// not silently destroy a pinned tag. Unlike [`clear_episode_tag`] this
+/// does NOT clear `state` on pinned rows: the torrent going away doesn't
+/// imply the file left disk (post-processing may have already moved it).
+/// The grab_history state flip to 'removed' still runs unconditionally;
+/// that history is about the release, not the episode's ground truth.
 pub async fn clear_tags_for_removal(
     db: &SqlitePool,
     series_id: i64,
@@ -545,7 +669,9 @@ pub async fn clear_tags_for_removal(
     for &ep in episode_numbers {
         // Delete the current quality tag so the episode no longer shows as grabbed.
         sqlx::query(
-            "DELETE FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+            "DELETE FROM episode_quality_tags
+             WHERE series_id = ? AND episode_number = ?
+               AND COALESCE(manual_override, 0) = 0",
         )
         .bind(series_id)
         .bind(ep)
@@ -597,4 +723,245 @@ pub async fn mark_grab_failed(
     .await?;
 
     Ok((series_id, episode_number, release_title))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::series;
+    use crate::services::source::{Resolution, Source};
+
+    async fn seed_series(db: &SqlitePool) -> i64 {
+        let (id, _) = series::upsert(
+            db,
+            series::SeriesCore {
+                anilist_id: 1,
+                mal_id: None,
+                title: "Test Series",
+                title_romaji: "Test Series",
+                title_english: "Test Series",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2020),
+                end_year: Some(2020),
+            },
+        )
+        .await
+        .expect("series upsert");
+        id
+    }
+
+    fn synthetic_classification(source: Source, resolution: Resolution) -> ClassificationResult {
+        ClassificationResult {
+            source,
+            resolution,
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: crate::services::source::WebKind::Unknown,
+            confidence: 1.0,
+            needs_review: false,
+            evidence: Vec::new(),
+            decision_rule: crate::services::source::DecisionRule::Empty,
+        }
+    }
+
+    /// Bug A: clear_tags_for_removal previously deleted every row
+    /// regardless of manual_override. Blocklisting a release would
+    /// silently destroy a user's pinned classification.
+    #[tokio::test]
+    async fn clear_tags_for_removal_preserves_manual_override() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
+            .await
+            .expect("set manual override");
+
+        clear_tags_for_removal(&db, sid, &[1])
+            .await
+            .expect("clear tags for removal");
+
+        let tags = get_for_series(&db, sid).await.expect("get for series");
+        let tag = tags.get(&1).expect("tag row must survive");
+        assert!(tag.manual_override, "manual_override row was wiped");
+        assert_eq!(tag.source, "BluRay");
+        assert_eq!(tag.resolution, "1080p");
+    }
+
+    /// Bug A: clear_episode_tag previously deleted every row
+    /// regardless of manual_override. Deleting a file on disk would
+    /// silently destroy a pinned classification.
+    #[tokio::test]
+    async fn clear_episode_tag_preserves_manual_override() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
+            .await
+            .expect("set manual override");
+
+        clear_episode_tag(&db, sid, 1).await.expect("clear tag");
+
+        let tags = get_for_series(&db, sid).await.expect("get for series");
+        assert!(tags.contains_key(&1), "manual_override row was wiped");
+    }
+
+    /// PR #35 review: pin an episode's classification, then delete the
+    /// file on disk. The pin must survive (classification columns
+    /// intact, manual_override stays 1) but `state` must clear so the
+    /// series-page `downloaded` flag (on_disk OR state == 'completed')
+    /// stops rendering a checkmark for a file that no longer exists.
+    #[tokio::test]
+    async fn clear_episode_tag_resets_state_on_pinned_row() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        // Grab + complete, then pin. record_grab writes state='grabbed'
+        // and the full classification; mark_completed flips to completed.
+        let cls = synthetic_classification(Source::Web, Resolution::R1080p);
+        record_grab(
+            &db,
+            sid,
+            1,
+            &cls,
+            "[SubsPlease] Test - 01 (1080p).mkv",
+            "SubsPlease",
+            1_000_000,
+            false,
+        )
+        .await
+        .expect("record grab");
+        mark_completed(&db, sid, &[1]).await.expect("mark completed");
+        set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
+            .await
+            .expect("pin override");
+
+        // Sanity: state should be 'completed' (set_manual_override
+        // upserts the row with state='completed' via its INSERT branch).
+        let before = get_for_series(&db, sid).await.expect("get");
+        assert!(before[&1].manual_override);
+        assert_eq!(before[&1].state, "completed");
+
+        // User deletes the file on disk — the handler calls clear_episode_tag.
+        clear_episode_tag(&db, sid, 1).await.expect("clear tag");
+
+        let after = get_for_series(&db, sid).await.expect("get");
+        let row = after.get(&1).expect("pinned row must survive");
+        assert!(row.manual_override, "pin must survive");
+        assert_eq!(row.source, "BluRay", "classification must survive");
+        assert_eq!(row.resolution, "1080p", "classification must survive");
+        assert_eq!(
+            row.state, "",
+            "state must clear so downloaded-flag stops rendering checkmark"
+        );
+    }
+
+    /// Bug B: clearing an override on an episode with no live grab
+    /// deletes the row entirely so the episode reads as missing.
+    #[tokio::test]
+    async fn clear_manual_override_without_grab_deletes_row() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
+            .await
+            .expect("set manual override");
+
+        // No grab history — clearing must delete the row.
+        set_manual_override(&db, sid, 1, "", "", false, false, "")
+            .await
+            .expect("clear manual override");
+
+        let tags = get_for_series(&db, sid).await.expect("get for series");
+        assert!(
+            !tags.contains_key(&1),
+            "row should have been deleted when no live grab exists"
+        );
+    }
+
+    /// Bug B: clearing an override on an episode *with* a prior grab
+    /// reverts to the automatic classification rather than leaving
+    /// the pinned values in place with `manual_override = 0`.
+    #[tokio::test]
+    async fn clear_manual_override_with_grab_reverts_to_classification() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        // Record a WEB grab first so episode_grab_history has a live row.
+        let web_cls = synthetic_classification(Source::Web, Resolution::R1080p);
+        record_grab(
+            &db,
+            sid,
+            1,
+            &web_cls,
+            "[SubsPlease] Test - 01 (1080p) [abcd].mkv",
+            "SubsPlease",
+            1_000_000,
+            false,
+        )
+        .await
+        .expect("record grab");
+
+        // User pins it as BluRay.
+        set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
+            .await
+            .expect("set manual override");
+
+        // User clears the pin. Should fall back to a WEB-style
+        // classification derived from the release title, not stay as BluRay.
+        set_manual_override(&db, sid, 1, "", "", false, false, "")
+            .await
+            .expect("clear manual override");
+
+        let tags = get_for_series(&db, sid).await.expect("get for series");
+        let tag = tags.get(&1).expect("row must survive with live grab");
+        assert!(!tag.manual_override, "override flag must clear");
+        assert_ne!(
+            tag.source, "BluRay",
+            "cleared override must not retain the pinned BluRay source"
+        );
+    }
+
+    /// After bug B fix: a fresh record_grab after a set_manual_override
+    /// still respects the pin (the existing `WHERE manual_override = 0`
+    /// guard in record_grab). Defensive — the fix to Bug B's clearing
+    /// branch must not affect the pinned-vs-re-grab interaction.
+    #[tokio::test]
+    async fn manual_override_still_wins_over_later_grab() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
+            .await
+            .expect("set manual override");
+
+        let web_cls = synthetic_classification(Source::Web, Resolution::R720p);
+        record_grab(
+            &db,
+            sid,
+            1,
+            &web_cls,
+            "[SubsPlease] Test - 01 (720p).mkv",
+            "SubsPlease",
+            500_000,
+            false,
+        )
+        .await
+        .expect("record grab");
+
+        let tags = get_for_series(&db, sid).await.expect("get for series");
+        let tag = tags.get(&1).expect("tag row");
+        assert!(tag.manual_override, "override must survive re-grab");
+        assert_eq!(tag.source, "BluRay", "pinned source must not be overwritten");
+        assert_eq!(tag.resolution, "1080p", "pinned resolution must not be overwritten");
+    }
 }

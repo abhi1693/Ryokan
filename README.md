@@ -67,6 +67,7 @@ Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 | `RUST_LOG` | `ryokan=info` | Log filter (see [`tracing-subscriber`](https://github.com/tokio-rs/tracing) docs) |
 | `RYOKAN_MEDIA_CACHE_DIR` | `data/cache/artwork` (local), `/data/cache/artwork` (Docker) | On-disk directory for the artwork blob cache |
 | `JIKAN_API_BASE` | `https://api.jikan.moe/v4` | Override for a self-hosted Jikan instance |
+| `RYOKAN_RESET_AUTH` | *(unset)* | Set to `1` alongside a `data/.reset-auth` sentinel file to wipe `users` / `sessions` on next boot. See [Password recovery](#password-recovery) |
 | `PUID` | `1000` | *Docker only.* UID Ryokan runs as inside the container. Set to match host file ownership |
 | `PGID` | `1000` | *Docker only.* GID Ryokan runs as inside the container |
 | `TZ` | `UTC` | *Docker only.* Container timezone, affects log timestamps and scheduled-task anchoring |
@@ -102,6 +103,27 @@ The URL Base distinction is important: Sonarr routes live at `/api/v3/`, while R
 - Seerr allows a maximum of two Sonarr servers and two Radarr servers (one non-4K, one 4K each). Adding Ryokan uses one slot for each.
 - Ryokan treats each AniList entry as a single season. Multi-season TMDB shows that map to multiple AniList entries will each appear as a separate series in Ryokan.
 - Some anime may not have TMDB/TVDB-to-AniList mappings in the [anibridge](https://github.com/anibridge/anibridge-mappings) dataset. Ryokan falls back to AniList title search in those cases, which usually works for single-season shows but may pick the wrong entry on series with multiple seasons.
+
+## Password recovery
+
+If you've forgotten the admin password, recover access with either:
+
+**1. Reset on boot.** From the Ryokan install directory:
+
+```bash
+touch data/.reset-auth
+RYOKAN_RESET_AUTH=1 ./ryokan        # or `cargo run`, or restart the container with the env var set
+```
+
+Ryokan wipes the `users` and `sessions` tables on startup, so the browser redirects you to the first-run setup page. Create a new admin account, then remove the sentinel: `rm data/.reset-auth`. The sentinel is required so a stuck-on env var in a compose file can't wipe auth on every boot.
+
+**2. Direct sqlite3.** Shut Ryokan down, then:
+
+```bash
+sqlite3 data/ryokan.db "DELETE FROM users; DELETE FROM sessions;"
+```
+
+Start Ryokan and create a new admin account. Config (Jellyfin / qBit credentials, media root, CFs) survives either recovery path — only the admin account and active sessions get wiped.
 
 ## Self-hosting Jikan
 

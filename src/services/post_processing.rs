@@ -866,7 +866,16 @@ pub async fn run_once(state: &AppState) {
         _ => return,
     };
 
+    // When post-processing is disabled, we still want the UI checkmark to
+    // flip as soon as qBit reports the torrent complete — otherwise the
+    // row is stuck showing a progress bar forever even though the download
+    // finished. Run a lightweight sweep that advances state on
+    // episode_quality_tags and grabbed_torrents without moving any files.
+    //
+    // media_root being empty implies post-processing is unusable even if
+    // the toggle is on, so treat it the same as the disabled case.
     if !cfg.post_processing_enabled || cfg.media_root.is_empty() {
+        let _ = advance_state_without_import(state).await;
         return;
     }
 
@@ -967,6 +976,22 @@ pub async fn run_once(state: &AppState) {
             continue;
         }
 
+        // Stamp qBit's output path on the grab row before we move/
+        // hardlink the file into the library. Done BEFORE import so
+        // that even if import errors out mid-way, the UI still has a
+        // record of where qBit left the file.
+        let qbit_path = if !torrent.content_path.is_empty() {
+            torrent.content_path.clone()
+        } else {
+            torrent.save_path.clone()
+        };
+        let _ = grabbed_torrents::stamp_qbit_content_path(
+            &state.db,
+            grab.id,
+            &qbit_path,
+        )
+        .await;
+
         match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
             Ok(true) => {
                 any_imported = true;
@@ -1014,6 +1039,102 @@ pub async fn run_once(state: &AppState) {
                 .await;
             }
         }
+}
+
+/// Lightweight variant of `run_once` used when post-processing is
+/// disabled (or media_root is unset). Advances a qBit-complete pending
+/// grab's state on `grabbed_torrents` and `episode_quality_tags` so the
+/// UI checkmark can flip, without moving any files or writing an NFO.
+///
+/// This exists because the UI otherwise has no way to know a torrent
+/// finished downloading when post-processing is off — the checkmark
+/// watches `episode_quality_tags.state = 'completed'`, which only gets
+/// set by the full import pass. Operators who run Ryokan alongside a
+/// separate move/rename tool (or who just leave files in the qBit
+/// completed dir) would see every row stuck at "Importing…" forever.
+async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
+    let pending = grabbed_torrents::get_all_pending(&state.db)
+        .await
+        .map_err(|_| ())?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let qbit = match state.qbit.read().await.clone() {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    let torrents = qbit.get_torrents().await.map_err(|_| ())?;
+    let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
+        .iter()
+        .map(|t| (t.hash.to_lowercase(), t))
+        .collect();
+    let by_name: HashMap<String, &crate::services::qbit::Torrent> = torrents
+        .iter()
+        .map(|t| (t.name.to_lowercase(), t))
+        .collect();
+
+    for grab in &pending {
+        let matched = if !grab.hash.is_empty() {
+            by_hash.get(&grab.hash.to_lowercase()).copied()
+        } else {
+            by_name.get(&grab.torrent_name.to_lowercase()).copied()
+        };
+        let Some(torrent) = matched else { continue };
+
+        if !is_complete(&torrent.state) {
+            continue;
+        }
+
+        // Stamp the qBit-side path for the episode detail modal. Prefer
+        // content_path (qBit ≥ 2.6.1 — the actual file or container
+        // folder) and fall back to save_path for older qBit builds.
+        let qbit_path = if !torrent.content_path.is_empty() {
+            torrent.content_path.clone()
+        } else {
+            torrent.save_path.clone()
+        };
+        let _ = grabbed_torrents::stamp_qbit_content_path(
+            &state.db,
+            grab.id,
+            &qbit_path,
+        )
+        .await;
+
+        // Mark the grab row as finalized so we stop polling it and the
+        // UI stops treating it as in-flight. Use `mark_completed_no_import`
+        // rather than `mark_imported` — we never moved a file, so
+        // `imported_at` stays NULL and future reports keyed on that
+        // column don't see a false positive for this grab. Then flip
+        // the episode tag(s) to 'completed' so the checkmark appears
+        // on the next poll. Phase-2 sibling routes get the per-series
+        // treatment too.
+        let _ = grabbed_torrents::mark_completed_no_import(&state.db, grab.id).await;
+
+        let routes = grabbed_torrents::get_series_routes(&state.db, grab.id)
+            .await
+            .unwrap_or_default();
+        if routes.is_empty() {
+            let _ = episode_tags::mark_completed(
+                &state.db,
+                grab.series_id,
+                &grab.episode_numbers,
+            )
+            .await;
+        } else {
+            for route in &routes {
+                let _ = episode_tags::mark_completed(
+                    &state.db,
+                    route.series_id,
+                    &route.episode_numbers,
+                )
+                .await;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Summary of one run of [`scan_library_for_unclassified`]. Used by the

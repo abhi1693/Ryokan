@@ -169,12 +169,16 @@
     <div class="season-header">
         <div class="season-header-left">
             <h3 class="season-title">Episodes</h3>
+            {# Badge counts `downloaded_count` (on_disk OR state=completed)
+               instead of `on_disk_count` (media_root-only), so the
+               `N / total` count ticks forward for post-proc-off
+               torrents the moment qBit reports complete. #}
             {% if ep_total > 0 %}
-            <span class="season-badge {% if on_disk_count >= ep_total %}season-badge-complete{% else if on_disk_count > 0 %}season-badge-partial{% else %}season-badge-missing{% endif %}">
-                {{ on_disk_count }} / {{ ep_total }}
+            <span class="season-badge {% if downloaded_count >= ep_total %}season-badge-complete{% else if downloaded_count > 0 %}season-badge-partial{% else %}season-badge-missing{% endif %}">
+                {{ downloaded_count }} / {{ ep_total }}
             </span>
-            {% else if on_disk_count > 0 %}
-            <span class="season-badge season-badge-partial">{{ on_disk_count }} files</span>
+            {% else if downloaded_count > 0 %}
+            <span class="season-badge season-badge-partial">{{ downloaded_count }} files</span>
             {% endif %}
             {% if !size_display.is_empty() %}
             <span class="season-size">{{ size_display }}</span>
@@ -236,10 +240,20 @@
             </thead>
             <tbody>
                 {% for ep in episodes %}
-                <tr class="{% if ep.on_disk %}ep-row-have{% else %}ep-row-missing{% endif %}">
+                {# `downloaded` is true when the file is either in the
+                   media_root library (on_disk) OR Ryokan has marked the
+                   grab state as 'completed' without it having landed in
+                   the library — the latter is the post-processing-off
+                   case. Mirrors Sonarr's Activity "downloaded" vs
+                   library "HasFile" split. #}
+                <tr class="{% if ep.downloaded %}ep-row-have{% else %}ep-row-missing{% endif %}">
                     <td class="ep-col-status">
                         {% if ep.on_disk %}
                         <span class="ep-status-icon ep-have" title="On disk">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                        </span>
+                        {% else if ep.downloaded %}
+                        <span class="ep-status-icon ep-have" title="Downloaded (post-processing disabled — file not in library root)">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
                         </span>
                         {% else %}
@@ -500,6 +514,12 @@
 <script>
 const SD = document.getElementById('series-data').dataset;
 
+// Server-rendered flag: when post-processing is disabled, the episode-row
+// poller skips the "Importing…" label between a 100%-download and the
+// completion checkmark, because there's no post-processing pass to wait
+// on — advance_state_without_import flips the state directly (#14).
+window.POST_PROCESSING_ENABLED = {% if post_processing_enabled %}true{% else %}false{% endif %};
+
 // Title-language switching is handled entirely by CSS via the
 // `html[data-title-language]` attribute set by the inline head script in
 // base.html. No DOM walking here — doing it post-parse caused a visible
@@ -593,27 +613,36 @@ function showEpisodeDetail(epNum, btn) {
     // Show/hide delete button
     if (deleteBtn) deleteBtn.style.display = onDisk ? '' : 'none';
 
-    if (onDisk && filename) {
-        const mediaRoot = document.getElementById('series-data').dataset.mediaRoot || '';
-        const folderName = document.getElementById('series-data').dataset.folderName || '';
-        const fullPath = [mediaRoot, folderName, filename].filter(Boolean).join('/');
-        body.innerHTML =
-            '<div class="ep-detail-two-col">' +
-            '<div class="ep-detail-row ep-detail-full"><span class="ep-detail-label">File</span><span class="ep-detail-value ep-detail-path">' + escHtml(fullPath) + '</span></div>' +
-            // The Size row starts with the on-disk file size and is
-            // patched in place by `renderGrabHistory` once the grab
-            // history loads: if the latest grab was a batch, the row is
-            // rewritten to show the whole-torrent total with a
-            // "(batch total)" hint. Always rendered (even when size is
-            // empty) so the batch-patch has a stable target to find.
-            '<div class="ep-detail-row"><span class="ep-detail-label">Size</span><span class="ep-detail-value ep-detail-size-value">' + escHtml(size || '—') + '</span></div>' +
-            '</div>' +
-            '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
-    } else {
-        body.innerHTML =
-            '<div class="ep-detail-row"><span class="ep-detail-label">Status</span><span class="ep-detail-value" style="color:var(--text-dim)">Not on disk</span></div>' +
-            '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
-    }
+    // Two stable slots the grab-history loader patches in place once
+    // data arrives: the library-side file path (media_root-relative,
+    // rendered here when on_disk) and the qBit-side content_path
+    // (rendered by renderGrabHistory if the current grab has a
+    // qbit_content_path). Both can coexist when post-processing uses
+    // hardlinks — the user wants to see both; the Sonarr dual-path
+    // split (#14 follow-up) makes this possible.
+    const mediaRoot = document.getElementById('series-data').dataset.mediaRoot || '';
+    const folderName = document.getElementById('series-data').dataset.folderName || '';
+    const libraryPath = (onDisk && filename)
+        ? [mediaRoot, folderName, filename].filter(Boolean).join('/')
+        : '';
+    body.innerHTML =
+        '<div class="ep-detail-two-col">' +
+        (libraryPath
+            ? '<div class="ep-detail-row ep-detail-full"><span class="ep-detail-label">Library path</span><span class="ep-detail-value ep-detail-path">' + escHtml(libraryPath) + '</span></div>'
+            : '<div class="ep-detail-row ep-detail-full" id="ep-detail-library-placeholder"><span class="ep-detail-label">Library path</span><span class="ep-detail-value" style="color:var(--text-dim)">Not in library root</span></div>') +
+        // qBit path row is always rendered as a placeholder; renderGrabHistory
+        // fills it in when the current grab has a qbit_content_path. Hidden
+        // until then so empty state doesn't render for pre-qBit-complete rows.
+        '<div class="ep-detail-row ep-detail-full" id="ep-detail-qbit-path" style="display:none"><span class="ep-detail-label">qBit output path</span><span class="ep-detail-value ep-detail-path" id="ep-detail-qbit-path-value"></span></div>' +
+        // The Size row starts with the on-disk file size and is
+        // patched in place by `renderGrabHistory` once the grab
+        // history loads: if the latest grab was a batch, the row is
+        // rewritten to show the whole-torrent total with a
+        // "(batch total)" hint. Always rendered (even when size is
+        // empty) so the batch-patch has a stable target to find.
+        '<div class="ep-detail-row"><span class="ep-detail-label">Size</span><span class="ep-detail-value ep-detail-size-value">' + escHtml(size || '—') + '</span></div>' +
+        '</div>' +
+        '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
     modal.style.display = 'flex';
 
     // Load grab history
@@ -700,6 +729,21 @@ function renderGrabHistory(entries, epNum) {
         if (sizeValueEl) {
             sizeValueEl.innerHTML = escHtml(formatBytes(current.size_bytes))
                 + ' <span style="color:var(--text-dim);font-size:11px">(batch total)</span>';
+        }
+    }
+
+    // Dual-path display: if the current grab has a qBit content path
+    // (populated by post-processing when qBit reports complete), reveal
+    // the qBit path row in the detail header. Shown whenever present —
+    // with post-proc on + hardlink mode both paths point at the same
+    // bytes but are still worth surfacing so the operator can find the
+    // torrent in qBit without guessing.
+    if (current && current.qbit_content_path) {
+        const qbitRow = document.getElementById('ep-detail-qbit-path');
+        const qbitValue = document.getElementById('ep-detail-qbit-path-value');
+        if (qbitRow && qbitValue) {
+            qbitValue.textContent = current.qbit_content_path;
+            qbitRow.style.display = '';
         }
     }
 }
@@ -1805,11 +1849,21 @@ function pollDownloadProgress() {
                     }
                     const isComplete = item.state.includes('UP') || item.state === 'uploading' || item.progress >= 1.0;
                     if (isComplete) {
-                        // qBit has finished but post-processing hasn't imported
-                        // the release into the library yet. Show a full bar with
-                        // an "Importing..." label so the user isn't staring at a
-                        // stale 0.0% until the next post-processing tick.
-                        qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:100%"></div></div><span class="dl-progress-text">Importing…</span></div>';
+                        if (window.POST_PROCESSING_ENABLED) {
+                            // qBit finished but post-processing hasn't imported
+                            // the release into the library yet. Show a full bar with
+                            // an "Importing..." label so the user isn't staring at a
+                            // stale 0.0% until the next post-processing tick.
+                            qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:100%"></div></div><span class="dl-progress-text">Importing…</span></div>';
+                        } else {
+                            // Post-processing is off — there is no import step to
+                            // wait on. The lightweight post-proc sweep
+                            // (advance_state_without_import) flips the tag state
+                            // to 'completed' on the next tick; trigger a refresh
+                            // so the checkmark appears without flashing a
+                            // spurious "Importing…" that'll never advance.
+                            needsRefresh = true;
+                        }
                     } else {
                         const pct = (item.progress * 100).toFixed(1);
                         qualityCell.innerHTML = `<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div>`;

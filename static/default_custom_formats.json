@@ -126,21 +126,5 @@
         ]
       }
     ]
-  },
-  {
-    "name": "Penalize casual groups (NoobSubs, HorribleSubs)",
-    "trash_id": null,
-    "score": -1000,
-    "specifications": [
-      {
-        "name": "Casual groups",
-        "implementation": "ReleaseGroupSpecification",
-        "negate": false,
-        "required": false,
-        "fields": [
-          { "name": "value", "value": "^(NoobSubs|HorribleSubs)$" }
-        ]
-      }
-    ]
   }
 ]

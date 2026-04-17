@@ -123,6 +123,20 @@ body {
 
 .auth-form { display: flex; flex-direction: column; gap: 16px; }
 
+.auth-forgot {
+    text-align: center;
+    margin-top: 16px;
+    font-size: 13px;
+}
+.auth-forgot a {
+    color: var(--text-dim);
+    text-decoration: none;
+}
+.auth-forgot a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
 /* --- Forms --- */
 .form-group {
     display: flex;
@@ -2113,10 +2127,6 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     margin-bottom: 24px;
 }
 
-.debug-panel {
-    max-width: 980px;
-}
-
 /* --- Release Groups settings tab --- */
 .settings-subheading {
     margin: 24px 0 8px;
@@ -2951,18 +2961,30 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     color: var(--text-bright);
 }
 
+/* Wrapper for Debug-tab checkbox rows. Deliberately NOT `.form-group`
+ * because `.form-group label` (0,1,1) overrode `.checkbox-row` (0,1,0)
+ * on specificity, forcing checkbox labels uppercase/dimmed. Keeping a
+ * separate wrapper lets `.checkbox-row` apply cleanly. (#18) */
+.form-check {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+
 /* --- Debug action rows --- */
 .debug-actions-group {
     display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin-top: 8px;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 16px;
 }
 
 .debug-action-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
 }
 
 /* --- Monitor option list (add series modal) --- */

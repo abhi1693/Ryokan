@@ -999,6 +999,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Sonarr-parity dual-path tracking (#14 follow-up). Stamped from
+    // qBit's `content_path` (API ≥ 2.6.1) or `save_path` fallback the
+    // moment qBit reports the torrent complete, independent of whether
+    // post-processing has moved the file into the library. The episode
+    // detail modal renders this alongside the post-processed library
+    // path so the operator can see both locations when a torrent
+    // finishes (matters with post-proc off, or when hardlinking keeps
+    // both paths valid simultaneously).
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN qbit_content_path TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN web_kind TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await

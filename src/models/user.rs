@@ -62,6 +62,21 @@ pub async fn create_user(db: &SqlitePool, username: &str, password: &str) -> Res
     Ok(result.last_insert_rowid())
 }
 
+/// Wipe all user and session rows. Used by the password-recovery boot
+/// path (`#22`) — when `RYOKAN_RESET_AUTH=1` is set alongside a
+/// `data/.reset-auth` sentinel file, `main()` calls this before the
+/// router mounts so `has_users()` reports false and `/setup` re-renders.
+///
+/// Deliberately does NOT touch the `config` table — Jellyfin / qBit
+/// credentials and other settings survive a password reset. The user's
+/// recovery recipe is "reset auth, re-create admin, log back in" — not
+/// "factory reset the whole install."
+pub async fn reset_all(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM sessions").execute(db).await?;
+    sqlx::query("DELETE FROM users").execute(db).await?;
+    Ok(())
+}
+
 /// Verify credentials and return the user if valid.
 ///
 /// Timing note: when the username does not exist, this still runs a
@@ -122,5 +137,44 @@ pub async fn verify_user(db: &SqlitePool, username: &str, password: &str) -> Res
             .map_err(|e| format!("verify spawn_blocking failed: {}", e))?;
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #22: reset_all must wipe both users and sessions, so `has_users()`
+    /// returns false after it runs and the first-run setup page re-renders.
+    #[tokio::test]
+    async fn reset_all_wipes_users_and_sessions() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+
+        create_user(&db, "admin", "hunter2").await.expect("create admin");
+
+        // Seed a session row directly — real sessions are minted by the
+        // login handler, but for this test we only need a row present so
+        // reset_all has something to delete.
+        sqlx::query("INSERT INTO sessions (token, user_id) VALUES ('sid', 1)")
+            .execute(&db)
+            .await
+            .expect("seed session");
+
+        assert!(has_users(&db).await.unwrap(), "user exists before reset");
+        let session_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(session_count.0, 1);
+
+        reset_all(&db).await.expect("reset_all");
+
+        assert!(!has_users(&db).await.unwrap(), "users wiped");
+        let session_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(session_count.0, 0, "sessions wiped");
     }
 }
