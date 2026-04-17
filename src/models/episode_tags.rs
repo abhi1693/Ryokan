@@ -498,21 +498,39 @@ pub async fn set_manual_override(
 
 /// Mark episode quality tags as "completed" for the given episodes of a series.
 /// Called by post-processing after a torrent is successfully imported.
+///
+/// Single UPDATE with `episode_number IN (?, ?, ...)` instead of one
+/// query per episode — a batch import of a 24-episode BD pack used to
+/// fire 24 round-trips here, all of which serialise behind SQLite's
+/// single-writer lock.
 pub async fn mark_completed(
     db: &SqlitePool,
     series_id: i64,
     episode_numbers: &[i32],
 ) -> Result<(), sqlx::Error> {
-    for &ep in episode_numbers {
-        sqlx::query(
-            "UPDATE episode_quality_tags SET state = 'completed', updated_at = CURRENT_TIMESTAMP
-             WHERE series_id = ? AND episode_number = ? AND state = 'grabbed'",
-        )
-        .bind(series_id)
-        .bind(ep)
-        .execute(db)
-        .await?;
+    if episode_numbers.is_empty() {
+        return Ok(());
     }
+    // Build the IN-list placeholders at runtime; episode numbers are
+    // i32s from trusted upstream parsing, no injection surface. sqlx
+    // doesn't expand slice bindings on SQLite, so we splice the
+    // placeholder count into the SQL and bind each value.
+    let placeholders = std::iter::repeat_n("?", episode_numbers.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "UPDATE episode_quality_tags
+         SET state = 'completed', updated_at = CURRENT_TIMESTAMP
+         WHERE series_id = ?
+           AND state = 'grabbed'
+           AND episode_number IN ({})",
+        placeholders
+    );
+    let mut q = sqlx::query(&sql).bind(series_id);
+    for &ep in episode_numbers {
+        q = q.bind(ep);
+    }
+    q.execute(db).await?;
     Ok(())
 }
 
