@@ -92,6 +92,37 @@
             </tbody>
         </table>
 
+        {# #20 — Dual markup. Cards render on phone viewports via CSS
+           swap; the table above stays the canonical representation
+           for desktop. loadMore() appends rows to both containers so
+           paginated results show up regardless of viewport. #}
+        <div class="results-cards" id="results-cards">
+            {% for r in results %}
+            <div class="result-card {% if r.is_batch %}is-batch{% endif %} {% if r.is_trusted %}is-trusted{% endif %}">
+                <div class="result-card-header">
+                    <span class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}">{{ r.score }}</span>
+                    <a class="result-card-title" href="{{ r.link }}" target="_blank" rel="noopener">{{ r.title }}</a>
+                </div>
+                <div class="result-card-tags">
+                    {% if r.is_batch %}<span class="tag tag-batch">BATCH</span>{% endif %}
+                    {% if r.is_trusted %}<span class="tag tag-trusted">TRUSTED</span>{% endif %}
+                    {% if !r.group.is_empty() %}<span class="tag tag-group">{{ r.group }}</span>{% endif %}
+                    {% if !r.resolution.is_empty() %}<span class="tag tag-res">{{ r.resolution }}p</span>{% endif %}
+                </div>
+                <div class="result-card-footer">
+                    <span class="result-card-meta">{{ r.size }}</span>
+                    <span class="result-card-meta"><span class="seed-count">{{ r.seeders }}</span> S</span>
+                    <span class="result-card-meta"><span class="leech-count">{{ r.leechers }}</span> L</span>
+                    {% if !r.magnet.is_empty() %}
+                    <button class="btn btn-grab" onclick="grabRelease('{{ r.magnet }}', this)">Grab</button>
+                    {% else if !r.torrent.is_empty() %}
+                    <button class="btn btn-grab" onclick="grabRelease('{{ r.torrent }}', this)">Grab</button>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
         <div class="load-more-area" id="load-more-area" {% if !has_next %}style="display:none"{% endif %}>
             <button class="btn btn-load-more" id="load-more-btn" onclick="loadMore()">Load page 2</button>
             <span class="load-more-status" id="load-more-status"></span>
@@ -153,13 +184,12 @@ function loadMore() {
             }
 
             const tbody = document.getElementById('results-body');
+            const cards = document.getElementById('results-cards');
             for (const r of results) {
-                const tr = document.createElement('tr');
                 let rowClass = '';
                 if (r.is_batch && r.is_trusted) rowClass = 'is-batch is-trusted';
                 else if (r.is_batch) rowClass = 'is-batch';
                 else if (r.is_trusted) rowClass = 'is-trusted';
-                if (rowClass) tr.className = rowClass;
 
                 let scoreClass = r.score >= 60 ? 'score-high' : r.score >= 30 ? 'score-mid' : 'score-low';
                 let tags = '';
@@ -171,6 +201,9 @@ function loadMore() {
                 const grabUrl = r.magnet || r.torrent || '';
                 const grabBtn = grabUrl ? `<button class="btn btn-grab" onclick="grabRelease('${escAttr(grabUrl)}', this)">Grab</button>` : '';
 
+                // Table row (desktop).
+                const tr = document.createElement('tr');
+                if (rowClass) tr.className = rowClass;
                 tr.innerHTML = `
                     <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
                     <td class="col-name">
@@ -184,6 +217,28 @@ function loadMore() {
                     <td class="col-actions">${grabBtn}</td>
                 `;
                 tbody.appendChild(tr);
+
+                // Card (mobile). Same data, different shape. Hidden above
+                // --bp-phone via CSS; loadMore keeps both in sync so a
+                // viewport resize post-load still renders correctly.
+                if (cards) {
+                    const card = document.createElement('div');
+                    card.className = `result-card${rowClass ? ' ' + rowClass : ''}`;
+                    card.innerHTML = `
+                        <div class="result-card-header">
+                            <span class="score-badge ${scoreClass}">${r.score}</span>
+                            <a class="result-card-title" href="${escAttr(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>
+                        </div>
+                        <div class="result-card-tags">${tags}</div>
+                        <div class="result-card-footer">
+                            <span class="result-card-meta">${escHtml(r.size)}</span>
+                            <span class="result-card-meta"><span class="seed-count">${r.seeders}</span> S</span>
+                            <span class="result-card-meta"><span class="leech-count">${r.leechers}</span> L</span>
+                            ${grabBtn}
+                        </div>
+                    `;
+                    cards.appendChild(card);
+                }
             }
 
             totalResults += results.length;

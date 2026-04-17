@@ -473,6 +473,87 @@ fieldset legend {
 .col-seed, .col-leech, .col-dl { width: 50px; text-align: right; }
 .col-actions { width: 70px; text-align: right; }
 
+/* #20 — Search results card view (mobile). Dual-markup approach:
+ * results-table above renders both desktop and mobile shapes
+ * server-side, CSS hides one per viewport. loadMore() appends to
+ * both so paginated results stay in sync if the user resizes. */
+.results-cards {
+    display: none;
+}
+@media (max-width: 640px) {
+    .results-table {
+        display: none;
+    }
+    .results-cards {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+}
+.result-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+/* Same batch/trusted tinting as the table rows (blue / green /
+ * purple stripes) so color-coding is consistent across viewports. */
+.result-card.is-batch {
+    border-left: 3px solid var(--blue);
+    background: var(--blue-bg);
+}
+.result-card.is-trusted {
+    border-left: 3px solid var(--green);
+    background: var(--green-bg);
+}
+.result-card.is-batch.is-trusted {
+    border-left: 3px solid var(--purple);
+    background: var(--purple-bg);
+}
+.result-card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+.result-card-title {
+    color: var(--text);
+    text-decoration: none;
+    font-size: 14px;
+    line-height: 1.4;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-weight: 500;
+}
+.result-card-title:hover {
+    color: var(--accent);
+}
+.result-card-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.result-card-footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+}
+.result-card-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+.result-card-footer .btn-grab {
+    margin-left: auto;
+    padding: 8px 16px;
+}
+
 .col-name a {
     color: var(--text);
     text-decoration: none;
