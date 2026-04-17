@@ -47,19 +47,42 @@ async fn fetch_live_detail_for_ids(
     episode_count: Option<i32>,
     force_mal_fallback: bool,
 ) -> Result<anilist::AnimeDetail, String> {
-    // Each fallback step logs at warn so the operator can see *why* a
-    // series fell through to a lower-fidelity provider. The previous
-    // `if let Ok(...) = ... { return ... }` shape was silent — a
-    // sweep-time AniList error (slow GraphQL response for a huge
-    // entry like One Piece, transient 5xx, partial JSON) just dropped
-    // the entry to MAL with no breadcrumb, leaving the operator with
-    // a `provider_id=-21, episodes=None` row and no way to know
-    // whether AniList was genuinely down or whether one specific
-    // series was just slow to assemble.
+    // Fallback policy: when an entry has a real AniList ID and the user
+    // hasn't explicitly opted into MAL, treat AniList rate-limiting as
+    // "try again later," not "silently substitute MAL." Falling back
+    // every time AL is throttled would slowly overwrite high-fidelity
+    // AL data with lower-fidelity MAL data on every sweep that hits
+    // the rate limit; the user wants the AL data, not MAL's
+    // approximation. Only non-rate-limit AL errors (5xx, parse, "not
+    // found", etc.) flow into the MAL/Kitsu fallback chain — those
+    // signal a problem with the entry on AL itself, where the fallback
+    // produces real value.
     if provider_id > 0 && !force_mal_fallback {
+        if anilist::anilist_cooldown_active() {
+            return Err(format!(
+                "AniList rate-limit cooldown active; skipping provider_id={} \
+                 to preserve AL fidelity (next sweep will retry)",
+                provider_id
+            ));
+        }
         match anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
             Ok(detail) => return Ok(detail),
             Err(err) => {
+                // The error string format comes from
+                // anilist::fetch_anime_detail — keep this matcher in
+                // sync if that wording changes.
+                let is_rate_limited = err.contains("HTTP 429")
+                    || err.contains("cooldown active");
+                if is_rate_limited {
+                    tracing::warn!(
+                        target: "ryokan::metadata_sync",
+                        provider_id,
+                        mal_id = ?mal_id,
+                        error = %err,
+                        "AniList rate-limited; skipping series (no MAL/Kitsu fallback)"
+                    );
+                    return Err(err);
+                }
                 tracing::warn!(
                     target: "ryokan::metadata_sync",
                     provider_id,

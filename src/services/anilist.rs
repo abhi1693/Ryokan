@@ -87,7 +87,7 @@ fn search_cache_put(key: String, results: Vec<AnimeEntry>) {
     }
 }
 
-fn anilist_cooldown_active() -> bool {
+pub fn anilist_cooldown_active() -> bool {
     if let Ok(guard) = ANILIST_COOLDOWN_UNTIL.lock()
         && let Some(until) = *guard {
             return Instant::now() < until;
