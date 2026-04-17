@@ -562,18 +562,11 @@
     </div>
     {% endif %}
 
-    {# ── Defaults & Threshold (#11.5) ────────────────────────────────
-       Stacks two blocks vertically: Bundled Defaults on top (install
-       and reset actions), Minimum Score below. Originally tried a
-       two-column grid but the Min Score block ended up reading as an
-       orphan on the right; a vertical stack is cleaner and keeps the
-       related Install/Reset copy next to its buttons. #}
+    {# ── Bundled Defaults (#11.5) ────────────────────────────────── #}
     <div class="cf-section">
         <div class="cf-section-header">
-            <h3>Defaults &amp; Threshold</h3>
+            <h3>Bundled Defaults</h3>
         </div>
-
-        <h4 class="cf-defaults-subtitle">Bundled defaults</h4>
         <p class="cf-section-desc">
             <strong>Install Defaults</strong> adds the bundled anime-tuned Custom Formats (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit / x265, FLAC / Opus, plus an 8-bit mp4 penalty). Repeat clicks are safe: existing names are skipped.
         </p>
@@ -594,8 +587,13 @@
                 <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
             </form>
         </div>
+    </div>
 
-        <h4 class="cf-defaults-subtitle" style="margin-top: 24px">Minimum score</h4>
+    {# ── Minimum Score ───────────────────────────────────────────── #}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Minimum Score</h3>
+        </div>
         <p class="cf-section-desc">
             Auto-search drops any release whose summed CF score falls below this floor. Interactive search still shows everything. Leave blank to disable the floor entirely.
         </p>

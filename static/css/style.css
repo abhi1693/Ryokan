@@ -2579,6 +2579,48 @@ input[type="file"]::file-selector-button:hover {
  * a list into 490px made names wrap ugly and the + Delete button clip.
  * Each card is a clickable tile that deep-links to ?edit_id=N; the
  * editor form still lives below the grid (modal-ified in stage 2). */
+/* Stand-alone input class for inputs that live outside a .form-group
+ * (the CF filter search box, the RSS filter search box, etc.). Mirrors
+ * the .form-group input treatment so these don't fall back to the
+ * browser-default white chrome. */
+.settings-input {
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 14px;
+    font-family: var(--font-body);
+    transition: border-color 0.15s;
+}
+.settings-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+/* Chromium/WebKit render input[type=search] with its own internal
+ * search-cancel button and rounded corners; reset those so the input
+ * matches the rest of the dark theme. */
+.settings-input[type="search"] {
+    -webkit-appearance: none;
+    appearance: none;
+}
+.settings-input[type="search"]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-left: 6px;
+    background: var(--text-dim);
+    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M18 6L6 18M6 6l12 12' stroke='black' stroke-width='3' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M18 6L6 18M6 6l12 12' stroke='black' stroke-width='3' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
+    cursor: pointer;
+    opacity: 0.6;
+}
+.settings-input[type="search"]::-webkit-search-cancel-button:hover {
+    opacity: 1;
+    background: var(--accent);
+}
+
 .cf-list-filter {
     margin-bottom: 14px;
     width: 100%;
