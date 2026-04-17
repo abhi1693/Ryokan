@@ -54,18 +54,23 @@ body {
  * slightly so copy is legible at phone widths without the browser's
  * own text-zoom fallback kicking in. */
 @media (max-width: 640px) {
+    /* Pin html + body at the viewport width. Firefox mobile honors
+     * `overflow-x: hidden` on body only if the element establishes a
+     * containing block that doesn't get stretched by descendants;
+     * setting max-width: 100vw on html forces that. Both html and
+     * body get overflow-x: hidden + max-width: 100vw so a descendant
+     * with intrinsic width > viewport (a select with long option
+     * text, a wide nav anchor, etc.) gets clipped rather than
+     * forcing the whole page to h-scroll. */
+    html, body {
+        overflow-x: hidden;
+        max-width: 100vw;
+    }
     body {
         font-size: 16px;
         /* Padding so the fixed bottom tab bar (56px tall + safe-area
          * inset for iOS home indicator) doesn't overlap page content. */
         padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
-        /* Safety net: anything that somehow ends up wider than the
-         * viewport (e.g. long CF JSON in an edit textarea, a wide
-         * table that escaped its scroll wrapper) gets clipped
-         * instead of forcing the whole page to h-scroll. The
-         * expected-to-scroll elements (`.rss-table-wrap`,
-         * `.system-tabs`) each manage their own overflow-x: auto. */
-        overflow-x: hidden;
     }
     input[type="text"],
     input[type="search"],

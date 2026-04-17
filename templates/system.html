@@ -81,7 +81,7 @@
         </thead>
         <tbody id="log-tbody">
             {% for entry in logs %}
-            <tr class="log-row log-level-{{ entry.level }}" data-id="{{ entry.id }}">
+            <tr class="log-row log-level-{{ entry.level }}" data-id="{{ entry.id }}" onclick="toggleLogRowExpand(event)" role="button" tabindex="0">
                 <td class="log-col-time" title="{{ entry.timestamp }}">{{ entry.timestamp }}</td>
                 <td class="log-col-level"><span class="log-badge log-badge-{{ entry.level }}">{{ entry.level }}</span></td>
                 <td class="log-col-cat">{{ entry.category }}</td>
@@ -172,6 +172,9 @@ function pollLogs() {
                 const tr = document.createElement('tr');
                 tr.className = `log-row log-level-${e.level} log-row-new`;
                 tr.dataset.id = e.id;
+                tr.setAttribute('role', 'button');
+                tr.setAttribute('tabindex', '0');
+                tr.onclick = toggleLogRowExpand;
                 tr.innerHTML = `
                     <td class="log-col-time" title="${escapeHtml(e.timestamp)}">${escapeHtml(e.timestamp)}</td>
                     <td class="log-col-level"><span class="log-badge log-badge-${e.level}">${escapeHtml(e.level)}</span></td>
@@ -201,16 +204,18 @@ document.getElementById('poll-toggle').addEventListener('change', function() {
     if (this.checked) startPolling(); else stopPolling();
 });
 
-// Tap-to-expand on log rows. Desktop picks up :hover, mobile doesn't,
-// so toggle `.log-row-expanded` on click (delegated so polled-in rows
-// inherit it without rebinding). Skip the toggle when the user is
-// clicking a link or button inside the row.
-document.getElementById('log-tbody')?.addEventListener('click', function(ev) {
+// Tap-to-expand on log rows. Desktop picks up :hover; mobile doesn't,
+// so toggle `.log-row-expanded` on click. Each <tr> carries an explicit
+// onclick="toggleLogRowExpand(event)" attribute (and role="button") in
+// both the server-rendered template and the pollLogs runtime path —
+// delegated handlers on tbody weren't reliably firing on tr/td taps in
+// mobile Firefox, so a direct onclick is the safer option.
+function toggleLogRowExpand(ev) {
     const row = ev.target.closest('.log-row');
     if (!row) return;
     if (ev.target.closest('a, button, input')) return;
     row.classList.toggle('log-row-expanded');
-});
+}
 
 startPolling();
 </script>
