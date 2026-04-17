@@ -838,23 +838,35 @@ function filterCfList(query) {
 function openCfEditorModal() {
     const modal = document.getElementById('cf-editor-modal');
     if (!modal) return;
-    // Check the FORM state, not the URL. closeCfEditorModal drops
-    // ?edit_id=N from the URL via history.replaceState, but the form
-    // HTML was server-rendered with the previous edit's id/name/score/
-    // json pre-filled. If we open the modal in-place now, the user
-    // sees the previously-edited CF's values and submitting would
-    // update that CF rather than create a new one. Any hidden
-    // `name="id"` input in the form means we're carrying stale edit
-    // state — force a server re-render with a clean URL.
-    const editorForm = modal.querySelector('form');
-    const stale = editorForm && editorForm.querySelector('input[type="hidden"][name="id"]');
-    if (stale) {
-        window.location.href = '/settings?tab=custom_formats';
-        return;
+    // Reset the form to "Add Custom Format" shape in-place. The form
+    // was server-rendered with the previous edit's values if the page
+    // load had ?edit_id=N, so just flipping display:flex would show
+    // those stale fields. Navigate-to-reset (the previous fix) worked
+    // but required two clicks to see the empty modal. Clearing in-place
+    // keeps it a single click.
+    const form = modal.querySelector('form');
+    if (form) {
+        const hiddenId = form.querySelector('input[type="hidden"][name="id"]');
+        if (hiddenId) hiddenId.remove();
+        const trashDesc = form.querySelector('.cf-trash-description');
+        if (trashDesc) trashDesc.remove();
+        const name = form.querySelector('#cf_name');
+        if (name) name.value = '';
+        const score = form.querySelector('#cf_score');
+        if (score) score.value = '0';
+        const trashId = form.querySelector('#cf_trash_id');
+        if (trashId) trashId.value = '';
+        const json = form.querySelector('#cf_json');
+        if (json) json.value = '';
     }
+    const title = document.getElementById('cf-editor-modal-title');
+    if (title) title.textContent = 'Add Custom Format';
+    const submit = modal.querySelector('button[type="submit"]');
+    if (submit) submit.textContent = 'Create Custom Format';
+
     modal.style.display = 'flex';
-    const name = document.getElementById('cf_name');
-    if (name) name.focus();
+    const nameEl = document.getElementById('cf_name');
+    if (nameEl) nameEl.focus();
 }
 function closeCfEditorModal() {
     const modal = document.getElementById('cf-editor-modal');
