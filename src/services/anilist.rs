@@ -800,10 +800,26 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
     // Read as text first (not .json()) so a Cloudflare HTML challenge
     // doesn't blow up at the parse step — we need the body to classify
     // the failure correctly.
-    let body_text = resp
-        .text()
-        .await
-        .map_err(|e| format!("AniList unavailable: failed to read response: {}", e))?;
+    let body_text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            // Body-read failure: the status header was already received,
+            // so preserve the rate-limit signal when the status itself
+            // told us we were throttled. Without this branch a connection
+            // reset partway through a 429 body would erase the throttle
+            // signal — `is_rate_limit_error` returns false, the caller
+            // happily MAL-falls-back, and the whole "no MAL on rate-limit"
+            // invariant collapses on a flaky network.
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                set_anilist_cooldown(retry_after_secs, ANILIST_COOLDOWN_DEFAULT);
+                return Err(format!(
+                    "AniList rate-limited (HTTP 429): body read failed: {}",
+                    e
+                ));
+            }
+            return Err(format!("AniList unavailable: failed to read response: {}", e));
+        }
+    };
 
     if !status.is_success() {
         let (kind, msg) = classify_anilist_failure(status, &body_text);
@@ -814,7 +830,8 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         if kind == AniListFailureKind::RateLimited {
             // 403 (Cloudflare) doesn't include Retry-After, so pick a
             // longer default — 60s rarely outlasts a real challenge —
-            // and let ANILIST_COOLDOWN_MAX cap it.
+            // and let ANILIST_COOLDOWN_MAX cap it. Only Cloudflare 403s
+            // reach this branch (non-CF 403s classify as Unavailable).
             let default_cooldown = if status == reqwest::StatusCode::FORBIDDEN {
                 Duration::from_secs(300)
             } else {
@@ -828,8 +845,19 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
     let body: serde_json::Value = serde_json::from_str(&body_text)
         .map_err(|e| format!("AniList unavailable: parse error: {} (body: {})", e, excerpt(&body_text)))?;
 
-    if let Some(msg) = extract_graphql_error(&body) {
-        return Err(format!("AniList detail failed: {}", msg));
+    if extract_graphql_error(&body).is_some() {
+        // Run the classifier even on 2xx responses: AL has been observed
+        // to return throttle messages in the GraphQL `errors[]` array
+        // with a 200 status (no 429 at the transport layer). Without
+        // this branch we'd surface a generic "AniList detail failed"
+        // that doesn't match `is_rate_limit_error`, the caller would
+        // MAL-fall-back, and the cooldown wouldn't trigger to short-
+        // circuit the rest of the sweep.
+        let (kind, msg) = classify_anilist_failure(status, &body_text);
+        if kind == AniListFailureKind::RateLimited {
+            set_anilist_cooldown(retry_after_secs, ANILIST_COOLDOWN_DEFAULT);
+        }
+        return Err(msg);
     }
 
     let m = &body["data"]["Media"];
