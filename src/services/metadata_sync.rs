@@ -420,72 +420,55 @@ pub async fn refresh_series_metadata(
     refresh_series_metadata_inner(db, tracked, force_mal_fallback, false).await
 }
 
-pub async fn rebuild_cached_metadata(
-    db: &SqlitePool,
-    tracked: &series::Series,
-    force_mal_fallback: bool,
-) -> Result<anilist::AnimeDetail, String> {
-    refresh_series_metadata_inner(db, tracked, force_mal_fallback, true).await
-}
+/// Shared sweep driver for the manual rebuild and the periodic refresh.
+/// `rebuild_artifacts = true` runs the full rebuild path (re-derives
+/// episode metadata, artwork, etc. via refresh_series_metadata_inner's
+/// `rebuild` flag); `false` runs the lighter periodic refresh.
+///
+/// Defer-and-retry policy: when a series is rate-limited by AniList,
+/// it's parked in `deferred` instead of counted as `failed`. After the
+/// main pass completes, the helper waits for the AniList cooldown to
+/// clear and re-runs the deferred series. This is what makes the
+/// manual rebuild button do what its name promises — a sweep that hits
+/// rate limiting won't leave the user with stale or substituted data
+/// for half their library; it'll finish what it started.
+///
+/// Bounded by `MAX_RETRY_ROUNDS` so a sustained AniList outage doesn't
+/// pin the sweep forever; anything still deferred at the end counts as
+/// failed and the next periodic refresh will pick it up.
+async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize, usize) {
+    const MAX_RETRY_ROUNDS: usize = 3;
+    const COOLDOWN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+    // Inter-series spacing: AniList allows 30 req/min for anonymous
+    // clients, but in practice sustained bursts trip rate limits
+    // even when the per-minute average is low. A 1-second sleep
+    // between iterations paces the sweep at ~50 req/min worst-case
+    // (one request every 1 + call-duration seconds, where the call
+    // itself takes 0.5–2s for a typical entry), which empirically
+    // stays under the rate limit on a small library.
+    const INTER_SERIES_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
-pub async fn rebuild_cached_metadata_for_all(db: &SqlitePool) -> (usize, usize, usize) {
-    let tracked = match series::get_all(db).await {
-        Ok(items) => items,
-        Err(err) => {
-            logger::error(db, LogCategory::AniList, "Cached metadata rebuild sweep failed", &err.to_string()).await;
-            return (0, 0, 1);
-        }
+    let sweep_label = if rebuild_artifacts {
+        "Cached metadata rebuild"
+    } else {
+        "Metadata refresh"
+    };
+    let per_series_fail_label = if rebuild_artifacts {
+        "Failed to rebuild cached metadata"
+    } else {
+        "Metadata refresh failed"
     };
 
-    let force_mal_fallback = crate::models::config::get_config(db)
-        .await
-        .ok()
-        .flatten()
-        .map(|c| c.force_mal_fallback)
-        .unwrap_or(false);
-
-    let mut rebuilt = 0usize;
-    let skipped = 0usize;
-    let mut failed = 0usize;
-
-    for tracked in tracked {
-        match rebuild_cached_metadata(db, &tracked, force_mal_fallback).await {
-            Ok(detail) => {
-                rebuilt += 1;
-                logger::info(
-                    db,
-                    LogCategory::AniList,
-                    &format!("Rebuilt cached metadata for {}", tracked.title),
-                    &format!("provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}", detail.id, tracked.anilist_id, detail.id_mal, detail.episodes),
-                ).await;
-            }
-            Err(err) => {
-                failed += 1;
-                logger::warn(
-                    db,
-                    LogCategory::AniList,
-                    &format!("Failed to rebuild cached metadata for {}", tracked.title),
-                    &err,
-                ).await;
-            }
-        }
-    }
-
-    logger::info(
-        db,
-        LogCategory::AniList,
-        "Cached metadata rebuild sweep complete",
-        &format!("rebuilt={}, skipped={}, failed={}", rebuilt, skipped, failed),
-    ).await;
-
-    (rebuilt, skipped, failed)
-}
-
-pub async fn refresh_all_series_metadata(db: &SqlitePool) -> (usize, usize) {
     let tracked = match series::get_all(db).await {
         Ok(items) => items,
         Err(err) => {
-            logger::error(db, LogCategory::AniList, "Metadata refresh sweep failed", &err.to_string()).await;
+            logger::error(
+                db,
+                LogCategory::AniList,
+                &format!("{} sweep failed", sweep_label),
+                &err.to_string(),
+            )
+            .await;
             return (0, 1);
         }
     };
@@ -497,45 +480,176 @@ pub async fn refresh_all_series_metadata(db: &SqlitePool) -> (usize, usize) {
         .map(|c| c.force_mal_fallback)
         .unwrap_or(false);
 
-    let mut refreshed = 0usize;
+    let mut succeeded = 0usize;
     let mut failed = 0usize;
+    let mut deferred: Vec<series::Series> = Vec::new();
+
+    let should_defer = |tracked: &series::Series| -> bool {
+        anilist::anilist_cooldown_active() && tracked.anilist_id > 0 && !force_mal_fallback
+    };
+
+    // ── Main pass ────────────────────────────────────────────────────────
     let total = tracked.len();
     for (idx, tracked) in tracked.into_iter().enumerate() {
-        match refresh_series_metadata(db, &tracked, force_mal_fallback).await {
-            Ok(_) => refreshed += 1,
+        // Pre-check: if AL cooldown is already active, don't burn the
+        // call — defer immediately. (Saves a guaranteed-to-fail HTTP
+        // round trip per series.)
+        if should_defer(&tracked) {
+            deferred.push(tracked);
+            if idx + 1 < total {
+                tokio::time::sleep(INTER_SERIES_DELAY).await;
+            }
+            continue;
+        }
+
+        match refresh_series_metadata_inner(db, &tracked, force_mal_fallback, rebuild_artifacts).await {
+            Ok(detail) => {
+                succeeded += 1;
+                if rebuild_artifacts {
+                    logger::info(
+                        db,
+                        LogCategory::AniList,
+                        &format!("Rebuilt cached metadata for {}", tracked.title),
+                        &format!(
+                            "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
+                            detail.id, tracked.anilist_id, detail.id_mal, detail.episodes
+                        ),
+                    )
+                    .await;
+                }
+            }
             Err(err) => {
-                failed += 1;
-                logger::warn(
-                    db,
-                    LogCategory::AniList,
-                    &format!("Metadata refresh failed for {}", tracked.title),
-                    &err,
-                ).await;
+                // Post-check: this call may have been the 429 that just
+                // tripped the cooldown. If so, defer instead of failing
+                // so the retry round picks it up.
+                if should_defer(&tracked) {
+                    deferred.push(tracked);
+                } else {
+                    failed += 1;
+                    logger::warn(
+                        db,
+                        LogCategory::AniList,
+                        &format!("{} for {}", per_series_fail_label, tracked.title),
+                        &err,
+                    )
+                    .await;
+                }
             }
         }
-        // Inter-series spacing: AniList allows 30 req/min for anonymous
-        // clients, but in practice sustained bursts trip rate limits
-        // even when the per-minute average is low. A 1-second sleep
-        // between iterations paces the sweep at ~50 req/min worst-case
-        // (one request every 1 + call-duration seconds, where the call
-        // itself takes 0.5–2s for a typical entry), which empirically
-        // stays under the rate limit on a small library and only adds
-        // a handful of seconds to the total sweep time. The sleep is
-        // skipped on the last iteration so a single-series refresh
-        // doesn't pause needlessly.
         if idx + 1 < total {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(INTER_SERIES_DELAY).await;
         }
     }
 
-    if refreshed > 0 || failed > 0 {
+    // ── Retry rounds for deferred series ─────────────────────────────────
+    let mut round = 0;
+    while !deferred.is_empty() && round < MAX_RETRY_ROUNDS {
+        if anilist::anilist_cooldown_active() {
+            logger::info(
+                db,
+                LogCategory::AniList,
+                &format!(
+                    "{}: waiting for AniList cooldown ({} series deferred, retry round {})",
+                    sweep_label,
+                    deferred.len(),
+                    round + 1
+                ),
+                "",
+            )
+            .await;
+            while anilist::anilist_cooldown_active() {
+                tokio::time::sleep(COOLDOWN_POLL_INTERVAL).await;
+            }
+        }
+
+        let to_retry = std::mem::take(&mut deferred);
+        let total = to_retry.len();
+        for (idx, tracked) in to_retry.into_iter().enumerate() {
+            match refresh_series_metadata_inner(db, &tracked, force_mal_fallback, rebuild_artifacts).await {
+                Ok(detail) => {
+                    succeeded += 1;
+                    if rebuild_artifacts {
+                        logger::info(
+                            db,
+                            LogCategory::AniList,
+                            &format!("Rebuilt cached metadata for {}", tracked.title),
+                            &format!(
+                                "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
+                                detail.id, tracked.anilist_id, detail.id_mal, detail.episodes
+                            ),
+                        )
+                        .await;
+                    }
+                }
+                Err(err) => {
+                    if should_defer(&tracked) {
+                        deferred.push(tracked);
+                    } else {
+                        failed += 1;
+                        logger::warn(
+                            db,
+                            LogCategory::AniList,
+                            &format!("{} for {}", per_series_fail_label, tracked.title),
+                            &err,
+                        )
+                        .await;
+                    }
+                }
+            }
+            if idx + 1 < total {
+                tokio::time::sleep(INTER_SERIES_DELAY).await;
+            }
+        }
+        round += 1;
+    }
+
+    // Anything still deferred after MAX_RETRY_ROUNDS counts as failed —
+    // at that point AniList is sustainedly unavailable and we should
+    // surface that rather than spin. Next periodic refresh will pick it up.
+    if !deferred.is_empty() {
+        failed += deferred.len();
+        for tracked in &deferred {
+            logger::warn(
+                db,
+                LogCategory::AniList,
+                &format!(
+                    "{} skipped after {} retry rounds: {}",
+                    sweep_label, MAX_RETRY_ROUNDS, tracked.title
+                ),
+                "AniList still rate-limited; will retry on next sweep",
+            )
+            .await;
+        }
+    }
+
+    // Match the previous summary-log behaviour: rebuild always logs;
+    // refresh only logs when something happened.
+    if rebuild_artifacts || succeeded > 0 || failed > 0 {
+        let detail = if rebuild_artifacts {
+            format!("rebuilt={}, skipped=0, failed={}", succeeded, failed)
+        } else {
+            format!("refreshed={}, failed={}", succeeded, failed)
+        };
         logger::info(
             db,
             LogCategory::AniList,
-            "Metadata refresh sweep complete",
-            &format!("refreshed={}, failed={}", refreshed, failed),
-        ).await;
+            &format!("{} sweep complete", sweep_label),
+            &detail,
+        )
+        .await;
     }
 
-    (refreshed, failed)
+    (succeeded, failed)
+}
+
+pub async fn rebuild_cached_metadata_for_all(db: &SqlitePool) -> (usize, usize, usize) {
+    let (rebuilt, failed) = run_metadata_sweep(db, true).await;
+    // The middle "skipped" counter has been zero for a while — the
+    // sweep doesn't have a "skip without trying" branch — but the
+    // tuple shape is part of the handler contract so keep it.
+    (rebuilt, 0, failed)
+}
+
+pub async fn refresh_all_series_metadata(db: &SqlitePool) -> (usize, usize) {
+    run_metadata_sweep(db, false).await
 }
