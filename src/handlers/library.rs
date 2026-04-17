@@ -39,7 +39,16 @@ struct SeriesTemplate {
     media_root: String,
     episodes: Vec<Episode>,
     ep_total: i32,
+    /// Count of episodes whose file is present under `media_root`.
+    /// Used by the delete-confirmation copy ("N episode files will
+    /// be deleted from disk") — stays literal even when downloaded
+    /// but non-imported torrents exist in qBit's folder.
     on_disk_count: i32,
+    /// Count of episodes considered "downloaded" for the season badge.
+    /// Matches `Episode.downloaded` — on-disk plus state=completed —
+    /// so the `12 / 12` badge updates when post-proc-off torrents
+    /// finish, without misrepresenting the delete confirmation above.
+    downloaded_count: i32,
     size_display: String,
     title_language: String,
     relation_groups: Vec<RelationGroup>,
@@ -711,7 +720,7 @@ pub async fn series_detail(
         banner_fut,
     );
     let cfg = cfg.ok().flatten();
-    let ((episodes, on_disk_count, size_display, monitored_count), media_root) = episodes_out;
+    let ((episodes, on_disk_count, downloaded_count, size_display, monitored_count), media_root) = episodes_out;
     detail.cover_url = cover_url;
     detail.banner_url = banner_url;
 
@@ -752,6 +761,7 @@ pub async fn series_detail(
         episodes,
         ep_total,
         on_disk_count,
+        downloaded_count,
         size_display,
         title_language,
         relation_groups,
@@ -796,7 +806,7 @@ async fn build_episodes(
     db_id: Option<i64>,
     folder_name: &str,
     media_root: &str,
-) -> (Vec<Episode>, i32, String, i32) {
+) -> (Vec<Episode>, i32, i32, String, i32) {
     let ep_count = detail.effective_episode_count();
     // Fan out the four independent pre-fetches in parallel:
     //   1. disk file walk (blocking pool)
@@ -903,6 +913,7 @@ async fn build_episodes(
 
     let mut episodes = Vec::new();
     let mut on_disk_count = 0i32;
+    let mut downloaded_count = 0i32;
     let mut total_size: u64 = 0;
     let mut monitored_count = 0i32;
 
@@ -1075,6 +1086,9 @@ async fn build_episodes(
         let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
 
         let downloaded = on_disk || quality_state == "completed";
+        if downloaded {
+            downloaded_count += 1;
+        }
         episodes.push(Episode {
             number: ep_num,
             title: ep_title,
@@ -1103,6 +1117,7 @@ async fn build_episodes(
     if ep_count == 0 && !disk_files.is_empty() {
         for f in &disk_files {
             on_disk_count += 1;
+            downloaded_count += 1;
             total_size += f.size_bytes;
             let monitored = monitored_lookup.contains(&f.episode_number);
             if monitored {
@@ -1155,7 +1170,7 @@ async fn build_episodes(
     episodes.sort_by(|a, b| b.number.cmp(&a.number));
 
     let size_display = format_size(total_size);
-    (episodes, on_disk_count, size_display, monitored_count)
+    (episodes, on_disk_count, downloaded_count, size_display, monitored_count)
 }
 
 fn relation_identity_key(provider_id: i64, mal_id: Option<i64>) -> String {
@@ -4365,7 +4380,7 @@ pub async fn series_episodes_json(
     let cfg = config::get_config(&state.db).await.ok().flatten();
     let media_root = cfg.as_ref().map(|c| c.media_root.clone()).unwrap_or_default();
 
-    let (episodes, _, _, _) =
+    let (episodes, _, _, _, _) =
         build_episodes(&state.db, &detail, db_id, &folder_name, &media_root).await;
 
     Ok(Json(episodes))
