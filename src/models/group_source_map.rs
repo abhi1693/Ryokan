@@ -360,7 +360,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
 
 /// Insert any missing built-in seed rows. Existing rows (including
 /// user-edited ones) are left untouched thanks to `INSERT OR IGNORE`.
+///
+/// Wrapped in a single transaction so the 256 INSERTs commit as one
+/// fsync at boot — used to be one fsync per row, blocking the very
+/// first incoming request behind ~256 sequential disk syncs.
 pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
     for (name, source, confidence, notes) in SEED_DEFAULTS {
         sqlx::query(
             "INSERT OR IGNORE INTO group_source_map (group_name, source, confidence, is_user_edit, notes)
@@ -370,9 +375,10 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .bind(source.as_str())
         .bind(*confidence)
         .bind(notes)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -387,6 +393,8 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
 /// deliberately set their own confidence for a group keeps it. The
 /// update is idempotent — rows that already match the seed are a no-op.
 pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    // See seed_defaults — same fsync-coalesce reason for the tx wrap.
+    let mut tx = db.begin().await?;
     for (name, source, confidence, notes) in SEED_DEFAULTS {
         sqlx::query(
             "UPDATE group_source_map
@@ -397,9 +405,10 @@ pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .bind(*confidence)
         .bind(notes)
         .bind(name)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
