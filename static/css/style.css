@@ -2155,14 +2155,19 @@ fieldset legend {
         white-space: nowrap;
     }
     .tag-quality { padding: 1px 5px; font-size: 9px; }
-    .ep-col-actions {
+    /* Two-class selector so this wins over the later `.ep-col-actions`
+     * desktop rule (width: 84px; white-space: nowrap) that would
+     * otherwise pin the cell to 84px inside its full-width grid slot
+     * and push the buttons left. */
+    .episode-table .ep-col-actions {
         grid-area: actions;
         width: auto;
         text-align: right;
         padding-top: 6px;
         white-space: normal;
+        justify-self: stretch;
     }
-    .ep-col-actions .icon-btn {
+    .episode-table .ep-col-actions .icon-btn {
         display: inline-flex;
         min-width: 40px;
         min-height: 40px;
