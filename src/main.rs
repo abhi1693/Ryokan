@@ -3,7 +3,7 @@ mod models;
 mod services;
 
 use axum::{
-    extract::FromRef,
+    extract::{DefaultBodyLimit, FromRef},
     middleware,
     routing::{get, post},
     Router,
@@ -14,7 +14,7 @@ use sqlx::SqlitePool;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -26,6 +26,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use services::{
     custom_formats::{self, CompiledCfCache},
     jellyfin::JellyfinClient,
+    progress::ProgressRegistry,
     qbit::QbitClient,
 };
 
@@ -87,6 +88,7 @@ use services::{
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
         handlers::system::api_logs_client,
+        handlers::progress::poll_progress,
         handlers::system::api_rss_sync,
         handlers::system::api_rss_clear_history,
         handlers::system::api_force_metadata_refresh,
@@ -107,6 +109,8 @@ use services::{
         services::qbit::Torrent,
         services::auto_search::AutoSearchReport,
         services::auto_search::AutoSearchHit,
+        services::progress::ProgressEvent,
+        services::progress::ProgressPoll,
         models::log::LogEntry,
         models::episode_tags::GrabHistoryEntry,
         handlers::system::ClientLogForm,
@@ -152,6 +156,13 @@ pub struct AppState {
     /// out on the scoring hot path so the read lock releases before the
     /// per-candidate evaluation loop begins.
     pub custom_formats: CompiledCfCache,
+    /// In-memory progress registry for long-running user-triggered jobs
+    /// (currently the manual auto-search). The frontend mints an opaque
+    /// `progress_id`, the trigger handler binds it via
+    /// `register(...).await`, and the polling endpoint at
+    /// `/api/progress/{id}` drains buffered events. See
+    /// `services::progress` for the full lifecycle.
+    pub progress: ProgressRegistry,
     /// Flip-to-true-once cache of `user::has_users`. The auth middleware
     /// runs on every protected request and was firing a `SELECT COUNT(*)
     /// FROM users` query for each one just to decide whether to redirect
@@ -183,33 +194,61 @@ impl FromRef<AppState> for SqlitePool {
 ///
 /// `name` is used purely in the log line so the operator can tell which
 /// task misbehaved.
+/// Build a `Router` that registers the same handler at multiple
+/// path aliases. Used by the Sonarr/Radarr compat router setup to
+/// collapse case-variant doublings (`qualityprofile` vs
+/// `qualityProfile`, etc. — Seerr ships both spellings depending on
+/// version) into one logical line per endpoint.
+fn aliased(paths: &[&str], handler: axum::routing::MethodRouter<AppState>) -> Router<AppState> {
+    let mut router = Router::new();
+    for path in paths {
+        router = router.route(path, handler.clone());
+    }
+    router
+}
+
 async fn supervise<F, Fut>(name: &'static str, mut make_fut: F) -> !
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    // Exponential backoff for crash loops. A task that exits in <60s
+    // before its next restart is considered "unhealthy" — double the
+    // backoff (capped at MAX) so a stuck-on-startup task can't spam
+    // logs at 12 restarts/minute. A task that runs for ≥60s before
+    // exiting resets the backoff to MIN, so a one-off transient
+    // failure doesn't punish the next restart.
+    const MIN_BACKOFF: Duration = Duration::from_secs(5);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
+    const HEALTHY_RUNTIME: Duration = Duration::from_secs(60);
+
+    let mut backoff = MIN_BACKOFF;
     loop {
+        let started = Instant::now();
         let handle = tokio::spawn(make_fut());
         match handle.await {
             Err(e) if e.is_panic() => {
-                tracing::error!(
-                    "Background task '{}' panicked, restarting in 5s: {:?}",
-                    name,
-                    e
-                );
+                tracing::error!("Background task '{}' panicked: {:?}", name, e);
             }
             Err(e) => {
-                tracing::error!(
-                    "Background task '{}' join error, restarting in 5s: {:?}",
-                    name,
-                    e
-                );
+                tracing::error!("Background task '{}' join error: {:?}", name, e);
             }
             Ok(()) => {
-                tracing::warn!("Background task '{}' exited normally, restarting", name);
+                tracing::warn!("Background task '{}' exited normally", name);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        if started.elapsed() >= HEALTHY_RUNTIME {
+            backoff = MIN_BACKOFF;
+        } else {
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        }
+        tracing::warn!(
+            "supervise '{}': restarting in {:?}",
+            name,
+            backoff
+        );
+        tokio::time::sleep(backoff).await;
     }
 }
 
@@ -285,6 +324,7 @@ async fn main() {
         qbit: Arc::new(RwLock::new(None)),
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
+        progress: ProgressRegistry::new(),
         users_exist,
     };
 
@@ -315,8 +355,7 @@ async fn main() {
     let public_routes = Router::new()
         .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
         .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
-        .layer(middleware::from_fn(handlers::auth::csrf_public))
-        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
+        .layer(middleware::from_fn(handlers::auth::csrf_public));
 
     // Routes that require auth.
     let protected_routes = Router::new()
@@ -361,8 +400,21 @@ async fn main() {
         .route("/settings/custom-formats/upsert", post(handlers::settings::settings_custom_formats_upsert))
         .route("/settings/custom-formats/delete", post(handlers::settings::settings_custom_formats_delete))
         .route("/settings/custom-formats/minimum-score", post(handlers::settings::settings_custom_formats_minimum_score))
-        .route("/settings/custom-formats/import", post(handlers::settings::settings_custom_formats_import))
-        .route("/settings/custom-formats/import-resolve", post(handlers::settings::settings_custom_formats_import_resolve))
+        // 256 KiB is generous for TRaSH-Guides anime CF JSON (the
+        // entire vendored set is ~70 KiB) but well below axum's 2 MiB
+        // default — keeps the hidden-field re-echo on the collision
+        // review page bounded so a pasted multi-MiB payload doesn't
+        // render a multi-MiB hidden form field.
+        .route(
+            "/settings/custom-formats/import",
+            post(handlers::settings::settings_custom_formats_import)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/settings/custom-formats/import-resolve",
+            post(handlers::settings::settings_custom_formats_import_resolve)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route("/settings/custom-formats/install-defaults", post(handlers::settings::settings_custom_formats_install_defaults))
         .route("/settings/custom-formats/reset-defaults", post(handlers::settings::settings_custom_formats_reset_defaults))
         .route("/settings/custom-formats/export", get(handlers::settings::settings_custom_formats_export))
@@ -384,8 +436,15 @@ async fn main() {
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
         .route("/api/logs/client", post(handlers::system::api_logs_client))
+        .route("/api/progress/{job_id}", get(handlers::progress::poll_progress))
         .route("/media/art/{cache_key}", get(handlers::media::artwork))
         .route("/logout", get(handlers::auth::logout))
+        // SwaggerUI/OpenAPI live behind the auth wall: the OpenAPI doc
+        // describes the entire route surface and form schemas, including
+        // the rate-limited /login and /setup shapes. Exposing it
+        // unauthenticated would hand a passing scanner a complete map of
+        // the application before any auth check fires.
+        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             handlers::auth::require_auth,
@@ -393,14 +452,27 @@ async fn main() {
 
     // Sonarr v3 API compatibility layer for Seerr integration.
     // Authenticated via ?apikey= query parameter, not cookies.
+    //
+    // `aliased` collapses the Sonarr-API case-variant doublings (Seerr
+    // sometimes sends `qualityprofile`, sometimes `qualityProfile`,
+    // similarly for rootfolder/rootFolder and languageprofile/
+    // languageProfile) into one line per logical endpoint. Adding a
+    // third alias is a string change, not another `.route(...)` line
+    // that future-me has to remember to keep in sync with the first.
     let sonarr_routes = Router::new()
         .route("/api/v3/system/status", get(handlers::sonarr_compat::system_status))
-        .route("/api/v3/qualityprofile", get(handlers::sonarr_compat::quality_profiles))
-        .route("/api/v3/qualityProfile", get(handlers::sonarr_compat::quality_profiles))
-        .route("/api/v3/rootfolder", get(handlers::sonarr_compat::root_folders))
-        .route("/api/v3/rootFolder", get(handlers::sonarr_compat::root_folders))
-        .route("/api/v3/languageprofile", get(handlers::sonarr_compat::language_profiles))
-        .route("/api/v3/languageProfile", get(handlers::sonarr_compat::language_profiles))
+        .merge(aliased(
+            &["/api/v3/qualityprofile", "/api/v3/qualityProfile"],
+            get(handlers::sonarr_compat::quality_profiles),
+        ))
+        .merge(aliased(
+            &["/api/v3/rootfolder", "/api/v3/rootFolder"],
+            get(handlers::sonarr_compat::root_folders),
+        ))
+        .merge(aliased(
+            &["/api/v3/languageprofile", "/api/v3/languageProfile"],
+            get(handlers::sonarr_compat::language_profiles),
+        ))
         .route("/api/v3/tag", get(handlers::sonarr_compat::list_tags).post(handlers::sonarr_compat::create_tag))
         .route("/api/v3/series", get(handlers::sonarr_compat::list_series).post(handlers::sonarr_compat::add_series).put(handlers::sonarr_compat::update_series))
         .route("/api/v3/series/{id}", get(handlers::sonarr_compat::get_series))
@@ -415,10 +487,14 @@ async fn main() {
     // Mounted under /radarr/ prefix — Seerr uses URL Base "/radarr" to route here.
     let radarr_routes = Router::new()
         .route("/radarr/api/v3/system/status", get(handlers::radarr_compat::system_status))
-        .route("/radarr/api/v3/qualityprofile", get(handlers::radarr_compat::quality_profiles))
-        .route("/radarr/api/v3/qualityProfile", get(handlers::radarr_compat::quality_profiles))
-        .route("/radarr/api/v3/rootfolder", get(handlers::radarr_compat::root_folders))
-        .route("/radarr/api/v3/rootFolder", get(handlers::radarr_compat::root_folders))
+        .merge(aliased(
+            &["/radarr/api/v3/qualityprofile", "/radarr/api/v3/qualityProfile"],
+            get(handlers::radarr_compat::quality_profiles),
+        ))
+        .merge(aliased(
+            &["/radarr/api/v3/rootfolder", "/radarr/api/v3/rootFolder"],
+            get(handlers::radarr_compat::root_folders),
+        ))
         .route("/radarr/api/v3/tag", get(handlers::radarr_compat::list_tags).post(handlers::radarr_compat::create_tag))
         .route("/radarr/api/v3/movie", get(handlers::radarr_compat::list_movies).post(handlers::radarr_compat::add_movie).put(handlers::radarr_compat::update_movie))
         .route("/radarr/api/v3/movie/{id}", get(handlers::radarr_compat::get_movie))
@@ -669,6 +745,24 @@ async fn main() {
                     }
                     _ => {}
                 }
+                // Prune orphan artwork (image_refs whose parent series
+                // is gone, and image_blobs/files no ref references after
+                // 7 days). Without this the cache only ever grows —
+                // every removed series leaves rows pointing at on-disk
+                // blob files that nothing will ever touch again.
+                match models::artwork_cache::cleanup_orphans(&cleanup_db, 7).await {
+                    Ok((refs, blobs)) if refs > 0 || blobs > 0 => {
+                        tracing::debug!(
+                            "Cleaned up {} orphan artwork refs and {} orphan blobs",
+                            refs, blobs
+                        );
+                    }
+                    Err(e) => {
+                        cleanup_errors.push(format!("artwork_cache: {}", e));
+                        tracing::error!("Artwork cleanup failed: {}", e);
+                    }
+                    _ => {}
+                }
                 // Prune expired session rows. `validate_session` already
                 // rejects rows older than 7 days, but without this sweep
                 // the sessions table grows unbounded — every login leaves
@@ -894,6 +988,27 @@ async fn main() {
                             let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "error", "Failed to download mappings").await;
                         }
                         tokio::time::sleep(period).await;
+                    }
+                }
+            }).await;
+        });
+    }
+
+    // Background task: sweep finished progress jobs out of the in-memory
+    // registry. Jobs are kept for 60s past their terminal event so a
+    // frontend that's mid-poll still sees the final state on its next
+    // tick, then dropped. The sweep itself is cheap (one mutex acquire,
+    // a HashMap retain) so a 30s tick is fine.
+    {
+        let progress_state = state.clone();
+        tokio::spawn(async move {
+            supervise("progress_sweep", move || {
+                let progress = progress_state.progress.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                    loop {
+                        interval.tick().await;
+                        progress.sweep(std::time::Duration::from_secs(60)).await;
                     }
                 }
             }).await;

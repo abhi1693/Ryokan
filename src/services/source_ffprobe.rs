@@ -42,9 +42,9 @@ use sqlx::SqlitePool;
 use tokio::process::Command;
 
 use crate::models::media_probe_cache;
-use crate::services::source::{Resolution, Source, SourceEvidence};
+use crate::services::source::{Origin, Resolution, Source, SourceEvidence};
 
-const ORIGIN: &str = "ffprobe";
+const ORIGIN: Origin = Origin::Ffprobe;
 
 /// Public output of Layer 5.
 #[derive(Debug, Clone, Default)]
@@ -81,7 +81,7 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
     // Snapshot mtime + size to key the cache. An rmdir-then-recreate (same
     // path, new file) invalidates on either mtime or size. If stat fails,
     // treat it as "can't probe" rather than blindly going to the network.
-    let meta = match std::fs::metadata(path) {
+    let meta = match tokio::fs::metadata(path).await {
         Ok(m) => m,
         Err(err) => {
             tracing::warn!(
@@ -126,7 +126,10 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
 /// different remediation.
 async fn run_ffprobe(path: &Path) -> Option<String> {
     // Capture stderr so the non-zero-exit branch can surface the reason.
-    let spawn = Command::new("ffprobe")
+    // kill_on_drop ensures the child is reaped if the surrounding
+    // timeout fires (and would otherwise leave an orphan ffprobe
+    // chewing CPU forever on a corrupt container).
+    let output_fut = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
         .arg("-show_streams")
@@ -138,17 +141,34 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await;
+        .kill_on_drop(true)
+        .output();
 
-    let output = match spawn {
-        Ok(o) => o,
-        Err(err) => {
+    // Cap ffprobe at 60s. A partially-downloaded mkv with a corrupt
+    // container or a Blu-ray .m2ts with an inconsistent index will spin
+    // ffprobe forever, and the post-processing pass holds POST_PROC_LOCK
+    // for the duration — one bad file otherwise pins the entire import
+    // queue. ffprobe finishes in milliseconds for healthy files; 60s is
+    // generous enough that any non-pathological input completes well
+    // under the cap.
+    const FFPROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    let output = match tokio::time::timeout(FFPROBE_TIMEOUT, output_fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(err)) => {
             tracing::warn!(
                 target: "ryokan::source::ffprobe",
                 path = %path.display(),
                 %err,
                 "ffprobe spawn failed — is the `ffprobe` binary installed and on PATH?"
+            );
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "ryokan::source::ffprobe",
+                path = %path.display(),
+                timeout_secs = FFPROBE_TIMEOUT.as_secs(),
+                "ffprobe timed out — file likely has a corrupt container or partial download"
             );
             return None;
         }

@@ -38,32 +38,36 @@ pub async fn record_grab(
     is_batch: bool,
 ) -> Result<Option<i64>, sqlx::Error> {
     let eps_json = serde_json::to_string(episode_numbers).unwrap_or_else(|_| "[]".to_string());
-
-    if !hash.is_empty() {
-        let existing: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM grabbed_torrents WHERE hash = ? AND state IN ('pending', 'imported') LIMIT 1",
-        )
-        .bind(hash)
-        .fetch_optional(db)
-        .await?;
-        if existing.is_some() {
-            return Ok(None);
-        }
-    }
-
     let is_batch_i = if is_batch { 1_i64 } else { 0_i64 };
-    let result = sqlx::query(
-        "INSERT INTO grabbed_torrents (hash, torrent_name, series_id, episode_numbers, state, is_batch) VALUES (?, ?, ?, ?, 'pending', ?)",
+
+    // Atomic dedup via partial UNIQUE index on (hash) WHERE hash != ''
+    // AND state IN ('pending', 'imported') (created in models::migrate).
+    // INSERT OR IGNORE swallows the conflict and RETURNING yields no
+    // row, so fetch_optional resolves to None on the dedup path. The
+    // previous SELECT-then-INSERT pattern had a race window where two
+    // concurrent record_grab calls (RSS auto-sync racing a manual grab
+    // on the same release) both observed "no existing row" and both
+    // inserted, producing duplicate pending rows that triggered
+    // double-import attempts in post-processing.
+    //
+    // Empty-hash rows aren't covered by the partial index (the WHERE
+    // clause filters them out), so they always insert — preserving the
+    // pre-fix behavior where empty-hash grabs from legacy paths never
+    // deduped against each other.
+    let inserted_id: Option<i64> = sqlx::query_scalar(
+        "INSERT OR IGNORE INTO grabbed_torrents
+             (hash, torrent_name, series_id, episode_numbers, state, is_batch)
+         VALUES (?, ?, ?, ?, 'pending', ?)
+         RETURNING id",
     )
     .bind(hash)
     .bind(torrent_name)
     .bind(series_id)
     .bind(&eps_json)
     .bind(is_batch_i)
-    .execute(db)
+    .fetch_optional(db)
     .await?;
-
-    Ok(Some(result.last_insert_rowid()))
+    Ok(inserted_id)
 }
 
 /// Per-file routing row for a grabbed torrent. Used to drive
@@ -411,16 +415,18 @@ pub async fn find_imported_for_episode(
     // UNION dedups grabs where the same series matches through both
     // paths (parent of a single-series grab).
     let rows = sqlx::query(
-        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at FROM (
+        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch FROM (
              SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
                     g.series_id AS series_id, g.episode_numbers AS episode_numbers,
-                    g.grabbed_at AS grabbed_at
+                    g.grabbed_at AS grabbed_at,
+                    COALESCE(g.is_batch, 0) AS is_batch
              FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
              WHERE g.series_id = ? AND je.value = ? AND g.state = 'imported'
              UNION
              SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
                     g.series_id AS series_id, g.episode_numbers AS episode_numbers,
-                    g.grabbed_at AS grabbed_at
+                    g.grabbed_at AS grabbed_at,
+                    COALESCE(g.is_batch, 0) AS is_batch
              FROM grabbed_torrents g
              JOIN grabbed_torrent_series r ON r.grab_id = g.id
              , json_each(r.episode_numbers) AS je
@@ -440,6 +446,7 @@ pub async fn find_imported_for_episode(
         .map(|row| {
             let eps_json: String = row.get("episode_numbers");
             let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            let is_batch_i: i64 = row.get("is_batch");
             GrabbedTorrent {
                 id: row.get("id"),
                 hash: row.get("hash"),
@@ -448,42 +455,63 @@ pub async fn find_imported_for_episode(
                 episode_numbers,
                 state: "imported".to_string(),
                 grabbed_at: row.get("grabbed_at"),
-                is_batch: false,
+                is_batch: is_batch_i != 0,
             }
         })
         .collect())
 }
 
-/// Return the torrent name of the most recent imported grab for this
-/// series, regardless of which episodes the grab's `episode_numbers`
-/// column claims it covers. Used by
-/// `scan_library_for_unclassified` as a fallback to
-/// [`find_imported_for_episode`] when the per-episode lookup misses:
-/// pre-fix batch grabs were recorded with `episode_numbers = []`, so
-/// `json_each` yields nothing and the precise lookup returns empty
-/// even though there's a perfectly good batch grab with a real
-/// release name sitting in the table. For those stale rows we want
-/// to classify against that release name instead of the sanitized
-/// on-disk filename.
+/// Bulk variant for post-processing's library scan: fetch every
+/// imported grab covering this series in one round-trip, including
+/// grabs that reach the series via the sibling-routes path. Returns
+/// `(torrent_name, episode_numbers)` for each, sorted most-recent
+/// first by `grabbed_at`.
 ///
-/// Returns `None` when the series has never had an imported grab,
-/// in which case the scanner falls back to the sanitized filename
-/// (correct behavior for externally-imported files Ryokan never
-/// grabbed).
-pub async fn most_recent_imported_torrent_name_for_series(
+/// scan_library_for_unclassified used to do *two* per-file queries
+/// (`find_imported_for_episode` + a fallback `most_recent_…`) per
+/// disk file inside a held POST_PROC_LOCK. For a 100-series, 24-ep
+/// library that's ~4800 sequential round-trips per pass. With this
+/// helper the caller pre-builds an in-memory map per series and the
+/// per-file path is lock-free dictionary lookups.
+///
+/// `UNION ALL` (not `UNION`) because dedup falls naturally out of the
+/// caller's `entry().or_insert_with()` first-write-wins semantics; we
+/// don't pay for SQLite's UNION-side sort/hash.
+pub async fn imported_grabs_for_series(
     db: &SqlitePool,
     series_id: i64,
-) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT torrent_name FROM grabbed_torrents
-         WHERE series_id = ? AND state = 'imported'
-         ORDER BY grabbed_at DESC LIMIT 1",
+) -> Result<Vec<(String, Vec<i32>)>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT torrent_name, episode_numbers, grabbed_at FROM (
+             SELECT g.torrent_name AS torrent_name,
+                    g.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at
+             FROM grabbed_torrents g
+             WHERE g.series_id = ? AND g.state = 'imported'
+             UNION ALL
+             SELECT g.torrent_name AS torrent_name,
+                    r.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at
+             FROM grabbed_torrents g
+             JOIN grabbed_torrent_series r ON r.grab_id = g.id
+             WHERE r.series_id = ? AND g.state = 'imported'
+           )
+           ORDER BY grabbed_at DESC"#,
     )
     .bind(series_id)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten()
+    .bind(series_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let torrent_name: String = row.get("torrent_name");
+            let eps_json: String = row.get("episode_numbers");
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            (torrent_name, episode_numbers)
+        })
+        .collect())
 }
 
 /// Remove a grabbed torrent record entirely.
@@ -655,5 +683,177 @@ mod tests {
             "episode-range fallback (14..=20)"
         );
         assert_eq!(sibling_route.file_indices.len(), 7);
+    }
+
+    /// Regression: find_imported_for_episode previously hard-coded
+    /// `is_batch: false`, so callers (handlers/library.rs and
+    /// post_processing) treated batch torrents as single-episode grabs and
+    /// `delete_torrent(..., delete_files=true)` would wipe the entire pack
+    /// off disk during an upgrade-replace.
+    #[tokio::test]
+    async fn find_imported_for_episode_preserves_is_batch() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21202,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(24),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        let batch_eps: Vec<i32> = (1..=24).collect();
+        let batch_grab_id = record_grab(
+            &db,
+            "batchhash00000000000000000000000000000000",
+            "[Group] Show 01-24 [BD 1080p]",
+            series_id,
+            &batch_eps,
+            true,
+        )
+        .await
+        .expect("record batch grab")
+        .expect("batch grab inserted");
+        mark_imported(&db, batch_grab_id)
+            .await
+            .expect("mark batch imported");
+
+        let single_grab_id = record_grab(
+            &db,
+            "singlehash0000000000000000000000000000000",
+            "[Group] Show - 07 [WEB-DL 1080p]",
+            series_id,
+            &[7],
+            false,
+        )
+        .await
+        .expect("record single grab")
+        .expect("single grab inserted");
+        mark_imported(&db, single_grab_id)
+            .await
+            .expect("mark single imported");
+
+        // Episode 5 is only covered by the batch grab — its is_batch must
+        // round-trip as true.
+        let ep5 = find_imported_for_episode(&db, series_id, 5)
+            .await
+            .expect("find ep5");
+        assert_eq!(ep5.len(), 1, "expected one grab covering episode 5");
+        assert!(
+            ep5[0].is_batch,
+            "batch grab for episode 5 must report is_batch=true"
+        );
+
+        // Episode 7 is covered by both grabs. The single-episode grab was
+        // recorded second so it sorts first (ORDER BY grabbed_at DESC), but
+        // both rows must report their true is_batch value.
+        let ep7 = find_imported_for_episode(&db, series_id, 7)
+            .await
+            .expect("find ep7");
+        assert_eq!(ep7.len(), 2, "expected both grabs covering episode 7");
+        let single = ep7
+            .iter()
+            .find(|g| g.id == single_grab_id)
+            .expect("single grab present");
+        assert!(!single.is_batch, "single-episode grab is_batch=false");
+        let batch = ep7
+            .iter()
+            .find(|g| g.id == batch_grab_id)
+            .expect("batch grab present");
+        assert!(batch.is_batch, "batch grab is_batch=true");
+    }
+
+    /// Regression: record_grab previously did SELECT-then-INSERT with no
+    /// transaction, so two concurrent calls (RSS auto-sync racing a
+    /// manual grab on the same hash) both observed "no existing row" and
+    /// both inserted. Post-processing then attempted to import the same
+    /// hash twice. The fix is a partial UNIQUE index + INSERT OR IGNORE,
+    /// which collapses the SELECT and INSERT into one atomic statement.
+    ///
+    /// This test covers the three cases the dedup window has to honour:
+    ///  - same hash, both active → second insert is rejected
+    ///  - failed grab with same hash → re-record is allowed
+    ///  - empty hash → never deduped, always inserts
+    #[tokio::test]
+    async fn record_grab_dedups_same_hash_atomically() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 12345,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2020),
+                end_year: Some(2020),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        // First active grab inserts.
+        let id1 = record_grab(&db, "racehash", "release a", series_id, &[1], false)
+            .await
+            .expect("first record_grab")
+            .expect("first must insert");
+
+        // Second active grab with same hash is dedup'd.
+        let id2 = record_grab(&db, "racehash", "release b", series_id, &[1], false)
+            .await
+            .expect("second record_grab");
+        assert!(id2.is_none(), "duplicate active hash must dedup");
+
+        // Confirm only one row exists for that hash.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents WHERE hash = 'racehash'")
+                .fetch_one(&db)
+                .await
+                .expect("count");
+        assert_eq!(count, 1);
+
+        // Mark the first one as failed; now the same hash can be
+        // re-recorded — the partial index excludes failed/removed rows.
+        mark_failed(&db, id1).await.expect("mark failed");
+        let id3 = record_grab(&db, "racehash", "release c", series_id, &[1], false)
+            .await
+            .expect("third record_grab");
+        assert!(
+            id3.is_some(),
+            "after blocklist, same hash must be re-recordable"
+        );
+
+        // Empty-hash rows aren't covered by the partial index.
+        let id4 = record_grab(&db, "", "no hash a", series_id, &[1], false)
+            .await
+            .expect("empty-hash a");
+        let id5 = record_grab(&db, "", "no hash b", series_id, &[1], false)
+            .await
+            .expect("empty-hash b");
+        assert!(id4.is_some() && id5.is_some(), "empty-hash never dedups");
     }
 }

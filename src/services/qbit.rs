@@ -212,9 +212,20 @@ impl QbitClient {
         let form = [("urls", url), ("category", &self.category)];
         let resp = self.do_post_form("/api/v2/torrents/add", &form).await?;
 
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("qbit add failed: {}", body));
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(format!("qbit add failed (HTTP {status}): {body}"));
+        }
+        // qBit returns 200 OK with body "Fails." when it couldn't parse
+        // the URL or otherwise refused to add the torrent. The prior
+        // code only checked status.is_success(), so callers (auto-search
+        // and the upgrade sweep) wrote a successful record_grab row for
+        // a torrent qBit silently rejected — and post-processing then
+        // looked forever for an import that was never going to land.
+        if body.trim() == "Fails." {
+            return Err(format!("qbit add rejected url={url}: qBit returned 'Fails.'"));
         }
         self.invalidate_torrents_cache().await;
         Ok(())

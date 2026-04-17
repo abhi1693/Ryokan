@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::models::{config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, monitoring, series};
 use crate::models::log::LogCategory;
-use crate::services::{anilist, artwork, auto_search, jikan, kitsu, logger, media, metadata_sync, monitoring as monitoring_service};
+use crate::services::{anilist, artwork, auto_search, jikan, kitsu, logger, media, metadata_sync, monitoring as monitoring_service, progress};
 use crate::AppState;
 
 #[derive(Template)]
@@ -472,6 +472,41 @@ async fn reconcile_all_fallback_entries(db: &SqlitePool) -> ReconcileReport {
     report
 }
 
+/// Fill each item's cover URL with the cached `/media/art/...` URL when
+/// one exists for `series-<id>-cover`. Wraps the build-cache-keys →
+/// batch-fetch → zip-write pattern shared by `index` and
+/// `needs_review_page` — both used to fire one
+/// `artwork::cached_or_source_url` per series, which on a 200-series
+/// library was 200 sequential SQLite queries before the topbar even
+/// rendered.
+async fn populate_series_cover_urls<T, S, M>(
+    db: &sqlx::SqlitePool,
+    items: &mut [T],
+    series_id_of: S,
+    set_cover: M,
+) where
+    S: Fn(&T) -> i64,
+    M: Fn(&mut T, String),
+{
+    if items.is_empty() {
+        return;
+    }
+    let cache_keys: Vec<String> = items
+        .iter()
+        .map(|item| format!("series-{}-cover", series_id_of(item)))
+        .collect();
+    let Ok(url_map) =
+        crate::models::artwork_cache::get_local_urls_batch(db, &cache_keys).await
+    else {
+        return;
+    };
+    for (item, key) in items.iter_mut().zip(cache_keys.iter()) {
+        if let Some(url) = url_map.get(key) {
+            set_cover(item, url.clone());
+        }
+    }
+}
+
 pub async fn index(State(state): State<AppState>) -> Html<String> {
     // Fetch the library list and config concurrently — they're independent
     // and each was previously serialized on the other. `get_all` is the
@@ -484,25 +519,13 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
     let mut library = library_res.unwrap_or_default();
     let cfg = cfg_res.ok().flatten();
 
-    // Batch the cover-art lookups into a single SQL round trip. The old
-    // code fired one `artwork::cached_or_source_url` per series — a 200-
-    // series library meant 200 sequential SQLite queries just to render
-    // the topbar's Library tab.
-    if !library.is_empty() {
-        let cache_keys: Vec<String> = library
-            .iter()
-            .map(|item| format!("series-{}-cover", item.id))
-            .collect();
-        if let Ok(url_map) =
-            crate::models::artwork_cache::get_local_urls_batch(&state.db, &cache_keys).await
-        {
-            for (item, key) in library.iter_mut().zip(cache_keys.iter()) {
-                if let Some(url) = url_map.get(key) {
-                    item.cover_url = url.clone();
-                }
-            }
-        }
-    }
+    populate_series_cover_urls(
+        &state.db,
+        &mut library,
+        |item| item.id,
+        |item, url| item.cover_url = url,
+    )
+    .await;
 
     let template = IndexTemplate {
         page: "library".to_string(),
@@ -518,24 +541,13 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
 pub async fn needs_review_page(State(state): State<AppState>) -> Html<String> {
     let mut entries = episode_tags::get_needs_review(&state.db).await.unwrap_or_default();
 
-    // Same batch-artwork treatment as `index` — the previous serial per-
-    // entry lookup was one of the reasons this page felt slow when the
-    // backlog was large.
-    if !entries.is_empty() {
-        let cache_keys: Vec<String> = entries
-            .iter()
-            .map(|e| format!("series-{}-cover", e.series_id))
-            .collect();
-        if let Ok(url_map) =
-            crate::models::artwork_cache::get_local_urls_batch(&state.db, &cache_keys).await
-        {
-            for (entry, key) in entries.iter_mut().zip(cache_keys.iter()) {
-                if let Some(url) = url_map.get(key) {
-                    entry.cover_url = url.clone();
-                }
-            }
-        }
-    }
+    populate_series_cover_urls(
+        &state.db,
+        &mut entries,
+        |e| e.series_id,
+        |entry, url| entry.cover_url = url,
+    )
+    .await;
 
     let template = NeedsReviewTemplate {
         page: "library".to_string(),
@@ -1941,6 +1953,7 @@ pub async fn set_monitoring(
                 let _ = auto_search_series(
                     axum::extract::State(state_clone),
                     axum::extract::Path(series_id),
+                    axum::extract::Query(AutoSearchQuery::default()),
                 ).await;
             });
         }
@@ -2039,23 +2052,61 @@ pub async fn set_manual_override(
     State(state): State<AppState>,
     Json(form): Json<SetManualOverrideForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use crate::services::source::{Resolution, Source, WebKind};
+
+    // Validate + canonicalize the form fields *before* writing. The
+    // model would otherwise bind the raw input string into the DB
+    // column even when from_str returns Unknown — so a malicious or
+    // buggy client could write a garbage `source` value that round-
+    // trips through the enum as Unknown but appears as the raw string
+    // in any SQL filter that compares against canonical names. Empty
+    // source is the explicit "clear override" path and skips
+    // validation.
+    let (source_str, resolution_str, web_kind_str) = if form.source.is_empty() {
+        (String::new(), String::new(), String::new())
+    } else {
+        let parsed_source = Source::from_str(&form.source);
+        if parsed_source == Source::Unknown {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("invalid source: {:?}", form.source),
+            ));
+        }
+        let parsed_resolution = Resolution::from_str(&form.resolution);
+        if parsed_resolution == Resolution::Unknown {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("invalid resolution: {:?}", form.resolution),
+            ));
+        }
+        // WebKind::Unknown is allowed — it's optional metadata that
+        // only applies to Source::Web; non-Web overrides leave it
+        // empty by design.
+        let parsed_web_kind = WebKind::from_str(&form.web_kind);
+        (
+            parsed_source.as_str().to_string(),
+            parsed_resolution.as_str().to_string(),
+            parsed_web_kind.as_str().to_string(),
+        )
+    };
+
     episode_tags::set_manual_override(
         &state.db,
         form.series_id,
         form.episode_number,
-        &form.source,
-        &form.resolution,
+        &source_str,
+        &resolution_str,
         form.is_remux,
         form.is_bdmv,
-        &form.web_kind,
+        &web_kind_str,
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let action = if form.source.is_empty() {
+    let action = if source_str.is_empty() {
         "cleared".to_string()
     } else {
-        format!("{} {}", form.source, form.resolution)
+        format!("{} {}", source_str, resolution_str)
     };
     logger::info(
         &state.db,
@@ -2068,8 +2119,8 @@ pub async fn set_manual_override(
         "ok": true,
         "series_id": form.series_id,
         "episode_number": form.episode_number,
-        "source": form.source,
-        "resolution": form.resolution,
+        "source": source_str,
+        "resolution": resolution_str,
         "is_remux": form.is_remux,
     })))
 }
@@ -2611,6 +2662,88 @@ async fn run_auto_search_targets(
     run_auto_search_targets_with_upgrades(state, request_id, targets, allow_batch, series_id, std::collections::HashMap::new()).await
 }
 
+/// Optional `?progress_id=<opaque>` query string the frontend appends to
+/// auto-search trigger calls. The handler binds it to a fresh job in the
+/// progress registry and the worker task emits stage events into it for
+/// the sticky toast on the page.
+#[derive(Deserialize, Default)]
+pub struct AutoSearchQuery {
+    pub progress_id: Option<String>,
+}
+
+/// Pick a user-facing title for progress toasts. Prefers the English
+/// title, falling back to romaji — the same fallback the logger
+/// already uses elsewhere in this handler.
+fn display_title_for_progress(detail: &anilist::AnimeDetail) -> &str {
+    if !detail.title_english.is_empty() {
+        &detail.title_english
+    } else {
+        &detail.title_romaji
+    }
+}
+
+/// Emit a terminal progress event summarizing the outcome of an
+/// auto-search task. Called from inside the spawned task so the
+/// `progress::EMITTER` task-local is in scope.
+async fn emit_auto_search_terminal(
+    result: &Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)>,
+) {
+    match result {
+        Ok(report) => {
+            let grabbed = report.grabbed.len();
+            if grabbed > 0 {
+                // Show titles for ≤3 grabs, otherwise just the count —
+                // a 50-episode batch shouldn't paste a 50-line toast.
+                let body = if grabbed <= 3 {
+                    Some(
+                        report
+                            .grabbed
+                            .iter()
+                            .map(|h| format!("{}: {}", h.target_label, h.release_title))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                } else {
+                    Some(format!("{} releases queued for download", grabbed))
+                };
+                progress::emit(
+                    "done",
+                    "success",
+                    format!(
+                        "Grabbed {} release{}",
+                        grabbed,
+                        if grabbed == 1 { "" } else { "s" }
+                    ),
+                    body,
+                    true,
+                )
+                .await;
+            } else if !report.skipped.is_empty() {
+                progress::emit(
+                    "done",
+                    "warn",
+                    "No releases grabbed",
+                    Some(report.skipped.join("\n")),
+                    true,
+                )
+                .await;
+            } else {
+                progress::emit(
+                    "done",
+                    "warn",
+                    "Nothing to search",
+                    Some("No targets matched the requested scope".into()),
+                    true,
+                )
+                .await;
+            }
+        }
+        Err((_, msg)) => {
+            progress::emit("error", "error", "Auto search failed", Some(msg.clone()), true).await;
+        }
+    }
+}
+
 async fn run_auto_search_targets_with_upgrades(
     state: &AppState,
     request_id: i64,
@@ -2646,6 +2779,18 @@ async fn run_auto_search_targets_with_upgrades(
         &format!("Auto search started for {}", title),
         &format!("{} target(s), allow_batch={}", targets.len(), allow_batch),
     ).await;
+    progress::emit(
+        "search",
+        "info",
+        format!("Searching {}", title),
+        Some(format!(
+            "{} target{}",
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" }
+        )),
+        false,
+    )
+    .await;
 
     // Clone the compiled-CF Arc out from under the read lock so the
     // scoring loop below runs without holding it.
@@ -2653,9 +2798,22 @@ async fn run_auto_search_targets_with_upgrades(
 
     let mut grabbed = Vec::new();
     let mut skipped = Vec::new();
-    for target in targets {
+    let total_targets = targets.len();
+    for (idx, target) in targets.into_iter().enumerate() {
         let label = auto_search::target_label(&target);
         let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrade_classifications.contains_key(n));
+        progress::emit(
+            "search",
+            "info",
+            if total_targets > 1 {
+                format!("[{}/{}] {}", idx + 1, total_targets, label)
+            } else {
+                format!("Searching: {}", label)
+            },
+            None,
+            false,
+        )
+        .await;
         match auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, allow_batch, is_upgrade, &cfs).await {
             Some(result) => {
                 // Classify up front so both upgrade-verification and log labels
@@ -2756,6 +2914,14 @@ async fn run_auto_search_targets_with_upgrades(
                             &format!("Grabbed: {}", result.title),
                             &format!("target={}, group={}, score={}, tier={}, batch={}{}", label, result.group, result.score, incoming_classification.label(), result.is_batch, selective_suffix),
                         ).await;
+                        progress::emit(
+                            "grab",
+                            "success",
+                            format!("Grabbed: {}", label),
+                            Some(format!("{} [{}]", result.title, incoming_classification.label())),
+                            false,
+                        )
+                        .await;
                         // Record for post-processing and episode quality tags.
                         if let Some(sid) = series_id {
                             let mut ep_nums: Vec<i32> = match &target {
@@ -2909,7 +3075,15 @@ async fn run_auto_search_targets_with_upgrades(
 pub async fn auto_search_series(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
+    Query(q): Query<AutoSearchQuery>,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
+        Some(id) => Some(state.progress.register(id).await),
+        None => None,
+    };
+    if let Some(h) = &progress_handle {
+        h.emit("start", "info", "Preparing auto-search…", None, false).await;
+    }
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -3003,13 +3177,37 @@ pub async fn auto_search_series(
             _ => None,
         })
         .collect();
-    // Spawn as an independent task so the grab completes even if the client disconnects.
+    // Spawn as an independent task so the grab completes even if the client
+    // disconnects. The spawned future is wrapped in `progress::scope` when a
+    // progress handle was registered, so deep callees inside the search
+    // pipeline can `progress::emit` into the toast without threading the
+    // handle through every signature.
     let state_clone = state.clone();
-    let handle = tokio::spawn(async move {
-        run_auto_search_targets_with_upgrades(&state_clone, request_id, targets, true, series_id_for_grab, upgrade_classifications).await
-    });
-    let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
+    let progress_for_task = progress_handle.clone();
+    let handle = tokio::spawn(progress::run_with_progress(
+        progress_for_task,
+        async move {
+            let result = run_auto_search_targets_with_upgrades(
+                &state_clone,
+                request_id,
+                targets,
+                true,
+                series_id_for_grab,
+                upgrade_classifications,
+            )
+            .await;
+            emit_auto_search_terminal(&result).await;
+            result
+        },
+    ));
+    let report = handle
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Search task failed: {}", e),
+            )
+        })??;
     Ok(Json(report))
 }
 
@@ -3032,7 +3230,22 @@ pub async fn auto_search_series(
 pub async fn auto_search_episode(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
+    Query(q): Query<AutoSearchQuery>,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
+        Some(id) => Some(state.progress.register(id).await),
+        None => None,
+    };
+    if let Some(h) = &progress_handle {
+        h.emit(
+            "start",
+            "info",
+            format!("Searching episode {}…", episode_number),
+            None,
+            false,
+        )
+        .await;
+    }
     let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
@@ -3056,20 +3269,35 @@ pub async fn auto_search_episode(
     // out by the Episode(n) matching rules.
     let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
 
-    // Spawn as an independent task so the grab completes even if the client disconnects.
+    // Spawn as an independent task so the grab completes even if the client
+    // disconnects. The spawn is wrapped in `progress::run_with_progress`
+    // when a progress handle was registered above so deep callees can emit
+    // into the user's sticky toast without threading the handle down.
     let state_clone = state.clone();
-    let handle = tokio::spawn(async move {
-        run_auto_search_targets(
-            &state_clone,
-            request_id,
-            vec![target],
-            false,
-            series_id_for_grab,
-        )
+    let progress_for_task = progress_handle.clone();
+    let handle = tokio::spawn(progress::run_with_progress(
+        progress_for_task,
+        async move {
+            let result = run_auto_search_targets(
+                &state_clone,
+                request_id,
+                vec![target],
+                false,
+                series_id_for_grab,
+            )
+            .await;
+            emit_auto_search_terminal(&result).await;
+            result
+        },
+    ));
+    let report = handle
         .await
-    });
-    let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Search task failed: {}", e),
+            )
+        })??;
     Ok(Json(report))
 }
 
@@ -3091,7 +3319,16 @@ pub async fn auto_search_episode(
 pub async fn search_batch_releases(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
+    Query(q): Query<AutoSearchQuery>,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
+        Some(id) => Some(state.progress.register(id).await),
+        None => None,
+    };
+    if let Some(h) = &progress_handle {
+        h.emit("start", "info", "Searching for batch release…", None, false).await;
+    }
+
     let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
@@ -3104,6 +3341,17 @@ pub async fn search_batch_releases(
         .unwrap_or_default();
 
     let cfs = state.custom_formats.read().await.clone();
+
+    if let Some(h) = &progress_handle {
+        h.emit(
+            "search",
+            "info",
+            format!("Searching: {}", display_title_for_progress(&detail)),
+            None,
+            false,
+        )
+        .await;
+    }
 
     // Pick the best *batch* — filtering to is_batch pre-selection instead
     // of post-selection. The old code called find_best_for_target and
@@ -3121,19 +3369,56 @@ pub async fn search_batch_releases(
     let qbit = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .ok_or({
+                if let Some(h) = &progress_handle {
+                    // Fire-and-forget: we're about to Err-return, so the
+                    // toast is the only surface that tells the user why.
+                    let h = h.clone();
+                    tokio::spawn(async move {
+                        h.emit("error", "error", "qBittorrent not configured", None, true).await;
+                    });
+                }
+                (axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string())
+            })?
             .clone()
     };
 
     match best {
-        None => Err((axum::http::StatusCode::NOT_FOUND, "No batch release found".to_string())),
+        None => {
+            if let Some(h) = &progress_handle {
+                h.emit("done", "warn", "No batch release found", None, true).await;
+            }
+            Err((axum::http::StatusCode::NOT_FOUND, "No batch release found".to_string()))
+        }
         Some(result) => {
             let url = if !result.magnet.is_empty() { result.magnet.clone() } else { result.torrent.clone() };
             if url.is_empty() {
+                if let Some(h) = &progress_handle {
+                    h.emit("error", "error", "No magnet/torrent URL for batch release", None, true).await;
+                }
                 return Err((axum::http::StatusCode::BAD_GATEWAY, "No magnet/torrent URL for batch release".to_string()));
             }
+            if let Some(h) = &progress_handle {
+                h.emit(
+                    "grab",
+                    "info",
+                    format!("Grabbing {}", result.title),
+                    None,
+                    false,
+                )
+                .await;
+            }
             qbit.add_torrent(&url).await
-                .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+                .map_err(|e| {
+                    if let Some(h) = &progress_handle {
+                        let h = h.clone();
+                        let err = e.clone();
+                        tokio::spawn(async move {
+                            h.emit("error", "error", "qBittorrent rejected the torrent", Some(err), true).await;
+                        });
+                    }
+                    (axum::http::StatusCode::BAD_GATEWAY, e)
+                })?;
             let classification = crate::services::source::classify_release(
                 &state.db,
                 &result.title,
@@ -3193,6 +3478,16 @@ pub async fn search_batch_releases(
                         result.is_batch,
                     ).await;
                 }
+            }
+            if let Some(h) = &progress_handle {
+                h.emit(
+                    "done",
+                    "success",
+                    "Batch grabbed",
+                    Some(format!("{} ({})", result.title, tier_label)),
+                    true,
+                )
+                .await;
             }
             Ok(Json(auto_search::AutoSearchReport {
                 grabbed: vec![auto_search::AutoSearchHit {

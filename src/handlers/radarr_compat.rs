@@ -27,15 +27,27 @@ pub async fn require_api_key(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // See sonarr_compat::require_api_key for the 503-vs-500 rationale.
     let cfg = match config::get_config(&state.db).await {
         Ok(Some(c)) => c,
-        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(None) | Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                "Ryokan config not yet available",
+            )
+                .into_response();
+        }
     };
 
     if !cfg.radarr_enabled || cfg.radarr_api_key.is_empty() {
         return (StatusCode::SERVICE_UNAVAILABLE, "Radarr API compatibility layer is disabled").into_response();
     }
 
+    // Mirrors sonarr_compat::require_api_key — see that function for the
+    // full rationale on percent-decoding the query-string value and on
+    // the constant-time compare. Kept duplicated rather than extracted
+    // because the only difference is the cfg field accessed.
     let api_key = req
         .headers()
         .get("x-api-key")
@@ -45,13 +57,25 @@ pub async fn require_api_key(
             let query_str = req.uri().query().unwrap_or("");
             query_str.split('&').find_map(|pair| {
                 let (key, val) = pair.split_once('=')?;
-                if key == "apikey" { Some(val.to_string()) } else { None }
+                if key == "apikey" {
+                    Some(urlencoding::decode(val).ok()?.into_owned())
+                } else {
+                    None
+                }
             })
         });
 
-    match api_key {
-        Some(key) if key == cfg.radarr_api_key => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response(),
+    let valid = match &api_key {
+        Some(key) => bool::from(subtle::ConstantTimeEq::ct_eq(
+            key.as_bytes(),
+            cfg.radarr_api_key.as_bytes(),
+        )),
+        None => false,
+    };
+    if valid {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response()
     }
 }
 
@@ -344,7 +368,7 @@ pub async fn movie_lookup(
             .ok()
             .flatten();
 
-        let tmdb_id = resolve_tmdb_id(r.id, r.id_mal).await;
+        let tmdb_id = anibridge::resolve_tmdb_id(r.id, r.id_mal).await;
         let title = if !r.title_english.is_empty() { &r.title_english } else { &r.title_romaji };
 
         movies.push(build_radarr_movie_from_search(
@@ -371,7 +395,7 @@ pub async fn list_movies(
 
     let mut results = Vec::new();
     for s in &tracked {
-        let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+        let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
         results.push(build_radarr_movie_from_tracked(s, tmdb_id, &cfg));
     }
 
@@ -394,7 +418,7 @@ pub async fn get_movie(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Movie not found".to_string()))?;
 
-    let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
     Ok(Json(build_radarr_movie_from_tracked(&s, tmdb_id, &cfg)))
 }
 
@@ -494,6 +518,7 @@ pub async fn add_movie(
             let _ = super::library::auto_search_series(
                 axum::extract::State(state_clone),
                 axum::extract::Path(id),
+                axum::extract::Query(super::library::AutoSearchQuery::default()),
             ).await;
         });
     }
@@ -545,7 +570,7 @@ pub async fn update_movie(
         .flatten()
         .unwrap_or_default();
 
-    let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
     Ok(Json(build_radarr_movie_from_tracked(&s, tmdb_id, &cfg)))
 }
 
@@ -564,6 +589,7 @@ pub async fn execute_command(
                     let _ = super::library::auto_search_series(
                         axum::extract::State(state_clone),
                         axum::extract::Path(movie_id),
+                        axum::extract::Query(super::library::AutoSearchQuery::default()),
                     ).await;
                 });
             }
@@ -579,19 +605,6 @@ pub async fn execute_command(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-/// Resolve TMDB ID from either AniList ID or MAL ID.
-async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64 {
-    if let Some(tmdb) = anibridge::lookup_tmdb_by_anilist(anilist_id).await {
-        return tmdb;
-    }
-    if let Some(mid) = mal_id.into()
-        && mid > 0
-            && let Some(tmdb) = anibridge::lookup_tmdb_by_mal(mid).await {
-                return tmdb;
-            }
-    0
-}
 
 async fn lookup_by_tmdb_id(
     state: &AppState,

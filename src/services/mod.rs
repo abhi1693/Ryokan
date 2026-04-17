@@ -10,6 +10,7 @@ pub mod jellyfin;
 
 pub mod auto_search;
 pub mod logger;
+pub mod progress;
 pub mod quality;
 
 pub mod rss;

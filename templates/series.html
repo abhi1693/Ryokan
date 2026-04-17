@@ -873,13 +873,15 @@ function renderPeers(seeders, leechers) {
 
 function searchBatchReleases(btn) {
     setBusyButton(btn, true, 'Searching…');
-    window.ryokanToast({
+    const pid = window.ryokanNewProgressId();
+    const toast = window.ryokanProgressToast({
+        progressId: pid,
         kind: 'info',
         category: 'auto_search',
         title: 'Searching for batch releases',
         body: SD.titleEnglish || SD.titleRomaji || '',
     });
-    fetch(`/api/series/${SD.id}/search-batch`, {
+    fetch(`/api/series/${SD.id}/search-batch?progress_id=${encodeURIComponent(pid)}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'}
     })
@@ -892,26 +894,12 @@ function searchBatchReleases(btn) {
         if (grabbed > 0) {
             ensureDlPollRunning();
             refreshEpisodeRows({ force: true });
-            window.ryokanToast({
-                kind: 'success',
-                category: 'auto_search',
-                title: 'Batch queued',
-                body: data.grabbed[0].release_title,
-            });
-        } else {
-            window.ryokanToast({
-                kind: 'warn',
-                category: 'auto_search',
-                title: 'No batch release found',
-                body: 'Nothing on Nyaa matched the batch search.',
-            });
         }
     })
     .catch(err => {
         setBusyButton(btn, false);
-        window.ryokanToast({
+        toast.finalize({
             kind: 'error',
-            category: 'auto_search',
             title: 'Batch search failed',
             body: err && err.message ? err.message : 'Unknown error',
         });
@@ -1171,14 +1159,16 @@ function setEpisodeButtonState(btn, state, title) {
 function autoSearchEpisode(episodeNumber, btn) {
     const seriesTitle = SD.titleEnglish || SD.titleRomaji || SD.titleNative || '';
     setEpisodeButtonState(btn, 'loading', `Searching episode ${episodeNumber}...`);
-    window.ryokanToast({
+    const pid = window.ryokanNewProgressId();
+    const toast = window.ryokanProgressToast({
+        progressId: pid,
         kind: 'info',
         category: 'auto_search',
         title: `Searching episode ${episodeNumber}`,
         body: seriesTitle,
     });
 
-    fetch(`/api/series/${SD.id}/auto-search/${episodeNumber}`, {
+    fetch(`/api/series/${SD.id}/auto-search/${episodeNumber}?progress_id=${encodeURIComponent(pid)}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'}
     })
@@ -1194,27 +1184,14 @@ function autoSearchEpisode(episodeNumber, btn) {
             updateEpisodeRow(episodeNumber, 'grabbed', first.release_group);
             ensureDlPollRunning();
             refreshEpisodeRows({ force: true });
-            window.ryokanToast({
-                kind: 'success',
-                category: 'auto_search',
-                title: `Episode ${episodeNumber} grabbed`,
-                body: first.release_title + (first.release_group ? ' · ' + first.release_group : ''),
-            });
         } else {
             setEpisodeButtonState(btn, 'error', 'No matching release found');
-            window.ryokanToast({
-                kind: 'warn',
-                category: 'auto_search',
-                title: `No release for episode ${episodeNumber}`,
-                body: 'Nothing on Nyaa matched the scoring threshold.',
-            });
         }
     })
     .catch(err => {
         setEpisodeButtonState(btn, 'error', err.message || 'Episode search failed');
-        window.ryokanToast({
+        toast.finalize({
             kind: 'error',
-            category: 'auto_search',
             title: `Episode ${episodeNumber} search failed`,
             body: err && err.message ? err.message : 'Unknown error',
         });
@@ -1224,14 +1201,16 @@ function autoSearchEpisode(episodeNumber, btn) {
 function autoSearchSeries(btn) {
     const seriesTitle = SD.titleEnglish || SD.titleRomaji || SD.titleNative || '';
     setBusyButton(btn, true, 'Searching…');
-    window.ryokanToast({
+    const pid = window.ryokanNewProgressId();
+    const toast = window.ryokanProgressToast({
+        progressId: pid,
         kind: 'info',
         category: 'auto_search',
         title: 'Searching missing episodes',
         body: seriesTitle,
     });
 
-    fetch(`/api/series/${SD.id}/auto-search`, {
+    fetch(`/api/series/${SD.id}/auto-search?progress_id=${encodeURIComponent(pid)}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'}
     })
@@ -1242,33 +1221,16 @@ function autoSearchSeries(btn) {
             throw new Error(data.message || 'Auto search failed');
         }
         const grabbed = Array.isArray(data.grabbed) ? data.grabbed.length : 0;
-        const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
-        const groups = Array.isArray(data.grabbed) ? [...new Set(data.grabbed.map(x => x.release_group).filter(Boolean))] : [];
-        const queuedPack = Array.isArray(data.skipped) && data.skipped.some(x => x.toLowerCase().includes('season pack queued'));
         setBusyButton(btn, false);
         if (grabbed > 0) {
             ensureDlPollRunning();
             refreshEpisodeRows({ force: true });
-            window.ryokanToast({
-                kind: 'success',
-                category: 'auto_search',
-                title: queuedPack ? 'Season pack queued' : `${grabbed} release${grabbed === 1 ? '' : 's'} grabbed`,
-                body: groups.length ? groups.join(', ') : seriesTitle,
-            });
-        } else {
-            window.ryokanToast({
-                kind: 'warn',
-                category: 'auto_search',
-                title: 'No release grabbed',
-                body: skipped ? `${skipped} candidate${skipped === 1 ? '' : 's'} skipped — check inline detail.` : 'Nothing matched.',
-            });
         }
     })
     .catch(err => {
         setBusyButton(btn, false);
-        window.ryokanToast({
+        toast.finalize({
             kind: 'error',
-            category: 'auto_search',
             title: 'Auto search failed',
             body: err && err.message ? err.message : 'Unknown error',
         });

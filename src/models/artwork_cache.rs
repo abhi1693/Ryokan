@@ -173,3 +173,69 @@ pub async fn get_local_urls_batch(
     }
     Ok(out)
 }
+
+/// Two-step prune of the artwork cache, called from the hourly cleanup
+/// task. Returns `(refs_deleted, blobs_deleted)`. Without this the
+/// `image_refs` and `image_blobs` tables — and the on-disk blob files
+/// they point at — only ever grow: removing a series leaves orphan
+/// rows, renaming a cover URL leaves the old blob behind, etc.
+///
+/// Step 1 — drop refs whose parent series no longer exists.
+/// Step 2 — drop blobs (and the backing files) that no ref references
+/// AND that haven't been written in `min_age_days` (the age gate
+/// covers the small race in cache_image where upsert_blob runs before
+/// upsert_ref — we don't want a concurrent prune to delete a blob
+/// that's about to get its ref written).
+pub async fn cleanup_orphans(
+    db: &SqlitePool,
+    min_age_days: i64,
+) -> Result<(u64, u64), sqlx::Error> {
+    // Step 1: orphan refs. Only series-keyed refs are pruned here —
+    // any other parent_kind is left alone since we don't own its
+    // identity table.
+    let refs_deleted = sqlx::query(
+        "DELETE FROM image_refs
+         WHERE parent_kind IN ('series', 'series_relation')
+           AND parent_id IS NOT NULL
+           AND parent_id NOT IN (SELECT id FROM series)",
+    )
+    .execute(db)
+    .await?
+    .rows_affected();
+
+    // Step 2: orphan blobs. DELETE … RETURNING in a single statement
+    // so the file removal is *consequent on* the DB delete, not
+    // concurrent with it. The earlier SELECT-then-remove_file-then-
+    // DELETE order had a TOCTOU window where a concurrent cache_image
+    // could land an upsert_ref between the SELECT and the DELETE: the
+    // SELECT-stage decision to remove the file was based on "no refs",
+    // but by DELETE time the new ref's NOT EXISTS check would fail and
+    // the row would survive — leaving a live ref pointing at an
+    // already-deleted on-disk file. With DELETE … RETURNING, only rows
+    // whose NOT EXISTS check still holds at delete-commit time return
+    // their local_path, and the file removal that follows can't beat a
+    // concurrent ref to the punch.
+    let age_filter = format!("-{} days", min_age_days);
+    let deleted_rows = sqlx::query(
+        r#"DELETE FROM image_blobs
+           WHERE NOT EXISTS (SELECT 1 FROM image_refs r WHERE r.blob_hash = image_blobs.blob_hash)
+             AND created_at < datetime('now', ?)
+           RETURNING local_path"#,
+    )
+    .bind(&age_filter)
+    .fetch_all(db)
+    .await?;
+
+    let blobs_deleted = deleted_rows.len() as u64;
+    for row in &deleted_rows {
+        let local_path: String = row.get("local_path");
+        if !local_path.is_empty() {
+            // Hourly task in an async path — match the rest of the
+            // codebase's std::fs → tokio::fs migration so we don't
+            // block the runtime executor on the unlink syscall.
+            let _ = tokio::fs::remove_file(&local_path).await;
+        }
+    }
+
+    Ok((refs_deleted, blobs_deleted))
+}

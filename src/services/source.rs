@@ -306,6 +306,46 @@ impl Resolution {
 /// aggregator thresholds can silently shift the classification
 /// behavior — bump the confidence of a weak layer too high and it
 /// starts overriding stronger signals.
+/// Which classification layer produced a piece of evidence. Replaces
+/// the previous `&'static str` so a typo at the per-layer constant or
+/// a comparison in the aggregator becomes a compile error instead of
+/// silently demoting the layer's vote (the per-origin clamp and rule-1
+/// tie-break key off this exact value).
+///
+/// Serialised as the lowercase variant name for on-disk JSON
+/// compatibility with the previous string form, so existing
+/// `episode_quality_tags.classification_evidence` rows render
+/// unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    Filename,
+    Description,
+    Group,
+    Temporal,
+    Ffprobe,
+    Dir,
+}
+
+impl Origin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::Filename => "filename",
+            Origin::Description => "description",
+            Origin::Group => "group",
+            Origin::Temporal => "temporal",
+            Origin::Ffprobe => "ffprobe",
+            Origin::Dir => "dir",
+        }
+    }
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SourceEvidence {
     pub source: Source,
@@ -314,12 +354,12 @@ pub struct SourceEvidence {
     /// docs for per-layer calibration bands and why the specific
     /// values matter.
     pub confidence: f32,
-    pub origin: &'static str,
+    pub origin: Origin,
     pub detail: String,
 }
 
 impl SourceEvidence {
-    pub fn new(source: Source, confidence: f32, origin: &'static str, detail: impl Into<String>) -> Self {
+    pub fn new(source: Source, confidence: f32, origin: Origin, detail: impl Into<String>) -> Self {
         Self {
             source,
             confidence: confidence.clamp(0.0, 1.0),
@@ -598,15 +638,17 @@ const ORIGIN_MAX: f32 = 1.3;
 /// corroborating signals can still outvote a single weak filename guess
 /// when filename didn't land a strong signal — that's the aggregator
 /// working as designed.
-fn origin_priority(origin: &str) -> u8 {
+fn origin_priority(origin: Origin) -> u8 {
+    // Exhaustive match — adding a new Origin variant forces this to be
+    // updated, preventing the silent "drops to 0" demotion that the
+    // previous wildcard arm hid.
     match origin {
-        "filename" => 5,
-        "ffprobe" => 4,
-        "dir" => 4,
-        "description" => 3,
-        "group" => 2,
-        "temporal" => 1,
-        _ => 0,
+        Origin::Filename => 5,
+        Origin::Ffprobe => 4,
+        Origin::Dir => 4,
+        Origin::Description => 3,
+        Origin::Group => 2,
+        Origin::Temporal => 1,
     }
 }
 
@@ -675,7 +717,7 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     // FLAC (0.85) = 1.80 for BluRay gets clamped to 1.30 here, leaving
     // room for a contradicting ground-truth signal to still win or at
     // least trip rule 4/5.
-    let mut per_origin: HashMap<(Source, &'static str), f32> = HashMap::new();
+    let mut per_origin: HashMap<(Source, Origin), f32> = HashMap::new();
     for e in evidence {
         *per_origin.entry((e.source, e.origin)).or_insert(0.0) += e.confidence;
     }
@@ -778,7 +820,7 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     let rule5_fires = evidence.iter().any(|e| {
         e.confidence >= STRONG_THRESHOLD
             && e.source != leader
-            && (e.origin == "ffprobe" || e.origin == "dir")
+            && matches!(e.origin, Origin::Ffprobe | Origin::Dir)
     });
 
     // Rule precedence for the stored tag: rule 5 is more specific than
@@ -946,8 +988,8 @@ pub async fn classify_release(
             && evidence
                 .iter()
                 .filter(|e| e.source == result.source)
-                .all(|e| e.origin == "filename")
-            && evidence.iter().any(|e| e.origin != "filename");
+                .all(|e| e.origin == Origin::Filename)
+            && evidence.iter().any(|e| e.origin != Origin::Filename);
         if result.source == Source::Unknown
             || result.needs_review
             || only_filename_backs_winner
@@ -1142,6 +1184,16 @@ async fn log_classification_to_db(
     title: &str,
     result: &ClassificationResult,
 ) {
+    // Only persist to the DB log table when the row actually needs
+    // the user's attention — needs_review is the one that drives the
+    // Needs-Review UI. Routine classification chatter is handled by
+    // the synchronous `log_classification` tracing helper called
+    // alongside this, so we aren't losing visibility — just not paying
+    // a per-candidate INSERT (50-200 candidates per search × 2 calls
+    // per candidate through classify_release + classify_post_download).
+    if !result.needs_review {
+        return;
+    }
     let detail = format!(
         "phase={}\nrule={}\nlabel={}\nconfidence={:.2}\nresolution={}\nis_remux={}\nis_bdmv={}\nweb_kind={}\nevidence:\n{}",
         phase,
@@ -1166,23 +1218,13 @@ async fn log_classification_to_db(
             .join("\n"),
     );
     let summary = format!("Classified \"{}\" → {}", title, result.label());
-    if result.needs_review {
-        crate::services::logger::info(
-            db,
-            crate::models::log::LogCategory::Quality,
-            &format!("Needs review: {}", summary),
-            &detail,
-        )
-        .await;
-    } else {
-        crate::services::logger::debug(
-            db,
-            crate::models::log::LogCategory::Quality,
-            &summary,
-            &detail,
-        )
-        .await;
-    }
+    crate::services::logger::info(
+        db,
+        crate::models::log::LogCategory::Quality,
+        &format!("Needs review: {}", summary),
+        &detail,
+    )
+    .await;
 }
 
 /// Formatted single-line evidence trail. Shared by both the tracing
@@ -1503,7 +1545,7 @@ pub(crate) fn contains_word(haystack: &str, needle: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn ev(src: Source, conf: f32, origin: &'static str) -> SourceEvidence {
+    fn ev(src: Source, conf: f32, origin: Origin) -> SourceEvidence {
         SourceEvidence::new(src, conf, origin, "")
     }
 
@@ -1619,9 +1661,9 @@ mod tests {
     fn aggregate_rule_1_strong_signal_wins_immediately() {
         // Single strong signal ≥ 0.90 short-circuits the rest.
         let evidence = vec![
-            ev(Source::Web, 0.95, "filename"),
-            ev(Source::BluRay, 0.40, "group"),
-            ev(Source::BluRay, 0.30, "temporal"),
+            ev(Source::Web, 0.95, Origin::Filename),
+            ev(Source::BluRay, 0.40, Origin::Group),
+            ev(Source::BluRay, 0.30, Origin::Temporal),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::Web);
@@ -1635,9 +1677,9 @@ mod tests {
         // No single strong signal, but two weak Web signals outweigh one
         // moderate BluRay signal by more than MIN_LEAD.
         let evidence = vec![
-            ev(Source::Web, 0.60, "filename"),
-            ev(Source::Web, 0.55, "group"),
-            ev(Source::BluRay, 0.50, "temporal"),
+            ev(Source::Web, 0.60, Origin::Filename),
+            ev(Source::Web, 0.55, Origin::Group),
+            ev(Source::BluRay, 0.50, Origin::Temporal),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::Web);
@@ -1650,8 +1692,8 @@ mod tests {
         // less than MIN_LEAD (0.30) — should pick a winner but flag for
         // review.
         let evidence = vec![
-            ev(Source::Web, 0.75, "filename"),
-            ev(Source::BluRay, 0.70, "ffprobe"),
+            ev(Source::Web, 0.75, Origin::Filename),
+            ev(Source::BluRay, 0.70, Origin::Ffprobe),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::Web); // Higher sum wins.
@@ -1662,8 +1704,8 @@ mod tests {
     fn aggregate_rule_4_all_weak_falls_to_unknown() {
         // Every signal below MIN_TOTAL (0.50) — total mass too weak.
         let evidence = vec![
-            ev(Source::Web, 0.20, "temporal"),
-            ev(Source::BluRay, 0.15, "temporal"),
+            ev(Source::Web, 0.20, Origin::Temporal),
+            ev(Source::BluRay, 0.15, Origin::Temporal),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::Unknown);
@@ -1674,8 +1716,8 @@ mod tests {
     fn aggregate_clean_win_despite_weak_conflict() {
         // Strong leader, weak opposing signal — no review needed.
         let evidence = vec![
-            ev(Source::Web, 0.95, "filename"),
-            ev(Source::BluRay, 0.30, "temporal"),
+            ev(Source::Web, 0.95, Origin::Filename),
+            ev(Source::BluRay, 0.30, Origin::Temporal),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::Web);
@@ -1688,8 +1730,8 @@ mod tests {
         // Filename origin should win the tiebreaker — "filename is the
         // primary source of truth."
         let evidence = vec![
-            ev(Source::BluRay, 0.95, "ffprobe"),
-            ev(Source::BluRay, 0.95, "filename"),
+            ev(Source::BluRay, 0.95, Origin::Ffprobe),
+            ev(Source::BluRay, 0.95, Origin::Filename),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::BluRay);
@@ -1711,9 +1753,9 @@ mod tests {
         // With ORIGIN_MAX = 1.3, filename caps to 1.30 and the
         // ground-truth veto (rule 5) flags the ffprobe conflict.
         let evidence = vec![
-            ev(Source::BluRay, 0.95, "filename"), // strong keyword
-            ev(Source::BluRay, 0.85, "filename"), // stacked audio codec
-            ev(Source::Web, 0.90, "ffprobe"),     // strong ground truth
+            ev(Source::BluRay, 0.95, Origin::Filename), // strong keyword
+            ev(Source::BluRay, 0.85, Origin::Filename), // stacked audio codec
+            ev(Source::Web, 0.90, Origin::Ffprobe),     // strong ground truth
         ];
         let result = aggregate(&evidence);
         // BluRay still wins the sum (1.30 vs 0.90 — a 0.40 clean lead).
@@ -1733,9 +1775,9 @@ mod tests {
         // 0.95 — Web wins by 0.70, a clean lead. But rule 5's veto
         // fires because the disagreeing signal is from the dir layer.
         let evidence = vec![
-            ev(Source::Web, 0.95, "filename"),
-            ev(Source::Web, 0.70, "group"),
-            ev(Source::BluRay, 0.95, "dir"),
+            ev(Source::Web, 0.95, Origin::Filename),
+            ev(Source::Web, 0.70, Origin::Group),
+            ev(Source::BluRay, 0.95, Origin::Dir),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::Web);
@@ -1750,9 +1792,9 @@ mod tests {
         // A ground-truth layer with a sub-threshold signal (< 0.90) does
         // not trigger the veto — only strong measurements do.
         let evidence = vec![
-            ev(Source::BluRay, 0.85, "filename"),
-            ev(Source::BluRay, 0.70, "group"),
-            ev(Source::Web, 0.80, "ffprobe"), // below STRONG_THRESHOLD
+            ev(Source::BluRay, 0.85, Origin::Filename),
+            ev(Source::BluRay, 0.70, Origin::Group),
+            ev(Source::Web, 0.80, Origin::Ffprobe), // below STRONG_THRESHOLD
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::BluRay);
@@ -1769,9 +1811,9 @@ mod tests {
         // contributions stack as normal. Verifies the cap is per-origin,
         // not a global ceiling.
         let evidence = vec![
-            ev(Source::BluRay, 0.85, "filename"),
-            ev(Source::BluRay, 0.85, "ffprobe"),
-            ev(Source::Web, 0.40, "temporal"),
+            ev(Source::BluRay, 0.85, Origin::Filename),
+            ev(Source::BluRay, 0.85, Origin::Ffprobe),
+            ev(Source::Web, 0.40, Origin::Temporal),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::BluRay);
@@ -1784,36 +1826,36 @@ mod tests {
         assert_eq!(aggregate(&[]).decision_rule, DecisionRule::Empty);
 
         // Single strong signal → Rule1Strong.
-        let rule1 = aggregate(&[ev(Source::Web, 0.95, "filename")]);
+        let rule1 = aggregate(&[ev(Source::Web, 0.95, Origin::Filename)]);
         assert_eq!(rule1.decision_rule, DecisionRule::Rule1Strong);
 
         // Clean sum win with no strong signals → Rule2Sum.
         let rule2 = aggregate(&[
-            ev(Source::Web, 0.60, "filename"),
-            ev(Source::Web, 0.55, "group"),
-            ev(Source::BluRay, 0.50, "temporal"),
+            ev(Source::Web, 0.60, Origin::Filename),
+            ev(Source::Web, 0.55, Origin::Group),
+            ev(Source::BluRay, 0.50, Origin::Temporal),
         ]);
         assert_eq!(rule2.decision_rule, DecisionRule::Rule2Sum);
 
         // Total mass below MIN_TOTAL → Rule3Weak.
         let rule3 = aggregate(&[
-            ev(Source::Web, 0.20, "temporal"),
-            ev(Source::BluRay, 0.15, "temporal"),
+            ev(Source::Web, 0.20, Origin::Temporal),
+            ev(Source::BluRay, 0.15, Origin::Temporal),
         ]);
         assert_eq!(rule3.decision_rule, DecisionRule::Rule3Weak);
 
         // Close strong conflict, no ground-truth layer → Rule4Conflict.
         let rule4 = aggregate(&[
-            ev(Source::Web, 0.75, "filename"),
-            ev(Source::BluRay, 0.70, "group"),
+            ev(Source::Web, 0.75, Origin::Filename),
+            ev(Source::BluRay, 0.70, Origin::Group),
         ]);
         assert_eq!(rule4.decision_rule, DecisionRule::Rule4Conflict);
 
         // Ground-truth veto beats rule 4 when both would fire.
         let rule5 = aggregate(&[
-            ev(Source::BluRay, 0.95, "filename"),
-            ev(Source::BluRay, 0.85, "filename"),
-            ev(Source::Web, 0.90, "ffprobe"),
+            ev(Source::BluRay, 0.95, Origin::Filename),
+            ev(Source::BluRay, 0.85, Origin::Filename),
+            ev(Source::Web, 0.90, Origin::Ffprobe),
         ]);
         assert_eq!(rule5.decision_rule, DecisionRule::Rule5GroundTruthVeto);
     }
@@ -1829,9 +1871,9 @@ mod tests {
         // rule 1 checks rule 2's leader before firing — if rule 2 picks
         // a different source, rule 1 falls through and rule 2 decides.
         let evidence = vec![
-            ev(Source::BluRay, 0.95, "group"),
-            ev(Source::Web, 0.85, "ffprobe"),
-            ev(Source::Web, 0.75, "temporal"),
+            ev(Source::BluRay, 0.95, Origin::Group),
+            ev(Source::Web, 0.85, Origin::Ffprobe),
+            ev(Source::Web, 0.75, Origin::Temporal),
         ];
         let result = aggregate(&evidence);
         assert_eq!(result.source, Source::Web);
@@ -1853,8 +1895,8 @@ mod tests {
         // picked BluRay via source-rank tiebreaker. Now it falls through
         // to rule 2+4 so the conflict gets flagged.
         let evidence = vec![
-            ev(Source::Web, 0.95, "filename"),
-            ev(Source::BluRay, 0.95, "dir"),
+            ev(Source::Web, 0.95, Origin::Filename),
+            ev(Source::BluRay, 0.95, Origin::Dir),
         ];
         let result = aggregate(&evidence);
         // Rule 2 ties the sums, rule 4 detects the strong opposing
@@ -1879,7 +1921,7 @@ mod tests {
     fn boundary_strong_threshold_exactly_090_fires_rule_1() {
         // 0.90 is the strong threshold; the filter uses `>= 0.90`, so an
         // evidence record at exactly 0.90 must take the rule-1 path.
-        let result = aggregate(&[ev(Source::Web, 0.90, "filename")]);
+        let result = aggregate(&[ev(Source::Web, 0.90, Origin::Filename)]);
         assert_eq!(result.decision_rule, DecisionRule::Rule1Strong);
         assert_eq!(result.source, Source::Web);
         assert!(!result.needs_review);
@@ -1891,7 +1933,7 @@ mod tests {
         // the record still wins via rule 2's sum path, but the decision
         // rule is Rule2Sum (not Rule1Strong). This is what catches a
         // hypothetical `> 0.90` flip in the strong filter.
-        let result = aggregate(&[ev(Source::Web, 0.89, "filename")]);
+        let result = aggregate(&[ev(Source::Web, 0.89, Origin::Filename)]);
         assert_eq!(result.decision_rule, DecisionRule::Rule2Sum);
         assert_eq!(result.source, Source::Web);
     }
@@ -1902,8 +1944,8 @@ mod tests {
         // conflict detection (the filter is `>= 0.70`). With a small
         // lead, rule 4 must fire.
         let result = aggregate(&[
-            ev(Source::Web, 0.75, "filename"),
-            ev(Source::BluRay, 0.70, "group"),
+            ev(Source::Web, 0.75, Origin::Filename),
+            ev(Source::BluRay, 0.70, Origin::Group),
         ]);
         assert!(result.needs_review);
         assert_eq!(result.decision_rule, DecisionRule::Rule4Conflict);
@@ -1914,8 +1956,8 @@ mod tests {
         // Runner-up at 0.69 is below the conflict threshold, so even a
         // narrow lead stays a clean rule-2 win.
         let result = aggregate(&[
-            ev(Source::Web, 0.75, "filename"),
-            ev(Source::BluRay, 0.69, "group"),
+            ev(Source::Web, 0.75, Origin::Filename),
+            ev(Source::BluRay, 0.69, Origin::Group),
         ]);
         assert!(!result.needs_review);
         assert_eq!(result.decision_rule, DecisionRule::Rule2Sum);
@@ -1926,8 +1968,8 @@ mod tests {
         // Sum to exactly 0.50: the test is `< MIN_TOTAL`, so 0.50 must
         // NOT be weak enough for the Unknown fallback.
         let result = aggregate(&[
-            ev(Source::Web, 0.30, "filename"),
-            ev(Source::Web, 0.20, "group"),
+            ev(Source::Web, 0.30, Origin::Filename),
+            ev(Source::Web, 0.20, Origin::Group),
         ]);
         assert_ne!(result.decision_rule, DecisionRule::Rule3Weak);
         assert_eq!(result.source, Source::Web);
@@ -1937,8 +1979,8 @@ mod tests {
     fn boundary_min_total_just_below_triggers_rule_3() {
         // Sum to 0.49 — strictly below MIN_TOTAL, so rule 3 fires.
         let result = aggregate(&[
-            ev(Source::Web, 0.30, "filename"),
-            ev(Source::Web, 0.19, "group"),
+            ev(Source::Web, 0.30, Origin::Filename),
+            ev(Source::Web, 0.19, Origin::Group),
         ]);
         assert_eq!(result.decision_rule, DecisionRule::Rule3Weak);
         assert_eq!(result.source, Source::Unknown);
@@ -1959,9 +2001,9 @@ mod tests {
         // BluRay's 0.70 is below STRONG_THRESHOLD (0.90), so the
         // ground-truth veto rule 5 also stays silent.
         let result = aggregate(&[
-            ev(Source::Web, 0.30, "filename"),
-            ev(Source::Web, 0.70, "group"),
-            ev(Source::BluRay, 0.70, "ffprobe"),
+            ev(Source::Web, 0.30, Origin::Filename),
+            ev(Source::Web, 0.70, Origin::Group),
+            ev(Source::BluRay, 0.70, Origin::Ffprobe),
         ]);
         assert_eq!(result.source, Source::Web);
         assert!(
@@ -1977,9 +2019,9 @@ mod tests {
         // because there's a conflicting runner-up at ≥ 0.70.
         // Web sums to 0.99, BluRay sums to 0.70, lead = 0.29.
         let result = aggregate(&[
-            ev(Source::Web, 0.29, "filename"),
-            ev(Source::Web, 0.70, "group"),
-            ev(Source::BluRay, 0.70, "ffprobe"),
+            ev(Source::Web, 0.29, Origin::Filename),
+            ev(Source::Web, 0.70, Origin::Group),
+            ev(Source::BluRay, 0.70, Origin::Ffprobe),
         ]);
         assert!(result.needs_review);
         assert_eq!(result.decision_rule, DecisionRule::Rule4Conflict);
@@ -1992,9 +2034,9 @@ mod tests {
         // Runner-up at 0.40 leaves a 0.90 lead, a clean rule-2 win with
         // no conflict.
         let result = aggregate(&[
-            ev(Source::BluRay, 0.65, "filename"),
-            ev(Source::BluRay, 0.65, "filename"),
-            ev(Source::Web, 0.40, "temporal"),
+            ev(Source::BluRay, 0.65, Origin::Filename),
+            ev(Source::BluRay, 0.65, Origin::Filename),
+            ev(Source::Web, 0.40, Origin::Temporal),
         ]);
         assert_eq!(result.source, Source::BluRay);
         assert_eq!(result.decision_rule, DecisionRule::Rule2Sum);
@@ -2014,9 +2056,9 @@ mod tests {
         // clipping — a flip to `< 1.30` / `> 1.30` on the comparison
         // would change the behavior here.
         let result = aggregate(&[
-            ev(Source::BluRay, 0.95, "filename"),
-            ev(Source::BluRay, 0.85, "filename"),
-            ev(Source::Web, 0.90, "ffprobe"),
+            ev(Source::BluRay, 0.95, Origin::Filename),
+            ev(Source::BluRay, 0.85, Origin::Filename),
+            ev(Source::Web, 0.90, Origin::Ffprobe),
         ]);
         assert_eq!(result.source, Source::BluRay);
         assert!(result.needs_review);
@@ -2030,8 +2072,8 @@ mod tests {
         // should contribute the full 0.90 to each source — not split
         // 1.30 across them or clip one of them.
         let result = aggregate(&[
-            ev(Source::BluRay, 0.90, "filename"),
-            ev(Source::Web, 0.90, "filename"),
+            ev(Source::BluRay, 0.90, Origin::Filename),
+            ev(Source::Web, 0.90, Origin::Filename),
         ]);
         // Rule 1 falls through because the two strong signals disagree.
         // Rule 2 sees BluRay=0.90 and Web=0.90 — a tie. Source::rank
@@ -2131,28 +2173,27 @@ mod tests {
         let origins: std::collections::HashSet<_> =
             result.evidence.iter().map(|e| e.origin).collect();
         assert!(
-            origins.contains("filename"),
+            origins.contains(&Origin::Filename),
             "filename evidence missing: {:#?}",
             result.evidence,
         );
         assert!(
-            origins.contains("group"),
+            origins.contains(&Origin::Group),
             "group evidence missing — Layer 3 lookup didn't fire: {:#?}",
             result.evidence,
         );
         assert!(
-            origins.contains("temporal"),
+            origins.contains(&Origin::Temporal),
             "temporal evidence missing — Layer 4 didn't fire: {:#?}",
             result.evidence,
         );
 
-        // And the audit log row was actually written — end-to-end proof
-        // that the classifier's DB side effects reach the `logs` table.
-        let log_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM logs WHERE category = 'quality'")
-                .fetch_one(&db)
-                .await
-                .expect("count logs");
-        assert!(log_count >= 1, "expected classifier to write an audit log");
+        // The DB log assertion that lived here was dropped along with
+        // the per-candidate INSERT in log_classification_to_db: that
+        // function now only persists rows where `needs_review` is true,
+        // and a confidently-corroborated release by definition isn't
+        // one. The classifier's structural correctness is what this
+        // test exercises; the side-effect-to-logs contract belongs in
+        // a needs_review-specific test (covered separately).
     }
 }

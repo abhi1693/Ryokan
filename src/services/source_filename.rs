@@ -23,9 +23,9 @@
 
 use anitomy::{Anitomy, ElementCategory};
 
-use crate::services::source::{contains_word, Resolution, Source, SourceEvidence, WebKind};
+use crate::services::source::{contains_word, Origin, Resolution, Source, SourceEvidence, WebKind};
 
-const ORIGIN: &str = "filename";
+const ORIGIN: Origin = Origin::Filename;
 
 /// Output of Layer 1 classification.
 ///

@@ -74,9 +74,34 @@ async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
         }
         match mode.as_str() {
             "move" => {
-                if std::fs::rename(&src, &dst).is_err() {
-                    std::fs::copy(&src, &dst)?;
-                    let _ = std::fs::remove_file(&src);
+                // Same-fs rename is atomic and instant — the happy path.
+                if std::fs::rename(&src, &dst).is_ok() {
+                    return Ok(());
+                }
+                // Cross-fs fallback: copy to a sibling tmp first then
+                // rename onto dst so a partially-copied file can't be
+                // observed at dst by a subsequent pass and mistaken for
+                // a finished import. Cleans up the tmp on rename failure.
+                let mut tmp = dst.as_os_str().to_os_string();
+                tmp.push(".ryokan-tmp");
+                let tmp = PathBuf::from(tmp);
+                std::fs::copy(&src, &tmp)?;
+                if let Err(e) = std::fs::rename(&tmp, &dst) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                // Source-remove failure is rare (qBit still holds the
+                // file open, source dir is read-only, etc.) and the
+                // file is safely at dst either way — but surface a warn
+                // so the operator can spot duplicate state in qBit's
+                // downloads directory.
+                if let Err(e) = std::fs::remove_file(&src) {
+                    tracing::warn!(
+                        target: "ryokan::post_processing",
+                        src = %src.display(),
+                        error = %e,
+                        "post-copy remove_file failed; file remains at source AND destination",
+                    );
                 }
                 Ok(())
             }
@@ -613,7 +638,8 @@ async fn import_torrent(
                     &ep_title,
                     &aired,
                     ctx.runtime_minutes,
-                );
+                )
+                .await;
                 imported_count += 1;
                 touched_series.insert(target_series_id);
                 logger::info(
@@ -783,7 +809,7 @@ async fn import_torrent(
         };
         let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
         let series_nfo = series_root.join("tvshow.nfo");
-        let _ = nfo::write_series_nfo(&series_nfo, &ctx.series, ctx.cached_detail.as_ref());
+        let _ = nfo::write_series_nfo(&series_nfo, &ctx.series, ctx.cached_detail.as_ref()).await;
 
         let poster_dest = series_root.join("poster.jpg");
         if !poster_dest.exists() {
@@ -1090,6 +1116,32 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                 .await
                 .unwrap_or_default();
 
+            // One bulk fetch of imported grabs for this series, used
+            // by every file in the inner loop below to look up the
+            // unsanitized torrent name. Replaces a pair of per-file
+            // queries (find_imported_for_episode + a fallback
+            // most_recent_imported_torrent_name_for_series) that ran
+            // inside the held POST_PROC_LOCK — that was ~4800
+            // round-trips per pass on a 100-series, 24-ep library.
+            let imported_grabs =
+                grabbed_torrents::imported_grabs_for_series(&state.db, row.id)
+                    .await
+                    .unwrap_or_default();
+            // Per-episode lookup; first occurrence (DESC by grabbed_at)
+            // wins, so each episode maps to its most recent grab. This
+            // matches the prior find_imported_for_episode .next()
+            // semantics on a DESC-sorted result set.
+            let mut grab_name_for_episode: HashMap<i32, String> = HashMap::new();
+            for (name, eps) in &imported_grabs {
+                for ep in eps {
+                    grab_name_for_episode
+                        .entry(*ep)
+                        .or_insert_with(|| name.clone());
+                }
+            }
+            let most_recent_grab_name: Option<&str> =
+                imported_grabs.first().map(|(n, _)| n.as_str());
+
             let series_root = Path::new(&cfg.media_root).join(&row.folder_name);
 
             for file in &disk_files {
@@ -1156,37 +1208,21 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                     .to_string();
 
                 // Look up the grab that covers this episode so we can
-                // classify against the unsanitized torrent name. Done
-                // inside the lock because the enumeration phase needs
-                // the work list to be a consistent snapshot and the DB
-                // round-trip is cheap next to the ffprobe shell-out
-                // that runs in the unlocked phase below.
-                //
-                // First try the per-episode lookup. When that misses
-                // (old batch grabs recorded with `episode_numbers = []`
-                // before the grab-time episode-range fix, where
-                // `json_each` yields nothing), fall back to the most
-                // recent imported grab for the series as a whole:
-                // for a single-series batch that's by definition the
-                // grab these files came from. Both queries are cheap
-                // `LIMIT 1` lookups.
-                let original_torrent_name = match grabbed_torrents::find_imported_for_episode(
-                    &state.db,
-                    row.id,
-                    file.episode_number,
-                )
-                .await
-                .ok()
-                .and_then(|grabs| grabs.into_iter().next())
-                {
-                    Some(g) => g.torrent_name,
-                    None => grabbed_torrents::most_recent_imported_torrent_name_for_series(
-                        &state.db,
-                        row.id,
-                    )
-                    .await
-                    .unwrap_or_default(),
-                };
+                // classify against the unsanitized torrent name. The
+                // pre-built `grab_name_for_episode` map and
+                // `most_recent_grab_name` fallback come from the
+                // single bulk fetch above — both lookups are now
+                // pure-Rust and don't touch the DB inside the held
+                // POST_PROC_LOCK. The fallback exists for old batch
+                // grabs recorded with `episode_numbers = []` before
+                // the grab-time episode-range fix; for a single-series
+                // batch the most-recent grab is by definition the one
+                // these files came from.
+                let original_torrent_name = grab_name_for_episode
+                    .get(&file.episode_number)
+                    .cloned()
+                    .or_else(|| most_recent_grab_name.map(|s| s.to_string()))
+                    .unwrap_or_default();
 
                 pending.push(PendingClassification {
                     series_id: row.id,
@@ -1250,7 +1286,8 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
         // 'completed' since the file is already on disk.
         if !item.row_exists {
             // Best-effort single stat — failure just leaves size at 0.
-            let file_size = std::fs::metadata(&item.file_path)
+            let file_size = tokio::fs::metadata(&item.file_path)
+                .await
                 .map(|m| m.len() as i64)
                 .unwrap_or(0);
             // Externally-imported file — we're creating both the quality

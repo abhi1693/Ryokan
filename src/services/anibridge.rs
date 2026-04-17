@@ -294,6 +294,29 @@ pub async fn lookup_tmdb_by_anilist(anilist_id: i64) -> Option<i64> {
         .copied()
 }
 
+/// Resolve a TMDB ID from either an AniList ID or a MAL ID. Tries
+/// AniList first, falls back to MAL when given. Returns 0 when neither
+/// path produces a hit — callers (the Sonarr/Radarr compat handlers)
+/// emit `tmdbId: 0` in that case so Seerr can still receive a
+/// well-formed payload.
+///
+/// Centralised here because the same shape lived duplicated in both
+/// sonarr_compat and radarr_compat — keeping the lookup chain in one
+/// place means future changes (extra fallback IDs, retry semantics,
+/// negative-cache) only need editing once.
+pub async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64 {
+    if let Some(tmdb) = lookup_tmdb_by_anilist(anilist_id).await {
+        return tmdb;
+    }
+    if let Some(mid) = mal_id.into()
+        && mid > 0
+        && let Some(tmdb) = lookup_tmdb_by_mal(mid).await
+    {
+        return tmdb;
+    }
+    0
+}
+
 /// Parse raw mappings JSON bytes into the in-memory lookup tables.
 /// Shared between the disk-cache path (`ensure_loaded`) and the
 /// network path (`download_parse_and_persist`) so there's only one

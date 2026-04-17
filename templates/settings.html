@@ -8,7 +8,11 @@
 </div>
 
 {% if let Some(msg) = message %}
-    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Settings saved">{{ msg|safe }}</div>
+    {# Auto-escape — never |safe. msg can come from `?msg=` query string
+       (settings_page) and from POST notice strings (settings_submit, which
+       interpolates user-controlled fields like media_root into format!()).
+       Either path is reflected/stored XSS without escaping. #}
+    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Settings saved">{{ msg }}</div>
 {% endif %}
 {% if let Some(err) = error %}
     <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Settings error">{{ err }}</div>
@@ -40,7 +44,11 @@
                 </div>
                 <div class="form-group">
                     <label for="qbit_pass">Password</label>
-                    <input type="password" name="qbit_pass" id="qbit_pass" value="{{ config.qbit_pass }}">
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <input type="password" name="qbit_pass" id="qbit_pass" value="{{ config.qbit_pass }}" style="flex:1">
+                        <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('qbit_pass', this)" style="white-space:nowrap">Show</button>
+                        <button type="button" class="btn btn-secondary" onclick="copyApiKey('qbit_pass', this)" style="white-space:nowrap">Copy</button>
+                    </div>
                 </div>
             </div>
             <div class="form-group">
@@ -66,7 +74,11 @@
             </div>
             <div class="form-group">
                 <label for="jellyfin_api_key">API Key</label>
-                <input type="password" name="jellyfin_api_key" id="jellyfin_api_key" value="{{ config.jellyfin_api_key }}">
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="password" name="jellyfin_api_key" id="jellyfin_api_key" value="{{ config.jellyfin_api_key }}" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('jellyfin_api_key', this)" style="white-space:nowrap">Show</button>
+                    <button type="button" class="btn btn-secondary" onclick="copyApiKey('jellyfin_api_key', this)" style="white-space:nowrap">Copy</button>
+                </div>
                 <span class="form-hint">Ryokan will use this for server info, targeted lookups, and library refreshes.</span>
             </div>
             <div class="settings-inline-actions">
@@ -92,7 +104,9 @@
             <div class="form-group">
                 <label for="sonarr_api_key">API Key</label>
                 <div style="display: flex; gap: 8px; align-items: center;">
-                    <input type="text" name="sonarr_api_key" id="sonarr_api_key" value="{{ config.sonarr_api_key }}" placeholder="Paste this key into Seerr's Sonarr server config" style="flex:1">
+                    <input type="password" name="sonarr_api_key" id="sonarr_api_key" value="{{ config.sonarr_api_key }}" placeholder="Paste this key into Seerr's Sonarr server config" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('sonarr_api_key', this)" style="white-space:nowrap">Show</button>
+                    <button type="button" class="btn btn-secondary" onclick="copyApiKey('sonarr_api_key', this)" style="white-space:nowrap">Copy</button>
                     <button type="button" class="btn btn-secondary" onclick="generateApiKey()" style="white-space:nowrap">Generate</button>
                 </div>
                 <span class="form-hint">Use this key as the API key when adding Ryokan as a Sonarr server in Seerr.</span>
@@ -115,7 +129,9 @@
             <div class="form-group">
                 <label for="radarr_api_key">API Key</label>
                 <div style="display: flex; gap: 8px; align-items: center;">
-                    <input type="text" name="radarr_api_key" id="radarr_api_key" value="{{ config.radarr_api_key }}" placeholder="Paste this key into Seerr's Radarr server config" style="flex:1">
+                    <input type="password" name="radarr_api_key" id="radarr_api_key" value="{{ config.radarr_api_key }}" placeholder="Paste this key into Seerr's Radarr server config" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('radarr_api_key', this)" style="white-space:nowrap">Show</button>
+                    <button type="button" class="btn btn-secondary" onclick="copyApiKey('radarr_api_key', this)" style="white-space:nowrap">Copy</button>
                     <button type="button" class="btn btn-secondary" onclick="generateRadarrApiKey()" style="white-space:nowrap">Generate</button>
                 </div>
                 <span class="form-hint">Use this key as the API key when adding Ryokan as a Radarr server in Seerr.</span>
@@ -672,6 +688,46 @@ function generateRadarrApiKey() {
     let key = '';
     for (let i = 0; i < 32; i++) key += chars[buf[i] % chars.length];
     document.getElementById('radarr_api_key').value = key;
+}
+
+// API-key inputs render as type="password" so the secret isn't visible
+// to anyone glancing at the admin's screen. These two helpers restore
+// the workflow that masking otherwise broke: Show toggles visibility
+// for verification, Copy puts the value on the clipboard so the user
+// can paste straight into Seerr without ever needing to read it.
+function toggleApiKeyVisibility(inputId, btn) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    if (input.type === 'password') {
+        input.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        input.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+async function copyApiKey(inputId, btn) {
+    const input = document.getElementById(inputId);
+    if (!input || !input.value) return;
+    const original = btn.textContent;
+    const flash = (label, ms) => {
+        btn.textContent = label;
+        setTimeout(() => { btn.textContent = original; }, ms);
+    };
+    // navigator.clipboard.writeText needs a secure context (HTTPS or
+    // localhost). Self-hosted Ryokan often runs over plain HTTP on a
+    // LAN address, so fall back to surfacing the value in a text input
+    // and selecting it — the user can then Ctrl+C themselves.
+    try {
+        await navigator.clipboard.writeText(input.value);
+        flash('Copied!', 1500);
+    } catch (_e) {
+        input.type = 'text';
+        input.focus();
+        input.select();
+        flash('Select & copy', 2500);
+    }
 }
 
 function syncTitleLanguagePreview(lang) {

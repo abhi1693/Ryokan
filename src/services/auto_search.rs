@@ -128,8 +128,8 @@ pub async fn find_all_for_target(
     _allow_batch: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
+    let queries = build_queries_from_aliases(&aliases, target);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -258,7 +258,6 @@ pub async fn find_all_for_target(
         );
         // No CF floor on the interactive path — see comment above.
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -266,9 +265,7 @@ pub async fn find_all_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             i32::MIN,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -397,7 +394,7 @@ pub async fn collect_scored_batches_for_target(
 
     // Standard query sweep — picks up any batches that happen to surface
     // on Nyaa page 1 alongside the singles.
-    let queries = build_queries(detail, target);
+    let queries = build_queries_from_aliases(&aliases, target);
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
 
     // Batch-targeted probes — the important addition for this function.
@@ -463,7 +460,6 @@ pub async fn collect_scored_batches_for_target(
             cutoff_resolution_enum,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -471,9 +467,7 @@ pub async fn collect_scored_batches_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             config.custom_format_minimum_score,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -502,8 +496,8 @@ async fn collect_scored_for_target(
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let queries = build_queries(detail, target);
     let aliases = collect_aliases(detail);
+    let queries = build_queries_from_aliases(&aliases, target);
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -669,7 +663,6 @@ async fn collect_scored_for_target(
             cutoff_resolution_enum,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
-            db,
             base,
             &c,
             &classification,
@@ -677,9 +670,7 @@ async fn collect_scored_for_target(
             &seadex_hashes,
             seadex_boost_enabled,
             config.custom_format_minimum_score,
-        )
-        .await
-        {
+        ) {
             c.score = final_score;
             scored.push(c);
         }
@@ -1010,6 +1001,16 @@ pub fn build_upgrade_targets(
         if !candidates.contains(&file.episode_number) {
             continue;
         }
+        // manual_override pins must short-circuit before find_best_for_target
+        // runs. The downstream SQL guards on record_grab /
+        // update_classification drop the tag write, but post-processing has
+        // already replaced the on-disk file by the time those guards fire.
+        if quality_tags
+            .get(&file.episode_number)
+            .is_some_and(|t| t.manual_override)
+        {
+            continue;
+        }
         let existing = resolve_existing_classification(file, quality_tags.get(&file.episode_number));
         // Skip completely unclassified episodes — we have no way to know
         // whether an incoming release would actually be an upgrade.
@@ -1058,10 +1059,6 @@ pub fn target_label(target: &SearchTarget) -> String {
         SearchTarget::Single => "Single".to_string(),
         SearchTarget::Episode(ep) => format!("Episode {}", ep),
     }
-}
-
-fn build_queries(detail: &AnimeDetail, target: &SearchTarget) -> Vec<String> {
-    build_queries_from_aliases(&collect_aliases(detail), target)
 }
 
 fn build_queries_from_aliases(aliases: &[String], target: &SearchTarget) -> Vec<String> {
@@ -1478,6 +1475,9 @@ struct SeaDexPayload {
 /// The cache lives for the lifetime of the process, so a restart is
 /// the operator's escape hatch if they ever need to force-refresh.
 const SEADEX_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+// Cap the cache so a long-running process can't accumulate every
+// AniList ID it ever touched. Mirrors anilist::DETAIL_CACHE_MAX_ENTRIES.
+const SEADEX_CACHE_MAX_ENTRIES: usize = 500;
 static SEADEX_CACHE: LazyLock<StdMutex<HashMap<i64, (Instant, SeaDexPayload)>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
@@ -1494,6 +1494,23 @@ fn seadex_cache_get(anilist_id: i64) -> Option<SeaDexPayload> {
 fn seadex_cache_put(anilist_id: i64, payload: SeaDexPayload) {
     if let Ok(mut cache) = SEADEX_CACHE.lock() {
         cache.insert(anilist_id, (Instant::now(), payload));
+        if cache.len() > SEADEX_CACHE_MAX_ENTRIES {
+            // Drop expired first; if still over cap, drop the oldest.
+            let expired: Vec<i64> = cache
+                .iter()
+                .filter(|(_, (fetched_at, _))| fetched_at.elapsed() >= SEADEX_CACHE_TTL)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in &expired {
+                cache.remove(k);
+            }
+            if cache.len() > SEADEX_CACHE_MAX_ENTRIES
+                && let Some((&oldest, _)) =
+                    cache.iter().min_by_key(|(_, (fetched_at, _))| *fetched_at)
+            {
+                cache.remove(&oldest);
+            }
+        }
     }
 }
 
@@ -1698,13 +1715,15 @@ fn display_title(detail: &AnimeDetail) -> &str {
 /// `SeaDexBestSpecification` — the user has taken ownership of that
 /// number and double-counting would be a silent regression.
 ///
-/// On the way through, emits one `LogCategory::Scoring` debug row per
-/// candidate with a CF-aware breakdown line (plan §6.3). Dropped
-/// candidates are logged too so the user can introspect "why did this
-/// candidate get cut from the results" in addition to "why did X win."
+/// On the way through, emits one tracing::debug! line per candidate with
+/// a CF-aware breakdown (plan §6.3). Operators who want to introspect
+/// "why did X win / Y lose" can set
+/// `RUST_LOG=ryokan::auto_search::scoring=debug`. The previous code
+/// wrote to the DB log table here, but at 50-200 candidates per search
+/// that was a sustained INSERT stream the `logs` UI flooded with rather
+/// than aided.
 #[allow(clippy::too_many_arguments)]
-async fn apply_cf_seadex_overlay(
-    db: &SqlitePool,
+fn apply_cf_seadex_overlay(
     base: i32,
     result: &SearchResult,
     classification: &ClassificationResult,
@@ -1733,10 +1752,25 @@ async fn apply_cf_seadex_overlay(
     };
 
     let below_floor = cf < minimum_score;
-    let final_score = base + cf + seadex_bonus;
+    // saturating_add at the combine — base, cf, and seadex_bonus are
+    // each i32 and any one of them can be ±10k+. With ~22 CFs all
+    // matching positively plus the 10k SeaDex boost plus base, naive
+    // `+` can wrap to a large negative and silently demote every
+    // candidate below minimum_score.
+    let final_score = base.saturating_add(cf).saturating_add(seadex_bonus);
 
     let detail = format_scoring_detail(base, cf, &breakdown, seadex_bonus, final_score, below_floor);
-    logger::debug(db, LogCategory::Scoring, &result.title, &detail).await;
+    // tracing::debug! instead of logger::debug — 50-200 candidates per
+    // search × one debug row each meant a sustained INSERT stream into
+    // the `logs` table on every auto-search. Terminal/container logs
+    // are the right surface for this granularity of detail; operators
+    // who want it can set RUST_LOG=ryokan::auto_search=debug.
+    tracing::debug!(
+        target: "ryokan::auto_search::scoring",
+        title = %result.title,
+        "{}",
+        detail
+    );
 
     if below_floor {
         None
@@ -5044,5 +5078,84 @@ mod tests {
         assert_eq!(siblings[0].episode_offset, 0);
         // And the match came from the subtitle path, not the fallback.
         assert!(!siblings[0].matched_subtitle.starts_with("episode-range fallback"));
+    }
+
+    fn pinned_720p_web_tag(manual_override: bool) -> crate::models::episode_tags::EpisodeQualityTag {
+        crate::models::episode_tags::EpisodeQualityTag {
+            episode_number: 1,
+            quality_tag: "WEBDL-720p".to_string(),
+            release_title: "[Group] Show - 01 [WEB-DL 720p].mkv".to_string(),
+            release_group: "Group".to_string(),
+            state: "completed".to_string(),
+            source: "Web".to_string(),
+            resolution: "720p".to_string(),
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: "WEBDL".to_string(),
+            classification_confidence: 1.0,
+            needs_review: false,
+            manual_override,
+            classification_evidence: String::new(),
+        }
+    }
+
+    fn dummy_720p_episode_file(episode_number: i32) -> media::EpisodeFile {
+        media::EpisodeFile {
+            filename: "[Group] Show - 01 [WEB-DL 720p].mkv".to_string(),
+            episode_number,
+            season_number: None,
+            quality: "720p".to_string(),
+            size_bytes: 0,
+            size_display: String::new(),
+        }
+    }
+
+    // Regression: build_upgrade_targets must skip rows the user has pinned
+    // via manual override. Otherwise the upgrade sweep selects a "better"
+    // release, post-processing replaces the on-disk file, and the
+    // manual_override SQL guards on record_grab / update_classification
+    // silently drop the tag write — the user loses their pinned file with
+    // no audit trail.
+    #[test]
+    fn build_upgrade_targets_skips_manual_override_rows() {
+        let file = dummy_720p_episode_file(1);
+        let mut tags = std::collections::HashMap::new();
+        tags.insert(1_i32, pinned_720p_web_tag(true));
+
+        let targets = build_upgrade_targets(
+            &[file],
+            &[1],
+            Source::BluRay,
+            Resolution::R1080p,
+            false,
+            false,
+            &tags,
+        );
+        assert!(
+            targets.is_empty(),
+            "manual_override row should be skipped, got {} target(s)",
+            targets.len()
+        );
+    }
+
+    // Sanity check the regression test: with the same file but
+    // manual_override = false, the upgrade target IS produced. Confirms the
+    // skip is the new behavior, not an unrelated "everything skips" bug.
+    #[test]
+    fn build_upgrade_targets_yields_target_when_not_manual_override() {
+        let file = dummy_720p_episode_file(1);
+        let mut tags = std::collections::HashMap::new();
+        tags.insert(1_i32, pinned_720p_web_tag(false));
+
+        let targets = build_upgrade_targets(
+            &[file],
+            &[1],
+            Source::BluRay,
+            Resolution::R1080p,
+            false,
+            false,
+            &tags,
+        );
+        assert_eq!(targets.len(), 1, "auto-classified row should be upgraded");
     }
 }

@@ -28,9 +28,22 @@ pub async fn require_api_key(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // 503 (with Retry-After) for transient config-load failures and
+    // for "config row missing" (fresh install, user hasn't saved
+    // settings yet). Returning 500 here would have Seerr mark the
+    // indexer broken and back off for a long window — 503 advertises
+    // "try again soon" instead. The 401 (UNAUTHORIZED) path stays
+    // for "key mismatch" so a real auth failure is still visible.
     let cfg = match config::get_config(&state.db).await {
         Ok(Some(c)) => c,
-        _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(None) | Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                "Ryokan config not yet available",
+            )
+                .into_response();
+        }
     };
 
     if !cfg.sonarr_enabled || cfg.sonarr_api_key.is_empty() {
@@ -38,6 +51,11 @@ pub async fn require_api_key(
     }
 
     // Check X-Api-Key header first, then fall back to ?apikey= query param.
+    // Query-string values are percent-decoded — Seerr URL-encodes apikey
+    // values that contain `+`, `=`, `&`, or `%` (all legal in API keys
+    // and not restricted by the settings UI), so a raw string compare
+    // would silently reject every Seerr request whose key contained any
+    // of those characters.
     let api_key = req
         .headers()
         .get("x-api-key")
@@ -47,13 +65,28 @@ pub async fn require_api_key(
             let query_str = req.uri().query().unwrap_or("");
             query_str.split('&').find_map(|pair| {
                 let (key, val) = pair.split_once('=')?;
-                if key == "apikey" { Some(val.to_string()) } else { None }
+                if key == "apikey" {
+                    Some(urlencoding::decode(val).ok()?.into_owned())
+                } else {
+                    None
+                }
             })
         });
 
-    match api_key {
-        Some(key) if key == cfg.sonarr_api_key => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response(),
+    // Constant-time compare so the equality check itself never becomes a
+    // timing oracle. The threat is largely theoretical over the network,
+    // but it costs nothing to remove.
+    let valid = match &api_key {
+        Some(key) => bool::from(subtle::ConstantTimeEq::ct_eq(
+            key.as_bytes(),
+            cfg.sonarr_api_key.as_bytes(),
+        )),
+        None => false,
+    };
+    if valid {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response()
     }
 }
 
@@ -394,7 +427,7 @@ pub async fn series_lookup(
             .ok()
             .flatten();
 
-        let tmdb_id = resolve_tmdb_id(r.id, r.id_mal).await;
+        let tmdb_id = anibridge::resolve_tmdb_id(r.id, r.id_mal).await;
         let title = if !r.title_english.is_empty() { &r.title_english } else { &r.title_romaji };
 
         sonarr_results.push(build_sonarr_series_from_search(
@@ -425,7 +458,7 @@ pub async fn list_series(
 
     let mut results = Vec::new();
     for s in &tracked {
-        let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+        let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
         results.push(build_sonarr_series_from_tracked(s, tmdb_id, &cfg));
     }
 
@@ -448,7 +481,7 @@ pub async fn get_series(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Series not found".to_string()))?;
 
-    let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
     Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
 }
 
@@ -591,6 +624,7 @@ pub async fn add_series(
             let _ = super::library::auto_search_series(
                 axum::extract::State(state_clone),
                 axum::extract::Path(id),
+                axum::extract::Query(super::library::AutoSearchQuery::default()),
             ).await;
         });
     }
@@ -643,7 +677,7 @@ pub async fn update_series(
         .flatten()
         .unwrap_or_default();
 
-    let tmdb_id = resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
     Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
 }
 
@@ -661,6 +695,7 @@ pub async fn execute_command(
                 let _ = super::library::auto_search_series(
                     axum::extract::State(state_clone),
                     axum::extract::Path(series_id),
+                    axum::extract::Query(super::library::AutoSearchQuery::default()),
                 ).await;
             });
         }
@@ -675,20 +710,6 @@ pub async fn execute_command(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-/// Resolve TMDB ID from either AniList ID or MAL ID.
-/// Tries AniList first, then MAL as fallback.
-async fn resolve_tmdb_id(anilist_id: i64, mal_id: impl Into<Option<i64>>) -> i64 {
-    if let Some(tmdb) = anibridge::lookup_tmdb_by_anilist(anilist_id).await {
-        return tmdb;
-    }
-    if let Some(mid) = mal_id.into()
-        && mid > 0
-            && let Some(tmdb) = anibridge::lookup_tmdb_by_mal(mid).await {
-                return tmdb;
-            }
-    0
-}
 
 /// Look up anime by external ID (TVDB or TMDB). Tries TVDB index first since
 /// Sonarr/Seerr sends real TVDB IDs, then falls back to TMDB index.

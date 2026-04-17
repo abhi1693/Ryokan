@@ -1,4 +1,14 @@
+use std::sync::LazyLock;
+
+use regex_lite::Regex;
+
 use crate::services::nyaa::{SearchOptions, SearchResult};
+
+// Word-boundary "dub" / "dubbed" — anchors prevent the prior bare-
+// substring match from false-positiving on "redub", "dubsoon",
+// "dubbing", or release tags that happen to contain those bytes.
+static DUB_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:dub|dubbed)\b").expect("dub regex compiles"));
 
 /// Score a search result based on multiple factors.
 /// `prefer_subs` controls whether dual audio/dub releases are penalized (default true).
@@ -89,7 +99,12 @@ pub fn score_result_with_sub_pref(r: &SearchResult, opts: &SearchOptions, prefer
         || lower.contains("multi.audio")
         || lower.contains("multi-audio")
         || lower.contains("multiaudio");
-    let is_dub = is_dual || lower.contains("dub") || lower.contains("dubbed") || lower.contains("english dub");
+    // Match "dub"/"dubbed" only as whole words. The earlier `multi`
+    // tightening missed this companion case — bare contains("dub")
+    // would fire on "redub", "dubsoon", and any release tag whose bytes
+    // happened to include "dub". `english dub` stays as a literal
+    // substring because the space anchors it.
+    let is_dub = is_dual || DUB_RE.is_match(&lower) || lower.contains("english dub");
     if prefer_subs {
         // Penalize dub/dual audio releases when user prefers subs.
         if is_dub {
