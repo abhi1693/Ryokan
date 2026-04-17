@@ -178,6 +178,33 @@ body {
     .form-group > div[style*="display: flex"] {
         flex-wrap: wrap;
     }
+
+    /* Logs: there is no :hover on touch, and tr-level onclick on mobile
+     * Firefox was unreliable even when wired up directly. Drop the
+     * tap-to-expand pattern on phone and just always show detail fully
+     * wrapped — the desktop's ellipsis+hover exists to save vertical
+     * space, and mobile rows are already one-per-screen-width anyway. */
+    .log-row .log-detail {
+        white-space: normal;
+        word-break: break-word;
+    }
+    .log-expand-hint { display: none; }
+    .log-row-has-detail { cursor: default; }
+
+    /* Series detail: strip the outer season-section card on phone so
+     * the rounded-border container doesn't nest around the already-
+     * carded episode rows (created duplicated visible lines around
+     * the table). Season header stays as a flat header; episodes sit
+     * directly below it as independent cards. */
+    .season-section {
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        overflow: visible;
+        margin-bottom: 20px;
+    }
+    .season-header { padding: 10px 0; }
+    .season-body { border-top: none; padding-top: 6px; }
 }
 
 /* #20 — Mobile tab bar default (hidden). The actual phone-width swap
