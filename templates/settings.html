@@ -181,7 +181,7 @@
                     <option value="bluray_bdmv" {% if config.cutoff_source == "bluray_bdmv" %}selected{% endif %}>BD-RAW</option>
                     <option value="dvd" {% if config.cutoff_source == "dvd" %}selected{% endif %}>DVD</option>
                 </select>
-                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source. BD-Remux and BD-RAW require a matching sub-tier — plain BD encodes will stay upgradeable.</span>
+                <span class="form-hint">Stop upgrading once the existing file reaches this source at or above the cutoff resolution. Should be ≥ preferred source. BD-Remux and BD-RAW require a matching sub-tier. Plain BD encodes will stay upgradeable.</span>
             </div>
             <div class="form-group">
                 <label for="cutoff_resolution">Cutoff Resolution</label>
@@ -260,12 +260,12 @@
                     <input type="checkbox" name="post_processing_enabled" id="post_processing_enabled" {% if config.post_processing_enabled %}checked{% endif %}>
                     <span>Enable post-processing</span>
                 </label>
-                <span class="form-hint">When enabled, Ryokan will rename and move completed downloads into your media library and write NFO sidecar files for Jellyfin. No external metadata providers are queried — data already in the database is used. Requires a configured media root and qBittorrent.</span>
+                <span class="form-hint">When enabled, Ryokan will rename and move completed downloads into your media library and write NFO sidecar files for Jellyfin. No external metadata providers are queried; data already in the database is used. Requires a configured media root and qBittorrent.</span>
             </div>
             <div class="form-group">
                 <label for="post_processing_mode">File operation mode</label>
                 <select name="post_processing_mode" id="post_processing_mode">
-                    <option value="hardlink" {% if config.post_processing_mode == "hardlink" %}selected{% endif %}>Hardlink (recommended — preserves seeding, no extra disk space)</option>
+                    <option value="hardlink" {% if config.post_processing_mode == "hardlink" %}selected{% endif %}>Hardlink (recommended; preserves seeding, no extra disk space)</option>
                     <option value="copy" {% if config.post_processing_mode == "copy" %}selected{% endif %}>Copy (safe across filesystems, uses extra disk space)</option>
                     <option value="move" {% if config.post_processing_mode == "move" %}selected{% endif %}>Move (frees download space, breaks seeding)</option>
                 </select>
@@ -300,6 +300,7 @@
         {% if !suggestions.is_empty() %}
         <h3 class="settings-subheading">Suggested Mappings ({{ suggestions.len() }})</h3>
         <p class="form-hint">Inferred from your manual classification overrides. When you've pinned multiple episodes from the same release group to the same source, Ryokan surfaces it here so you can teach the identity table.</p>
+        <div class="table-scroll-wrap">
         <table class="group-source-table">
             <thead>
                 <tr>
@@ -320,7 +321,7 @@
                         {% if let Some(existing) = s.existing_source %}
                         <span class="tag tag-res" title="Accepting will overwrite the existing mapping">conflicts: {{ existing.as_str() }}</span>
                         {% else %}
-                        <span class="form-hint">— (new)</span>
+                        <span class="form-hint">(new)</span>
                         {% endif %}
                     </td>
                     <td>
@@ -336,6 +337,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
         {% endif %}
 
         <h3 class="settings-subheading">Add or Update Group</h3>
@@ -368,6 +370,7 @@
         </form>
 
         <h3 class="settings-subheading">Current Entries ({{ groups.len() }})</h3>
+        <div class="table-scroll-wrap">
         <table class="group-source-table">
             <thead>
                 <tr>
@@ -397,6 +400,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </fieldset>
 </div>
 {% endif %}
@@ -407,13 +411,21 @@
         Sonarr v4-compatible Custom Formats. Every matching spec contributes its score to the release total during auto-search. Paste JSON exports from Sonarr or <a href="https://trash-guides.info" target="_blank" rel="noopener">Trash Guides</a>, or build your own from scratch.
     </p>
 
-    {# ── Current Custom Formats ─────────────────────────────────────── #}
+    {# ── Card grid (#11.1, Sonarr-style) ─────────────────────────────
+       Sonarr renders CFs as a full-width flex-wrap grid of ~300px cards,
+       not a table. Each card shows the name, the score (Ryokan
+       extension — Sonarr stores score per-profile instead), an origin
+       dot, and a row of condition pills (one per spec, colored green
+       when required and red when negated). A trailing "+ Add Custom
+       Format" tile starts the create flow. Click a card → deep-link
+       `?edit_id=N` which scrolls the editor below into view; same-page
+       form edits stay until the modal work lands in stage 2. #}
+    {% if custom_formats.is_empty() %}
     <div class="cf-section">
         <div class="cf-section-header">
             <h3>Current Custom Formats</h3>
-            <span class="cf-count-pill">{{ custom_formats.len() }} total</span>
+            <span class="cf-count-pill">0 total</span>
         </div>
-        {% if custom_formats.is_empty() %}
         <div class="cf-empty-state">
             <p>You don't have any Custom Formats yet. Install the bundled anime-tuned defaults to get started with SeaDex, tier-S BD groups, 10-bit/x265, FLAC/Opus, and other curated rules.</p>
             <form method="post" action="/settings/custom-formats/install-defaults"
@@ -423,183 +435,218 @@
                 <button type="submit" class="btn btn-primary">Install Bundled Defaults</button>
             </form>
         </div>
-        {% else %}
-        <table class="group-source-table cf-table">
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Score</th>
-                    <th>Specs</th>
-                    <th>Source</th>
-                    <th>Trash ID</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for cf in custom_formats %}
-                <tr>
-                    <td class="cf-name">{{ cf.row.name }}</td>
-                    <td class="cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
-                        {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
-                    </td>
-                    <td>
-                        {% if let Some(err) = cf.parse_error.as_ref() %}
-                        <span class="cf-parse-error" title="{{ err }}">parse error</span>
-                        {% else %}
-                        {{ cf.specs_count }}
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if cf.row.origin == "defaults" %}
-                        <span class="cf-origin-badge cf-origin-default" title="Installed from the bundled default set">default</span>
-                        {% else if cf.row.origin == "import" %}
-                        <span class="cf-origin-badge cf-origin-import" title="Imported from a Sonarr v4 JSON export">import</span>
-                        {% else %}
-                        <span class="cf-origin-badge cf-origin-manual" title="Created via the Add Custom Format form">manual</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if let Some(tid) = cf.row.trash_id.as_ref() %}<code>{{ tid }}</code>{% else %}<span class="form-hint">—</span>{% endif %}
-                    </td>
-                    <td>
-                        <div class="settings-inline-actions">
-                            <a href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}" class="btn btn-secondary">Edit</a>
-                            <form method="post" action="/settings/custom-formats/delete" class="group-delete-form" onsubmit="return confirm('Delete Custom Format: {{ cf.row.name }}?');">
-                                <input type="hidden" name="id" value="{{ cf.row.id }}">
-                                <button type="submit" class="btn btn-danger">Delete</button>
-                            </form>
+    </div>
+    {% else %}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Current Custom Formats</h3>
+            <span class="cf-count-pill"><span id="cf-visible-count">{{ custom_formats.len() }}</span> / {{ custom_formats.len() }}</span>
+        </div>
+        <input type="search" id="cf-list-filter" class="settings-input cf-list-filter"
+            placeholder="Filter by name, score, trash ID, or origin (default / import / manual)"
+            oninput="filterCfList(this.value)">
+        <div class="cf-card-grid" id="cf-list-tbody">
+            {% for cf in custom_formats %}
+            <div class="cf-card{% if let Some(edit) = custom_format_edit %}{% if edit.row.id == cf.row.id %} cf-card-selected{% endif %}{% endif %}"
+                data-cf-name="{{ cf.row.name|lowercase }}"
+                data-cf-score="{{ cf.row.score }}"
+                data-cf-origin="{{ cf.row.origin }}"
+                data-cf-trash-id="{% if let Some(tid) = cf.row.trash_id.as_ref() %}{{ tid|lowercase }}{% endif %}">
+                <a class="cf-card-body" href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}">
+                    <div class="cf-card-header">
+                        <div class="cf-card-title-row">
+                            <span class="cf-origin-dot cf-origin-dot-{{ cf.row.origin }}"
+                                title="{% if cf.row.origin == "defaults" %}From bundled defaults{% else if cf.row.origin == "import" %}Imported{% else %}Manual{% endif %}"></span>
+                            <h4 class="cf-card-name">{{ cf.row.name }}</h4>
                         </div>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% endif %}
+                        <span class="cf-card-score cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
+                            {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
+                        </span>
+                    </div>
+                    <div class="cf-card-pills">
+                        {% if let Some(err) = cf.parse_error.as_ref() %}
+                        <span class="cf-pill cf-pill-error" title="{{ err }}">parse error</span>
+                        {% else if cf.spec_labels.is_empty() %}
+                        <span class="cf-pill cf-pill-muted">no conditions</span>
+                        {% else %}
+                        {% for s in cf.spec_labels %}
+                        <span class="cf-pill{% if s.negate %} cf-pill-negate{% else if s.required %} cf-pill-required{% endif %}"
+                            title="{{ s.implementation }}{% if s.negate %} (negate){% endif %}{% if s.required %} (required){% endif %}">
+                            {{ s.name }}
+                        </span>
+                        {% endfor %}
+                        {% endif %}
+                    </div>
+                </a>
+                <div class="cf-card-actions">
+                    <form method="post" action="/settings/custom-formats/delete" class="group-delete-form"
+                          data-ryokan-confirm-title="Delete Custom Format"
+                          data-ryokan-confirm-body="Delete &quot;{{ cf.row.name }}&quot;? This cannot be undone."
+                          data-ryokan-confirm-label="Delete">
+                        <input type="hidden" name="id" value="{{ cf.row.id }}">
+                        <button type="submit" class="btn btn-icon-danger" title="Delete {{ cf.row.name }}" aria-label="Delete {{ cf.row.name }}">×</button>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+            {# Trailing add card mirrors Sonarr's "+ Add Custom Format" tile.
+               Opens the editor modal in add mode via JS — no URL change
+               so hitting Cancel just returns to the same grid view. #}
+            <button type="button" class="cf-card cf-card-add" onclick="openCfEditorModal()">
+                <div class="cf-card-add-icon">+</div>
+                <div class="cf-card-add-label">Add Custom Format</div>
+            </button>
+        </div>
+        <div id="cf-list-empty-filter" class="cf-empty-state" style="display:none">
+            <p>No Custom Formats match your filter.</p>
+        </div>
     </div>
 
-    {# ── Add / Edit ─────────────────────────────────────────────────── #}
-    <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>{% if let Some(edit) = custom_format_edit %}Edit Custom Format #{{ edit.row.id }}{% else %}Add Custom Format{% endif %}</h3>
-        </div>
-        <p class="cf-section-desc">
-            Full Sonarr v4 CF object. Supported spec implementations:
-            <code>ReleaseTitleSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>ResolutionSpecification</code>, <code>SourceSpecification</code>, <code>Ryokan.SeaDexBestSpecification</code>.
-            The compiler runs before saving, so invalid JSON is rejected with an error message.
-        </p>
-        <form method="post" action="/settings/custom-formats/upsert" class="settings-form">
-            {% if let Some(edit) = custom_format_edit %}
-            <input type="hidden" name="id" value="{{ edit.row.id }}">
-            {% if let Some(desc) = edit.trash_description.as_ref() %}
-            <div class="cf-trash-description">
-                <strong>Trash Guides description</strong>
-                <div style="white-space: pre-wrap;">{{ desc }}</div>
-            </div>
-            {% endif %}
-            {% endif %}
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="cf_name">Name</label>
-                    <input type="text" name="name" id="cf_name" required
-                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.name }}{% endif %}">
-                </div>
-                <div class="form-group">
-                    <label for="cf_score">Score</label>
-                    <input type="number" name="score" id="cf_score" required
-                        value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.score }}{% else %}0{% endif %}">
-                </div>
-            </div>
-            <div class="form-group">
-                <label for="cf_trash_id">Trash ID <span class="form-hint">(optional)</span></label>
-                <input type="text" name="trash_id" id="cf_trash_id" placeholder="e.g. ed38b0b3..."
-                    value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.row.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
-            </div>
-            <div class="form-group">
-                <label for="cf_json">Sonarr v4 Custom Format JSON</label>
-                <textarea name="json" id="cf_json" rows="16" required spellcheck="false"
-                    placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.row.json }}{% endif %}</textarea>
-                <span class="form-hint">A top-level <code>trash_description</code> field is preserved verbatim and shown above when editing.</span>
-            </div>
-            <div class="settings-inline-actions">
-                <button type="submit" class="btn btn-primary">
-                    {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
+    {# Editor modal — opens on card click (deep-link via ?edit_id=N auto-
+       opens on load), or on "+ Add Custom Format" tile click. The form
+       still submits natively to the server; a successful save redirects
+       back to the tab (no modal) and a validation error redirects back
+       with ?edit_id=N and the modal re-opens with the error in &err. #}
+    <div class="modal-backdrop" id="cf-editor-modal" style="display:none">
+        <div class="modal cf-editor-modal" style="max-width:780px"
+             role="dialog" aria-modal="true" aria-labelledby="cf-editor-modal-title">
+            <div class="modal-header">
+                <h3 id="cf-editor-modal-title">{% if let Some(edit) = custom_format_edit %}Edit Custom Format{% else %}Add Custom Format{% endif %}</h3>
+                <button class="btn-icon" type="button" onclick="closeCfEditorModal()" aria-label="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
                 </button>
-                {% if custom_format_edit.is_some() %}
-                <a href="/settings?tab=custom_formats" class="btn btn-secondary">Cancel</a>
+            </div>
+            {# Upsert form wraps only the body. The Save button in the
+               footer uses the HTML5 `form="cf-upsert-form"` attribute to
+               submit from outside the form element, which lets the
+               Delete form sit in the same footer without being nested
+               (invalid HTML) or colliding on submit. #}
+            <form id="cf-upsert-form" method="post" action="/settings/custom-formats/upsert" class="settings-form cf-editor-form">
+                <div class="modal-body" style="padding:16px 24px">
+                    <p class="cf-section-desc" style="margin-top:0">
+                        Full Sonarr v4 CF object. Supported spec implementations:
+                        <code>ReleaseTitleSpecification</code>, <code>ReleaseGroupSpecification</code>, <code>SizeSpecification</code>, <code>ResolutionSpecification</code>, <code>SourceSpecification</code>, <code>Ryokan.SeaDexBestSpecification</code>.
+                        The compiler runs before saving, so invalid JSON is rejected with an error message.
+                    </p>
+                    {% if let Some(edit) = custom_format_edit %}
+                    <input type="hidden" name="id" value="{{ edit.row.id }}">
+                    {% if let Some(desc) = edit.trash_description.as_ref() %}
+                    <div class="cf-trash-description">
+                        <strong>Trash Guides description</strong>
+                        <div style="white-space: pre-wrap;">{{ desc }}</div>
+                    </div>
+                    {% endif %}
+                    {% endif %}
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="cf_name">Name</label>
+                            <input type="text" name="name" id="cf_name" required
+                                value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.name }}{% endif %}">
+                        </div>
+                        <div class="form-group">
+                            <label for="cf_score">Score</label>
+                            <input type="number" name="score" id="cf_score" required
+                                value="{% if let Some(edit) = custom_format_edit %}{{ edit.row.score }}{% else %}0{% endif %}">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="cf_trash_id">Trash ID <span class="form-hint">(optional)</span></label>
+                        <input type="text" name="trash_id" id="cf_trash_id" placeholder="e.g. ed38b0b3..."
+                            value="{% if let Some(edit) = custom_format_edit %}{% if let Some(tid) = edit.row.trash_id.as_ref() %}{{ tid }}{% endif %}{% endif %}">
+                    </div>
+                    <div class="form-group">
+                        <label for="cf_json">Sonarr v4 Custom Format JSON</label>
+                        <textarea name="json" id="cf_json" rows="14" required spellcheck="false"
+                            placeholder='{ "name": "My CF", "specifications": [ ... ] }'>{% if let Some(edit) = custom_format_edit %}{{ edit.row.json }}{% endif %}</textarea>
+                        <span class="form-hint">A top-level <code>trash_description</code> field is preserved verbatim and shown above when editing.</span>
+                    </div>
+                </div>
+            </form>
+            {# Footer uses `margin-left: auto` on the right-side button
+               group to pin it to the right regardless of whether the
+               Delete form is rendered or display:none'd. Using
+               `justify-content: space-between` here left Cancel+Save
+               stuck at the start when the Delete form was JS-hidden
+               during the in-place Add reset (flex space-between with
+               one child aligns to start). #}
+            <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;align-items:center">
+                {# Delete lives on the left so it doesn't sit adjacent to
+                   Save Changes (reduces the chance of a misclick). Only
+                   rendered when editing; hidden by JS for the in-place
+                   Add reset. #}
+                {% if let Some(edit) = custom_format_edit %}
+                <form id="cf-delete-form" method="post" action="/settings/custom-formats/delete"
+                      data-ryokan-confirm-title="Delete Custom Format"
+                      data-ryokan-confirm-body="Delete &quot;{{ edit.row.name }}&quot;? This cannot be undone."
+                      data-ryokan-confirm-label="Delete"
+                      style="margin:0">
+                    <input type="hidden" name="id" value="{{ edit.row.id }}">
+                    <button type="submit" class="btn btn-danger">Delete</button>
+                </form>
                 {% endif %}
+                <div style="display:flex;gap:8px;margin-left:auto">
+                    <button type="button" class="btn btn-secondary" onclick="closeCfEditorModal()">Cancel</button>
+                    <button type="submit" form="cf-upsert-form" class="btn btn-primary" id="cf-upsert-submit">
+                        {% if custom_format_edit.is_some() %}Save Changes{% else %}Create Custom Format{% endif %}
+                    </button>
+                </div>
             </div>
-        </form>
-    </div>
-
-    {# ── Global Minimum Score ───────────────────────────────────────── #}
-    <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Global Minimum Score</h3>
-        </div>
-        <p class="cf-section-desc">
-            Auto-search drops releases whose summed CF score falls below this threshold. Interactive search still shows everything. Leave blank to disable the floor.
-        </p>
-        <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form">
-            <div class="form-group">
-                <label for="cf_min_score">Minimum Score</label>
-                <input type="number" name="minimum_score" id="cf_min_score"
-                    value="{{ custom_format_min_score_display }}" placeholder="(blank = no floor)">
-            </div>
-            <button type="submit" class="btn btn-primary">Save Minimum Score</button>
-        </form>
-    </div>
-
-    {# ── Bundled Defaults ───────────────────────────────────────────── #}
-    <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Bundled Defaults</h3>
-        </div>
-        <p class="cf-section-desc">
-            <strong>Install Defaults</strong> imports the bundled anime-tuned CF set (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit/x265, FLAC/Opus, plus the 8-bit mp4 penalty) — existing names are skipped so repeat clicks are safe.
-            <strong>Reset to Defaults</strong> drops every row whose Source column shows <em>default</em> and re-installs them from the bundled file — use this after you've edited a default CF and want the original back. Manual and imported CFs are untouched.
-        </p>
-        <div class="settings-inline-actions">
-            <form method="post" action="/settings/custom-formats/install-defaults"
-                  data-ryokan-confirm-title="Install bundled defaults"
-                  data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
-                  data-ryokan-confirm-label="Install">
-                <button type="submit" class="btn btn-primary">Install Defaults</button>
-            </form>
-            <form method="post" action="/settings/custom-formats/reset-defaults"
-                  data-ryokan-confirm-title="Reset bundled defaults"
-                  data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
-                  data-ryokan-confirm-label="Reset">
-                <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
-            </form>
         </div>
     </div>
+    {% endif %}
 
-    {# ── Import / Export ────────────────────────────────────────────── #}
+    {# ── Import (#11.3) ─────────────────────────────────────────────
+       Two-stage flow:
+       1. Paste / Upload → POST /settings/custom-formats/import.
+          - If every entry is cleanly new, server imports silently and
+            flash-toasts the summary on redirect (unchanged behavior).
+          - If any entry collides or fails to parse, server re-renders
+            this tab with custom_format_import_review populated.
+       2. Review panel shows every parsed entry with a status badge
+          (new / collision / invalid) and error message where applicable,
+          plus per-collision skip/overwrite/rename controls. Single
+          "Apply & Import" button commits everything the user chose. #}
     <div class="cf-section">
         <div class="cf-section-header">
-            <h3>Import / Export</h3>
-        </div>
-        <p class="cf-section-desc">
-            <strong>Export All</strong> keeps every saved CF verbatim (including Ryokan-only specs like <code>Ryokan.SeaDexBestSpecification</code>) and round-trips into another Ryokan instance.
-            <strong>Sonarr-safe</strong> drops whole CFs containing Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance — dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
-        </p>
-        <div class="settings-inline-actions" style="margin-bottom: 16px;">
-            <a href="/settings/custom-formats/export" class="btn btn-secondary">Export All as JSON</a>
-            <a href="/settings/custom-formats/export?mode=sonarr-safe" class="btn btn-secondary">Export (Sonarr-safe)</a>
+            <h3>Import</h3>
         </div>
 
         {% if let Some(review) = custom_format_import_review %}
         <div class="cf-import-review">
-            <h4>Review Import Collisions</h4>
+            <h4 style="margin-top:0">Preview</h4>
             <p class="form-hint">
-                {{ review.collisions.len() }} Custom Format(s) in your import share a name with an existing row.
-                Pick an action per collision. Entries with no collision will import as new rows regardless of these choices.
+                {{ review.entries.len() }} entry in the import payload.
+                Entries marked <strong>new</strong> will import as-is; entries marked <strong>collision</strong> need a per-row action below; entries marked <strong>invalid</strong> failed to parse and are skipped regardless.
             </p>
+            <div class="cf-import-preview">
+                {% for e in review.entries %}
+                <div class="cf-import-preview-row cf-import-status-{{ e.status }}">
+                    <span class="cf-import-status-badge cf-import-status-{{ e.status }}">{{ e.status }}</span>
+                    <span class="cf-import-name">{{ e.name }}{% if e.name.is_empty() %}<em class="form-hint">(unnamed)</em>{% endif %}</span>
+                    <span class="cf-import-meta">
+                        <span class="cf-score {% if e.score > 0 %}cf-score-positive{% else if e.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">{% if e.score > 0 %}+{% endif %}{{ e.score }}</span>
+                        <span class="form-hint">{{ e.specs_count }} spec{% if e.specs_count != 1 %}s{% endif %}</span>
+                    </span>
+                    {% if let Some(err) = e.error.as_ref() %}
+                    <div class="cf-import-error">{{ err }}</div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+
+            {% if !review.collisions.is_empty() %}
+            <h4 style="margin-top:24px">Resolve collisions</h4>
+            <p class="form-hint">
+                {{ review.collisions.len() }} Custom Format(s) share a name with an existing row. Pick an action per collision.
+            </p>
+            {% endif %}
             <form method="post" action="/settings/custom-formats/import-resolve" class="settings-form"
                   onsubmit="return buildCfImportResolvePayload(this);">
                 <input type="hidden" name="payload" value="{{ review.payload }}">
                 <input type="hidden" name="decisions" id="cf_import_resolve_decisions" value="">
                 <input type="hidden" name="renames" id="cf_import_resolve_renames" value="">
+                {% if !review.collisions.is_empty() %}
+                <div class="table-scroll-wrap">
                 <table class="group-source-table cf-table">
                     <thead>
                         <tr>
@@ -624,27 +671,137 @@
                         {% endfor %}
                     </tbody>
                 </table>
-                <div class="settings-inline-actions" style="margin-top: 12px;">
+                </div>
+                {% endif %}
+                {% if review.has_invalid %}
+                <p class="form-hint" style="color:var(--orange); margin-top:12px">
+                    <strong>Heads up:</strong> invalid entries above are silently skipped on apply. Fix the JSON and re-paste if you need those CFs — they won't be reported as failures after import.
+                </p>
+                {% endif %}
+                <div class="settings-inline-actions" style="margin-top: 16px;">
                     <button type="submit" class="btn btn-primary">Apply &amp; Import</button>
                     <a href="/settings?tab=custom_formats" class="btn btn-secondary">Cancel</a>
                 </div>
             </form>
         </div>
-        {% endif %}
-
+        {% else %}
         <form method="post" action="/settings/custom-formats/import" class="settings-form">
+            <p class="cf-section-desc" style="margin-top:0">
+                Paste a Sonarr v4 CF export or upload a .json file. Accepts a single object, an array, or <code>{"custom_formats":[…]}</code> wrapper. Every entry runs through the same compiler as the create form. Invalid entries are flagged for review before any are written.
+            </p>
             <div class="form-group">
-                <label for="cf_import_payload">Paste Sonarr v4 CF Export</label>
-                <textarea name="payload" id="cf_import_payload" rows="10" spellcheck="false"
-                    placeholder='[{"name": "...", "specifications": [...], "score": 100}, ...]'></textarea>
-                <span class="form-hint">
-                    Accepts a single object, an array, or <code>{"custom_formats":[…]}</code> wrapper.
-                    Each entry is compiled via the same parser as the create form. Per-entry failures are counted and the first error is reported.
-                    CFs whose name matches an existing row trigger a review page where you can pick <em>overwrite</em>, <em>rename</em>, or <em>skip</em> per conflict before anything is written.
-                </span>
+                <label for="cf_import_file">Upload JSON file <span class="form-hint">(optional; fills the textarea below)</span></label>
+                <input type="file" id="cf_import_file" accept="application/json,.json"
+                    onchange="cfImportFilePicked(this)">
             </div>
-            <button type="submit" class="btn btn-primary">Import</button>
+            <div class="form-group">
+                <label for="cf_import_payload">Paste Sonarr v4 CF export</label>
+                <textarea name="payload" id="cf_import_payload" rows="10" spellcheck="false"
+                    placeholder='[{"name": "...", "specifications": [...], "score": 100}, ...]' required></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary">Preview &amp; Import</button>
         </form>
+        {% endif %}
+    </div>
+
+    {# ── Export (#11.4) ─────────────────────────────────────────────
+       Per-CF checkbox selector + mode radio + two actions (download
+       file / copy to clipboard). The selector only renders when at
+       least one CF exists — exporting 0 rows isn't useful. #}
+    {% if !custom_formats.is_empty() %}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Export</h3>
+        </div>
+        <p class="cf-section-desc">
+            <strong>Ryokan (native)</strong> keeps every selected CF verbatim (including Ryokan-only specs like <code>Ryokan.SeaDexBestSpecification</code>) and round-trips into another Ryokan instance.
+            <strong>Sonarr-safe</strong> drops selected CFs that contain Ryokan-only specs so the file imports into a vanilla Sonarr v4 instance. Dropped CF names are written to the <a href="/system?tab=logs&amp;category=system">System log</a>.
+        </p>
+
+        <div class="cf-export-mode-row">
+            <label class="cf-export-mode">
+                <input type="radio" name="cf_export_mode" value="" checked>
+                <span>Ryokan (native)</span>
+            </label>
+            <label class="cf-export-mode">
+                <input type="radio" name="cf_export_mode" value="sonarr-safe">
+                <span>Sonarr-safe</span>
+            </label>
+        </div>
+
+        <div class="cf-export-selector">
+            <div class="cf-export-selector-head">
+                <span class="cf-defaults-subtitle" style="margin:0">Custom formats to include</span>
+                <div class="settings-inline-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="cfExportSelectAll(true)">Select all</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="cfExportSelectAll(false)">Select none</button>
+                </div>
+            </div>
+            <div class="cf-export-list">
+                {% for cf in custom_formats %}
+                <label class="cf-export-check">
+                    <input type="checkbox" name="cf_export_ids" value="{{ cf.row.id }}" checked>
+                    <span class="cf-origin-dot cf-origin-dot-{{ cf.row.origin }}"></span>
+                    <span class="cf-export-check-name">{{ cf.row.name }}</span>
+                    <span class="cf-export-check-score cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
+                        {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
+                    </span>
+                </label>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="settings-inline-actions" style="margin-top: 16px">
+            <button type="button" class="btn btn-primary" onclick="cfExportDownload()">Export JSON</button>
+            <button type="button" class="btn btn-secondary" onclick="cfExportClipboard(this)">Copy to clipboard</button>
+        </div>
+    </div>
+    {% endif %}
+
+    {# ── Minimum Score ───────────────────────────────────────────── #}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Minimum Score</h3>
+        </div>
+        <p class="cf-section-desc">
+            Auto-search drops any release whose summed CF score falls below this floor. Interactive search still shows everything. Leave blank to disable the floor entirely.
+        </p>
+        <form method="post" action="/settings/custom-formats/minimum-score" class="settings-form cf-min-score-form">
+            <div class="form-group cf-min-score-group">
+                <input type="number" name="minimum_score" id="cf_min_score"
+                    value="{{ custom_format_min_score_display }}"
+                    placeholder="(blank = no floor)"
+                    aria-label="Minimum score">
+                <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+        </form>
+    </div>
+
+    {# ── Bundled Defaults (#11.5) ────────────────────────────────── #}
+    <div class="cf-section">
+        <div class="cf-section-header">
+            <h3>Bundled Defaults</h3>
+        </div>
+        <p class="cf-section-desc">
+            <strong>Install Defaults</strong> adds the bundled anime-tuned Custom Formats (SeaDex best, Tier S BD groups, BD source, WEB groups, 10-bit / x265, FLAC / Opus, plus an 8-bit mp4 penalty). Repeat clicks are safe: existing names are skipped.
+        </p>
+        <p class="cf-section-desc">
+            <strong>Reset to Defaults</strong> drops every row with Source = <em>default</em> and re-installs the bundled set from scratch. Useful if you edited a default CF and want the original back. Manual and imported CFs are untouched.
+        </p>
+        <div class="settings-inline-actions">
+            <form method="post" action="/settings/custom-formats/install-defaults"
+                  data-ryokan-confirm-title="Install bundled defaults"
+                  data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
+                  data-ryokan-confirm-label="Install">
+                <button type="submit" class="btn btn-primary">Install Defaults</button>
+            </form>
+            <form method="post" action="/settings/custom-formats/reset-defaults"
+                  data-ryokan-confirm-title="Reset bundled defaults"
+                  data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
+                  data-ryokan-confirm-label="Reset">
+                <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
+            </form>
+        </div>
     </div>
 </div>
 {% endif %}
@@ -671,6 +828,222 @@
         });
     });
 })();
+
+// #11.1 — Client-side filter for the CF card grid. Matches against
+// `data-cf-*` attributes on each card (name is pre-lowercased
+// server-side, score/trash_id/origin match case-insensitively). Empty
+// query = show all. Updates the `#cf-visible-count` pill and toggles
+// the "no matches" placeholder so the grid doesn't render as a blank
+// void when every card is filtered out.
+function filterCfList(query) {
+    const q = (query || '').trim().toLowerCase();
+    const grid = document.getElementById('cf-list-tbody');
+    if (!grid) return;
+    const cards = grid.querySelectorAll('.cf-card:not(.cf-card-add)');
+    let visible = 0;
+    cards.forEach(function(card) {
+        if (!q) {
+            card.style.display = '';
+            visible++;
+            return;
+        }
+        const name = card.dataset.cfName || '';
+        const score = (card.dataset.cfScore || '').toLowerCase();
+        const trashId = card.dataset.cfTrashId || '';
+        const origin = (card.dataset.cfOrigin || '').toLowerCase();
+        const hit = name.includes(q)
+            || score.includes(q)
+            || trashId.includes(q)
+            || origin.includes(q);
+        card.style.display = hit ? '' : 'none';
+        if (hit) visible++;
+    });
+    const countEl = document.getElementById('cf-visible-count');
+    if (countEl) countEl.textContent = visible;
+    const emptyEl = document.getElementById('cf-list-empty-filter');
+    if (emptyEl) emptyEl.style.display = (visible === 0 && cards.length > 0) ? '' : 'none';
+    // Hide the trailing "+ Add" tile while the user is filtering —
+    // mixing it into search results reads as noise.
+    const addCard = grid.querySelector('.cf-card-add');
+    if (addCard) addCard.style.display = q ? 'none' : '';
+}
+
+// #11.1 stage 2 — modal editor open/close. The modal element itself is
+// server-rendered with the pre-filled form when ?edit_id=N is set, so
+// auto-opening is just flipping display. "+ Add Custom Format" opens a
+// fresh modal — but since the form markup is tied to server-side edit
+// state, clicking + on a page that's rendering in edit mode would
+// open the edit form, not a blank one. Fix by clearing edit_id via a
+// GET navigation first whenever the user hits + from an edit-mode page.
+function openCfEditorModal() {
+    const modal = document.getElementById('cf-editor-modal');
+    if (!modal) return;
+    // Reset the form to "Add Custom Format" shape in-place. The form
+    // was server-rendered with the previous edit's values if the page
+    // load had ?edit_id=N, so just flipping display:flex would show
+    // those stale fields. Navigate-to-reset (the previous fix) worked
+    // but required two clicks to see the empty modal. Clearing in-place
+    // keeps it a single click.
+    const form = modal.querySelector('form');
+    if (form) {
+        const hiddenId = form.querySelector('input[type="hidden"][name="id"]');
+        if (hiddenId) hiddenId.remove();
+        const trashDesc = form.querySelector('.cf-trash-description');
+        if (trashDesc) trashDesc.remove();
+        const name = form.querySelector('#cf_name');
+        if (name) name.value = '';
+        const score = form.querySelector('#cf_score');
+        if (score) score.value = '0';
+        const trashId = form.querySelector('#cf_trash_id');
+        if (trashId) trashId.value = '';
+        const json = form.querySelector('#cf_json');
+        if (json) json.value = '';
+    }
+    const title = document.getElementById('cf-editor-modal-title');
+    if (title) title.textContent = 'Add Custom Format';
+    const submit = document.getElementById('cf-upsert-submit');
+    if (submit) submit.textContent = 'Create Custom Format';
+    // Hide the Delete form — nothing to delete when we haven't saved
+    // yet. Leaving it visible in Add mode would let the user click
+    // Delete with the previously-edited CF's hidden id still in the
+    // form (server-rendered). Hiding also collapses the footer to the
+    // single-button layout on the right.
+    const deleteForm = document.getElementById('cf-delete-form');
+    if (deleteForm) deleteForm.style.display = 'none';
+
+    modal.style.display = 'flex';
+    const nameEl = document.getElementById('cf_name');
+    if (nameEl) nameEl.focus();
+}
+function closeCfEditorModal() {
+    const modal = document.getElementById('cf-editor-modal');
+    if (modal) modal.style.display = 'none';
+    // Drop ?edit_id=N from the URL without reloading so Cancel doesn't
+    // leave the user on a URL that'd re-open the modal on refresh.
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('edit_id')) {
+        params.delete('edit_id');
+        const newUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+        history.replaceState(null, '', newUrl);
+    }
+    // Drop the selected-card highlight. The class was server-rendered
+    // based on ?edit_id=N, so closing without a full reload leaves the
+    // highlight stuck on the originally-edited card until next refresh.
+    document.querySelectorAll('.cf-card-selected').forEach(function(el) {
+        el.classList.remove('cf-card-selected');
+    });
+}
+// Auto-open on load when the URL carries ?edit_id=N — the server
+// already rendered the pre-filled form inside the modal markup, so
+// this is just a display flip. Also handle backdrop click + Escape
+// to dismiss.
+(function() {
+    const modal = document.getElementById('cf-editor-modal');
+    if (!modal) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('edit_id')) {
+        modal.style.display = 'flex';
+    }
+    modal.addEventListener('click', function(ev) {
+        if (ev.target === modal) closeCfEditorModal();
+    });
+    document.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Escape' && modal.style.display !== 'none') closeCfEditorModal();
+    });
+})();
+
+// #11.4 — CF export selector. Radios pick the mode, checkboxes pick the
+// ids, then two actions: download the file (via the existing GET endpoint)
+// or copy the pretty-printed JSON to the clipboard (same endpoint, fetch
+// then navigator.clipboard.writeText).
+
+// #11.3 — When a JSON file is picked, read it and drop into the paste
+// textarea so the user doesn't need a two-step ceremony. The server-side
+// flow stays the same (POST payload → preview → resolve).
+function cfImportFilePicked(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+        const target = document.getElementById('cf_import_payload');
+        if (target && ev.target && typeof ev.target.result === 'string') {
+            target.value = ev.target.result;
+            target.focus();
+        }
+    };
+    reader.onerror = function() {
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'error', title: 'Import', body: 'Could not read the file.' });
+        }
+    };
+    reader.readAsText(file);
+}
+
+function cfExportSelectAll(state) {
+    document.querySelectorAll('input[name="cf_export_ids"]').forEach(function(cb) {
+        cb.checked = state;
+    });
+}
+
+function cfExportBuildUrl() {
+    const mode = document.querySelector('input[name="cf_export_mode"]:checked');
+    const ids = Array.from(
+        document.querySelectorAll('input[name="cf_export_ids"]:checked')
+    ).map(function(cb) { return cb.value; });
+    const params = new URLSearchParams();
+    if (mode && mode.value) params.set('mode', mode.value);
+    // Only attach `ids` when the user has deselected at least one; an
+    // empty `ids` param would be interpreted by the server as "all" (by
+    // design — keeps curl workflows unchanged), but sending the full list
+    // as the default is also harmless.
+    if (ids.length > 0) params.set('ids', ids.join(','));
+    const qs = params.toString();
+    return '/settings/custom-formats/export' + (qs ? '?' + qs : '');
+}
+
+function cfExportDownload() {
+    // Simplest possible "download file" trigger: navigate to the URL —
+    // the server sets Content-Disposition: attachment and the browser
+    // handles the rest. Guards against "select none, click export" by
+    // bailing with a toast.
+    const ids = document.querySelectorAll('input[name="cf_export_ids"]:checked');
+    if (ids.length === 0) {
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'warn', title: 'Export', body: 'Select at least one Custom Format to export.' });
+        }
+        return;
+    }
+    window.location.href = cfExportBuildUrl();
+}
+
+async function cfExportClipboard(btn) {
+    const ids = document.querySelectorAll('input[name="cf_export_ids"]:checked');
+    if (ids.length === 0) {
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'warn', title: 'Export', body: 'Select at least one Custom Format to copy.' });
+        }
+        return;
+    }
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Copying…';
+    try {
+        const resp = await fetch(cfExportBuildUrl(), { credentials: 'same-origin' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const text = await resp.text();
+        await navigator.clipboard.writeText(text);
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'success', title: 'Copied', body: ids.length + ' Custom Format(s) copied to clipboard.' });
+        }
+    } catch (e) {
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'error', title: 'Copy failed', body: String(e && e.message ? e.message : e) });
+        }
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
 
 function generateApiKey() {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';

@@ -25,6 +25,16 @@
     --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
     --radius: 6px;
     --radius-lg: 10px;
+    /* #20 — Breakpoint system. Exposed as custom properties so JS that
+     * needs to know "am I on mobile" can read them via getComputedStyle
+     * instead of duplicating pixel values. The @media queries throughout
+     * the stylesheet still hardcode these numbers because `@media
+     * (max-width: var(--bp-phone))` is only supported in very recent
+     * browsers; a comment at each @media block references which
+     * breakpoint it's targeting. */
+    --bp-phone: 640px;
+    --bp-tablet: 900px;
+    --bp-desktop: 1100px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -36,6 +46,213 @@ body {
     font-size: 15px;
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
+}
+
+/* #20 — Mobile reset. Below --bp-phone iOS Safari will auto-zoom on
+ * any form input whose font-size is < 16px, so everything that accepts
+ * keyboard input gets bumped to 16px. Also scale body font-size up
+ * slightly so copy is legible at phone widths without the browser's
+ * own text-zoom fallback kicking in. */
+@media (max-width: 640px) {
+    /* Pin html + body at the viewport width. Firefox mobile honors
+     * `overflow-x: hidden` on body only if the element establishes a
+     * containing block that doesn't get stretched by descendants;
+     * setting max-width: 100vw on html forces that. Both html and
+     * body get overflow-x: hidden + max-width: 100vw so a descendant
+     * with intrinsic width > viewport (a select with long option
+     * text, a wide nav anchor, etc.) gets clipped rather than
+     * forcing the whole page to h-scroll. */
+    html, body {
+        overflow-x: hidden;
+        max-width: 100vw;
+    }
+    body {
+        font-size: 16px;
+        /* Padding so the fixed bottom tab bar (56px tall + safe-area
+         * inset for iOS home indicator) doesn't overlap page content. */
+        padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    }
+    input[type="text"],
+    input[type="search"],
+    input[type="number"],
+    input[type="password"],
+    input[type="email"],
+    input[type="url"],
+    input[type="tel"],
+    select,
+    textarea {
+        font-size: 16px;
+    }
+    /* Forms fill their parent on mobile. Without this, `<input>` keeps
+     * its user-agent default width (~173px for 20ch) and wanders out
+     * of its fieldset instead of filling the column. `max-width: 100%`
+     * belt-and-suspenders against inline-style widths. */
+    .form-group input,
+    .form-group select,
+    .form-group textarea,
+    .settings-form input,
+    .settings-form select,
+    .settings-form textarea {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+    /* Fieldset padding is 24px on desktop; shrink on phone so the
+     * input grid has more usable horizontal space.
+     *
+     * `min-width: 0` works around a long-standing browser quirk where
+     * <fieldset> defaults to `min-width: min-content`, so a wide child
+     * (like the group-source-table before its scroll wrap caught it)
+     * would force the fieldset past the viewport and cut the page off.
+     * Without this, the Release Groups tab renders fine horizontally
+     * but the fieldset's computed height clips below the real content. */
+    fieldset {
+        padding: 16px;
+        min-width: 0;
+    }
+    /* Content container padding tightens from 24px to 14px side-padding
+     * so forms don't get squeezed on both sides. */
+    .content {
+        padding: 24px 14px calc(80px + env(safe-area-inset-bottom, 0px));
+    }
+
+    /* Wide data tables (Groups, CF import collision review) that live
+     * directly in their section need a scrolling parent on mobile. The
+     * template wraps them in a `<div class="table-scroll-wrap">` so
+     * the table can keep its native <table> layout (display:block on
+     * the table itself broke the internal row layout in some contexts).
+     * `-webkit-overflow-scrolling: touch` preserves inertial scrolling
+     * on iOS. */
+    .table-scroll-wrap {
+        overflow-x: auto;
+        max-width: 100%;
+        -webkit-overflow-scrolling: touch;
+    }
+    /* Pre-wrap form-hint so it doesn't get dragged wider when a
+     * sibling (e.g. a wide table below) temporarily forces the
+     * parent container past viewport during layout. */
+    .form-hint {
+        overflow-wrap: anywhere;
+    }
+
+    /* Specific overflow culprits identified during phone testing.
+     * Each of these set a fixed/min width that forced their parent
+     * past the viewport at ~500px widths. */
+
+    /* RSS-decisions "Reason" column had `min-width: 420px` which
+     * alone exceeds a 412px viewport. Let the cell shrink to its
+     * share of the table width; the text wraps via .rss-reason-text
+     * `white-space: pre-wrap` so long reasons stay readable. */
+    .rss-reason-cell {
+        min-width: 0;
+    }
+
+    /* RSS-decisions filter-row text input had `flex: 1 1 320px` so
+     * its natural size pushed siblings off-screen. Shrink to zero
+     * basis so the flex container can honor the viewport. */
+    .rss-table-controls input,
+    .rss-table-controls select {
+        flex: 1 1 0;
+        min-width: 0;
+    }
+
+    /* Logs-table fixed-width columns collectively exceed 500px
+     * (160 + 70 + 100 + content = 330+ reserved). Drop the
+     * hard widths on mobile and let content dictate width; the
+     * table wrapper keeps overflow-x: auto as a fallback. */
+    .log-col-time,
+    .log-col-level,
+    .log-col-cat {
+        width: auto;
+        min-width: 0;
+    }
+    .log-col-time {
+        font-size: 11px;
+        white-space: nowrap;
+    }
+
+    /* Password/API-key/download-path rows use inline `display: flex;
+     * gap: 8px;` with `white-space: nowrap` buttons that refuse to
+     * shrink. Allow the row to wrap so Show/Copy can drop below the
+     * input rather than fighting it for width. */
+    .form-group > div[style*="display: flex"] {
+        flex-wrap: wrap;
+    }
+
+    /* Logs: the desktop table uses `table-layout: fixed` with per-cell
+     * `overflow: hidden`, which at phone widths collapses columns into
+     * equal-split boxes that then clip the message to a few characters
+     * (often to nothing visible). On phone, convert the table into a
+     * stacked card per row: top metadata strip (level + timestamp +
+     * category) over a full-width wrapped message and detail block.
+     * There's no :hover on touch, so always show detail fully. */
+    .log-table {
+        table-layout: auto;
+        display: block;
+    }
+    .log-table thead { display: none; }
+    .log-table tbody { display: block; }
+    .log-table tr.log-row {
+        display: block;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(42, 42, 58, 0.4);
+        background: var(--bg-card);
+    }
+    .log-table td {
+        display: block;
+        padding: 0;
+        border: none;
+        overflow: visible;
+        text-overflow: clip;
+        background: transparent;
+    }
+    .log-table td.log-col-time,
+    .log-table td.log-col-level,
+    .log-table td.log-col-cat {
+        display: inline-block;
+        vertical-align: middle;
+        margin-right: 8px;
+        font-size: 11px;
+    }
+    .log-table td.log-col-time { white-space: nowrap; }
+    .log-table td.log-col-msg { margin-top: 6px; }
+    .log-row .log-message {
+        display: block;
+        overflow-wrap: break-word;
+        word-break: normal;
+        color: var(--text);
+    }
+    .log-row .log-detail {
+        display: block;
+        white-space: normal;
+        overflow-wrap: break-word;
+        word-break: normal;
+        margin-top: 4px;
+    }
+
+    /* Series detail: strip the outer season-section card on phone so
+     * the rounded-border container doesn't nest around the already-
+     * carded episode rows (created duplicated visible lines around
+     * the table). Season header stays as a flat header; episodes sit
+     * directly below it as independent cards. */
+    .season-section {
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        overflow: visible;
+        margin-bottom: 20px;
+    }
+    .season-header { padding: 10px 0; }
+    .season-body { border-top: none; padding-top: 6px; }
+}
+
+/* #20 — Mobile tab bar default (hidden). The actual phone-width swap
+ * (hide .nav-links, show tab bar) lives further down after the
+ * default `.nav-links { display: flex }` rule so the cascade works
+ * out — an earlier media-query rule loses to a later unscoped rule
+ * with equal specificity. */
+.mobile-tabbar {
+    display: none;
 }
 
 /* --- Nav --- */
@@ -78,6 +295,79 @@ body {
 .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
 .nav-links a.active { color: var(--accent); background: rgba(203, 166, 247, 0.08); }
 .nav-logout { color: var(--text-dim) !important; }
+
+/* #20 — Below --bp-phone, hide the top nav's link strip and show
+ * the fixed bottom tab bar declared at the top of the file. This
+ * block must live AFTER the default `.nav-links { display: flex }`
+ * rule above or the cascade reorders it out of effect. */
+@media (max-width: 640px) {
+    .nav-links {
+        display: none;
+    }
+    .mobile-tabbar {
+        display: flex;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 100;
+        background: var(--bg);
+        border-top: 1px solid var(--border);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        /* Promote to its own GPU compositing layer so address-bar
+         * show/hide on iOS Safari doesn't repaint the blurred
+         * backdrop-filter layer on every scroll tick. Combined with
+         * dropping the blur entirely (solid bg above) to prevent the
+         * jitter users were seeing. */
+        will-change: transform;
+        transform: translateZ(0);
+    }
+    .mobile-tab {
+        /* Explicit equal-width (1/5) instead of `flex: 1 1 0`. With
+         * flex-basis:0, column-flex children whose natural content
+         * width varies slightly (ICON + short label) can trigger
+         * sub-pixel rounding that makes Library/System feel further
+         * apart than Search/Downloads/Settings. Pinning each tab to
+         * 20% guarantees geometric parity regardless of content. */
+        flex: 0 0 20%;
+        width: 20%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        padding: 8px 4px 6px;
+        color: var(--text-dim);
+        text-decoration: none;
+        min-height: 56px;
+        transition: color 0.15s;
+    }
+    .mobile-tab svg {
+        flex-shrink: 0;
+    }
+    .mobile-tab-label {
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.2px;
+    }
+    .mobile-tab.active {
+        color: var(--accent);
+    }
+    .mobile-tab:hover {
+        color: var(--text-bright);
+    }
+    .mobile-tab.active:hover {
+        color: var(--accent);
+    }
+    /* Keyboard focus ring — fires only for keyboard users via
+     * `:focus-visible`, so touch taps don't leave a stuck focus
+     * outline on the previously-tapped tab. */
+    .mobile-tab:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+        border-radius: 4px;
+    }
+}
 
 /* --- Content --- */
 .content {
@@ -377,6 +667,87 @@ fieldset legend {
 .col-seed, .col-leech, .col-dl { width: 50px; text-align: right; }
 .col-actions { width: 70px; text-align: right; }
 
+/* #20 — Search results card view (mobile). Dual-markup approach:
+ * results-table above renders both desktop and mobile shapes
+ * server-side, CSS hides one per viewport. loadMore() appends to
+ * both so paginated results stay in sync if the user resizes. */
+.results-cards {
+    display: none;
+}
+@media (max-width: 640px) {
+    .results-table {
+        display: none;
+    }
+    .results-cards {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+}
+.result-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+/* Same batch/trusted tinting as the table rows (blue / green /
+ * purple stripes) so color-coding is consistent across viewports. */
+.result-card.is-batch {
+    border-left: 3px solid var(--blue);
+    background: var(--blue-bg);
+}
+.result-card.is-trusted {
+    border-left: 3px solid var(--green);
+    background: var(--green-bg);
+}
+.result-card.is-batch.is-trusted {
+    border-left: 3px solid var(--purple);
+    background: var(--purple-bg);
+}
+.result-card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+.result-card-title {
+    color: var(--text);
+    text-decoration: none;
+    font-size: 14px;
+    line-height: 1.4;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-weight: 500;
+}
+.result-card-title:hover {
+    color: var(--accent);
+}
+.result-card-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.result-card-footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+}
+.result-card-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+.result-card-footer .btn-grab {
+    margin-left: auto;
+    padding: 8px 16px;
+}
+
 .col-name a {
     color: var(--text);
     text-decoration: none;
@@ -468,6 +839,18 @@ fieldset legend {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 20px;
+}
+/* #20 — Tighter minimum below --bp-phone so 375px-wide viewports
+ * (iPhone SE and friends) show two posters per row with healthy
+ * spacing. At 160px min, a 375px viewport drops to a single
+ * column; at 120px min, it cleanly fits 2. Gap also tightens from
+ * 20px → 12px so the reduced poster width isn't dominated by the
+ * gap itself. */
+@media (max-width: 640px) {
+    .library-grid {
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 12px;
+    }
 }
 
 .series-card {
@@ -619,6 +1002,27 @@ fieldset legend {
     padding: 20px 24px;
     overflow-y: auto;
     flex: 1;
+}
+
+/* #20 commit 8 — Full-screen modals on phone. Below --bp-phone the
+ * modal-backdrop padding drops to 0 and the modal fills the viewport
+ * edge-to-edge. Improves tap targets and avoids the fiddly
+ * floating-card feel on small screens. Applies to the shared
+ * .modal / .modal-backdrop primitives so ryokanConfirm / ryokanAlert
+ * / ryokanPrompt and the CF editor modal all pick it up
+ * automatically. */
+@media (max-width: 640px) {
+    .modal-backdrop {
+        padding: 0;
+    }
+    .modal {
+        max-width: none;
+        width: 100%;
+        height: 100%;
+        max-height: 100vh;
+        border-radius: 0;
+        border: none;
+    }
 }
 
 .modal-header .btn-icon {
@@ -1707,10 +2111,81 @@ fieldset legend {
     .detail-banner { height: 160px; margin-bottom: -40px; }
     .ep-filename { max-width: 180px; }
     .ep-col-size { display: none; }
-    .ep-col-aired { display: none; }
     .folder-row { flex-wrap: wrap; }
     .folder-select { max-width: none; width: 100%; }
     .season-header { padding: 12px 14px; }
+
+    /* #20 — Episode table on phone. Keep the table shape but break the
+     * actions cell onto its own line underneath the primary row — at
+     * phone widths there's no room for three 34px icons after status/
+     * num/mon/title/quality without squeezing title to nothing.
+     *
+     * Done by turning each <tr> into a CSS grid with two template
+     * rows: primary data on top, actions spanning full width below.
+     * No card border — just a separator line between rows so it still
+     * reads like a table, not a stack of cards. */
+    .episode-table { font-size: 12px; }
+    .episode-table thead { display: none; }
+    .episode-table tbody,
+    .episode-table { display: block; width: 100%; }
+    .episode-table tr {
+        display: grid;
+        grid-template-columns: auto auto auto 1fr auto;
+        grid-template-areas:
+            "status num mon title quality"
+            "actions actions actions actions actions";
+        align-items: center;
+        gap: 4px 8px;
+        padding: 8px 4px;
+        border-bottom: 1px solid var(--border);
+    }
+    .episode-table td {
+        padding: 0;
+        border: none;
+        vertical-align: middle;
+    }
+    .ep-col-status { grid-area: status; width: auto; }
+    .ep-col-num { grid-area: num; width: auto; text-align: left; }
+    .ep-col-monitor { grid-area: mon; width: auto; }
+    .ep-col-title {
+        grid-area: title;
+        min-width: 0;
+        overflow-wrap: break-word;
+        word-break: normal;
+    }
+    .ep-col-aired { display: none; }
+    .ep-col-size { display: none; }
+    .ep-col-quality {
+        grid-area: quality;
+        width: auto;
+        min-width: 0;
+        text-align: right;
+        white-space: nowrap;
+    }
+    .tag-quality { padding: 1px 5px; font-size: 9px; }
+    /* Two-class selector so this wins over the later `.ep-col-actions`
+     * desktop rule (width: 84px; white-space: nowrap) that would
+     * otherwise pin the cell to 84px inside its full-width grid slot
+     * and push the buttons left. */
+    .episode-table .ep-col-actions {
+        grid-area: actions;
+        width: auto;
+        text-align: right;
+        padding-top: 6px;
+        white-space: normal;
+        justify-self: stretch;
+    }
+    .episode-table .ep-col-actions .icon-btn {
+        display: inline-flex;
+        min-width: 40px;
+        min-height: 40px;
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        margin: 0 0 0 6px;
+    }
+    .ep-filename { max-width: none; }
+    .ep-mon-btn { padding: 3px 8px; min-height: 28px; font-size: 11px; }
 }
 
 
@@ -2106,6 +2581,31 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 .system-tab:hover { color: var(--text); }
 .system-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+/* #20 commit 7 — On phone the tab strip wraps to 2-3 lines (Connections
+ * / Preferred Quality & Releases / Custom Formats / Release Groups /
+ * General at 412px is way too much for one row). Convert to a
+ * horizontally-scrolling strip with snap points so each tab lands
+ * cleanly at the left edge. Same treatment for .settings-tabs and
+ * .system-tabs since they share the same class. */
+@media (max-width: 640px) {
+    .system-tabs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scroll-snap-type: x proximity;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+    .system-tabs::-webkit-scrollbar {
+        display: none;
+    }
+    .system-tab {
+        flex-shrink: 0;
+        scroll-snap-align: start;
+        padding: 10px 14px;
+        font-size: 13px;
+    }
+}
+
 .settings-tabs {
     margin-bottom: 24px;
 }
@@ -2296,6 +2796,552 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     font-weight: 500;
 }
 
+/* #11.5 — Defaults & Threshold vertical stack. Two subsections
+ * (Bundled defaults + Minimum score) share one card, separated by
+ * the subtitle + paragraph rhythm. The 2-column grid attempt read
+ * as an orphan floating block for Min Score; stacking is cleaner. */
+.cf-defaults-subtitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-bright);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 10px;
+}
+.cf-min-score-form {
+    margin: 0;
+}
+/* Score-floor input + inline Save button. Explicit `flex-direction:
+ * row` overrides `.form-group`'s default `column` so the two children
+ * sit side-by-side; without it the Save button wraps below the input
+ * which reads as two separate controls. */
+.cf-min-score-group {
+    display: flex;
+    flex-direction: row;
+    gap: 8px;
+    align-items: center;
+    max-width: 360px;
+    margin: 0;
+}
+.cf-min-score-group input[type="number"] {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.cf-min-score-group .btn {
+    flex-shrink: 0;
+}
+
+/* #11.1 modal — the CF editor form wraps BOTH .modal-body and
+ * .modal-footer, so the .modal's flex-column rule can't keep the footer
+ * stuck at the bottom without the form itself being a flex child too.
+ * Without this, long textareas push the footer past the modal's
+ * max-height: 80vh and the Save/Cancel buttons clip. (#11.1 follow-up) */
+.cf-editor-form {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* #11.4 — Export selector card. Mode radio row, per-CF checkbox list,
+ * and a pair of action buttons. The checkbox list is vertically scrollable
+ * when many CFs are installed. */
+.cf-export-mode-row {
+    display: flex;
+    gap: 18px;
+    margin-bottom: 14px;
+}
+.cf-export-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+}
+.cf-export-selector {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+.cf-export-selector-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.cf-export-list {
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 8px 14px;
+}
+.cf-export-check {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    font-size: 13px;
+    cursor: pointer;
+}
+.cf-export-check:hover {
+    color: var(--text-bright);
+}
+.cf-export-check-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.cf-export-check-score {
+    flex-shrink: 0;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+/* #11.3 — Import preview panel. One row per parsed entry with a
+ * status badge on the left (new / collision / invalid), the CF name
+ * and score/spec-count in the middle, and an inline error message
+ * below for invalid rows. */
+.cf-import-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    background: var(--bg-elevated);
+}
+.cf-import-preview-row {
+    display: grid;
+    grid-template-columns: 90px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--border);
+}
+.cf-import-preview-row:last-child {
+    border-bottom: none;
+}
+.cf-import-status-badge {
+    display: inline-block;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-dim);
+}
+.cf-import-status-badge.cf-import-status-new {
+    background: rgba(140, 204, 151, 0.12);
+    color: #8ccc97;
+    border-color: rgba(140, 204, 151, 0.3);
+}
+.cf-import-status-badge.cf-import-status-collision {
+    background: rgba(234, 179, 8, 0.14);
+    color: #e6c86b;
+    border-color: rgba(234, 179, 8, 0.35);
+}
+.cf-import-status-badge.cf-import-status-invalid {
+    background: rgba(220, 70, 70, 0.12);
+    color: #e06b6b;
+    border-color: rgba(220, 70, 70, 0.3);
+}
+.cf-import-name {
+    font-weight: 500;
+    color: var(--text-bright);
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+.cf-import-meta {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.cf-import-error {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    color: #e06b6b;
+    font-family: monospace;
+    word-break: break-word;
+    background: rgba(220, 70, 70, 0.06);
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-top: 4px;
+}
+
+/* Dark-theme styling for native form widgets that otherwise render as
+ * OS-default white controls on the CF tab: radios (Export mode
+ * picker), number input spin buttons (Min Score), and the file-picker
+ * button (Import). Kept scoped to the .settings-form / .cf-section
+ * context so this doesn't accidentally restyle unrelated inputs
+ * elsewhere in the app. */
+
+/* Radios — used by the #11.4 export-mode picker. Native radios render
+ * as a white circle with a white dot; custom appearance: none lets us
+ * draw a dark-theme version with the accent color for the selected
+ * state, matching the existing checkbox treatment. */
+.cf-section input[type="radio"],
+.settings-form input[type="radio"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border-accent);
+    border-radius: 50%;
+    background: var(--bg);
+    margin: 0;
+    cursor: pointer;
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    vertical-align: middle;
+    transition: border-color 0.15s, background 0.15s;
+}
+.cf-section input[type="radio"]:checked,
+.settings-form input[type="radio"]:checked {
+    border-color: var(--accent);
+    background: var(--bg);
+}
+.cf-section input[type="radio"]:checked::after,
+.settings-form input[type="radio"]:checked::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+}
+
+/* Number input spin arrows — the <input type="number"> spinner UI is
+ * browser-default white on Chromium/WebKit. Hide the spinner entirely;
+ * the user can still type or arrow-key the value. The Min Score field
+ * (and the CF Score field in the edit modal) are both happier without
+ * spinner chrome. Firefox-specific hides via appearance: textfield. */
+.cf-section input[type="number"],
+.settings-form input[type="number"] {
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+.cf-section input[type="number"]::-webkit-outer-spin-button,
+.cf-section input[type="number"]::-webkit-inner-spin-button,
+.settings-form input[type="number"]::-webkit-outer-spin-button,
+.settings-form input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
+}
+
+/* Style the native file input so the "Choose File" button isn't a
+ * white OS-default block on the dark theme. Can't style the button
+ * directly (browser UA shadow DOM), but we can style the input's
+ * ::file-selector-button pseudo-element which both Chromium and
+ * Firefox expose. The rest of the input is the selected-file text
+ * that sits next to the button. */
+input[type="file"] {
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 13px;
+    max-width: 100%;
+}
+input[type="file"]::file-selector-button {
+    background: var(--bg-card);
+    color: var(--text-bright);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 12px;
+    margin-right: 10px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+input[type="file"]::file-selector-button:hover {
+    background: var(--bg-elevated);
+    border-color: var(--border-accent);
+    color: var(--accent);
+}
+
+/* #11.1 — Sonarr-style CF card grid (full-width flex-wrap of ~300px
+ * cards). Replaced the earlier two-pane table layout because compressing
+ * a list into 490px made names wrap ugly and the + Delete button clip.
+ * Each card is a clickable tile that deep-links to ?edit_id=N; the
+ * editor form still lives below the grid (modal-ified in stage 2). */
+/* Stand-alone input class for inputs that live outside a .form-group
+ * (the CF filter search box, the RSS filter search box, etc.). Mirrors
+ * the .form-group input treatment so these don't fall back to the
+ * browser-default white chrome. */
+.settings-input {
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 14px;
+    font-family: var(--font-body);
+    transition: border-color 0.15s;
+}
+.settings-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+/* Chromium/WebKit render input[type=search] with its own internal
+ * search-cancel button and rounded corners; reset those so the input
+ * matches the rest of the dark theme. */
+.settings-input[type="search"] {
+    -webkit-appearance: none;
+    appearance: none;
+}
+.settings-input[type="search"]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-left: 6px;
+    background: var(--text-dim);
+    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M18 6L6 18M6 6l12 12' stroke='black' stroke-width='3' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M18 6L6 18M6 6l12 12' stroke='black' stroke-width='3' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
+    cursor: pointer;
+    opacity: 0.6;
+}
+.settings-input[type="search"]::-webkit-search-cancel-button:hover {
+    opacity: 1;
+    background: var(--accent);
+}
+
+.cf-list-filter {
+    margin-bottom: 14px;
+    width: 100%;
+    max-width: 520px;
+}
+.cf-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+}
+.cf-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: border-color 0.15s, background 0.15s;
+    min-height: 120px;
+}
+.cf-card:hover {
+    border-color: var(--border-accent);
+    background: var(--bg);
+}
+.cf-card-selected {
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.06);
+}
+.cf-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 16px;
+    color: inherit;
+    text-decoration: none;
+    flex: 1 1 auto;
+}
+.cf-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+.cf-card-title-row {
+    display: flex;
+    align-items: flex-start;
+    /* Wider gap so the × button that replaces the dot on hover
+     * doesn't crowd the name text. The dot is 8px, the × is ~20px;
+     * matching the × width in the gap keeps the name visually anchored
+     * at the same position regardless of hover state. */
+    gap: 16px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+/* Nudge the origin dot down slightly so it sits on the x-height of the
+ * name's first line instead of clinging to the cap height. Only matters
+ * when the name wraps to 2+ lines — otherwise the center-vs-baseline
+ * difference is imperceptible. */
+.cf-card-title-row .cf-origin-dot {
+    margin-top: 6px;
+}
+.cf-card-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin: 0;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+}
+.cf-card-selected .cf-card-name {
+    color: var(--accent);
+}
+.cf-card-score {
+    font-size: 13px;
+    font-weight: 600;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+.cf-card-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: auto;
+}
+/* Condition pill shape mirrors Sonarr's Labels: default grey, green
+ * when `required`, red when `negate`. One pill per spec; the title
+ * attribute carries the implementation type for hover inspection. */
+.cf-pill {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.cf-pill-required {
+    background: rgba(140, 204, 151, 0.12);
+    color: #8ccc97;
+    border-color: rgba(140, 204, 151, 0.3);
+}
+.cf-pill-negate {
+    background: rgba(220, 70, 70, 0.12);
+    color: #e06b6b;
+    border-color: rgba(220, 70, 70, 0.3);
+}
+.cf-pill-error {
+    background: rgba(220, 70, 70, 0.2);
+    color: #e06b6b;
+    border-color: rgba(220, 70, 70, 0.4);
+}
+.cf-pill-muted {
+    font-style: italic;
+    opacity: 0.7;
+}
+/* Delete × replaces the origin dot at the top-left on hover. The dot
+ * and the × share the same position so the card's top-right score
+ * badge stays untouched (otherwise the × would overlap the score).
+ * The dot fades out on hover and the × fades in — same pixel slot,
+ * two affordances: at-rest the user sees origin, on hover they get
+ * the delete action. */
+.cf-card-actions {
+    position: absolute;
+    top: 13px;
+    /* Left-align the × with the dot's natural position. Card body has
+     * padding-left: 16px; the dot is 8px so its center is at ~x=20.
+     * The 20px × button centered on that center = left:10px. */
+    left: 10px;
+    opacity: 0;
+    transition: opacity 0.15s;
+    pointer-events: none;
+}
+.cf-card:hover .cf-card-actions,
+.cf-card:focus-within .cf-card-actions {
+    opacity: 1;
+    pointer-events: auto;
+}
+/* Fade the origin dot out on hover so the × isn't stacked on top of
+ * it. visibility:hidden would drop the element from hit-testing; we
+ * just need visual suppression, so opacity is enough. */
+.cf-card .cf-origin-dot {
+    transition: opacity 0.15s;
+}
+.cf-card:hover .cf-origin-dot,
+.cf-card:focus-within .cf-origin-dot {
+    opacity: 0;
+}
+/* Trailing "+ Add" tile — same dimensions as a CF card but dashed border
+ * and centered label so it reads as a create affordance, not a real
+ * entry. */
+.cf-card-add {
+    border-style: dashed;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    text-decoration: none;
+    padding: 14px 16px;
+    text-align: center;
+    cursor: pointer;
+}
+.cf-card-add:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.04);
+}
+.cf-card-add-icon {
+    font-size: 28px;
+    font-weight: 300;
+    line-height: 1;
+    margin-bottom: 6px;
+}
+.cf-card-add-label {
+    font-size: 13px;
+    font-weight: 500;
+}
+/* Origin indicator: colored dot inline with the card name. Filter still
+ * matches on origin via data-cf-origin so removing the dedicated column
+ * doesn't hurt discoverability. */
+.cf-origin-dot {
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    display: inline-block;
+    background: var(--text-dim);
+}
+.cf-origin-dot-defaults { background: var(--accent); }
+.cf-origin-dot-import { background: #8ccc97; }
+.cf-origin-dot-manual { background: var(--text-dim); }
+/* Icon-only danger button (× for Delete). Sits on top of the card
+ * content via absolute positioning on .cf-card-actions, so the
+ * background MUST be fully opaque — an rgba() fill with alpha <1
+ * lets the content behind (e.g. the CF name or score) bleed
+ * through, which reads as a glitch. */
+.btn-icon-danger {
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-dim);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.btn-icon-danger:hover {
+    background: #5a2b2b;
+    color: #ffb3b3;
+    border-color: #8a3a3a;
+}
+
 /* Trash-Guides description callout shown above the edit form when the
    CF carries a `trash_description` field. Replaces the inline-styled
    white box that broke the dark theme. */
@@ -2363,10 +3409,14 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
    reused, but CF rows have a badge column that needs a bit more room
    and the actions column should align its buttons cleanly. */
 .cf-table .cf-name { font-weight: 600; color: var(--text-bright); }
-.cf-table .cf-score { font-variant-numeric: tabular-nums; }
-.cf-table .cf-score-positive { color: var(--green); }
-.cf-table .cf-score-negative { color: var(--red); }
-.cf-table .cf-score-zero { color: var(--text-dim); }
+/* Score coloring. Applies wherever a `.cf-score` element also carries a
+ * positive/negative/zero modifier: the CF card grid (#11.1), the
+ * export selector row (#11.4), the import preview (#11.3), and the
+ * legacy .cf-table if it ever returns. */
+.cf-score { font-variant-numeric: tabular-nums; }
+.cf-score-positive { color: var(--green); }
+.cf-score-negative { color: var(--red); }
+.cf-score-zero { color: var(--text-dim); }
 
 .cf-origin-badge {
     display: inline-block;
@@ -2507,6 +3557,38 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     font-size: 13px;
 }
 
+/* #20 commit 9 — Touch-target minimums. Below --bp-phone every tappable
+ * button gets bumped to at least a 40x40 hit area (WCAG 2.5.5
+ * recommends 44x44; .btn-sm at 40 is our compromise for density).
+ * Icon-only buttons get the full 44x44 since the visible control
+ * is already small and fingers are imprecise. Checkbox rows gain
+ * vertical padding so the whole row is tappable, not just the 16px
+ * checkbox square. */
+@media (max-width: 640px) {
+    .btn-sm {
+        min-height: 40px;
+        padding: 8px 14px;
+        font-size: 14px;
+    }
+    .btn-ghost,
+    .btn-icon,
+    .btn-icon-sm,
+    .btn-icon-danger {
+        min-width: 44px;
+        min-height: 44px;
+    }
+    .checkbox-row,
+    .checkbox-label {
+        padding: 8px 0;
+    }
+    /* Card-level action clusters (Grab button, etc.) go full-width so
+     * the thumb has the whole row to aim at. */
+    .result-card-footer .btn-grab {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+}
+
 /* Log Table */
 .logs-container {
     border: 1px solid var(--border);
@@ -2613,6 +3695,8 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     background: rgba(203, 166, 247, 0.04);
 }
 
+/* Expand the wrapped detail on hover (desktop only — touch targets
+ * get fully wrapped detail via the phone-width override). */
 .log-row:hover .log-detail {
     white-space: normal;
     word-break: break-word;
@@ -2712,6 +3796,17 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     background: rgba(125, 211, 147, 0.14);
     color: var(--green);
 }
+
+/* #20 follow-up — .rss-table tables (downloads, RSS decisions,
+ * scheduled tasks) keep their real table shape on mobile. An
+ * earlier attempt to reshape them as cards via display:block broke
+ * more than it fixed (form layouts overflowed, RSS status stat
+ * rows collapsed into illegible stacks). `.rss-table-wrap` already
+ * has `overflow: auto`, so content wider than the viewport scrolls
+ * naturally within the wrapper — the right UX for data tables at
+ * small widths. Dedicated dual-markup card lists live only where
+ * the table shape doesn't carry its weight (search results,
+ * episode table — see 8ca7fca and 3fc9d17). */
 
 .rss-decision-rejected,
 .rss-decision-error {

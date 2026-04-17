@@ -14,14 +14,68 @@ use crate::services::{
 };
 use crate::AppState;
 
-/// View-model wrapper rendered on the Custom Formats tab. Pairs each
-/// stored CF row with its parsed spec count (or parse error), so the
-/// table can surface "3 specs" next to well-formed rows and a red
-/// "parse error: ..." marker next to ones the user needs to fix.
+/// View-model wrapper rendered on the Custom Formats tab. Surfaces
+/// parse errors (so the user can spot broken CFs without tailing logs)
+/// and carries the per-spec label list used by the card-grid UI to
+/// render condition pills.
 pub struct CustomFormatView {
     pub row: cf_model::CustomFormatRow,
-    pub specs_count: usize,
     pub parse_error: Option<String>,
+    /// Sonarr-style condition pills shown on the CF card. Extracted
+    /// directly from the row's JSON `specifications[]` array (the
+    /// compiled form drops the per-spec `name` field, which is exactly
+    /// what the pill needs to render). Empty for parse-error rows; the
+    /// template uses `.len()` for the count display too.
+    pub spec_labels: Vec<SpecLabelView>,
+}
+
+pub struct SpecLabelView {
+    pub name: String,
+    pub implementation: String,
+    pub negate: bool,
+    pub required: bool,
+}
+
+/// Extract the per-spec labels used by CF card pills. Pulls
+/// `name`/`implementation`/`negate`/`required` straight out of the
+/// JSON — the compiled form at this layer already dropped the `name`
+/// field, so re-parsing as a loose `Value` is the simplest path.
+/// Returns an empty vec on any parse failure; the caller already
+/// surfaces the parse error via `parse_error`.
+fn extract_spec_labels(json: &str) -> Vec<SpecLabelView> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let specs = match value.get("specifications").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+    specs
+        .iter()
+        .map(|s| {
+            let name = s
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let implementation = s
+                .get("implementation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let negate = s.get("negate").and_then(|v| v.as_bool()).unwrap_or(false);
+            let required = s
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            SpecLabelView {
+                name,
+                implementation,
+                negate,
+                required,
+            }
+        })
+        .collect()
 }
 
 /// View-model wrapper rendered when the Custom Formats tab is in edit
@@ -80,12 +134,27 @@ pub struct ImportCollision {
     pub name: String,
 }
 
+/// One row of the import preview panel (#11.3). Status is one of
+/// `"new"` / `"collision"` / `"invalid"`; `error` is populated for the
+/// `"invalid"` case so the UI can surface the parse reason inline.
+/// `specs_count` renders as "N specs" next to the name.
+pub struct ImportPreviewEntry {
+    pub name: String,
+    pub score: i32,
+    pub specs_count: usize,
+    pub status: String,
+    pub error: Option<String>,
+}
+
 /// View model for the import review block. Holds the original payload
 /// (echoed back into a hidden field so the resolve handler can re-parse
-/// it) plus the list of collisions the user needs to act on.
+/// it) plus the full entries list (for the preview panel) and the
+/// collisions subset (for the resolve form).
 pub struct ImportReviewView {
     pub payload: String,
     pub collisions: Vec<ImportCollision>,
+    pub entries: Vec<ImportPreviewEntry>,
+    pub has_invalid: bool,
 }
 
 fn min_score_display(score: i32) -> String {
@@ -175,15 +244,16 @@ async fn load_custom_formats_view(db: &sqlx::SqlitePool) -> Vec<CustomFormatView
     let rows = cf_model::list_with_scores(db).await.unwrap_or_default();
     rows.into_iter()
         .map(|row| {
+            let spec_labels = extract_spec_labels(&row.json);
             match cf_service::compile_from_json(&row.json, row.score as i32, row.id) {
-                Ok(cf) => CustomFormatView {
-                    specs_count: cf.specs.len(),
+                Ok(_) => CustomFormatView {
                     parse_error: None,
+                    spec_labels,
                     row,
                 },
                 Err(e) => CustomFormatView {
-                    specs_count: 0,
                     parse_error: Some(e),
+                    spec_labels,
                     row,
                 },
             }
@@ -1090,10 +1160,13 @@ pub async fn settings_custom_formats_import(
         .map(|r| (r.name, r.id))
         .collect();
 
-    // Scan for collisions before touching the database. If any exist,
-    // render the review page inline — the user picks a decision per
-    // conflict and submits the resolve form.
+    // Scan every entry up-front: classify as new / collision / invalid.
+    // collisions[] feeds the existing resolve form; preview[] feeds the
+    // #11.3 preview panel that shows all rows with status badges so the
+    // user can see what they're about to import before picking actions
+    // per-collision.
     let mut collisions: Vec<ImportCollision> = Vec::new();
+    let mut preview: Vec<ImportPreviewEntry> = Vec::with_capacity(entries.len());
     for (idx, entry) in entries.iter().enumerate() {
         let name = entry
             .get("name")
@@ -1101,18 +1174,57 @@ pub async fn settings_custom_formats_import(
             .unwrap_or("")
             .trim()
             .to_string();
-        if !name.is_empty() && existing_by_name.contains_key(&name) {
-            collisions.push(ImportCollision { index: idx, name });
+        let score = entry
+            .get("score")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let specs_count = entry
+            .get("specifications")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        // Dry-run compile so parse/regex errors surface in the preview
+        // with their actual message. The real import loop below re-runs
+        // the compile for the "apply" step — fine, compile is cheap.
+        let compile_err = cf_service::compile_from_json(&entry.to_string(), score, 0).err();
+        let (status, error) = if let Some(e) = compile_err.as_ref() {
+            ("invalid".to_string(), Some(e.clone()))
+        } else if name.is_empty() {
+            (
+                "invalid".to_string(),
+                Some("CF is missing a non-empty `name` field.".to_string()),
+            )
+        } else if existing_by_name.contains_key(&name) {
+            ("collision".to_string(), None)
+        } else {
+            ("new".to_string(), None)
+        };
+        if status == "collision" {
+            collisions.push(ImportCollision {
+                index: idx,
+                name: name.clone(),
+            });
         }
+        preview.push(ImportPreviewEntry {
+            name,
+            score,
+            specs_count,
+            status,
+            error,
+        });
     }
 
-    if !collisions.is_empty() {
-        // Re-render the settings page with the review block populated.
-        // The original payload rides along in a hidden form field so the
-        // resolve handler can re-parse it without server-side state.
+    // Only re-render inline when there's something for the user to act
+    // on — a collision (pick skip/overwrite/rename) or an invalid entry
+    // (fix and re-paste). If every entry is cleanly "new", fall through
+    // to the silent-apply branch below as before.
+    let has_invalid = preview.iter().any(|p| p.status == "invalid");
+    if !collisions.is_empty() || has_invalid {
         let review = ImportReviewView {
             payload: payload.to_string(),
             collisions,
+            entries: preview,
+            has_invalid,
         };
         let template = build_settings_template(
             &state,
@@ -1639,6 +1751,12 @@ pub struct CfExportQuery {
     /// `"sonarr-safe"` triggers the Sonarr-safe branch; anything else
     /// (or absent) falls through to the default Ryokan-compatible mode.
     mode: Option<String>,
+    /// Comma-separated row IDs to include. `None` or empty string =
+    /// export all rows (backwards-compatible with curl-based scripts
+    /// that just call `/settings/custom-formats/export`). Non-numeric
+    /// tokens are skipped silently. #11.4 — the UI populates this
+    /// from the per-CF checkbox list; unchecked CFs drop out here.
+    ids: Option<String>,
 }
 
 /// Normalize a parsed CF import payload into a flat list of per-CF
@@ -1725,6 +1843,20 @@ pub async fn settings_custom_formats_export(
         .map(|s| s.eq_ignore_ascii_case("sonarr-safe"))
         .unwrap_or(false);
 
+    // #11.4 — parse the `ids` query into an optional allow-set. None
+    // means "export all" (legacy behaviour). Empty / unparseable tokens
+    // are silently dropped; an `ids` value containing only garbage ends
+    // up filtering to zero rows, which produces a `[]` export — honest.
+    let id_filter: Option<std::collections::HashSet<i64>> = query
+        .ids
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            s.split(',')
+                .filter_map(|tok| tok.trim().parse::<i64>().ok())
+                .collect()
+        });
+
     let rows = cf_model::list_with_scores(&state.db)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1736,6 +1868,11 @@ pub async fn settings_custom_formats_export(
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
     let mut dropped_for_sonarr: Vec<String> = Vec::new();
     for row in rows {
+        if let Some(ref allow) = id_filter {
+            if !allow.contains(&row.id) {
+                continue;
+            }
+        }
         match serde_json::from_str::<serde_json::Value>(&row.json) {
             Ok(mut v) => {
                 // In Sonarr-safe mode, drop the whole CF if any spec
