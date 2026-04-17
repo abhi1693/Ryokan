@@ -154,6 +154,7 @@ pub struct ImportReviewView {
     pub payload: String,
     pub collisions: Vec<ImportCollision>,
     pub entries: Vec<ImportPreviewEntry>,
+    pub has_invalid: bool,
 }
 
 fn min_score_display(score: i32) -> String {
@@ -1223,6 +1224,7 @@ pub async fn settings_custom_formats_import(
             payload: payload.to_string(),
             collisions,
             entries: preview,
+            has_invalid,
         };
         let template = build_settings_template(
             &state,

@@ -69,7 +69,8 @@
          checkboxes to render inside the modal body; the resolved promise
          carries back their values. -->
     <div class="modal-backdrop" id="ryokan-confirm-modal" style="display:none">
-        <div class="modal" style="max-width:420px">
+        <div class="modal" style="max-width:420px"
+             role="dialog" aria-modal="true" aria-labelledby="ryokan-confirm-title">
             <div class="modal-header">
                 <h3 id="ryokan-confirm-title">Confirm</h3>
                 <button class="btn-icon" type="button" id="ryokan-confirm-close" aria-label="Close">
@@ -91,7 +92,8 @@
          Invoked via window.ryokanAlert({title, body, okLabel}). Returns
          a promise that resolves when the user dismisses the modal. -->
     <div class="modal-backdrop" id="ryokan-alert-modal" style="display:none">
-        <div class="modal" style="max-width:420px">
+        <div class="modal" style="max-width:420px"
+             role="dialog" aria-modal="true" aria-labelledby="ryokan-alert-title">
             <div class="modal-header">
                 <h3 id="ryokan-alert-title">Notice</h3>
                 <button class="btn-icon" type="button" id="ryokan-alert-close" aria-label="Close">
@@ -113,7 +115,8 @@
          that resolves to the submitted string, or null if cancelled.
          `validator` is an optional sync function (value) => errorString | null. -->
     <div class="modal-backdrop" id="ryokan-prompt-modal" style="display:none">
-        <div class="modal" style="max-width:420px">
+        <div class="modal" style="max-width:420px"
+             role="dialog" aria-modal="true" aria-labelledby="ryokan-prompt-title">
             <div class="modal-header">
                 <h3 id="ryokan-prompt-title">Enter value</h3>
                 <button class="btn-icon" type="button" id="ryokan-prompt-close" aria-label="Close">

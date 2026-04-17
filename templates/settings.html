@@ -456,7 +456,7 @@
                     <div class="cf-card-header">
                         <div class="cf-card-title-row">
                             <span class="cf-origin-dot cf-origin-dot-{{ cf.row.origin }}"
-                                title="{% if cf.row.origin == " defaults" %}From bundled defaults{% else if cf.row.origin == " import" %}Imported{% else %}Manual{% endif %}"></span>
+                                title="{% if cf.row.origin == "defaults" %}From bundled defaults{% else if cf.row.origin == "import" %}Imported{% else %}Manual{% endif %}"></span>
                             <h4 class="cf-card-name">{{ cf.row.name }}</h4>
                         </div>
                         <span class="cf-card-score cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
@@ -508,7 +508,8 @@
        back to the tab (no modal) and a validation error redirects back
        with ?edit_id=N and the modal re-opens with the error in &err. #}
     <div class="modal-backdrop" id="cf-editor-modal" style="display:none">
-        <div class="modal cf-editor-modal" style="max-width:780px">
+        <div class="modal cf-editor-modal" style="max-width:780px"
+             role="dialog" aria-modal="true" aria-labelledby="cf-editor-modal-title">
             <div class="modal-header">
                 <h3 id="cf-editor-modal-title">{% if let Some(edit) = custom_format_edit %}Edit Custom Format{% else %}Add Custom Format{% endif %}</h3>
                 <button class="btn-icon" type="button" onclick="closeCfEditorModal()" aria-label="Close">
@@ -671,6 +672,11 @@
                     </tbody>
                 </table>
                 </div>
+                {% endif %}
+                {% if review.has_invalid %}
+                <p class="form-hint" style="color:var(--orange); margin-top:12px">
+                    <strong>Heads up:</strong> invalid entries above are silently skipped on apply. Fix the JSON and re-paste if you need those CFs — they won't be reported as failures after import.
+                </p>
                 {% endif %}
                 <div class="settings-inline-actions" style="margin-top: 16px;">
                     <button type="submit" class="btn btn-primary">Apply &amp; Import</button>
