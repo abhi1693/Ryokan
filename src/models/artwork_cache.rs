@@ -230,7 +230,10 @@ pub async fn cleanup_orphans(
     for row in &deleted_rows {
         let local_path: String = row.get("local_path");
         if !local_path.is_empty() {
-            let _ = std::fs::remove_file(&local_path);
+            // Hourly task in an async path — match the rest of the
+            // codebase's std::fs → tokio::fs migration so we don't
+            // block the runtime executor on the unlink syscall.
+            let _ = tokio::fs::remove_file(&local_path).await;
         }
     }
 

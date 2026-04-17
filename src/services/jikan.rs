@@ -30,10 +30,18 @@ static DETAIL_CACHE: LazyLock<RwLock<HashMap<i64, DetailCacheEntry>>> =
 /// rebuilt the client per request — wasteful given how often Jikan
 /// gets hit (search, details, episodes, relations, all routed
 /// through different helpers). One shared client lets the connection
-/// pool reuse TLS sessions across calls. No timeout configured here —
-/// callers own retry/cooldown/backoff that interacts in non-obvious
-/// ways with a blanket per-request timeout.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+/// pool reuse TLS sessions across calls.
+///
+/// Timeouts: 10s connect, 30s overall — same rationale as the AniList
+/// client. Callers' cooldown/backoff logic is unaffected; this just
+/// stops a hung connection from pinning a pool slot for hours.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("building the Jikan reqwest client should not fail")
+});
 
 /// When Jikan rate-limits us, remember "unavailable until Instant" so
 /// `search_anime` returns a clean cooldown error immediately rather than

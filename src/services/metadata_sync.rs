@@ -296,6 +296,14 @@ async fn hydrate_relation_tree(
     // already handles inline before this walker is even called.
     const MAX_AL_RETRY_ROUNDS: usize = 3;
     const COOLDOWN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+    // Hard ceiling on total cooldown waits across all retry rounds for
+    // a single hydration. With MAX_AL_RETRY_ROUNDS=3 and AniList's
+    // 300s ANILIST_COOLDOWN_MAX, the worst-case naïve wait is ~15
+    // minutes — long enough that a manual rebuild click feels broken
+    // during a sustained AL outage. Cap at 5 minutes total so the
+    // request returns predictably; remaining deferred relations get
+    // picked up by the next periodic refresh.
+    const MAX_HYDRATION_WAIT_TOTAL: std::time::Duration = std::time::Duration::from_secs(300);
 
     if root_provider_id == 0 {
         return;
@@ -310,6 +318,7 @@ async fn hydrate_relation_tree(
     seen.insert(root_provider_id);
     let mut processed = 0usize;
     let mut al_round = 0usize;
+    let mut total_cooldown_wait = std::time::Duration::ZERO;
 
     loop {
         while let Some((provider_id, mal_id)) = queue.pop_front() {
@@ -360,7 +369,8 @@ async fn hydrate_relation_tree(
             }
         }
 
-        if deferred.is_empty() || al_round >= MAX_AL_RETRY_ROUNDS {
+        let wait_budget_exhausted = total_cooldown_wait >= MAX_HYDRATION_WAIT_TOTAL;
+        if deferred.is_empty() || al_round >= MAX_AL_RETRY_ROUNDS || wait_budget_exhausted {
             // Anything still deferred after the retry budget is left out
             // of this sweep's cache — the next periodic refresh picks it
             // up. We don't substitute MAL on rate-limit (would mix trees
@@ -371,6 +381,8 @@ async fn hydrate_relation_tree(
                     root_provider_id,
                     dropped = deferred.len(),
                     retry_rounds = al_round,
+                    cooldown_wait_secs = total_cooldown_wait.as_secs(),
+                    wait_budget_exhausted,
                     "relation hydration left {} relations unfetched after AniList \
                      retry budget exhausted; next sweep will retry",
                     deferred.len()
@@ -379,9 +391,19 @@ async fn hydrate_relation_tree(
             break;
         }
 
+        let wait_start = std::time::Instant::now();
+        let remaining_budget = MAX_HYDRATION_WAIT_TOTAL.saturating_sub(total_cooldown_wait);
         while anilist::anilist_cooldown_active() {
+            // Stop polling if the per-hydration wait budget is exhausted —
+            // the next iteration of the outer loop will drop the
+            // remaining deferred and exit. Without this guard a
+            // pathological AL outage could pin the sweep for ~15 min.
+            if wait_start.elapsed() >= remaining_budget {
+                break;
+            }
             tokio::time::sleep(COOLDOWN_POLL_INTERVAL).await;
         }
+        total_cooldown_wait += wait_start.elapsed();
 
         queue.append(&mut deferred);
         al_round += 1;
