@@ -77,7 +77,7 @@ pub fn best_title(series: &Series) -> String {
 /// cache), the NFO is enriched with plot, year, premiered, rating, genres,
 /// and runtime. Without it the output is the minimal series-row-only form
 /// used as a fallback when the metadata cache is empty.
-pub fn write_series_nfo(
+pub async fn write_series_nfo(
     path: &Path,
     series: &Series,
     detail: Option<&AnimeDetail>,
@@ -169,7 +169,7 @@ pub fn write_series_nfo(
 
     xml.push_str("</tvshow>\n");
 
-    std::fs::write(path, xml)
+    tokio::fs::write(path, xml).await
 }
 
 /// Write an episode `.nfo` alongside the renamed video file.
@@ -180,7 +180,7 @@ pub fn write_series_nfo(
 /// detail, or `None` when unknown. Jellyfin shows "Unknown" duration on
 /// episode cards until it has scanned the file once, so emitting the
 /// AniList runtime up-front is a meaningful UX improvement.
-pub fn write_episode_nfo(
+pub async fn write_episode_nfo(
     path: &Path,
     showtitle: &str,
     season: i32,
@@ -217,7 +217,7 @@ pub fn write_episode_nfo(
 
     xml.push_str("</episodedetails>\n");
 
-    std::fs::write(path, xml)
+    tokio::fs::write(path, xml).await
 }
 
 #[cfg(test)]
@@ -314,9 +314,9 @@ mod tests {
         dir.join(suffix)
     }
 
-    fn render_series_nfo(detail: Option<&AnimeDetail>) -> String {
+    async fn render_series_nfo(detail: Option<&AnimeDetail>) -> String {
         let path = unique_temp_path("tvshow.nfo");
-        write_series_nfo(&path, &series_stub(), detail).expect("write nfo");
+        write_series_nfo(&path, &series_stub(), detail).await.expect("write nfo");
         let xml = std::fs::read_to_string(&path).expect("read nfo");
         std::fs::remove_file(&path).ok();
         if let Some(parent) = path.parent() {
@@ -325,10 +325,10 @@ mod tests {
         xml
     }
 
-    #[test]
-    fn series_nfo_with_detail_emits_plot_year_rating_genres() {
+    #[tokio::test]
+    async fn series_nfo_with_detail_emits_plot_year_rating_genres() {
         let detail = detail_with_everything();
-        let xml = render_series_nfo(Some(&detail));
+        let xml = render_series_nfo(Some(&detail)).await;
 
         // Plot is HTML-stripped.
         assert!(xml.contains("<plot>A brilliant story. About things.</plot>"));
@@ -350,9 +350,9 @@ mod tests {
         assert!(xml.contains("<uniqueid type=\"myanimelist\">67890</uniqueid>"));
     }
 
-    #[test]
-    fn series_nfo_without_detail_falls_back_to_minimal() {
-        let xml = render_series_nfo(None);
+    #[tokio::test]
+    async fn series_nfo_without_detail_falls_back_to_minimal() {
+        let xml = render_series_nfo(None).await;
         // No enrichment fields — just title/originaltitle/status/genre/ids.
         assert!(!xml.contains("<plot>"));
         assert!(!xml.contains("<year>"));
@@ -363,21 +363,22 @@ mod tests {
         assert!(xml.contains("<title>English Title</title>"));
     }
 
-    #[test]
-    fn series_nfo_does_not_double_emit_animation_when_anilist_lists_it() {
+    #[tokio::test]
+    async fn series_nfo_does_not_double_emit_animation_when_anilist_lists_it() {
         let mut detail = detail_with_everything();
         detail.genres = vec!["Animation".to_string(), "Adventure".to_string()];
-        let xml = render_series_nfo(Some(&detail));
+        let xml = render_series_nfo(Some(&detail)).await;
         // Animation should appear exactly once (from AniList) — the fallback
         // must not double-emit it.
         assert_eq!(xml.matches("<genre>Animation</genre>").count(), 1);
         assert!(xml.contains("<genre>Adventure</genre>"));
     }
 
-    #[test]
-    fn episode_nfo_emits_runtime_when_provided() {
+    #[tokio::test]
+    async fn episode_nfo_emits_runtime_when_provided() {
         let path = unique_temp_path("ep_with_runtime.nfo");
         write_episode_nfo(&path, "Show", 1, 5, "The Title", "2024-03-01", Some(24))
+            .await
             .expect("write nfo");
         let xml = std::fs::read_to_string(&path).expect("read nfo");
         std::fs::remove_file(&path).ok();
@@ -389,10 +390,10 @@ mod tests {
         assert!(xml.contains("<aired>2024-03-01</aired>"));
     }
 
-    #[test]
-    fn episode_nfo_omits_runtime_when_unknown() {
+    #[tokio::test]
+    async fn episode_nfo_omits_runtime_when_unknown() {
         let path = unique_temp_path("ep_no_runtime.nfo");
-        write_episode_nfo(&path, "Show", 1, 5, "", "", None).expect("write nfo");
+        write_episode_nfo(&path, "Show", 1, 5, "", "", None).await.expect("write nfo");
         let xml = std::fs::read_to_string(&path).expect("read nfo");
         std::fs::remove_file(&path).ok();
         if let Some(parent) = path.parent() {

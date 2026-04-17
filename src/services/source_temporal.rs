@@ -36,9 +36,9 @@
 //! job of [`crate::services::source::aggregate`]. It emits at most one
 //! weak piece of evidence.
 
-use crate::services::source::{Source, SourceEvidence};
+use crate::services::source::{Origin, Source, SourceEvidence};
 
-const ORIGIN: &str = "temporal";
+const ORIGIN: Origin = Origin::Temporal;
 
 /// Reduced confidence used when the layer falls back to `season_year`
 /// (i.e. no `end_year` was known). The start year is a noisy proxy for
@@ -159,7 +159,7 @@ mod tests {
         let ev = classify_temporal("RELEASING", Some(2026), None, false, 2026).unwrap();
         assert_eq!(ev.source, Source::Web);
         assert!((ev.confidence - 0.75).abs() < 1e-4);
-        assert_eq!(ev.origin, "temporal");
+        assert_eq!(ev.origin, Origin::Temporal);
     }
 
     #[test]

@@ -31,9 +31,9 @@
 
 use std::path::Path;
 
-use crate::services::source::{contains_word, Source, SourceEvidence};
+use crate::services::source::{contains_word, Origin, Source, SourceEvidence};
 
-const ORIGIN: &str = "dir";
+const ORIGIN: Origin = Origin::Dir;
 
 /// A directory entry as seen by the Layer 6 scanner. The public walker
 /// populates one of these per `read_dir` result; tests construct them

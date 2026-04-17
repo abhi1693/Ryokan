@@ -12,9 +12,9 @@
 use sqlx::SqlitePool;
 
 use crate::models::group_source_map;
-use crate::services::source::SourceEvidence;
+use crate::services::source::{Origin, SourceEvidence};
 
-const ORIGIN: &str = "group";
+const ORIGIN: Origin = Origin::Group;
 
 /// Look up a release group and, if known, return a single
 /// [`SourceEvidence`] record tagged with the group's source and confidence.
@@ -77,7 +77,7 @@ mod tests {
             .expect("VCB-Studio should be seeded");
         assert_eq!(ev.source, Source::BluRay);
         assert!((ev.confidence - 0.95).abs() < f32::EPSILON);
-        assert_eq!(ev.origin, "group");
+        assert_eq!(ev.origin, Origin::Group);
         assert!(ev.detail.contains("VCB-Studio"));
     }
 

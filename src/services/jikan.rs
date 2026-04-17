@@ -26,6 +26,15 @@ struct DetailCacheEntry {
 static DETAIL_CACHE: LazyLock<RwLock<HashMap<i64, DetailCacheEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Shared reqwest client. Six call sites in this module previously
+/// rebuilt the client per request — wasteful given how often Jikan
+/// gets hit (search, details, episodes, relations, all routed
+/// through different helpers). One shared client lets the connection
+/// pool reuse TLS sessions across calls. No timeout configured here —
+/// callers own retry/cooldown/backoff that interacts in non-obvious
+/// ways with a blanket per-request timeout.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+
 /// When Jikan rate-limits us, remember "unavailable until Instant" so
 /// `search_anime` returns a clean cooldown error immediately rather than
 /// hammering the API and piling up more 429s.
@@ -294,7 +303,7 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
         ));
     }
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
     let url = format!("{}/anime", api_base.trim_end_matches('/'));
     let resp = client
@@ -397,10 +406,10 @@ async fn fetch_relation_card_detail(mal_id: i64, fallback_name: &str) -> Related
         media_type: "ANIME".to_string(),
     };
 
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
     let url = format!("{}/anime/{}/full", api_base.trim_end_matches('/'), mal_id);
-    let body: FullResponse = match get_json_with_retry(&client, &url).await {
+    let body: FullResponse = match get_json_with_retry(client, &url).await {
         Ok(body) => body,
         Err(_) => return fallback(),
     };
@@ -426,10 +435,10 @@ async fn fetch_relation_card_detail(mal_id: i64, fallback_name: &str) -> Related
 }
 
 async fn fetch_relations(mal_id: i64) -> Vec<RelatedEntry> {
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
     let url = format!("{}/anime/{}/relations", api_base.trim_end_matches('/'), mal_id);
-    let body: RelationsResponse = match get_json_with_retry(&client, &url).await {
+    let body: RelationsResponse = match get_json_with_retry(client, &url).await {
         Ok(body) => body,
         Err(_) => return Vec::new(),
     };
@@ -522,10 +531,10 @@ pub async fn get_anime_detail_cached(mal_id: i64) -> Result<AnimeDetail, String>
 }
 
 pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
     let url = format!("{}/anime/{}/full", api_base.trim_end_matches('/'), mal_id);
-    let body: FullResponse = get_json_with_retry(&client, &url)
+    let body: FullResponse = get_json_with_retry(client, &url)
         .await
         .map_err(|e| format!("Jikan detail failed: {}", e))?;
 
@@ -594,10 +603,10 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
 }
 
 async fn fetch_relation_groups_raw(mal_id: i64) -> Vec<RelationGroupResponse> {
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
     let url = format!("{}/anime/{}/relations", api_base.trim_end_matches('/'), mal_id);
-    match get_json_with_retry::<RelationsResponse>(&client, &url).await {
+    match get_json_with_retry::<RelationsResponse>(client, &url).await {
         Ok(body) => body.data,
         Err(_) => Vec::new(),
     }
@@ -766,9 +775,17 @@ async fn cache_episodes(
     mal_id: i64,
     episodes: &HashMap<i32, EpisodeInfo>,
 ) -> Result<(), sqlx::Error> {
+    // Wrap DELETE + N INSERTs in one transaction. SQLite's WAL only
+    // fsyncs at commit, so a 1100-episode One Piece refresh becomes
+    // one fsync instead of 1101 — orders-of-magnitude difference on
+    // any non-tmpfs disk. As a bonus the writer lock is held once and
+    // released once, which keeps concurrent readers (the rest of the
+    // app) from being chunked into 1100 tiny windows.
+    let mut tx = db.begin().await?;
+
     sqlx::query("DELETE FROM episode_cache WHERE mal_id = ?")
         .bind(mal_id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
 
     if episodes.is_empty() {
@@ -777,8 +794,9 @@ async fn cache_episodes(
         )
         .bind(mal_id)
         .bind(NEGATIVE_CACHE_SENTINEL)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         return Ok(());
     }
 
@@ -790,23 +808,24 @@ async fn cache_episodes(
         .bind(num)
         .bind(&info.title)
         .bind(&info.aired)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     }
 
+    tx.commit().await?;
     Ok(())
 }
 
 async fn fetch_from_jikan(mal_id: i64) -> HashMap<i32, EpisodeInfo> {
     let mut episodes = HashMap::new();
-    let client = reqwest::Client::new();
+    let client = &*HTTP_CLIENT;
     let mut page = 1;
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
 
     loop {
         let url = format!("{}/anime/{}/episodes?page={}", api_base.trim_end_matches('/'), mal_id, page);
 
-        let body: JikanResponse = match get_json_with_retry(&client, &url).await {
+        let body: JikanResponse = match get_json_with_retry(client, &url).await {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!("Jikan episode fetch failed for mal_id {}: {}", mal_id, e);

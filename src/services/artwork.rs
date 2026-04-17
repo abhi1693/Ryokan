@@ -1,7 +1,13 @@
-use std::{path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
+use std::{path::{Path, PathBuf}, sync::LazyLock, time::{SystemTime, UNIX_EPOCH}};
 
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+
+/// Shared reqwest client for artwork downloads. cache_image runs once
+/// per cover/banner/relation-card import — many in a row when the
+/// metadata sweep refreshes a series — and previously rebuilt the TLS
+/// pool every call.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 use crate::models::artwork_cache;
 
@@ -89,8 +95,7 @@ pub async fn cache_image(
     }
 
     let safe_key = sanitize_key(cache_key);
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = HTTP_CLIENT
         .get(source_url)
         .header("User-Agent", "Ryokan/0.1")
         .send()

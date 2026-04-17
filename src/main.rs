@@ -194,6 +194,19 @@ impl FromRef<AppState> for SqlitePool {
 ///
 /// `name` is used purely in the log line so the operator can tell which
 /// task misbehaved.
+/// Build a `Router` that registers the same handler at multiple
+/// path aliases. Used by the Sonarr/Radarr compat router setup to
+/// collapse case-variant doublings (`qualityprofile` vs
+/// `qualityProfile`, etc. — Seerr ships both spellings depending on
+/// version) into one logical line per endpoint.
+fn aliased(paths: &[&str], handler: axum::routing::MethodRouter<AppState>) -> Router<AppState> {
+    let mut router = Router::new();
+    for path in paths {
+        router = router.route(path, handler.clone());
+    }
+    router
+}
+
 async fn supervise<F, Fut>(name: &'static str, mut make_fut: F) -> !
 where
     F: FnMut() -> Fut,
@@ -439,14 +452,27 @@ async fn main() {
 
     // Sonarr v3 API compatibility layer for Seerr integration.
     // Authenticated via ?apikey= query parameter, not cookies.
+    //
+    // `aliased` collapses the Sonarr-API case-variant doublings (Seerr
+    // sometimes sends `qualityprofile`, sometimes `qualityProfile`,
+    // similarly for rootfolder/rootFolder and languageprofile/
+    // languageProfile) into one line per logical endpoint. Adding a
+    // third alias is a string change, not another `.route(...)` line
+    // that future-me has to remember to keep in sync with the first.
     let sonarr_routes = Router::new()
         .route("/api/v3/system/status", get(handlers::sonarr_compat::system_status))
-        .route("/api/v3/qualityprofile", get(handlers::sonarr_compat::quality_profiles))
-        .route("/api/v3/qualityProfile", get(handlers::sonarr_compat::quality_profiles))
-        .route("/api/v3/rootfolder", get(handlers::sonarr_compat::root_folders))
-        .route("/api/v3/rootFolder", get(handlers::sonarr_compat::root_folders))
-        .route("/api/v3/languageprofile", get(handlers::sonarr_compat::language_profiles))
-        .route("/api/v3/languageProfile", get(handlers::sonarr_compat::language_profiles))
+        .merge(aliased(
+            &["/api/v3/qualityprofile", "/api/v3/qualityProfile"],
+            get(handlers::sonarr_compat::quality_profiles),
+        ))
+        .merge(aliased(
+            &["/api/v3/rootfolder", "/api/v3/rootFolder"],
+            get(handlers::sonarr_compat::root_folders),
+        ))
+        .merge(aliased(
+            &["/api/v3/languageprofile", "/api/v3/languageProfile"],
+            get(handlers::sonarr_compat::language_profiles),
+        ))
         .route("/api/v3/tag", get(handlers::sonarr_compat::list_tags).post(handlers::sonarr_compat::create_tag))
         .route("/api/v3/series", get(handlers::sonarr_compat::list_series).post(handlers::sonarr_compat::add_series).put(handlers::sonarr_compat::update_series))
         .route("/api/v3/series/{id}", get(handlers::sonarr_compat::get_series))
@@ -461,10 +487,14 @@ async fn main() {
     // Mounted under /radarr/ prefix — Seerr uses URL Base "/radarr" to route here.
     let radarr_routes = Router::new()
         .route("/radarr/api/v3/system/status", get(handlers::radarr_compat::system_status))
-        .route("/radarr/api/v3/qualityprofile", get(handlers::radarr_compat::quality_profiles))
-        .route("/radarr/api/v3/qualityProfile", get(handlers::radarr_compat::quality_profiles))
-        .route("/radarr/api/v3/rootfolder", get(handlers::radarr_compat::root_folders))
-        .route("/radarr/api/v3/rootFolder", get(handlers::radarr_compat::root_folders))
+        .merge(aliased(
+            &["/radarr/api/v3/qualityprofile", "/radarr/api/v3/qualityProfile"],
+            get(handlers::radarr_compat::quality_profiles),
+        ))
+        .merge(aliased(
+            &["/radarr/api/v3/rootfolder", "/radarr/api/v3/rootFolder"],
+            get(handlers::radarr_compat::root_folders),
+        ))
         .route("/radarr/api/v3/tag", get(handlers::radarr_compat::list_tags).post(handlers::radarr_compat::create_tag))
         .route("/radarr/api/v3/movie", get(handlers::radarr_compat::list_movies).post(handlers::radarr_compat::add_movie).put(handlers::radarr_compat::update_movie))
         .route("/radarr/api/v3/movie/{id}", get(handlers::radarr_compat::get_movie))
