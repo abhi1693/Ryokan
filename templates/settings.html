@@ -440,18 +440,22 @@
                 </div>
             </div>
             <input type="search" id="cf-list-filter" class="settings-input cf-list-filter"
-                placeholder="Filter by name, score, trash ID, or source"
+                placeholder="Filter by name, score, trash ID, or origin (default / import / manual)"
                 oninput="filterCfList(this.value)">
             <div class="cf-list-scroll">
+                {# Tight three-column layout (Name / Score / Actions) that
+                   fits inside the ~490px list pane without clipping. Origin
+                   is shown as a colored dot inline with the name (hover for
+                   full label); Trash ID and parse-error specs surface in
+                   the edit form on the right — no point in repeating them
+                   twice. The filter still matches on origin and trash ID
+                   via the data-cf-* attributes. #}
                 <table class="group-source-table cf-table cf-list-table">
                     <thead>
                         <tr>
                             <th>Name</th>
-                            <th>Score</th>
-                            <th>Specs</th>
-                            <th>Source</th>
-                            <th>Trash ID</th>
-                            <th></th>
+                            <th class="cf-list-score-col">Score</th>
+                            <th class="cf-list-action-col"></th>
                         </tr>
                     </thead>
                     <tbody id="cf-list-tbody">
@@ -462,34 +466,24 @@
                             data-cf-origin="{{ cf.row.origin }}"
                             data-cf-trash-id="{% if let Some(tid) = cf.row.trash_id.as_ref() %}{{ tid|lowercase }}{% endif %}">
                             <td class="cf-name">
-                                <a class="cf-row-link" href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}">{{ cf.row.name }}</a>
+                                <a class="cf-row-link" href="/settings?tab=custom_formats&amp;edit_id={{ cf.row.id }}">
+                                    <span class="cf-origin-dot cf-origin-dot-{{ cf.row.origin }}"
+                                        title="{% if cf.row.origin == " defaults" %}From bundled defaults{% else if cf.row.origin == " import" %}Imported{% else %}Manual{% endif %}"></span>
+                                    <span class="cf-row-name">{{ cf.row.name }}</span>
+                                    {% if let Some(err) = cf.parse_error.as_ref() %}
+                                    <span class="cf-parse-error" title="{{ err }}">parse error</span>
+                                    {% else %}
+                                    <span class="cf-row-spec-count">{{ cf.specs_count }} spec{% if cf.specs_count != 1 %}s{% endif %}</span>
+                                    {% endif %}
+                                </a>
                             </td>
-                            <td class="cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
+                            <td class="cf-list-score-col cf-score {% if cf.row.score > 0 %}cf-score-positive{% else if cf.row.score < 0 %}cf-score-negative{% else %}cf-score-zero{% endif %}">
                                 {% if cf.row.score > 0 %}+{% endif %}{{ cf.row.score }}
                             </td>
-                            <td>
-                                {% if let Some(err) = cf.parse_error.as_ref() %}
-                                <span class="cf-parse-error" title="{{ err }}">parse error</span>
-                                {% else %}
-                                {{ cf.specs_count }}
-                                {% endif %}
-                            </td>
-                            <td>
-                                {% if cf.row.origin == "defaults" %}
-                                <span class="cf-origin-badge cf-origin-default" title="Installed from the bundled default set">default</span>
-                                {% else if cf.row.origin == "import" %}
-                                <span class="cf-origin-badge cf-origin-import" title="Imported from a Sonarr v4 JSON export">import</span>
-                                {% else %}
-                                <span class="cf-origin-badge cf-origin-manual" title="Created via the Add Custom Format form">manual</span>
-                                {% endif %}
-                            </td>
-                            <td>
-                                {% if let Some(tid) = cf.row.trash_id.as_ref() %}<code>{{ tid }}</code>{% else %}<span class="form-hint">—</span>{% endif %}
-                            </td>
-                            <td>
+                            <td class="cf-list-action-col">
                                 <form method="post" action="/settings/custom-formats/delete" class="group-delete-form" onsubmit="return confirm('Delete Custom Format: {{ cf.row.name }}?');">
                                     <input type="hidden" name="id" value="{{ cf.row.id }}">
-                                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                                    <button type="submit" class="btn btn-icon-danger" title="Delete {{ cf.row.name }}" aria-label="Delete {{ cf.row.name }}">×</button>
                                 </form>
                             </td>
                         </tr>

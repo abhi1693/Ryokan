@@ -2352,10 +2352,25 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 .cf-row-link {
     color: inherit;
     text-decoration: none;
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
 }
 .cf-row-link:hover {
     color: var(--accent);
+}
+.cf-row-name {
+    overflow-wrap: anywhere;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.cf-row-spec-count {
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 400;
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 .cf-row-selected {
     background: rgba(203, 166, 247, 0.08);
@@ -2363,8 +2378,52 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 .cf-row-selected .cf-name {
     color: var(--accent);
 }
-.cf-row-selected::after {
-    content: none;
+/* Origin indicator as a colored dot inline with the name so the list pane
+ * doesn't need a standalone Source column at tablet widths. Hover shows the
+ * full label via the title attribute. */
+.cf-origin-dot {
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    display: inline-block;
+    background: var(--text-dim);
+}
+.cf-origin-dot-defaults { background: var(--accent); }
+.cf-origin-dot-import { background: #8ccc97; }
+.cf-origin-dot-manual { background: var(--text-dim); }
+
+/* Tighten Score + Delete action columns so the Name column keeps as much
+ * width as possible inside the ~490px list pane. */
+.cf-list-score-col {
+    width: 64px;
+    text-align: right;
+    white-space: nowrap;
+}
+.cf-list-action-col {
+    width: 36px;
+    text-align: right;
+    padding-right: 8px !important;
+}
+/* Icon-only danger button (the × for Delete). Matches the btn-danger
+ * color scheme at a tighter footprint. */
+.btn-icon-danger {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.btn-icon-danger:hover {
+    background: rgba(220, 70, 70, 0.12);
+    color: #e06b6b;
+    border-color: rgba(220, 70, 70, 0.3);
 }
 
 /* Trash-Guides description callout shown above the edit form when the
