@@ -1,4 +1,4 @@
-use std::{path::{Path, PathBuf}, sync::LazyLock, time::{SystemTime, UNIX_EPOCH}};
+use std::{path::{Path, PathBuf}, sync::LazyLock, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -6,8 +6,15 @@ use sqlx::SqlitePool;
 /// Shared reqwest client for artwork downloads. cache_image runs once
 /// per cover/banner/relation-card import — many in a row when the
 /// metadata sweep refreshes a series — and previously rebuilt the TLS
-/// pool every call.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+/// pool every call. Timeouts (10s connect, 30s overall) bound a hung
+/// CDN connection so it can't pin a pool slot waiting for TCP keepalive.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("building the artwork reqwest client should not fail")
+});
 
 use crate::models::artwork_cache;
 

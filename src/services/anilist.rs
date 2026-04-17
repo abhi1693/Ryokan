@@ -40,10 +40,24 @@ static DETAIL_CACHE: LazyLock<RwLock<HashMap<i64, CacheEntry>>> =
 /// rebuilt the TLS context and connection pool from scratch — wasteful
 /// across the search / detail / fallback paths that all hit
 /// graphql.anilist.co. Using a single Lazy client lets the pool reuse
-/// connections across calls. No timeout configured here — callers own
-/// retry/cooldown semantics that interact in non-obvious ways with a
-/// blanket per-request timeout.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+/// connections across calls.
+///
+/// Timeouts: 10s to establish a TCP+TLS handshake, 30s overall per
+/// request. Without an overall timeout a hung connection (e.g. half-
+/// open after a network partition) pins a pool slot until kernel TCP
+/// keepalive resolves, which on default Linux is roughly 2 hours —
+/// long enough that interactive searches feel permanently broken even
+/// after AL is healthy again. The 30s ceiling is generous relative to
+/// AL's typical sub-second response time but still bounded; cooldown /
+/// retry semantics live in the callers and are unaffected by this
+/// per-attempt cap.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("building the AniList reqwest client should not fail")
+});
 
 type SearchCacheEntry = (Instant, Vec<AnimeEntry>);
 

@@ -2,6 +2,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use crate::services::anilist::AnimeDetail;
 use crate::services::html::sanitize_rich_description;
@@ -10,7 +11,15 @@ const KITSU_API: &str = "https://kitsu.io/api/edge";
 
 /// Shared reqwest client. Replaces a per-call `Client::new()` so the
 /// connection pool is reused across the search/detail fetch helpers.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+/// Timeouts (10s connect, 30s overall) bound a hung connection so it
+/// can't pin a pool slot for hours waiting on TCP keepalive.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("building the Kitsu reqwest client should not fail")
+});
 const CACHE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const NEGATIVE_CACHE_SENTINEL: &str = "__RYOKAN_EMPTY__";
 
