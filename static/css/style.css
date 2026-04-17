@@ -2311,10 +2311,13 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 .cf-min-score-form {
     margin: 0;
 }
-/* Score-floor input + inline Save button. max-width so the number
- * field doesn't stretch across the whole card at desktop widths. */
+/* Score-floor input + inline Save button. Explicit `flex-direction:
+ * row` overrides `.form-group`'s default `column` so the two children
+ * sit side-by-side; without it the Save button wraps below the input
+ * which reads as two separate controls. */
 .cf-min-score-group {
     display: flex;
+    flex-direction: row;
     gap: 8px;
     align-items: center;
     max-width: 360px;
@@ -2474,6 +2477,68 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     padding: 4px 8px;
     border-radius: 4px;
     margin-top: 4px;
+}
+
+/* Dark-theme styling for native form widgets that otherwise render as
+ * OS-default white controls on the CF tab: radios (Export mode
+ * picker), number input spin buttons (Min Score), and the file-picker
+ * button (Import). Kept scoped to the .settings-form / .cf-section
+ * context so this doesn't accidentally restyle unrelated inputs
+ * elsewhere in the app. */
+
+/* Radios — used by the #11.4 export-mode picker. Native radios render
+ * as a white circle with a white dot; custom appearance: none lets us
+ * draw a dark-theme version with the accent color for the selected
+ * state, matching the existing checkbox treatment. */
+.cf-section input[type="radio"],
+.settings-form input[type="radio"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border-accent);
+    border-radius: 50%;
+    background: var(--bg);
+    margin: 0;
+    cursor: pointer;
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    vertical-align: middle;
+    transition: border-color 0.15s, background 0.15s;
+}
+.cf-section input[type="radio"]:checked,
+.settings-form input[type="radio"]:checked {
+    border-color: var(--accent);
+    background: var(--bg);
+}
+.cf-section input[type="radio"]:checked::after,
+.settings-form input[type="radio"]:checked::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+}
+
+/* Number input spin arrows — the <input type="number"> spinner UI is
+ * browser-default white on Chromium/WebKit. Hide the spinner entirely;
+ * the user can still type or arrow-key the value. The Min Score field
+ * (and the CF Score field in the edit modal) are both happier without
+ * spinner chrome. Firefox-specific hides via appearance: textfield. */
+.cf-section input[type="number"],
+.settings-form input[type="number"] {
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+.cf-section input[type="number"]::-webkit-outer-spin-button,
+.cf-section input[type="number"]::-webkit-inner-spin-button,
+.settings-form input[type="number"]::-webkit-outer-spin-button,
+.settings-form input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
 }
 
 /* Style the native file input so the "Choose File" button isn't a
@@ -2775,7 +2840,7 @@ input[type="file"]::file-selector-button:hover {
    and the actions column should align its buttons cleanly. */
 .cf-table .cf-name { font-weight: 600; color: var(--text-bright); }
 /* Score coloring. Applies wherever a `.cf-score` element also carries a
- * positive/negative/zero modifier — the CF card grid (#11.1), the
+ * positive/negative/zero modifier: the CF card grid (#11.1), the
  * export selector row (#11.4), the import preview (#11.3), and the
  * legacy .cf-table if it ever returns. */
 .cf-score { font-variant-numeric: tabular-nums; }
