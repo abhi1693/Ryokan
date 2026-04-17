@@ -36,7 +36,6 @@ async fn fetch_live_detail(
         &title_candidates_for_series(tracked),
         tracked.episodes,
         force_mal_fallback,
-        false,
     )
     .await
 }
@@ -47,65 +46,49 @@ async fn fetch_live_detail_for_ids(
     title_candidates: &[String],
     episode_count: Option<i32>,
     force_mal_fallback: bool,
-    allow_mal_on_rate_limit: bool,
 ) -> Result<anilist::AnimeDetail, String> {
     // Fallback policy: when an entry has a real AniList ID and the user
-    // hasn't explicitly opted into MAL, treat AniList rate-limiting as
-    // "try again later," not "silently substitute MAL." Falling back
-    // every time AL is throttled would slowly overwrite high-fidelity
-    // AL data with lower-fidelity MAL data on every sweep that hits
-    // the rate limit. The exception is `allow_mal_on_rate_limit`, which
-    // the relation hydrator sets on its final retry round so unreachable
-    // AL relations still pick up *some* metadata (MAL also sometimes has
-    // a different relation graph than AL — e.g. JoJo Part 6 is split
-    // into 3 parts on MAL but only 2 on AL).
+    // hasn't explicitly opted into MAL, MAL is only used when AL is
+    // genuinely *down* (5xx, network error, parse failure, etc.). A 429
+    // rate-limit means AL is responding but throttling us — we surface
+    // an Err so the caller can defer-and-retry, preserving AL fidelity
+    // instead of silently substituting MAL data. Persistent rate-limits
+    // are the user's own library not getting fully refreshed; we'd
+    // rather leave the previous AL data in place than overwrite it with
+    // a MAL approximation.
     if provider_id > 0 && !force_mal_fallback {
         if anilist::anilist_cooldown_active() {
-            if !allow_mal_on_rate_limit {
-                return Err(format!(
-                    "AniList rate-limit cooldown active for provider_id={} \
-                     (no MAL/Kitsu fallback)",
-                    provider_id
-                ));
-            }
-            // Fall through to MAL/Kitsu — relation hydrator's final pass.
-        } else {
-            match anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
-                Ok(detail) => return Ok(detail),
-                Err(err) => {
-                    // The error string format comes from
-                    // anilist::fetch_anime_detail — keep this matcher in
-                    // sync if that wording changes.
-                    let is_rate_limited = err.contains("HTTP 429")
-                        || err.contains("cooldown active");
-                    if is_rate_limited && !allow_mal_on_rate_limit {
-                        tracing::warn!(
-                            target: "ryokan::metadata_sync",
-                            provider_id,
-                            mal_id = ?mal_id,
-                            error = %err,
-                            "AniList rate-limited (no MAL/Kitsu fallback)"
-                        );
-                        return Err(err);
-                    }
-                    if is_rate_limited {
-                        tracing::warn!(
-                            target: "ryokan::metadata_sync",
-                            provider_id,
-                            mal_id = ?mal_id,
-                            error = %err,
-                            "AniList rate-limited; falling back to MAL/Kitsu"
-                        );
-                    } else {
-                        tracing::warn!(
-                            target: "ryokan::metadata_sync",
-                            provider_id,
-                            mal_id = ?mal_id,
-                            error = %err,
-                            "AniList detail fetch failed; falling back to MAL/Kitsu"
-                        );
-                    }
+            return Err(format!(
+                "AniList rate-limit cooldown active for provider_id={} \
+                 (no MAL/Kitsu fallback)",
+                provider_id
+            ));
+        }
+        match anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
+            Ok(detail) => return Ok(detail),
+            Err(err) => {
+                // The error string format comes from
+                // anilist::fetch_anime_detail — keep this matcher in
+                // sync if that wording changes.
+                let is_rate_limited = err.contains("HTTP 429")
+                    || err.contains("cooldown active");
+                if is_rate_limited {
+                    tracing::warn!(
+                        target: "ryokan::metadata_sync",
+                        provider_id,
+                        mal_id = ?mal_id,
+                        error = %err,
+                        "AniList rate-limited (no MAL/Kitsu fallback)"
+                    );
+                    return Err(err);
                 }
+                tracing::warn!(
+                    target: "ryokan::metadata_sync",
+                    provider_id,
+                    mal_id = ?mal_id,
+                    error = %err,
+                    "AniList detail fetch failed; falling back to MAL/Kitsu"
+                );
             }
         }
     }
@@ -303,19 +286,27 @@ async fn hydrate_relation_tree(
     force_mal_fallback: bool,
     force_kitsu_fallback: bool,
 ) {
-    // Mirror the primary sweep's defer-and-retry policy so a rate-limit
-    // burst doesn't leave us with half a relation graph cached. After
-    // MAX_AL_RETRY_ROUNDS rounds of waiting for AL to recover, fall back
-    // to MAL for anything still rate-limited — MAL's relation graph is
-    // structurally different from AL's (e.g. JoJo Part 6 is three MAL
-    // entries but only two AL entries), so the MAL pass can also surface
-    // relations AL would never return.
+    // Trees stay strictly separate. AL mode walks AL's relation graph
+    // (positive AL IDs only); MAL mode walks MAL's, where Jikan stamps
+    // each card with `id = -mal_id` as a "no AL mapping" sentinel. Mode
+    // is determined by which provider gave us the root: positive root
+    // detail id = AL, negative = MAL fallback (or user opted into MAL).
+    // We never interleave the two — a MAL fallback mid-walk would
+    // pollute AL's graph with MAL-only siblings (e.g. JoJo Part 6 is 3
+    // entries on MAL but 2 on AL).
+    //
+    // Rate-limited AL relations defer-and-retry within the walk, but we
+    // never substitute MAL on rate-limit; "MAL only when AL is down"
+    // means non-rate-limit errors (5xx/network), which fetch_live_detail
+    // already handles inline before this walker is even called.
     const MAX_AL_RETRY_ROUNDS: usize = 3;
     const COOLDOWN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
     if root_provider_id == 0 {
         return;
     }
+
+    let mal_mode = force_mal_fallback || root_detail.id < 0;
 
     let mut seen: HashSet<i64> = HashSet::new();
     let mut queue: VecDeque<(i64, Option<i64>)> = VecDeque::new();
@@ -326,11 +317,6 @@ async fn hydrate_relation_tree(
     let mut al_round = 0usize;
 
     loop {
-        // Once al_round exceeds MAX_AL_RETRY_ROUNDS we're in the final
-        // pass: rate-limited AL fetches transparently degrade to MAL/Kitsu
-        // instead of being deferred again.
-        let allow_mal_on_rate_limit = al_round > MAX_AL_RETRY_ROUNDS;
-
         while let Some((provider_id, mal_id)) = queue.pop_front() {
             if processed >= MAX_RELATION_TREE_NODES {
                 break;
@@ -345,7 +331,6 @@ async fn hydrate_relation_tree(
                     &Vec::new(),
                     None,
                     force_mal_fallback,
-                    allow_mal_on_rate_limit,
                 )
                 .await
                 {
@@ -353,7 +338,10 @@ async fn hydrate_relation_tree(
                     Err(err) => {
                         let is_rate_limited = err.contains("HTTP 429")
                             || err.contains("cooldown active");
-                        if is_rate_limited && !allow_mal_on_rate_limit {
+                        // Only AL rate-limits are worth retrying. MAL
+                        // failures or genuine AL-down errors are already
+                        // terminal by the time this returns.
+                        if is_rate_limited && !mal_mode {
                             deferred.push_back((provider_id, mal_id));
                         }
                         continue;
@@ -365,7 +353,12 @@ async fn hydrate_relation_tree(
             let _ = cache_provider_detail(db, provider_id, &detail, force_kitsu_fallback).await;
 
             for related in &detail.relations {
-                if related.id != 0
+                let id_valid = if mal_mode {
+                    related.id != 0
+                } else {
+                    related.id > 0
+                };
+                if id_valid
                     && matches!(related.media_type.as_str(), "ANIME" | "MUSIC")
                     && seen.insert(related.id)
                 {
@@ -374,21 +367,16 @@ async fn hydrate_relation_tree(
             }
         }
 
-        if deferred.is_empty() || allow_mal_on_rate_limit {
-            // Either nothing left to retry, or we just finished the
-            // MAL-fallback round (anything still deferred at that point
-            // is a hard failure — give up).
+        if deferred.is_empty() || al_round >= MAX_AL_RETRY_ROUNDS {
+            // Anything still deferred after the retry budget is left out
+            // of this sweep's cache — the next periodic refresh picks it
+            // up. We don't substitute MAL on rate-limit (would mix trees
+            // and downgrade fidelity).
             break;
         }
 
-        // Wait for the AL cooldown to clear before another AL-only round.
-        // Skip the wait when the next round is the MAL-fallback round —
-        // waiting on AL is pointless when we won't be calling AL.
-        let next_is_mal_fallback = al_round + 1 > MAX_AL_RETRY_ROUNDS;
-        if !next_is_mal_fallback {
-            while anilist::anilist_cooldown_active() {
-                tokio::time::sleep(COOLDOWN_POLL_INTERVAL).await;
-            }
+        while anilist::anilist_cooldown_active() {
+            tokio::time::sleep(COOLDOWN_POLL_INTERVAL).await;
         }
 
         queue.append(&mut deferred);
