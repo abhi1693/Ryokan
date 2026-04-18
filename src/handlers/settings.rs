@@ -1882,10 +1882,10 @@ pub async fn settings_custom_formats_export(
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
     let mut dropped_for_sonarr: Vec<String> = Vec::new();
     for row in rows {
-        if let Some(ref allow) = id_filter {
-            if !allow.contains(&row.id) {
-                continue;
-            }
+        if let Some(ref allow) = id_filter
+            && !allow.contains(&row.id)
+        {
+            continue;
         }
         match serde_json::from_str::<serde_json::Value>(&row.json) {
             Ok(mut v) => {

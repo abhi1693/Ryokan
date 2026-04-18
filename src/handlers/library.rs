@@ -4435,46 +4435,45 @@ pub async fn cancel_pending_episode(
     .ok()
     .flatten();
     let tag_is_grabbed = matches!(tag_state.as_deref(), Some("grabbed"));
-    if tag_is_grabbed {
-        if let Ok(stuck) =
+    if tag_is_grabbed
+        && let Ok(stuck) =
             grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
                 .await
-        {
-            // Re-read the tag state *after* the drift-lookup completes.
-            // Narrows the race where a post-processing tick flips the
-            // tag 'grabbed' → 'completed' between our first tag read
-            // and the qBit delete loop: if that happened, the user's
-            // library file is now legitimately present and we should
-            // not tear down the torrent with `delete_files=true`. The
-            // pending-grab list (if any) still gets cancelled — the
-            // user's explicit action on a live-pending row is honored
-            // regardless of the stuck-drift path.
-            let tag_state_recheck: Option<String> = sqlx::query_scalar(
-                "SELECT state FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
-            )
-            .bind(tracked.id)
-            .bind(episode_number)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
-            if matches!(tag_state_recheck.as_deref(), Some("grabbed")) {
-                let seen: std::collections::HashSet<i64> =
-                    pending.iter().map(|g| g.id).collect();
-                for g in stuck {
-                    if !seen.contains(&g.id) {
-                        pending.push(g);
-                    }
+    {
+        // Re-read the tag state *after* the drift-lookup completes.
+        // Narrows the race where a post-processing tick flips the
+        // tag 'grabbed' → 'completed' between our first tag read
+        // and the qBit delete loop: if that happened, the user's
+        // library file is now legitimately present and we should
+        // not tear down the torrent with `delete_files=true`. The
+        // pending-grab list (if any) still gets cancelled — the
+        // user's explicit action on a live-pending row is honored
+        // regardless of the stuck-drift path.
+        let tag_state_recheck: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+        )
+        .bind(tracked.id)
+        .bind(episode_number)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        if matches!(tag_state_recheck.as_deref(), Some("grabbed")) {
+            let seen: std::collections::HashSet<i64> =
+                pending.iter().map(|g| g.id).collect();
+            for g in stuck {
+                if !seen.contains(&g.id) {
+                    pending.push(g);
                 }
-            } else {
-                tracing::debug!(
-                    target: "ryokan::library",
-                    series_id = tracked.id,
-                    episode = episode_number,
-                    tag_state_now = ?tag_state_recheck,
-                    "cancel_pending_episode: tag flipped away from 'grabbed' mid-handler — skipping drift-repair branch"
-                );
             }
+        } else {
+            tracing::debug!(
+                target: "ryokan::library",
+                series_id = tracked.id,
+                episode = episode_number,
+                tag_state_now = ?tag_state_recheck,
+                "cancel_pending_episode: tag flipped away from 'grabbed' mid-handler — skipping drift-repair branch"
+            );
         }
     }
 
