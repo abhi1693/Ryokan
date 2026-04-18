@@ -4187,14 +4187,87 @@ pub async fn delete_episode_file(
             // Clear the episode quality tag so it shows as missing again.
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
 
+            // Also remove the corresponding qBit torrent so deleting
+            // the episode from the library doesn't leave an orphan
+            // torrent seeding from the downloads folder — otherwise
+            // qBit keeps the file alive and the "delete" action only
+            // actually cleaned up the library copy. `delete_files =
+            // true` wipes both the torrent entry and the downloads-
+            // folder source.
+            //
+            // Soft-fail on qBit errors: the library file is already
+            // gone, so reporting failure to the user would misrepresent
+            // the state. If qBit is unreachable or the torrent was
+            // already manually removed there, nothing we do here can
+            // recover it anyway — log and move on.
+            let imported_grabs = grabbed_torrents::find_imported_for_episode(
+                &state.db,
+                tracked.id,
+                episode_number,
+            )
+            .await
+            .unwrap_or_default();
+            let mut qbit_removed: Vec<String> = Vec::new();
+            if !imported_grabs.is_empty() {
+                let qbit = state.qbit.read().await.as_ref().cloned();
+                if let Some(qbit) = qbit {
+                    for grab in &imported_grabs {
+                        // Skip batch grabs: those cover multiple episodes
+                        // and deleting one episode's file shouldn't tear
+                        // down the whole pack.
+                        if grab.is_batch {
+                            continue;
+                        }
+                        if grab.hash.is_empty() {
+                            continue;
+                        }
+                        match qbit.delete_torrent(&grab.hash, true).await {
+                            Ok(()) => {
+                                qbit_removed.push(grab.torrent_name.clone());
+                                let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
+                            }
+                            Err(e) => {
+                                // Typical cause: torrent already gone from qBit
+                                // (user deleted it directly, or a prior
+                                // reconciliation pass already cleaned up).
+                                // Not fatal — the library file is already
+                                // deleted so the user's intent is satisfied.
+                                logger::debug(
+                                    &state.db,
+                                    LogCategory::QBit,
+                                    &format!(
+                                        "qBit delete failed for episode {} torrent '{}' — continuing with file delete",
+                                        episode_number, grab.torrent_name
+                                    ),
+                                    &e,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+            }
+
             logger::info(
                 &state.db,
                 LogCategory::Library,
                 &format!("Deleted episode {} file: {}", episode_number, file.filename),
-                &format!("series_id={}, path={}", tracked.id, full_path_canon.display()),
+                &format!(
+                    "series_id={}, path={}, qbit_removed={}",
+                    tracked.id,
+                    full_path_canon.display(),
+                    qbit_removed.len()
+                ),
             ).await;
 
-            (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": file.filename})))
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "deleted": file.filename,
+                    "qbit_removed": qbit_removed,
+                })),
+            )
         }
     }
 }
@@ -4247,7 +4320,7 @@ pub async fn cancel_pending_episode(
         }
     };
 
-    let pending = match grabbed_torrents::find_pending_for_episode(
+    let mut pending = match grabbed_torrents::find_pending_for_episode(
         &state.db,
         tracked.id,
         episode_number,
@@ -4263,7 +4336,64 @@ pub async fn cancel_pending_episode(
         }
     };
 
+    // Drift case: `grabbed_torrents.state = 'imported'` but the
+    // `episode_quality_tags` row for this episode is still 'grabbed'.
+    // Happens when post-processing returned Ok(true) (flipping the
+    // grab row) but didn't actually land a file for the requested
+    // episode — e.g. a pre-offset-fix grab of SubsPlease `- 56` that
+    // imported as S01E56 instead of S01E09, leaving ep 9's tag stuck.
+    // From the UI it still reads as pending (progress bar / queued
+    // row), so the cancel action should clean it up even though
+    // find_pending skipped it on the strict state filter.
+    //
+    // We fold these in via `find_imported_for_episode` only when the
+    // episode's tag actually says 'grabbed' — otherwise a healthy
+    // imported grab (tag = 'completed') would get yanked every time
+    // the user opened the cancel dialog on an adjacent row, which
+    // would be surprising.
+    let tag_state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+    )
+    .bind(tracked.id)
+    .bind(episode_number)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let tag_is_grabbed = matches!(tag_state.as_deref(), Some("grabbed"));
+    if tag_is_grabbed {
+        if let Ok(stuck) =
+            grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
+                .await
+        {
+            let seen: std::collections::HashSet<i64> =
+                pending.iter().map(|g| g.id).collect();
+            for g in stuck {
+                if !seen.contains(&g.id) {
+                    pending.push(g);
+                }
+            }
+        }
+    }
+
     if pending.is_empty() {
+        // Tag might still be 'grabbed' with no recorded grab at all —
+        // an orphaned state from a grab row that got deleted or from
+        // a stale tag that survived a blocklist. Clear the tag so the
+        // UI returns the episode to missing even without a torrent to
+        // remove.
+        if tag_is_grabbed {
+            let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
+            return (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "cancelled": 0,
+                    "torrent_failures": Vec::<String>::new(),
+                    "note": "Tag cleared; no associated torrent was found.",
+                })),
+            );
+        }
         return json_err(
             axum::http::StatusCode::NOT_FOUND,
             "No pending grab found for this episode",
@@ -4286,6 +4416,7 @@ pub async fn cancel_pending_episode(
         grab_ids = ?pending.iter().map(|g| g.id).collect::<Vec<_>>(),
         grab_names = ?pending.iter().map(|g| g.torrent_name.clone()).collect::<Vec<_>>(),
         batch_grabs = ?pending.iter().filter(|g| g.episode_numbers.len() > 1).map(|g| g.id).collect::<Vec<_>>(),
+        tag_was_stuck_grabbed = tag_is_grabbed,
         "cancel_pending_episode: matching grabs"
     );
 
