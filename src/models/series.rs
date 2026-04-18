@@ -29,6 +29,22 @@ pub struct Series {
     /// skips this series entirely, even if a higher-quality release is
     /// available. Defaults to true to preserve historical behavior.
     pub allow_upgrades: bool,
+    /// #23 — Per-series custom Nyaa query tokens appended after the
+    /// title aliases. Overrides the global
+    /// `config.default_custom_query_tokens` when non-empty.
+    pub custom_query_tokens: String,
+    /// #23 — Per-series Nyaa uploader restriction. When non-empty,
+    /// Ryokan sets `?u=<name>` on every search for this series so only
+    /// that account's uploads come back. Overrides the global
+    /// `config.default_restrict_to_uploader`.
+    pub restrict_to_uploader: String,
+    /// #30 — Cumulative episode count across the shortest TV-format
+    /// PREQUEL chain up to this series. Zero for first-season series
+    /// and for cases where no prequel data is cached. Search accepts a
+    /// Nyaa release if its parsed episode number matches either the
+    /// relative target (AL's own numbering) OR `target + offset` (the
+    /// absolute number a SubsPlease-style release would use).
+    pub cumulative_prior_episodes: i32,
 }
 
 impl Series {
@@ -57,13 +73,18 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
         // Default to true so series from before the column existed (migration
         // backfills via ADD COLUMN DEFAULT 1) opt *in* to upgrades.
         allow_upgrades: row.try_get::<i64, _>("allow_upgrades").map(|v| v != 0).unwrap_or(true),
+        custom_query_tokens: row.try_get("custom_query_tokens").unwrap_or_default(),
+        restrict_to_uploader: row.try_get("restrict_to_uploader").unwrap_or_default(),
+        cumulative_prior_episodes: row
+            .try_get::<i32, _>("cumulative_prior_episodes")
+            .unwrap_or(0),
     }
 }
 
 /// Get all tracked series, ordered by most recently added.
 pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -73,7 +94,7 @@ pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
@@ -84,7 +105,7 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx:
 
 pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE anilist_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE anilist_id = ?",
     )
     .bind(anilist_id)
     .fetch_optional(db)
@@ -95,7 +116,7 @@ pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Optio
 
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE mal_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE mal_id = ?",
     )
     .bind(mal_id)
     .fetch_optional(db)
@@ -351,7 +372,7 @@ pub async fn refresh_core_metadata(
 
 pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -376,6 +397,44 @@ pub async fn update_allow_upgrades(db: &SqlitePool, id: i64, allow: bool) -> Res
         .bind(id)
         .execute(db)
         .await?;
+    Ok(())
+}
+
+/// #30 — Store the cumulative-prior-episodes offset computed from the
+/// cached PREQUEL chain. Called by `metadata_sync::refresh_series_metadata`
+/// after relations are cached, and by `handlers/library::add_series` so
+/// the first interactive search works without waiting on the next
+/// refresh sweep.
+pub async fn update_cumulative_prior_episodes(
+    db: &SqlitePool,
+    id: i64,
+    offset: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE series SET cumulative_prior_episodes = ? WHERE id = ?")
+        .bind(offset)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// #23 — Update the per-series search overrides. Empty strings clear
+/// the override and make the series fall back to the global defaults
+/// in `config.default_custom_query_tokens` / `default_restrict_to_uploader`.
+pub async fn update_search_overrides(
+    db: &SqlitePool,
+    id: i64,
+    custom_query_tokens: &str,
+    restrict_to_uploader: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE series SET custom_query_tokens = ?, restrict_to_uploader = ? WHERE id = ?",
+    )
+    .bind(custom_query_tokens.trim())
+    .bind(restrict_to_uploader.trim())
+    .bind(id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

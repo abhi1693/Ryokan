@@ -471,6 +471,21 @@ async fn refresh_series_metadata_inner(
         cache_provider_detail(db, stored_anilist_id, &detail, force_kitsu_fallback).await?;
         hydrate_relation_tree(db, stored_anilist_id, &detail, force_mal_fallback, force_kitsu_fallback).await;
 
+        // #30 — With the franchise graph freshly cached, walk the PREQUEL
+        // chain and store the cumulative prior-cour episode count on
+        // the series row. Search reads this at query time to match
+        // absolute-numbered Nyaa titles against relative-numbered AL
+        // episodes. Must run AFTER hydrate_relation_tree so the cache
+        // covers the whole chain, not just the immediate neighbors.
+        let cumulative = local_metadata::compute_cumulative_prior_episodes(db, stored_anilist_id).await;
+        if let Err(err) = series::update_cumulative_prior_episodes(db, tracked.id, cumulative).await {
+            tracing::warn!(
+                target: "ryokan::metadata_sync",
+                series_id = tracked.id,
+                "failed to persist cumulative_prior_episodes: {err}"
+            );
+        }
+
         if !authoritative_detail {
             logger::info(
                 db,

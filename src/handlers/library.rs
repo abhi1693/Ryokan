@@ -61,6 +61,17 @@ struct SeriesTemplate {
     /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the
     /// series detail page; toggled via POST /api/library/allow-upgrades.
     allow_upgrades: bool,
+    /// #23 — Per-series custom Nyaa query tokens. Empty string means
+    /// "use the global default in config." Rendered in the Advanced
+    /// search panel on the series detail page.
+    custom_query_tokens: String,
+    /// #23 — Per-series Nyaa uploader restriction. Empty string means
+    /// "use the global default in config."
+    restrict_to_uploader: String,
+    /// #23 — Global defaults, surfaced as placeholder hints so the user
+    /// can see what the per-series field will inherit when left blank.
+    default_custom_query_tokens: String,
+    default_restrict_to_uploader: String,
     /// Whether post-processing (file move + rename + NFO) is enabled in
     /// config. Rendered into the page as a JS global so the episode-row
     /// poller knows whether to show "Importing…" between a 100%-download
@@ -191,6 +202,18 @@ pub struct SetEpisodeMonitoringForm {
 pub struct SetAllowUpgradesForm {
     series_id: i64,
     allow: bool,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SetSearchOverridesForm {
+    series_id: i64,
+    /// Empty string clears the override and makes the series use the global
+    /// `config.default_custom_query_tokens` default.
+    #[serde(default)]
+    custom_query_tokens: String,
+    /// Nyaa uploader to restrict to (`?u=<name>`). Empty string clears.
+    #[serde(default)]
+    restrict_to_uploader: String,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -746,6 +769,22 @@ pub async fn series_detail(
 
     let all_monitored = ep_total > 0 && monitored_count >= ep_total;
     let allow_upgrades = db_series.as_ref().map(|s| s.allow_upgrades).unwrap_or(true);
+    let custom_query_tokens = db_series
+        .as_ref()
+        .map(|s| s.custom_query_tokens.clone())
+        .unwrap_or_default();
+    let restrict_to_uploader = db_series
+        .as_ref()
+        .map(|s| s.restrict_to_uploader.clone())
+        .unwrap_or_default();
+    let default_custom_query_tokens = cfg
+        .as_ref()
+        .map(|c| c.default_custom_query_tokens.clone())
+        .unwrap_or_default();
+    let default_restrict_to_uploader = cfg
+        .as_ref()
+        .map(|c| c.default_restrict_to_uploader.clone())
+        .unwrap_or_default();
     let post_processing_enabled = cfg
         .as_ref()
         .map(|c| c.post_processing_enabled)
@@ -772,6 +811,10 @@ pub async fn series_detail(
         monitored_count,
         all_monitored,
         allow_upgrades,
+        custom_query_tokens,
+        restrict_to_uploader,
+        default_custom_query_tokens,
+        default_restrict_to_uploader,
         post_processing_enabled,
     };
     Html(template.render().unwrap_or_default())
@@ -2066,6 +2109,51 @@ pub async fn set_allow_upgrades(
         "ok": true,
         "series_id": form.series_id,
         "allow_upgrades": form.allow,
+    })))
+}
+
+/// #23 — Update the per-series search overrides (custom Nyaa tokens +
+/// uploader restriction). Empty strings clear the overrides, which
+/// makes the series fall back to the global `config` defaults.
+#[utoipa::path(
+    post,
+    path = "/api/library/search-overrides",
+    tag = "Library",
+    summary = "Update series search overrides",
+    description = "Set or clear the per-series Nyaa uploader restriction and custom query tokens. Empty strings clear the override.",
+    request_body = SetSearchOverridesForm,
+    responses(
+        (status = 200, description = "Search overrides updated", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
+pub async fn set_search_overrides(
+    State(state): State<AppState>,
+    Json(form): Json<SetSearchOverridesForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    series::update_search_overrides(
+        &state.db,
+        form.series_id,
+        &form.custom_query_tokens,
+        &form.restrict_to_uploader,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!("Search overrides updated for series {}", form.series_id),
+        &format!(
+            "tokens={:?} restrict_to={:?}",
+            form.custom_query_tokens.trim(),
+            form.restrict_to_uploader.trim(),
+        ),
+    ).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "series_id": form.series_id,
+        "custom_query_tokens": form.custom_query_tokens.trim(),
+        "restrict_to_uploader": form.restrict_to_uploader.trim(),
     })))
 }
 
@@ -3580,7 +3668,7 @@ pub async fn interactive_search_episode(
     // Same single-entry collapse as auto_search_episode — the interactive
     // picker otherwise returns zero results for movies.
     let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
-    let results = auto_search::find_all_for_target(
+    let mut results = auto_search::find_all_for_target(
         &state.db,
         &detail,
         &cfg,
@@ -3588,6 +3676,14 @@ pub async fn interactive_search_episode(
         false,
         &cfs,
     ).await;
+
+    // Layer 3 (group-map) enrichment. Auto-search already runs the full
+    // source pipeline so its classification is complete, but the interactive
+    // picker shows results straight from nyaa::parse_results where only
+    // Layer 1 (anitomy filename tokens) has fired. Filling source via the
+    // group table here is what lets SubsPlease releases label as WEB-DL
+    // and VCB-Studio as BluRay when the filename alone is silent.
+    crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
 
     Ok(Json(results))
 }
@@ -3626,13 +3722,15 @@ pub async fn interactive_search_batches(
 
     let cfs = state.custom_formats.read().await.clone();
 
-    let results = auto_search::collect_scored_batches_for_target(
+    let mut results = auto_search::collect_scored_batches_for_target(
         &state.db,
         &detail,
         &cfg,
         &auto_search::SearchTarget::Single,
         &cfs,
     ).await;
+
+    crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
 
     Ok(Json(results))
 }
@@ -4089,16 +4187,351 @@ pub async fn delete_episode_file(
             // Clear the episode quality tag so it shows as missing again.
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
 
+            // Also remove the corresponding qBit torrent so deleting
+            // the episode from the library doesn't leave an orphan
+            // torrent seeding from the downloads folder — otherwise
+            // qBit keeps the file alive and the "delete" action only
+            // actually cleaned up the library copy. `delete_files =
+            // true` wipes both the torrent entry and the downloads-
+            // folder source.
+            //
+            // Soft-fail on qBit errors: the library file is already
+            // gone, so reporting failure to the user would misrepresent
+            // the state. If qBit is unreachable or the torrent was
+            // already manually removed there, nothing we do here can
+            // recover it anyway — log and move on.
+            let imported_grabs = grabbed_torrents::find_imported_for_episode(
+                &state.db,
+                tracked.id,
+                episode_number,
+            )
+            .await
+            .unwrap_or_default();
+            let mut qbit_removed: Vec<String> = Vec::new();
+            if !imported_grabs.is_empty() {
+                let qbit = state.qbit.read().await.as_ref().cloned();
+                if let Some(qbit) = qbit {
+                    for grab in &imported_grabs {
+                        // Skip batch grabs: those cover multiple episodes
+                        // and deleting one episode's file shouldn't tear
+                        // down the whole pack.
+                        if grab.is_batch {
+                            continue;
+                        }
+                        if grab.hash.is_empty() {
+                            continue;
+                        }
+                        match qbit.delete_torrent(&grab.hash, true).await {
+                            Ok(()) => {
+                                qbit_removed.push(grab.torrent_name.clone());
+                                let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
+                            }
+                            Err(e) => {
+                                // Typical cause: torrent already gone from qBit
+                                // (user deleted it directly, or a prior
+                                // reconciliation pass already cleaned up).
+                                // Not fatal — the library file is already
+                                // deleted so the user's intent is satisfied.
+                                logger::debug(
+                                    &state.db,
+                                    LogCategory::QBit,
+                                    &format!(
+                                        "qBit delete failed for episode {} torrent '{}' — continuing with file delete",
+                                        episode_number, grab.torrent_name
+                                    ),
+                                    &e,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+            }
+
             logger::info(
                 &state.db,
                 LogCategory::Library,
                 &format!("Deleted episode {} file: {}", episode_number, file.filename),
-                &format!("series_id={}, path={}", tracked.id, full_path_canon.display()),
+                &format!(
+                    "series_id={}, path={}, qbit_removed={}",
+                    tracked.id,
+                    full_path_canon.display(),
+                    qbit_removed.len()
+                ),
             ).await;
 
-            (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": file.filename})))
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "deleted": file.filename,
+                    "qbit_removed": qbit_removed,
+                })),
+            )
         }
     }
+}
+
+/// Cancel an in-flight grab for an episode: remove the torrent from
+/// qBittorrent (with its partial/complete data), mark the grab row as
+/// 'removed', and clear the episode's quality tag so it returns to the
+/// missing state.
+///
+/// This is the delete-file path's twin for episodes that were grabbed
+/// but never imported — a torrent stuck at 99%, a mis-grabbed release
+/// the user wants to drop without re-searching, or a cancel-before-
+/// qBit-finishes action. `mark_episode_failed` already does most of
+/// this work but then re-triggers auto-search, which is the opposite
+/// of what the user wants here.
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/cancel-pending/{episode_number}",
+    tag = "Library",
+    summary = "Cancel pending episode grab",
+    description = "Remove the in-flight torrent from qBittorrent, mark the grab as removed, and clear the episode's quality tag. Does not trigger a re-search.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number"),
+    ),
+    responses(
+        (status = 200, description = "Pending grab cancelled", body = serde_json::Value),
+        (status = 400, description = "Series not in library"),
+        (status = 404, description = "No pending grab found for this episode"),
+    ),
+)]
+pub async fn cancel_pending_episode(
+    State(state): State<AppState>,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let json_err = |status: axum::http::StatusCode, msg: &str| {
+        (status, Json(serde_json::json!({"ok": false, "message": msg})))
+    };
+
+    let tracked = match resolve_tracked_series(&state.db, request_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return json_err(axum::http::StatusCode::BAD_REQUEST, "Series not in library")
+        }
+        Err(e) => {
+            return json_err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+            )
+        }
+    };
+
+    let mut pending = match grabbed_torrents::find_pending_for_episode(
+        &state.db,
+        tracked.id,
+        episode_number,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            return json_err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+            )
+        }
+    };
+
+    // Drift case: `grabbed_torrents.state = 'imported'` but the
+    // `episode_quality_tags` row for this episode is still 'grabbed'.
+    // Happens when post-processing returned Ok(true) (flipping the
+    // grab row) but didn't actually land a file for the requested
+    // episode — e.g. a pre-offset-fix grab of SubsPlease `- 56` that
+    // imported as S01E56 instead of S01E09, leaving ep 9's tag stuck.
+    // From the UI it still reads as pending (progress bar / queued
+    // row), so the cancel action should clean it up even though
+    // find_pending skipped it on the strict state filter.
+    //
+    // We fold these in via `find_imported_for_episode` only when the
+    // episode's tag actually says 'grabbed' — otherwise a healthy
+    // imported grab (tag = 'completed') would get yanked every time
+    // the user opened the cancel dialog on an adjacent row, which
+    // would be surprising.
+    let tag_state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+    )
+    .bind(tracked.id)
+    .bind(episode_number)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let tag_is_grabbed = matches!(tag_state.as_deref(), Some("grabbed"));
+    if tag_is_grabbed {
+        if let Ok(stuck) =
+            grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
+                .await
+        {
+            // Re-read the tag state *after* the drift-lookup completes.
+            // Narrows the race where a post-processing tick flips the
+            // tag 'grabbed' → 'completed' between our first tag read
+            // and the qBit delete loop: if that happened, the user's
+            // library file is now legitimately present and we should
+            // not tear down the torrent with `delete_files=true`. The
+            // pending-grab list (if any) still gets cancelled — the
+            // user's explicit action on a live-pending row is honored
+            // regardless of the stuck-drift path.
+            let tag_state_recheck: Option<String> = sqlx::query_scalar(
+                "SELECT state FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+            )
+            .bind(tracked.id)
+            .bind(episode_number)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+            if matches!(tag_state_recheck.as_deref(), Some("grabbed")) {
+                let seen: std::collections::HashSet<i64> =
+                    pending.iter().map(|g| g.id).collect();
+                for g in stuck {
+                    if !seen.contains(&g.id) {
+                        pending.push(g);
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    target: "ryokan::library",
+                    series_id = tracked.id,
+                    episode = episode_number,
+                    tag_state_now = ?tag_state_recheck,
+                    "cancel_pending_episode: tag flipped away from 'grabbed' mid-handler — skipping drift-repair branch"
+                );
+            }
+        }
+    }
+
+    if pending.is_empty() {
+        // Tag might still be 'grabbed' with no recorded grab at all —
+        // an orphaned state from a grab row that got deleted or from
+        // a stale tag that survived a blocklist. Clear the tag so the
+        // UI returns the episode to missing even without a torrent to
+        // remove.
+        if tag_is_grabbed {
+            let _ = episode_tags::clear_tags_for_removal(
+                &state.db,
+                tracked.id,
+                &[episode_number],
+            )
+            .await;
+            return (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "cancelled": 0,
+                    "torrent_failures": Vec::<String>::new(),
+                    "note": "Tag cleared; no associated torrent was found.",
+                })),
+            );
+        }
+        return json_err(
+            axum::http::StatusCode::NOT_FOUND,
+            "No pending grab found for this episode",
+        );
+    }
+
+    // Diagnostic: log the exact set of grabs we're about to touch so
+    // we can confirm a cancel for one episode isn't accidentally
+    // matching a batch grab that covers the whole season. Batch grabs
+    // have `episode_numbers.len() > 1` and are the one case where
+    // cancelling "one episode" legitimately takes the whole torrent
+    // out — the UI should surface a batch-cancel confirmation in that
+    // case. For now at least the log trail makes the distinction
+    // obvious.
+    tracing::debug!(
+        target: "ryokan::library",
+        series_id = tracked.id,
+        episode = episode_number,
+        grab_count = pending.len(),
+        grab_ids = ?pending.iter().map(|g| g.id).collect::<Vec<_>>(),
+        grab_names = ?pending.iter().map(|g| g.torrent_name.clone()).collect::<Vec<_>>(),
+        batch_grabs = ?pending.iter().filter(|g| g.episode_numbers.len() > 1).map(|g| g.id).collect::<Vec<_>>(),
+        tag_was_stuck_grabbed = tag_is_grabbed,
+        "cancel_pending_episode: matching grabs"
+    );
+
+    // Pull the qBit client once — if qBit isn't configured we still
+    // want to clear the DB state so a stale grab row doesn't
+    // permanently block a re-grab.
+    let qbit = state.qbit.read().await.as_ref().cloned();
+
+    let mut removed_count = 0;
+    let mut torrent_failures: Vec<String> = Vec::new();
+    for grab in &pending {
+        if !grab.hash.is_empty()
+            && let Some(ref qbit) = qbit
+            && let Err(e) = qbit.delete_torrent(&grab.hash, true).await
+        {
+            torrent_failures.push(format!("{}: {}", grab.torrent_name, e));
+            logger::warn(
+                &state.db,
+                LogCategory::QBit,
+                &format!(
+                    "Failed to remove pending torrent for S?E{:02} cancel: '{}'",
+                    episode_number, grab.torrent_name
+                ),
+                &e,
+            )
+            .await;
+        }
+
+        if let Err(e) = grabbed_torrents::mark_removed(&state.db, grab.id).await {
+            logger::warn(
+                &state.db,
+                LogCategory::Library,
+                &format!(
+                    "Failed to mark grab {} as removed during cancel for S?E{:02}",
+                    grab.id, episode_number
+                ),
+                &e.to_string(),
+            )
+            .await;
+        } else {
+            removed_count += 1;
+        }
+    }
+
+    // `clear_tags_for_removal` (vs `clear_episode_tag`) also flips any
+    // lingering 'grabbed' history rows to 'removed' so the grab-history
+    // modal stops showing stale entries for a torrent we just deleted.
+    // Consistency with the qBit-removal reconciliation path (which
+    // already calls this on the progress-poll and post-processing
+    // stale branches) — a cancel should leave history in the same
+    // shape as an external qBit delete.
+    let _ = episode_tags::clear_tags_for_removal(
+        &state.db,
+        tracked.id,
+        &[episode_number],
+    )
+    .await;
+
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!(
+            "Cancelled pending grab for episode {}",
+            episode_number
+        ),
+        &format!(
+            "series_id={}, cancelled={}, qbit_failures={}",
+            tracked.id,
+            removed_count,
+            torrent_failures.len()
+        ),
+    )
+    .await;
+
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "cancelled": removed_count,
+            "torrent_failures": torrent_failures,
+        })),
+    )
 }
 
 /// Get grab history for a specific episode.
@@ -4290,7 +4723,26 @@ pub async fn episode_download_progress(
         }
     };
 
-    let torrents = qbit.get_torrents().await.unwrap_or_default();
+    // Propagate the qBit query result instead of swallowing errors. A
+    // qBit restart / network blip makes `by_hash` empty; the
+    // reconciliation pass below would then falsely mark every pending
+    // grab as removed. Returning 503 (a) preserves DB state by
+    // short-circuiting before the reconcile path, and (b) lets the UI
+    // distinguish "qBit unreachable" from "no active downloads" — the
+    // prior `Ok(Json(Vec::new()))` collapsed both into the same empty
+    // response, so progress bars would silently reset on every
+    // transient outage. The poller JS on the series page already ignores
+    // non-200s (`r.ok ? r.json() : []`), so existing clients simply
+    // keep the last-known progress state until the next successful poll.
+    let torrents = match qbit.get_torrents().await {
+        Ok(t) => t,
+        Err(err) => {
+            return Err((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("qBittorrent unavailable: {err}"),
+            ))
+        }
+    };
     let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
         .iter()
         .map(|t| (t.hash.to_lowercase(), t))
@@ -4319,8 +4771,40 @@ pub async fn episode_download_progress(
         };
 
         let Some(t) = torrent else {
-            // Torrent not in qBittorrent — skip it so the UI clears the stale
-            // progress bar. The post-processing tick will mark old orphans as failed.
+            // Torrent not in qBittorrent. qBit responded successfully
+            // (we'd have returned early on error above), so the torrent
+            // is truly gone — almost always because the user deleted it
+            // manually in qBit. Reconcile immediately so the UI reflects
+            // the change on next render, instead of waiting for the
+            // 60s post-processing tick. A 30s grace guards against the
+            // brief window between our grab RPC and qBit ingesting it
+            // where the hash may transiently not yet appear in the
+            // torrent list.
+            if crate::services::post_processing::grab_is_stale(&grab.grabbed_at, 30) {
+                logger::info(
+                    &state.db,
+                    LogCategory::QBit,
+                    &format!(
+                        "Torrent removed in qBittorrent — reconciling '{}'",
+                        grab.torrent_name
+                    ),
+                    &format!(
+                        "series_id={} grab_id={} hash={}",
+                        grab.series_id, grab.id, grab.hash
+                    ),
+                )
+                .await;
+                let _ = crate::models::grabbed_torrents::mark_removed(
+                    &state.db, grab.id,
+                )
+                .await;
+                let _ = crate::models::episode_tags::clear_tags_for_removal(
+                    &state.db,
+                    grab.series_id,
+                    &grab.episode_numbers,
+                )
+                .await;
+            }
             continue;
         };
 

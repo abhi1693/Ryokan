@@ -48,6 +48,7 @@ use services::{
         handlers::library::set_monitoring,
         handlers::library::set_episode_monitoring,
         handlers::library::set_allow_upgrades,
+        handlers::library::set_search_overrides,
         handlers::library::set_manual_override,
         handlers::library::list_folders,
         handlers::library::auto_search_series,
@@ -58,6 +59,7 @@ use services::{
         handlers::library::grab_interactive_result,
         handlers::library::grab_batch_result,
         handlers::library::delete_episode_file,
+        handlers::library::cancel_pending_episode,
         handlers::library::get_episode_grab_history,
         handlers::library::mark_episode_failed,
         handlers::library::episode_download_progress,
@@ -406,6 +408,7 @@ async fn main() {
         .route("/api/library/monitoring", post(handlers::library::set_monitoring))
         .route("/api/library/episode-monitoring", post(handlers::library::set_episode_monitoring))
         .route("/api/library/allow-upgrades", post(handlers::library::set_allow_upgrades))
+        .route("/api/library/search-overrides", post(handlers::library::set_search_overrides))
         .route("/api/library/manual-override", post(handlers::library::set_manual_override))
         .route("/api/series/{anilist_id}/auto-search", post(handlers::library::auto_search_series))
         .route("/api/series/{anilist_id}/auto-search/{episode_number}", post(handlers::library::auto_search_episode))
@@ -415,6 +418,7 @@ async fn main() {
         .route("/api/series/{anilist_id}/grab/{episode_number}", post(handlers::library::grab_interactive_result))
         .route("/api/series/{anilist_id}/grab-batch", post(handlers::library::grab_batch_result))
         .route("/api/series/{anilist_id}/delete-file/{episode_number}", post(handlers::library::delete_episode_file))
+        .route("/api/series/{anilist_id}/cancel-pending/{episode_number}", post(handlers::library::cancel_pending_episode))
         .route("/api/series/{anilist_id}/grab-history/{episode_number}", get(handlers::library::get_episode_grab_history))
         .route("/api/series/{anilist_id}/mark-failed/{episode_number}", post(handlers::library::mark_episode_failed))
         .route("/api/series/{anilist_id}/download-progress", get(handlers::library::episode_download_progress))

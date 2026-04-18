@@ -18,12 +18,29 @@ pub struct GrabbedTorrent {
     pub is_batch: bool,
 }
 
-/// Record a torrent grab for post-processing. Skips silently if we
-/// already have a pending or imported record with the same (non-empty)
-/// hash, in which case `Ok(None)` is returned. On a fresh insert,
-/// returns `Ok(Some(id))` so the Phase 2 multi-series routing path can
-/// attach `grabbed_torrent_series` rows via
-/// [`record_grab_series_routes`] without re-querying.
+/// Record a torrent grab for post-processing.
+///
+/// Three outcomes, all returning `Ok(Some(grab_id))` so callers can
+/// attach `grabbed_torrent_series` route rows without re-querying:
+///
+///  1. **Fresh insert.** No prior active row for this hash — a new
+///     grab row is inserted at state `pending`.
+///  2. **Reactivation.** A prior row with the same non-empty hash
+///     exists in state `pending` or `imported`. That row is flipped
+///     back to `pending`, `imported_at` and `qbit_content_path` are
+///     cleared, and `series_id` / `episode_numbers` / `torrent_name`
+///     / `is_batch` are refreshed to the new request. Post-processing
+///     will re-import the torrent as if it were fresh. This handles
+///     the "I deleted the library file, re-grabbed the same release,
+///     nothing happened" drift case — without it, the `INSERT OR
+///     IGNORE` silently swallowed the second grab and the episode tag
+///     would get stuck at `grabbed` forever.
+///  3. **Empty-hash pass-through.** Hash is empty (legacy grab
+///     paths). Partial index excludes empty-hash rows, so a fresh
+///     insert always succeeds and no dedup/reactivation happens.
+///
+/// `Ok(None)` is no longer returned — any successful path now carries
+/// the affected row's id, and a real DB error bubbles up as `Err`.
 ///
 /// `is_batch` is the caller's view (from the Nyaa listing or search
 /// hit) of whether the release is a batch/season pack. Persisted so
@@ -40,20 +57,11 @@ pub async fn record_grab(
     let eps_json = serde_json::to_string(episode_numbers).unwrap_or_else(|_| "[]".to_string());
     let is_batch_i = if is_batch { 1_i64 } else { 0_i64 };
 
-    // Atomic dedup via partial UNIQUE index on (hash) WHERE hash != ''
-    // AND state IN ('pending', 'imported') (created in models::migrate).
-    // INSERT OR IGNORE swallows the conflict and RETURNING yields no
-    // row, so fetch_optional resolves to None on the dedup path. The
-    // previous SELECT-then-INSERT pattern had a race window where two
-    // concurrent record_grab calls (RSS auto-sync racing a manual grab
-    // on the same release) both observed "no existing row" and both
-    // inserted, producing duplicate pending rows that triggered
-    // double-import attempts in post-processing.
-    //
-    // Empty-hash rows aren't covered by the partial index (the WHERE
-    // clause filters them out), so they always insert — preserving the
-    // pre-fix behavior where empty-hash grabs from legacy paths never
-    // deduped against each other.
+    // Step 1 — attempt a fresh insert. Partial UNIQUE index on (hash)
+    // WHERE hash != '' AND state IN ('pending', 'imported') makes
+    // INSERT OR IGNORE atomically dedup against an active row for the
+    // same hash. Empty-hash rows bypass the index (see the outcome #3
+    // comment on the fn) and always land.
     let inserted_id: Option<i64> = sqlx::query_scalar(
         "INSERT OR IGNORE INTO grabbed_torrents
              (hash, torrent_name, series_id, episode_numbers, state, is_batch)
@@ -67,7 +75,66 @@ pub async fn record_grab(
     .bind(is_batch_i)
     .fetch_optional(db)
     .await?;
-    Ok(inserted_id)
+
+    if let Some(id) = inserted_id {
+        return Ok(Some(id));
+    }
+
+    // Empty-hash insert can't conflict (excluded by partial index), so
+    // reaching here with an empty hash means something else went wrong
+    // (e.g. a FK violation on series_id). Report None to surface the
+    // anomaly instead of silently papering over it.
+    if hash.is_empty() {
+        return Ok(None);
+    }
+
+    // Step 2 — dedup hit. Reactivate the existing row ONLY when it's
+    // already imported. `RETURNING id` gives us the existing grab's
+    // primary key so callers get a consistent `Some(id)` on the drift
+    // path.
+    //
+    // Why gate on `state='imported'` instead of `IN ('pending',
+    // 'imported')`:
+    //   A `pending` row means another concurrent flow — most likely
+    //   post-processing mid-import — is actively working on the
+    //   torrent. `stamp_qbit_content_path` runs BEFORE `import_torrent`,
+    //   so at that moment the row is `pending` with a non-empty
+    //   `qbit_content_path`. If we null-clobbered those columns here,
+    //   the in-flight import would finish on a row that no longer
+    //   knows where qBit left the file. Leaving pending rows alone
+    //   (and returning Ok(None) when the insert is deduped against a
+    //   pending row) matches the pre-reactivation "silent dedup"
+    //   semantics for the narrow "already in progress" case and only
+    //   diverges for the drift case (imported row the user wants to
+    //   re-import).
+    //
+    // Refresh series_id / episode_numbers / torrent_name / is_batch
+    // from the new request: a user who re-grabs typed a release
+    // against a different episode set than the original (e.g. was a
+    // batch, now a single episode) should see post-processing import
+    // the new intent, not the stale one.
+    let reactivated: Option<i64> = sqlx::query_scalar(
+        "UPDATE grabbed_torrents
+         SET state = 'pending',
+             imported_at = NULL,
+             qbit_content_path = '',
+             grabbed_at = CURRENT_TIMESTAMP,
+             series_id = ?,
+             episode_numbers = ?,
+             torrent_name = ?,
+             is_batch = ?
+         WHERE hash = ? AND state = 'imported'
+         RETURNING id",
+    )
+    .bind(series_id)
+    .bind(&eps_json)
+    .bind(torrent_name)
+    .bind(is_batch_i)
+    .bind(hash)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(reactivated)
 }
 
 /// Per-file routing row for a grabbed torrent. Used to drive
@@ -506,6 +573,69 @@ pub async fn find_imported_for_episode(
         .collect())
 }
 
+/// Same shape as [`find_imported_for_episode`] but for pending rows —
+/// the torrent is in qBit but post-processing hasn't imported it yet.
+/// Used by the cancel-pending handler to find what to pull out of qBit
+/// before marking the row 'removed'.
+///
+/// `grabbed_torrents.state = 'pending'` is the on-the-wire label for
+/// this stage (distinct from `episode_tags.state = 'grabbed'`, which
+/// describes the episode's UI state and uses a different vocabulary
+/// — yes, it's confusing). Returns both direct single-series grabs
+/// and routed multi-series grabs (parent batch whose route targets
+/// this series+episode), same UNION shape as the imported variant.
+pub async fn find_pending_for_episode(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch FROM (
+             SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
+                    g.series_id AS series_id, g.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at,
+                    COALESCE(g.is_batch, 0) AS is_batch
+             FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
+             WHERE g.series_id = ? AND je.value = ? AND g.state = 'pending'
+             UNION
+             SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
+                    g.series_id AS series_id, g.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at,
+                    COALESCE(g.is_batch, 0) AS is_batch
+             FROM grabbed_torrents g
+             JOIN grabbed_torrent_series r ON r.grab_id = g.id
+             , json_each(r.episode_numbers) AS je
+             WHERE r.series_id = ? AND je.value = ? AND g.state = 'pending'
+           )
+           ORDER BY grabbed_at DESC"#,
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .bind(series_id)
+    .bind(episode_number)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let eps_json: String = row.get("episode_numbers");
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            let is_batch_i: i64 = row.get("is_batch");
+            GrabbedTorrent {
+                id: row.get("id"),
+                hash: row.get("hash"),
+                torrent_name: row.get("torrent_name"),
+                series_id: row.get("series_id"),
+                episode_numbers,
+                state: "pending".to_string(),
+                grabbed_at: row.get("grabbed_at"),
+                is_batch: is_batch_i != 0,
+            }
+        })
+        .collect())
+}
+
 /// Bulk variant for post-processing's library scan: fetch every
 /// imported grab covering this series in one round-trip, including
 /// grabs that reach the series via the sibling-routes path. Returns
@@ -823,19 +953,14 @@ mod tests {
         assert!(batch.is_batch, "batch grab is_batch=true");
     }
 
-    /// Regression: record_grab previously did SELECT-then-INSERT with no
-    /// transaction, so two concurrent calls (RSS auto-sync racing a
-    /// manual grab on the same hash) both observed "no existing row" and
-    /// both inserted. Post-processing then attempted to import the same
-    /// hash twice. The fix is a partial UNIQUE index + INSERT OR IGNORE,
-    /// which collapses the SELECT and INSERT into one atomic statement.
-    ///
-    /// This test covers the three cases the dedup window has to honour:
-    ///  - same hash, both active → second insert is rejected
-    ///  - failed grab with same hash → re-record is allowed
-    ///  - empty hash → never deduped, always inserts
+    /// record_grab's atomic dedup uses a partial UNIQUE index on
+    /// `(hash) WHERE hash != '' AND state IN ('pending', 'imported')`.
+    /// A dedup hit is no longer a silent no-op — the existing row is
+    /// reactivated so post-processing picks it up again (see the
+    /// drift-cause story on the `record_grab` fn). This test pins both
+    /// the dedup-and-reactivate behavior and the empty-hash bypass.
     #[tokio::test]
-    async fn record_grab_dedups_same_hash_atomically() {
+    async fn record_grab_dedups_and_reactivates_same_hash() {
         let db = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("in-memory sqlite");
@@ -867,13 +992,22 @@ mod tests {
             .expect("first record_grab")
             .expect("first must insert");
 
-        // Second active grab with same hash is dedup'd.
-        let id2 = record_grab(&db, "racehash", "release b", series_id, &[1], false)
+        // Second grab with same hash against a PENDING row dedups
+        // silently — reactivation only runs on 'imported' rows to
+        // avoid null-clobbering an in-flight import's
+        // qbit_content_path / imported_at. Returns Ok(None) and the
+        // existing row's fields are left alone.
+        let id2 = record_grab(&db, "racehash", "release b", series_id, &[2], false)
             .await
             .expect("second record_grab");
-        assert!(id2.is_none(), "duplicate active hash must dedup");
+        assert!(
+            id2.is_none(),
+            "pending-row dedup must not reactivate: {:?}",
+            id2
+        );
 
-        // Confirm only one row exists for that hash.
+        // Confirm only one row exists and the pending fields are
+        // intact (no silent rewrite).
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents WHERE hash = 'racehash'")
                 .fetch_one(&db)
@@ -881,24 +1015,151 @@ mod tests {
                 .expect("count");
         assert_eq!(count, 1);
 
-        // Mark the first one as failed; now the same hash can be
-        // re-recorded — the partial index excludes failed/removed rows.
-        mark_failed(&db, id1).await.expect("mark failed");
-        let id3 = record_grab(&db, "racehash", "release c", series_id, &[1], false)
-            .await
-            .expect("third record_grab");
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT torrent_name, episode_numbers, state FROM grabbed_torrents WHERE id = ?",
+        )
+        .bind(id1)
+        .fetch_one(&db)
+        .await
+        .expect("fetch row");
+        assert_eq!(row.0, "release a", "pending row's fields must be untouched");
+        assert_eq!(row.1, "[1]", "pending row's episode_numbers must be untouched");
+        assert_eq!(row.2, "pending", "pending row stays pending");
+
+        // The original drift case: mark the row 'imported' (as
+        // post-processing would have), then re-grab the same hash.
+        // Reactivation must flip it back to 'pending' and null out
+        // imported_at so the next post-processing tick picks it up.
+        mark_imported(&db, id1).await.expect("mark imported");
+        let imported_at_before: Option<String> = sqlx::query_scalar(
+            "SELECT imported_at FROM grabbed_torrents WHERE id = ?",
+        )
+        .bind(id1)
+        .fetch_one(&db)
+        .await
+        .expect("imported_at before");
         assert!(
-            id3.is_some(),
-            "after blocklist, same hash must be re-recordable"
+            imported_at_before.is_some(),
+            "mark_imported stamps imported_at"
         );
 
-        // Empty-hash rows aren't covered by the partial index.
-        let id4 = record_grab(&db, "", "no hash a", series_id, &[1], false)
+        let id3 = record_grab(&db, "racehash", "release c", series_id, &[1], false)
+            .await
+            .expect("third record_grab")
+            .expect("re-grab of imported hash must yield an id");
+        assert_eq!(id3, id1, "reactivation preserves the row id");
+
+        let (state_after, imported_at_after): (String, Option<String>) = sqlx::query_as(
+            "SELECT state, imported_at FROM grabbed_torrents WHERE id = ?",
+        )
+        .bind(id1)
+        .fetch_one(&db)
+        .await
+        .expect("state after");
+        assert_eq!(state_after, "pending", "imported→pending flip on re-grab");
+        assert!(
+            imported_at_after.is_none(),
+            "imported_at must be cleared on reactivation"
+        );
+
+        // Failed grabs with the same hash are NOT covered by the
+        // partial index, so a re-grab goes through the fresh-insert
+        // path and writes a new row. This preserves blocklist
+        // semantics (user marked the grab failed on purpose — the
+        // re-grab is a genuinely new attempt, not a reactivation).
+        mark_failed(&db, id1).await.expect("mark failed");
+        let id4 = record_grab(&db, "racehash", "release d", series_id, &[1], false)
+            .await
+            .expect("fourth record_grab")
+            .expect("re-record after failed must insert");
+        assert_ne!(id4, id1, "post-failed re-grab inserts a new row");
+
+        // Empty-hash rows aren't covered by the partial index and are
+        // never deduped.
+        let id5 = record_grab(&db, "", "no hash a", series_id, &[1], false)
             .await
             .expect("empty-hash a");
-        let id5 = record_grab(&db, "", "no hash b", series_id, &[1], false)
+        let id6 = record_grab(&db, "", "no hash b", series_id, &[1], false)
             .await
             .expect("empty-hash b");
-        assert!(id4.is_some() && id5.is_some(), "empty-hash never dedups");
+        assert!(id5.is_some() && id6.is_some(), "empty-hash never dedups");
+        assert_ne!(id5, id6, "empty-hash inserts are distinct rows");
+    }
+
+    /// `find_pending_for_episode` backs the cancel-pending handler.
+    /// It must only return 'pending' rows (not 'imported' / 'failed' /
+    /// 'removed'), and must find both direct single-series grabs and
+    /// grabs that reach the series via a route row.
+    #[tokio::test]
+    async fn find_pending_filters_by_state_and_series() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 99999,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2024),
+                end_year: Some(2024),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        // Pending grab for ep 5 — should be found.
+        let pending_id = record_grab(
+            &db,
+            "pending0000000000000000000000000000000001",
+            "[Group] Show - 05",
+            series_id,
+            &[5],
+            false,
+        )
+        .await
+        .expect("pending grab")
+        .expect("id");
+
+        // Imported grab for ep 6 — must NOT be returned for ep 6 pending
+        // lookup (different state).
+        let imported_id = record_grab(
+            &db,
+            "imported000000000000000000000000000000002",
+            "[Group] Show - 06",
+            series_id,
+            &[6],
+            false,
+        )
+        .await
+        .expect("imported grab")
+        .expect("id");
+        mark_imported(&db, imported_id).await.expect("mark imported");
+
+        let hits_ep5 = find_pending_for_episode(&db, series_id, 5).await.expect("query");
+        assert_eq!(hits_ep5.len(), 1, "should find the one pending grab for ep 5");
+        assert_eq!(hits_ep5[0].id, pending_id);
+        assert_eq!(hits_ep5[0].state, "pending");
+
+        let hits_ep6 = find_pending_for_episode(&db, series_id, 6).await.expect("query");
+        assert!(hits_ep6.is_empty(), "imported grabs must not leak into pending lookup");
+
+        // Cancel path: mark_removed flips the state; a second lookup
+        // should no longer return the row.
+        mark_removed(&db, pending_id).await.expect("mark removed");
+        let hits_after_remove = find_pending_for_episode(&db, series_id, 5).await.expect("query");
+        assert!(
+            hits_after_remove.is_empty(),
+            "removed grabs must not reappear in pending lookup"
+        );
     }
 }

@@ -516,10 +516,37 @@ pub async fn add_series(
         anime_ids = anibridge::lookup_by_tmdb(tvdb_id, requested_season).await;
     }
 
+    // #26 — TMDB often models multi-cour anime as one flat season
+    // (JJK, Bleach TYBW, Demon Slayer) so Seerr requests "season 1"
+    // even when it covers 2–3 AL entries. anibridge hands back the
+    // full list, but HashMap iteration order is unstable so [0] picked
+    // arbitrary cours — JJK would sometimes resolve to the S3 entry
+    // instead of S1. Sort by AL ID ascending before picking the
+    // primary so the earliest-aired cour wins deterministically.
+    // AniList IDs are assigned chronologically at entry-creation time,
+    // which usually (though not always) matches cour order.
+    //
+    // Full fan-out to all AL entries when len > 1 is the plan's piece
+    // 1 for #26 — punted to a follow-up commit. For now, log when
+    // len > 1 so operators can see which shows are candidates.
+    anime_ids.sort_by_key(|a| a.anilist_id.unwrap_or(i64::MAX));
+
     tracing::info!(
         "Anibridge resolved TVDB {} season {:?} → {} entries: {:?}",
         tvdb_id, requested_season, anime_ids.len(), anime_ids,
     );
+    if anime_ids.len() > 1 {
+        let al_ids: Vec<i64> = anime_ids.iter().filter_map(|a| a.anilist_id).collect();
+        logger::info(
+            &state.db,
+            LogCategory::Library,
+            &format!(
+                "Seerr add: TVDB {} season {:?} maps to {} AniList entries — picking earliest",
+                tvdb_id, requested_season, anime_ids.len()
+            ),
+            &format!("al_ids_sorted={:?}, selected={:?}", al_ids, al_ids.first()),
+        ).await;
+    }
 
     let detail = if let Some(ids) = anime_ids.first().filter(|a| a.anilist_id.is_some() || a.mal_id.is_some()) {
         // Anibridge has a mapping — fetch detail via AniList/Jikan.

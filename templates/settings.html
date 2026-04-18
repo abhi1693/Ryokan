@@ -153,6 +153,18 @@
                 <input type="text" name="blocked_groups" id="blocked_groups" value="{{ config.blocked_groups }}" placeholder="EMBER, ASW, randomgroup">
                 <span class="form-hint">Comma-separated groups Ryokan should never auto-grab from. Manual search results still appear, but RSS auto-grabs will reject them.</span>
             </div>
+            {# #23 — Global search defaults. Per-series overrides on the
+               series detail page take precedence when set. #}
+            <div class="form-group">
+                <label for="default_restrict_to_uploader">Default Restrict to Nyaa Uploader</label>
+                <input type="text" name="default_restrict_to_uploader" id="default_restrict_to_uploader" value="{{ config.default_restrict_to_uploader }}" placeholder="SubsPlease">
+                <span class="form-hint">When set, every Nyaa search is scoped to <code>?u=&lt;name&gt;</code> so only this uploader's releases come back. Tighter and faster than a title-contains group filter. Must match an actual Nyaa account — groups without a dedicated uploader return zero results. Per-series overrides on the series page beat this default.</span>
+            </div>
+            <div class="form-group">
+                <label for="default_custom_query_tokens">Default Custom Query Tokens</label>
+                <input type="text" name="default_custom_query_tokens" id="default_custom_query_tokens" value="{{ config.default_custom_query_tokens }}" placeholder="bd 1080p">
+                <span class="form-hint">Extra keywords appended to every Nyaa search (e.g. <code>bd</code>, <code>1080p</code>, <code>h.264</code>). Useful for narrowing the result pool at the source. Per-series overrides on the series page beat this default.</span>
+            </div>
             <div class="form-group">
                 <label for="preferred_source">Preferred Source</label>
                 <select name="preferred_source" id="preferred_source">

@@ -98,8 +98,28 @@ pub struct SearchResult {
     pub seeders: i32,
     pub leechers: i32,
     pub downloads: i32,
+    /// Release group extracted via anitomy. Kept as `String` for backward-
+    /// compat with the old ad-hoc bracket parse; empty string means "no
+    /// group detected."
     pub group: String,
+    /// Resolution as a bare digit string ("1080", "720", …) or empty. Kept
+    /// for UI callers that render just the resolution tag; richer callers
+    /// should use `quality_label` which encodes source+resolution+sub-tier.
     pub resolution: String,
+    /// Pre-computed Sonarr-parity label (`WEBDL-1080p`, `BD-1080p Remux`,
+    /// etc.) produced from the same [`crate::services::source::ClassificationResult::label`]
+    /// logic as the grab-side pipeline, so the value the user sees in
+    /// interactive search equals the value persisted once grabbed.
+    /// Empty when neither source nor resolution was determined.
+    pub quality_label: String,
+    /// Source enum as a string (`"Web"`, `"BluRay"`, …) or empty when
+    /// unknown. Mirrors `Source::as_str()` exactly.
+    pub source: String,
+    /// Web sub-variant (`"WEB-DL"`, `"WEBRip"`, or empty for Unknown).
+    /// Only meaningful when `source == "Web"`.
+    pub web_kind: String,
+    pub is_remux: bool,
+    pub is_bdmv: bool,
     pub is_batch: bool,
     pub is_trusted: bool,
     pub score: i32,
@@ -246,9 +266,11 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
         let row_class = row.value().attr("class").unwrap_or("");
         let is_trusted = row_class.contains("success");
 
-        // Extract group, resolution, batch, hash from title/magnet.
-        let group = extract_group(&title);
-        let resolution = extract_resolution(&title);
+        // Filename-layer classification (anitomy + source-token scan).
+        // Drops the old ad-hoc bracket/regex extract and mirrors what the
+        // grab-side pipeline's Layer 1 produces, so the label the user
+        // sees in interactive search equals the value persisted on grab.
+        let classified = classify_search_result(&title);
         let is_batch = detect_batch(&title);
         let info_hash = extract_hash(&magnet);
 
@@ -262,8 +284,13 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
             seeders,
             leechers,
             downloads,
-            group,
-            resolution,
+            group: classified.group,
+            resolution: classified.resolution,
+            quality_label: classified.quality_label,
+            source: classified.source,
+            web_kind: classified.web_kind,
+            is_remux: classified.is_remux,
+            is_bdmv: classified.is_bdmv,
             is_batch,
             is_trusted,
             score: 0,
@@ -287,22 +314,159 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
     (results, has_next)
 }
 
-fn extract_group(title: &str) -> String {
-    if let Some(start) = title.find('[')
-        && let Some(end) = title[start..].find(']') {
-            return title[start + 1..start + end].to_string();
-        }
-    String::new()
+/// Classification-derived fields for a single Nyaa row. Bundles the
+/// values that used to come from three separate ad-hoc extractors with
+/// the richer label the template now renders directly, so `parse_results`
+/// only touches one helper per row.
+struct ClassifiedFields {
+    group: String,
+    resolution: String,
+    quality_label: String,
+    source: String,
+    web_kind: String,
+    is_remux: bool,
+    is_bdmv: bool,
 }
 
-fn extract_resolution(title: &str) -> String {
-    let lower = title.to_lowercase();
-    for res in &["2160", "1080", "720", "480"] {
-        if lower.contains(&format!("{}p", res)) || lower.contains(&format!("{}i", res)) {
-            return res.to_string();
+/// Run the filename classifier over a release title and reshape the
+/// output for [`SearchResult`]. Mirrors the backend's
+/// [`crate::services::source::ClassificationResult::label`] so the UI
+/// label in interactive search matches the value a grab would persist.
+///
+/// The group-map (Layer 3) lookup is not done here — it's async and the
+/// parser is sync. Interactive paths that want Layer 3 enrichment call
+/// [`enrich_results_with_group_map`] after parsing.
+fn classify_search_result(title: &str) -> ClassifiedFields {
+    use crate::services::source::{ClassificationResult, DecisionRule, Source, Resolution};
+    use crate::services::source_filename::classify_filename;
+
+    let fc = classify_filename(title);
+
+    // Reduce the filename-layer evidence down to a winning source the
+    // same way the multi-layer aggregator would if this were the only
+    // layer's output. We don't need confidence/needs_review — we only
+    // want a source token for the label — so take the highest-confidence
+    // piece of evidence and use its source directly.
+    let mut winning_source = Source::Unknown;
+    let mut best_conf = 0.0_f32;
+    for e in &fc.evidence {
+        if e.confidence > best_conf {
+            winning_source = e.source;
+            best_conf = e.confidence;
         }
     }
-    String::new()
+
+    let cls = ClassificationResult {
+        source: winning_source,
+        resolution: fc.resolution,
+        is_remux: fc.is_remux,
+        web_kind: fc.web_kind,
+        is_bdmv: fc.is_bdmv,
+        confidence: best_conf,
+        needs_review: false,
+        evidence: Vec::new(),
+        decision_rule: DecisionRule::default(),
+    };
+
+    let quality_label = match cls.label().as_str() {
+        "Unknown" => String::new(),
+        other => other.to_string(),
+    };
+
+    // Bare-digit resolution ("1080") for back-compat with existing
+    // templates that render `{{ r.resolution }}p` tags.
+    let resolution = match fc.resolution {
+        Resolution::Unknown => String::new(),
+        r => r.as_str().trim_end_matches('p').to_string(),
+    };
+
+    ClassifiedFields {
+        group: fc.release_group.unwrap_or_default(),
+        resolution,
+        quality_label,
+        source: match winning_source {
+            Source::Unknown => String::new(),
+            other => other.as_str().to_string(),
+        },
+        web_kind: fc.web_kind.as_str().to_string(),
+        is_remux: fc.is_remux,
+        is_bdmv: fc.is_bdmv,
+    }
+}
+
+/// Enrich already-parsed search results with Layer 3 (group identity
+/// table) signals. Walks each result whose filename classifier didn't
+/// produce a source, looks up the group in `group_source_map`, and fills
+/// in `source` / `quality_label` when the group is known.
+///
+/// No-op for results that already have a filename-derived source — the
+/// filename is more specific than the group map (e.g. a SubsPlease
+/// release explicitly tagged "BluRay" remains BluRay, even though the
+/// group map says SubsPlease == Web).
+///
+/// Call this from interactive search handlers after `nyaa::search` —
+/// auto-search runs the full source pipeline downstream so it doesn't
+/// need the extra call.
+pub async fn enrich_results_with_group_map(
+    db: &sqlx::SqlitePool,
+    results: &mut [SearchResult],
+) {
+    use crate::services::source::{Resolution, Source};
+    use crate::services::source_groups::classify_group;
+
+    // Small per-batch cache so we only hit the DB once per unique group
+    // across a typical 75-row result page.
+    let mut seen: std::collections::HashMap<
+        String,
+        Option<(Source, crate::services::source::WebKind)>,
+    > = std::collections::HashMap::new();
+
+    for r in results.iter_mut() {
+        if !r.source.is_empty() || r.group.is_empty() {
+            continue;
+        }
+        let group_key = r.group.to_ascii_lowercase();
+        let group_hint = if let Some(cached) = seen.get(&group_key) {
+            *cached
+        } else {
+            let looked_up = classify_group(db, &r.group)
+                .await
+                .map(|cls| (cls.evidence.source, cls.web_kind));
+            seen.insert(group_key, looked_up);
+            looked_up
+        };
+
+        if let Some((src, web_kind)) = group_hint {
+            r.source = src.as_str().to_string();
+            // Rebuild quality_label now that source is known. Resolution
+            // string is bare digits ("1080"); translate back into the
+            // Resolution enum for label formatting.
+            let res_enum = if r.resolution.is_empty() {
+                Resolution::Unknown
+            } else {
+                Resolution::from_str(&format!("{}p", r.resolution))
+            };
+            // Web releases use the group table's web_kind hint (#33) so
+            // SubsPlease / HorribleSubs uploads label as `WEBDL` in
+            // interactive search instead of the generic `WEB`, matching
+            // the post-download classifier's output on the same files.
+            let source_label = match src {
+                Source::Web => match web_kind {
+                    crate::services::source::WebKind::WebDl => "WEBDL".to_string(),
+                    crate::services::source::WebKind::WebRip => "WEBRip".to_string(),
+                    crate::services::source::WebKind::Unknown => "WEB".to_string(),
+                },
+                Source::BluRay => "BD".to_string(),
+                other => other.as_str().to_string(),
+            };
+            r.quality_label = match (source_label.as_str(), res_enum) {
+                ("", Resolution::Unknown) => String::new(),
+                (s, Resolution::Unknown) => s.to_string(),
+                ("", r) => r.as_str().to_string(),
+                (s, r) => format!("{}-{}", s, r.as_str()),
+            };
+        }
+    }
 }
 
 fn detect_batch(title: &str) -> bool {
@@ -492,8 +656,7 @@ fn parse_view_page(
         })
         .unwrap_or_default();
 
-    let group = extract_group(&title);
-    let resolution = extract_resolution(&title);
+    let classified = classify_search_result(&title);
     let is_batch = detect_batch(&title);
 
     let mut result = SearchResult {
@@ -506,8 +669,13 @@ fn parse_view_page(
         seeders,
         leechers,
         downloads,
-        group,
-        resolution,
+        group: classified.group,
+        resolution: classified.resolution,
+        quality_label: classified.quality_label,
+        source: classified.source,
+        web_kind: classified.web_kind,
+        is_remux: classified.is_remux,
+        is_bdmv: classified.is_bdmv,
         is_batch,
         // We don't get the row-class `success` tag from a view page, so
         // the trusted flag stays false. Not a problem for the SeaDex
@@ -650,5 +818,136 @@ mod tests {
     fn extract_hash_no_prefix_returns_empty() {
         assert_eq!(extract_hash("https://example.com/t.torrent"), "");
         assert_eq!(extract_hash(""), "");
+    }
+
+    // ── #24 — anitomy-derived classification on SearchResult ──────────────
+
+    #[test]
+    fn classify_search_result_subsplease_1080p_webdl_from_filename_tokens() {
+        // SubsPlease's own filename is silent on source — just "1080p",
+        // no WEB/WEBDL token. Layer 1 (filename) should still surface
+        // 1080p + empty source; the group-map enricher fills in Web.
+        let c = classify_search_result("[SubsPlease] Frieren - 01 (1080p) [A1B2C3D4].mkv");
+        assert_eq!(c.group, "SubsPlease");
+        assert_eq!(c.resolution, "1080");
+        // Without Layer 3 (group map), source is unknown here.
+        assert!(c.source.is_empty() || c.source == "Web");
+    }
+
+    #[test]
+    fn classify_search_result_bdmv_label_matches_grab_path() {
+        // BDMV releases must produce `BD-1080p RAW` — the same label the
+        // grab-side ClassificationResult::label() emits, so UI and DB agree.
+        let c = classify_search_result("[smol] Monogatari S1 (BDMV 1080p x264 FLAC) [f00ba211].mkv");
+        assert_eq!(c.resolution, "1080");
+        assert_eq!(c.source, "BluRay");
+        assert!(c.is_bdmv);
+        assert_eq!(c.quality_label, "BD-1080p RAW");
+    }
+
+    #[test]
+    fn classify_search_result_remux_gets_suffix() {
+        let c = classify_search_result("[Tenrai-Sensei] Frieren - 01 (BD Remux 1080p).mkv");
+        assert_eq!(c.source, "BluRay");
+        assert!(c.is_remux);
+        assert_eq!(c.quality_label, "BD-1080p Remux");
+    }
+
+    #[test]
+    fn classify_search_result_web_dl_produces_full_label() {
+        let c = classify_search_result("Show Name - 01 (1080p) [WEB-DL].mkv");
+        assert_eq!(c.resolution, "1080");
+        assert_eq!(c.source, "Web");
+        assert_eq!(c.web_kind, "WEB-DL");
+        assert_eq!(c.quality_label, "WEBDL-1080p");
+    }
+
+    #[test]
+    fn classify_search_result_empty_label_when_nothing_parses() {
+        // No source, no resolution → empty label so the UI shows a dash
+        // instead of a stray "Unknown" string.
+        let c = classify_search_result("garbage title with no tokens");
+        assert!(c.resolution.is_empty());
+        assert!(c.source.is_empty());
+        assert!(c.quality_label.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enrich_with_group_map_fills_source_for_known_group() {
+        use crate::models::group_source_map;
+        use crate::services::source::Source;
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&pool).await.unwrap();
+        // Seeded map already ships SubsPlease=Web; rely on that rather
+        // than re-inserting here so the test also exercises the
+        // real seed data round-trip.
+        assert_eq!(
+            group_source_map::get(&pool, "SubsPlease")
+                .await
+                .unwrap()
+                .map(|e| e.source),
+            Some(Source::Web),
+        );
+
+        let mut results = vec![SearchResult {
+            title: "[SubsPlease] Show - 01 (1080p) [abc].mkv".to_string(),
+            link: String::new(),
+            magnet: String::new(),
+            torrent: String::new(),
+            size: String::new(),
+            size_bytes: 0,
+            seeders: 0,
+            leechers: 0,
+            downloads: 0,
+            group: "SubsPlease".to_string(),
+            resolution: "1080".to_string(),
+            quality_label: "1080p".to_string(),
+            source: String::new(),
+            web_kind: String::new(),
+            is_remux: false,
+            is_bdmv: false,
+            is_batch: false,
+            is_trusted: false,
+            score: 0,
+            info_hash: String::new(),
+        }];
+
+        enrich_results_with_group_map(&pool, &mut results).await;
+
+        assert_eq!(results[0].source, "Web");
+        // SubsPlease ships WEB-DL exclusively (direct CR/HIDIVE stream
+        // remuxes) and the group table carries that hint, so the
+        // label resolves to the specific `WEBDL` tier rather than the
+        // generic `WEB` one.
+        assert_eq!(results[0].quality_label, "WEBDL-1080p");
+    }
+
+    #[tokio::test]
+    async fn enrich_with_group_map_does_not_overwrite_filename_source() {
+        // Filename said BluRay explicitly; even if the group map would
+        // claim Web, the filename's specificity wins.
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&pool).await.unwrap();
+
+        let mut results = vec![SearchResult {
+            title: "[SubsPlease] Show - 01 (BD 1080p) [abc].mkv".to_string(),
+            link: String::new(), magnet: String::new(), torrent: String::new(),
+            size: String::new(), size_bytes: 0,
+            seeders: 0, leechers: 0, downloads: 0,
+            group: "SubsPlease".to_string(),
+            resolution: "1080".to_string(),
+            quality_label: "BD-1080p".to_string(),
+            source: "BluRay".to_string(),
+            web_kind: String::new(),
+            is_remux: false, is_bdmv: false,
+            is_batch: false, is_trusted: false,
+            score: 0, info_hash: String::new(),
+        }];
+
+        enrich_results_with_group_map(&pool, &mut results).await;
+
+        assert_eq!(results[0].source, "BluRay");
+        assert_eq!(results[0].quality_label, "BD-1080p");
     }
 }

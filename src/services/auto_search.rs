@@ -54,6 +54,33 @@ static RE_RELEASE_SEASON_N: LazyLock<Regex> = LazyLock::new(||
 static RE_RELEASE_NTH_SEASON: LazyLock<Regex> = LazyLock::new(||
     Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap()
 );
+/// #27 additions: release titles also use `Part N` / `Cour N` as season
+/// synonyms (matches the same token `infer_season_from_title` already
+/// accepts on the AL side — the parsers were asymmetric before, which
+/// let a release titled "JJK Part 2" slip past the reject layer as
+/// season 0 because neither regex fired on `parse_release_season`).
+static RE_RELEASE_PART_COUR: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"\b(?:part|cour)\s+(\d+)").unwrap()
+);
+/// Roman numerals II–IX at a word boundary, terminated by space/dot/
+/// punctuation/closing-bracket/comma/end-of-string. Single-letter
+/// Romans (`I`, `V`, `X`) are deliberately excluded — matching bare
+/// `I` would fire on any title containing the English pronoun and
+/// silently reject every release whose filename has no other season
+/// indicator. The Roman-numeral arm is for *rejecting* a release
+/// whose title explicitly names cour II/III/IV when the target is
+/// cour 1, not for pinning cour 1.
+///
+/// `(?i)` is omitted because every caller (`parse_release_season` and
+/// `infer_season_from_title`) lowercases before matching.
+///
+/// Terminator class: `]`, `)`, `,` included alongside the obvious
+/// whitespace / punctuation so shapes like `[II]`, `(Part II)`, and
+/// `Name, II - 01` reject-match. Prior version only had `: - \s .`
+/// and silently missed these.
+static RE_RELEASE_ROMAN: LazyLock<Regex> = LazyLock::new(||
+    Regex::new(r"\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-\s\.\]\)\,]|$)").unwrap()
+);
 
 #[derive(Debug, Clone)]
 pub enum SearchTarget {
@@ -129,7 +156,11 @@ pub async fn find_all_for_target(
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let aliases = collect_aliases(detail);
-    let queries = build_queries_from_aliases(&aliases, target);
+    let series_ctx = resolve_search_overrides(db, detail, config).await;
+    let queries = append_custom_tokens(
+        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
+        &series_ctx.custom_tokens,
+    );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -161,6 +192,7 @@ pub async fn find_all_for_target(
     let expected_season = infer_season_from_detail(detail);
     let sibling_aliases = collect_sibling_aliases(detail, &aliases);
     let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
+    let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
 
@@ -187,6 +219,9 @@ pub async fn find_all_for_target(
         target,
         expected_season,
         seadex_hashes: &seadex_hashes,
+        restrict_user: &series_ctx.restrict_user,
+        absolute_offset: series_ctx.absolute_offset,
+        categories: &categories,
     };
 
     // Interactive search: allow batch results so user can see & pick them,
@@ -202,7 +237,10 @@ pub async fn find_all_for_target(
     if candidates.is_empty() {
         let extended = collect_extended_aliases(detail);
         if !extended.is_empty() {
-            let ext_queries = build_queries_from_aliases(&extended, target);
+            let ext_queries = append_custom_tokens(
+                build_queries_from_aliases(&extended, target, !series_ctx.restrict_user.is_empty()),
+                &series_ctx.custom_tokens,
+            );
             let all_aliases = [aliases.clone(), extended].concat();
             let ext_precompute = SiblingRejectPrecompute::build(&all_aliases, &sibling_aliases);
             let ext_ctx = InteractiveQueryCtx {
@@ -214,9 +252,55 @@ pub async fn find_all_for_target(
         }
     }
 
-    if !preferred_groups.is_empty() {
-        let group_queries = build_group_queries(detail, target, &preferred_groups);
+    // #23 follow-up — When a Nyaa uploader restriction is active, every
+    // Nyaa request is already scoped to `/user/<name>`, so a
+    // preferred-group-prefixed query like "Erai-raws <title>" against the
+    // SubsPlease user page can only return uploads SubsPlease happened to
+    // name with "Erai-raws" in them — effectively never. Skip the whole
+    // pass to avoid paying N × round-trip cost for zero coverage.
+    if !preferred_groups.is_empty() && series_ctx.restrict_user.is_empty() {
+        let group_queries = append_custom_tokens(
+            build_group_queries(detail, target, &preferred_groups),
+            &series_ctx.custom_tokens,
+        );
         run_queries_interactive(&group_queries, ctx, &mut seen, &mut candidates).await;
+    }
+
+    // #30 Phase 2: franchise-root aliases + absolute episode number.
+    // SubsPlease-style releases ("[SubsPlease] Jujutsu Kaisen - 56" for
+    // JJK S3 E9) use the base franchise title and an absolute episode
+    // number. Phase 1 drops them at the alias-match step because the
+    // cour-specific aliases ("JJK: Shimetsu Kaiyuu - Zenpen",
+    // "JUJUTSU KAISEN Season 3: The Culling Game Part 1") share only
+    // 2 tokens with the release, below the 0.5 overlap threshold.
+    //
+    // This pass runs with a different ctx that treats franchise aliases
+    // as the own-side, the computed absolute episode as the target, and
+    // an empty sibling set (the base franchise name trivially substring-
+    // matches every sibling in the graph, so re-using Phase 1's sibling
+    // list would reject every absolute-numbered release).
+    let franchise_precompute;
+    let absolute_target;
+    if series_ctx.absolute_offset > 0
+        && !series_ctx.franchise_aliases.is_empty()
+        && let SearchTarget::Episode(ep) = target
+    {
+        absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
+        franchise_precompute = SiblingRejectPrecompute::build(&series_ctx.franchise_aliases, &[]);
+        let franchise_queries = append_custom_tokens(
+            build_queries_from_aliases(&series_ctx.franchise_aliases, &absolute_target, !series_ctx.restrict_user.is_empty()),
+            &series_ctx.custom_tokens,
+        );
+        let franchise_ctx = InteractiveQueryCtx {
+            aliases: &series_ctx.franchise_aliases,
+            sibling_precompute: &franchise_precompute,
+            target: &absolute_target,
+            // `target` already carries the absolute number, so no
+            // secondary offset on top of that.
+            absolute_offset: 0,
+            ..ctx
+        };
+        run_queries_interactive(&franchise_queries, franchise_ctx, &mut seen, &mut candidates).await;
     }
 
     // Interactive search is user-driven — we want to *show* the
@@ -255,6 +339,7 @@ pub async fn find_all_for_target(
             preferred_resolution_enum,
             cutoff_source_enum,
             cutoff_resolution_enum,
+            series_ctx.absolute_offset,
         );
         // No CF floor on the interactive path — see comment above.
         if let Some(final_score) = apply_cf_seadex_overlay(
@@ -334,6 +419,7 @@ pub async fn collect_scored_batches_for_target(
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let aliases = collect_aliases(detail);
+    let series_ctx = resolve_search_overrides(db, detail, config).await;
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -390,17 +476,25 @@ pub async fn collect_scored_batches_for_target(
         categories: &categories,
         batch_episode_match: false,
         seadex_hashes: &seadex_hashes,
+        restrict_user: &series_ctx.restrict_user,
+        absolute_offset: series_ctx.absolute_offset,
     };
 
     // Standard query sweep — picks up any batches that happen to surface
     // on Nyaa page 1 alongside the singles.
-    let queries = build_queries_from_aliases(&aliases, target);
+    let queries = append_custom_tokens(
+        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
+        &series_ctx.custom_tokens,
+    );
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
 
     // Batch-targeted probes — the important addition for this function.
     // Explicit "batch" / "complete" keywords push the Nyaa search toward
     // listings that wouldn't appear on page 1 for a plain title query.
-    let batch_queries = quality::batch_probe_queries(&aliases);
+    let batch_queries = append_custom_tokens(
+        quality::batch_probe_queries(&aliases),
+        &series_ctx.custom_tokens,
+    );
     run_queries(&batch_queries, ctx, &mut seen, &mut candidates).await;
 
     // Preferred-group queries, scoped to batches. Same fallback rule as
@@ -410,8 +504,14 @@ pub async fn collect_scored_batches_for_target(
         && candidates.iter().any(|c| {
             preferred_groups.iter().any(|g| g.eq_ignore_ascii_case(&c.group))
         });
-    if !has_preferred_hit && !preferred_groups.is_empty() {
-        let group_queries = build_group_queries(detail, target, &preferred_groups);
+    // #23 follow-up — see the note in `find_all_for_target`. Preferred-
+    // group queries are redundant when the `/user/<name>` scope is
+    // already active.
+    if !has_preferred_hit && !preferred_groups.is_empty() && series_ctx.restrict_user.is_empty() {
+        let group_queries = append_custom_tokens(
+            build_group_queries(detail, target, &preferred_groups),
+            &series_ctx.custom_tokens,
+        );
         run_queries(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
@@ -458,6 +558,7 @@ pub async fn collect_scored_batches_for_target(
             preferred_resolution_enum,
             cutoff_source_enum,
             cutoff_resolution_enum,
+            series_ctx.absolute_offset,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
             base,
@@ -497,7 +598,11 @@ async fn collect_scored_for_target(
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
     let aliases = collect_aliases(detail);
-    let queries = build_queries_from_aliases(&aliases, target);
+    let series_ctx = resolve_search_overrides(db, detail, config).await;
+    let queries = append_custom_tokens(
+        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
+        &series_ctx.custom_tokens,
+    );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -568,6 +673,8 @@ async fn collect_scored_for_target(
         categories: &categories,
         batch_episode_match,
         seadex_hashes: &seadex_hashes,
+        restrict_user: &series_ctx.restrict_user,
+        absolute_offset: series_ctx.absolute_offset,
     };
 
     // Phase 1: standard queries (primary aliases + episode variants).
@@ -580,7 +687,10 @@ async fn collect_scored_for_target(
     if candidates.is_empty() {
         let extended = collect_extended_aliases(detail);
         if !extended.is_empty() {
-            let ext_queries = build_queries_from_aliases(&extended, target);
+            let ext_queries = append_custom_tokens(
+                build_queries_from_aliases(&extended, target, !series_ctx.restrict_user.is_empty()),
+                &series_ctx.custom_tokens,
+            );
             let all_aliases = [aliases.clone(), extended].concat();
             let ext_precompute = SiblingRejectPrecompute::build(&all_aliases, &sibling_aliases);
             let ext_ctx = AutoQueryCtx {
@@ -598,8 +708,14 @@ async fn collect_scored_for_target(
             preferred_groups.iter().any(|g| g.eq_ignore_ascii_case(&c.group))
         });
 
-    if !has_preferred_hit && !preferred_groups.is_empty() {
-        let group_queries = build_group_queries(detail, target, &preferred_groups);
+    // #23 follow-up — see the note in `find_all_for_target`. Preferred-
+    // group queries are redundant when the `/user/<name>` scope is
+    // already active.
+    if !has_preferred_hit && !preferred_groups.is_empty() && series_ctx.restrict_user.is_empty() {
+        let group_queries = append_custom_tokens(
+            build_group_queries(detail, target, &preferred_groups),
+            &series_ctx.custom_tokens,
+        );
         run_queries(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
@@ -612,9 +728,41 @@ async fn collect_scored_for_target(
             .any(|c| source::looks_like_bluray_filename(&c.title));
 
         if !has_bd_candidate {
-            let bd_queries = quality::bd_probe_queries(&aliases);
+            let bd_queries = append_custom_tokens(
+                quality::bd_probe_queries(&aliases),
+                &series_ctx.custom_tokens,
+            );
             run_queries(&bd_queries, ctx, &mut seen, &mut candidates).await;
         }
+    }
+
+    // #30 Phase 4: franchise-root aliases + absolute episode number.
+    // Mirrors the interactive path — see the equivalent block in
+    // `find_all_for_target` for the full rationale. SubsPlease-style
+    // absolute-numbered releases for sequel cours ("Jujutsu Kaisen -
+    // 56" for JJK S3 E9) need this pass to surface, otherwise the
+    // cour-specific aliases reject them at the overlap threshold even
+    // when Phase 1 queried for the absolute number.
+    let franchise_precompute;
+    let absolute_target;
+    if series_ctx.absolute_offset > 0
+        && !series_ctx.franchise_aliases.is_empty()
+        && let SearchTarget::Episode(ep) = target
+    {
+        absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
+        franchise_precompute = SiblingRejectPrecompute::build(&series_ctx.franchise_aliases, &[]);
+        let franchise_queries = append_custom_tokens(
+            build_queries_from_aliases(&series_ctx.franchise_aliases, &absolute_target, !series_ctx.restrict_user.is_empty()),
+            &series_ctx.custom_tokens,
+        );
+        let franchise_ctx = AutoQueryCtx {
+            aliases: &series_ctx.franchise_aliases,
+            sibling_precompute: &franchise_precompute,
+            target: &absolute_target,
+            absolute_offset: 0,
+            ..ctx
+        };
+        run_queries(&franchise_queries, franchise_ctx, &mut seen, &mut candidates).await;
     }
 
     // Classify + filter + rescore in one pass. Each candidate is classified
@@ -661,6 +809,7 @@ async fn collect_scored_for_target(
             preferred_resolution_enum,
             cutoff_source_enum,
             cutoff_resolution_enum,
+            series_ctx.absolute_offset,
         );
         if let Some(final_score) = apply_cf_seadex_overlay(
             base,
@@ -717,10 +866,25 @@ struct AutoQueryCtx<'a> {
     /// `parse_release_season` would see "Season 9" and disagree
     /// with the Part-2 expected season.
     seadex_hashes: &'a HashSet<String>,
+    /// #23 — Nyaa uploader name to restrict searches to. Goes straight
+    /// into `SearchOptions.user`, which Nyaa translates to `?u=<name>`
+    /// — server-side filter, so fewer/faster responses. Empty string
+    /// means no restriction. Resolved from the per-series override or
+    /// the global default at the entry point.
+    restrict_user: &'a str,
+    /// #30 — Cumulative episode count across the shortest TV-format
+    /// PREQUEL chain up to this target. Allows an episode-filter match
+    /// on either the relative number (target_ep, AL's own numbering)
+    /// OR the absolute number (target_ep + absolute_offset, which is
+    /// what SubsPlease-style TV releases use for sequel cours). Zero
+    /// for first-season entries and for series whose relation cache
+    /// hasn't populated yet, which collapses to the legacy
+    /// strict-relative behavior.
+    absolute_offset: i32,
 }
 
 /// Same idea, but for the interactive-search helper which has a
-/// smaller shared context and no category/batch override.
+/// smaller shared context and no batch override.
 #[derive(Clone, Copy)]
 struct InteractiveQueryCtx<'a> {
     aliases: &'a [String],
@@ -729,6 +893,14 @@ struct InteractiveQueryCtx<'a> {
     preferred_resolution: &'a str,
     target: &'a SearchTarget,
     expected_season: i32,
+    /// Nyaa category filter set — one of `1_2` (English-translated),
+    /// `1_0` (Anime All, includes raws/foreign subs), or the MUSIC
+    /// pair. Computed from `config.allow_non_english` at the entry
+    /// point via `quality::nyaa_categories_for_format`. Previously the
+    /// interactive path hardcoded `1_0`, which silently leaked raw
+    /// Japanese releases and non-English-sub foreign releases into
+    /// results even when the user had left "Allow non-English" off.
+    categories: &'a [String],
     /// See the note on `AutoQueryCtx::seadex_hashes`. The interactive
     /// path's consequences for failing the bypass are more severe
     /// than the auto path: `run_queries_interactive` applies
@@ -738,6 +910,10 @@ struct InteractiveQueryCtx<'a> {
     /// vanished from interactive search even though auto search
     /// surfaced it.
     seadex_hashes: &'a HashSet<String>,
+    /// #23 — see `AutoQueryCtx::restrict_user`.
+    restrict_user: &'a str,
+    /// #30 — see `AutoQueryCtx::absolute_offset`.
+    absolute_offset: i32,
 }
 
 /// Run a set of queries against Nyaa page 1, collecting valid candidates.
@@ -753,7 +929,7 @@ async fn run_queries(
                 query: query.clone(),
                 category: category.clone(),
                 filter: "0".to_string(),
-                user: String::new(),
+                user: ctx.restrict_user.to_string(),
                 preferred_groups: ctx.preferred_groups.to_vec(),
                 preferred_resolution: ctx.preferred_resolution.to_string(),
                 prefer_subs: true,
@@ -800,6 +976,7 @@ async fn run_queries(
                         ctx.target,
                         ctx.expected_season,
                         ctx.batch_episode_match && result.is_batch,
+                        ctx.absolute_offset,
                     ) {
                         continue;
                     }
@@ -826,79 +1003,108 @@ async fn run_queries_interactive(
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
-    for query in queries {
-        let opts = SearchOptions {
-            query: query.clone(),
-            category: "1_0".to_string(),
-            filter: "0".to_string(),
-            user: String::new(),
-            preferred_groups: ctx.preferred_groups.to_vec(),
-            preferred_resolution: ctx.preferred_resolution.to_string(),
-            prefer_subs: true,
-        };
-
-        let resp = match nyaa::search(&opts, 1).await {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        for result in resp.results {
-            let dedupe_key = if !result.info_hash.is_empty() {
-                result.info_hash.clone()
-            } else {
-                result.title.to_lowercase()
+    for category in ctx.categories {
+        for query in queries {
+            let opts = SearchOptions {
+                query: query.clone(),
+                category: category.clone(),
+                filter: "0".to_string(),
+                user: ctx.restrict_user.to_string(),
+                preferred_groups: ctx.preferred_groups.to_vec(),
+                preferred_resolution: ctx.preferred_resolution.to_string(),
+                prefer_subs: true,
             };
-            if !seen.insert(dedupe_key) {
-                continue;
-            }
-            // SeaDex trusts its AniList-ID-based curation over any
-            // title heuristic. If this hash is in the set, skip all
-            // alias / season / episode checks below — the unconditional
-            // `season_mismatch` in particular drops releases like
-            // smol's `Monogatari (Season 9)` for a Kizumonogatari Part
-            // 2 target, even though SeaDex has already confirmed the
-            // AniList ID match.
-            if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
-                tracing::debug!(
-                    "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
-                    result.title,
-                    result.info_hash
-                );
-                candidates.push(result);
-                continue;
-            }
-            // Relaxed alias matching: lower threshold than auto search
-            let normalized_title = normalize_title(&result.title);
-            let title_tokens = token_set(&normalized_title);
-            let alias_match = ctx.aliases.iter().any(|alias| {
-                let normalized_alias = normalize_title(alias);
-                normalized_title.contains(&normalized_alias)
-                    || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
-            });
-            if !alias_match {
-                continue;
-            }
-            // Sibling rejection: same sequel/prequel guard as the auto
-            // path — a release that matches a sibling more tightly than
-            // us is almost certainly for the sibling.
-            if sibling_match_rejects(&normalized_title, &title_tokens, ctx.sibling_precompute) {
-                continue;
-            }
-            // Season check: reject results clearly from a different season
-            if season_mismatch(&result.title, ctx.expected_season) {
-                continue;
-            }
-            // Episode check for single-episode targets (allow batches through)
-            if let SearchTarget::Episode(target_ep) = ctx.target
-                && !result.is_batch {
-                    let parsed = parse_release_numbers(&result.title);
-                    if !parsed.is_empty() && !parsed.contains(target_ep) {
-                        continue;
-                    }
+
+            let resp = match nyaa::search(&opts, 1).await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            for result in resp.results {
+                let dedupe_key = if !result.info_hash.is_empty() {
+                    result.info_hash.clone()
+                } else {
+                    result.title.to_lowercase()
+                };
+                if !seen.insert(dedupe_key) {
+                    continue;
                 }
-            candidates.push(result);
+                // SeaDex trusts its AniList-ID-based curation over any
+                // title heuristic. If this hash is in the set, skip all
+                // alias / season / episode checks below — the unconditional
+                // `season_mismatch` in particular drops releases like
+                // smol's `Monogatari (Season 9)` for a Kizumonogatari Part
+                // 2 target, even though SeaDex has already confirmed the
+                // AniList ID match.
+                if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
+                    tracing::debug!(
+                        "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
+                        result.title,
+                        result.info_hash
+                    );
+                    candidates.push(result);
+                    continue;
+                }
+                // Relaxed alias matching: lower threshold than auto search
+                let normalized_title = normalize_title(&result.title);
+                let title_tokens = token_set(&normalized_title);
+                let alias_match = ctx.aliases.iter().any(|alias| {
+                    let normalized_alias = normalize_title(alias);
+                    normalized_title.contains(&normalized_alias)
+                        || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
+                });
+                if !alias_match {
+                    continue;
+                }
+                // Sibling rejection: same sequel/prequel guard as the auto
+                // path — a release that matches a sibling more tightly than
+                // us is almost certainly for the sibling.
+                if sibling_match_rejects(&normalized_title, &title_tokens, ctx.sibling_precompute) {
+                    continue;
+                }
+                // Season check: reject results clearly from a different season
+                if season_mismatch(&result.title, ctx.expected_season) {
+                    continue;
+                }
+                // Episode check for single-episode targets (allow batches through).
+                // #30 — A release passes if its parsed number matches either the
+                // relative target (AL's per-cour numbering) OR the absolute
+                // number `target + absolute_offset` (what SubsPlease-style TV
+                // releases use for sequel cours, e.g. JJK S3 E9 shipped as
+                // "Jujutsu Kaisen - 56" with offset 47). When offset is 0 this
+                // collapses to the legacy strict-relative behavior.
+                if let SearchTarget::Episode(target_ep) = ctx.target
+                    && !result.is_batch {
+                        let parsed = parse_release_numbers(&result.title);
+                        if !parsed.is_empty()
+                            && !episode_match(&parsed, *target_ep, ctx.absolute_offset)
+                        {
+                            continue;
+                        }
+                    }
+                candidates.push(result);
+            }
         }
     }
+}
+
+/// #30 — Episode-filter acceptance check. A release's parsed episode
+/// numbers match the target when they carry either the relative target
+/// number (AL's own per-cour numbering) or the absolute number derived
+/// by adding the cumulative prior-cour episode count. `offset == 0`
+/// reduces to the strict-relative path used for first-season entries
+/// and for series whose relation cache hasn't populated yet.
+fn episode_match(parsed: &HashSet<i32>, target_ep: i32, absolute_offset: i32) -> bool {
+    if parsed.contains(&target_ep) {
+        return true;
+    }
+    if absolute_offset > 0 {
+        let absolute = target_ep.saturating_add(absolute_offset);
+        if parsed.contains(&absolute) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Build group-prefixed queries for the fallback search.
@@ -1061,20 +1267,163 @@ pub fn target_label(target: &SearchTarget) -> String {
     }
 }
 
-fn build_queries_from_aliases(aliases: &[String], target: &SearchTarget) -> Vec<String> {
+/// Per-series search context resolved from the `series` row (with
+/// fallbacks to global `config` defaults for the user-controlled
+/// overrides). One DB hit per entry-point call for the series row
+/// plus one extra when `absolute_offset > 0` to walk the franchise
+/// root titles.
+struct SeriesSearchCtx {
+    /// #23 — Extra tokens appended verbatim to every Nyaa query after
+    /// the title aliases. Empty means no extra tokens.
+    custom_tokens: String,
+    /// #23 — Nyaa uploader name (`?u=<name>`) server-side filter.
+    /// Empty means no restriction.
+    restrict_user: String,
+    /// #30 — Cumulative TV-cour episode count for the entry's PREQUEL
+    /// chain. Zero for first-season entries and for series whose
+    /// relation cache hasn't populated yet. Used by the episode filter
+    /// to accept absolute-numbered Nyaa releases against a
+    /// relative-numbered AL target.
+    absolute_offset: i32,
+    /// #30 — Titles of every TV-format ancestor on the PREQUEL chain.
+    /// Used to build queries like `Jujutsu Kaisen 56` that a Nyaa text
+    /// search will actually match against `[SubsPlease] Jujutsu Kaisen
+    /// - 56`. The cour-specific AL titles ("JUJUTSU KAISEN Season 3:
+    /// The Culling Game Part 1", "Jujutsu Kaisen: Shimetsu Kaiyuu -
+    /// Zenpen") don't appear in SubsPlease release names, so without
+    /// these franchise-root titles the absolute-numbered release is
+    /// never in the candidate pool — loosening the filter alone is
+    /// not enough. Empty for first-season entries.
+    franchise_aliases: Vec<String>,
+}
+
+/// Resolve per-series search overrides + the cumulative-prior-episodes
+/// offset, falling back to global defaults from `config`. Per-series
+/// user overrides (`#23`) win when non-empty; the `#30` offset and
+/// franchise aliases have no global default (both are derived from
+/// the per-series relation cache).
+async fn resolve_search_overrides(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+    config: &Config,
+) -> SeriesSearchCtx {
+    let row = crate::models::series::get_by_anilist_id(db, detail.id)
+        .await
+        .ok()
+        .flatten();
+    match row {
+        Some(s) => resolve_search_overrides_from_row_async(db, &s, config).await,
+        None => SeriesSearchCtx {
+            custom_tokens: config.default_custom_query_tokens.clone(),
+            restrict_user: config.default_restrict_to_uploader.clone(),
+            // No series row means the entry isn't in the library yet;
+            // no relation cache to pull an offset from, so the filter
+            // stays strict-relative. This only affects provisional
+            // Sonarr-shim searches for unadded series.
+            absolute_offset: 0,
+            franchise_aliases: Vec::new(),
+        },
+    }
+}
+
+/// Async entry-point variant — hits the DB for franchise aliases when
+/// the series has a non-zero offset. The sync test variant below is
+/// kept for unit tests that don't need the alias lookup.
+async fn resolve_search_overrides_from_row_async(
+    db: &SqlitePool,
+    series: &crate::models::series::Series,
+    config: &Config,
+) -> SeriesSearchCtx {
+    let mut ctx = resolve_search_overrides_from_row(series, config);
+    if ctx.absolute_offset > 0 && series.anilist_id != 0 {
+        ctx.franchise_aliases =
+            crate::models::local_metadata::resolve_franchise_aliases(db, series.anilist_id).await;
+    }
+    ctx
+}
+
+fn resolve_search_overrides_from_row(
+    series: &crate::models::series::Series,
+    config: &Config,
+) -> SeriesSearchCtx {
+    let custom_tokens = if series.custom_query_tokens.is_empty() {
+        config.default_custom_query_tokens.clone()
+    } else {
+        series.custom_query_tokens.clone()
+    };
+    let restrict_user = if series.restrict_to_uploader.is_empty() {
+        config.default_restrict_to_uploader.clone()
+    } else {
+        series.restrict_to_uploader.clone()
+    };
+    SeriesSearchCtx {
+        custom_tokens,
+        restrict_user,
+        absolute_offset: series.cumulative_prior_episodes.max(0),
+        // Left empty in the sync variant — callers that need them use
+        // the async variant. Tests pin the sync variant's behavior on
+        // the other fields only.
+        franchise_aliases: Vec::new(),
+    }
+}
+
+
+/// #23 — Append user-supplied custom query tokens to every query in
+/// the list. Empty tokens is a no-op so the common path stays
+/// allocation-free. Tokens are appended verbatim — users can pass any
+/// Nyaa query syntax (quoted phrases, minus-prefix exclusions, etc.)
+/// that `build_queries_from_aliases` didn't generate.
+fn append_custom_tokens(queries: Vec<String>, tokens: &str) -> Vec<String> {
+    let trimmed = tokens.trim();
+    if trimmed.is_empty() {
+        return queries;
+    }
+    queries
+        .into_iter()
+        .map(|q| format!("{} {}", q, trimmed))
+        .collect()
+}
+
+/// Build the Nyaa text-query variants for each alias. The full sweep
+/// emits four variants per alias for Episode targets (`title 9`,
+/// `title - 09`, `title 09`, `"title" 09`) to cover punctuation and
+/// padding conventions across uploaders, plus two variants for Single
+/// targets (bare + phrase-match).
+///
+/// #23 follow-up — When a Nyaa uploader restriction (`?u=<name>`) is
+/// active those variants collapse to the same token set against a
+/// single uploader's catalog: Nyaa's tokenizer ignores punctuation,
+/// and the phrase-match variant narrows a result set that's already
+/// narrowed by the server-side user filter. Running all four in
+/// sequence burned 15–25s per sweep for no additional coverage.
+/// `collapsed = true` emits a single canonical variant per alias —
+/// the zero-padded episode form (`title 09`) for Episode targets, the
+/// bare alias for Single targets — cutting the per-alias query count
+/// 4→1 (Episode) and 2→1 (Single).
+fn build_queries_from_aliases(
+    aliases: &[String],
+    target: &SearchTarget,
+    collapsed: bool,
+) -> Vec<String> {
     let mut queries = Vec::new();
 
     for alias in aliases {
         match target {
             SearchTarget::Single => {
                 queries.push(alias.clone());
-                queries.push(format!("\"{}\"", alias));
+                if !collapsed {
+                    queries.push(format!("\"{}\"", alias));
+                }
             }
             SearchTarget::Episode(ep) => {
-                queries.push(format!("{} {}", alias, ep));
-                queries.push(format!("{} - {:02}", alias, ep));
-                queries.push(format!("{} {:02}", alias, ep));
-                queries.push(format!("\"{}\" {:02}", alias, ep));
+                if collapsed {
+                    queries.push(format!("{} {:02}", alias, ep));
+                } else {
+                    queries.push(format!("{} {}", alias, ep));
+                    queries.push(format!("{} - {:02}", alias, ep));
+                    queries.push(format!("{} {:02}", alias, ep));
+                    queries.push(format!("\"{}\" {:02}", alias, ep));
+                }
             }
         }
     }
@@ -1378,6 +1727,7 @@ pub fn matches_target(
     target: &SearchTarget,
     expected_season: i32,
     allow_batch_episode: bool,
+    absolute_offset: i32,
 ) -> bool {
     let normalized_title = normalize_title(title);
     let title_tokens = token_set(&normalized_title);
@@ -1418,7 +1768,10 @@ pub fn matches_target(
             if !allow_batch_episode && parsed.len() > 2 {
                 return false;
             }
-            parsed.contains(target_ep)
+            // #30 — Accept either the relative (AL-own) or the absolute
+            // (SubsPlease-style) episode number. See `episode_match`
+            // for the details.
+            episode_match(&parsed, *target_ep, absolute_offset)
         }
     }
 }
@@ -1831,6 +2184,7 @@ fn rescore_for_auto_search(
     preferred_resolution: Resolution,
     cutoff_source: Source,
     cutoff_resolution: Resolution,
+    absolute_offset: i32,
 ) -> i32 {
     let mut score = result.score;
     let lower = result.title.to_lowercase();
@@ -1867,8 +2221,30 @@ fn rescore_for_auto_search(
             } else {
                 score += 10;
             }
-            if parse_release_numbers(&result.title).contains(ep) {
+            let parsed = parse_release_numbers(&result.title);
+            let relative_match = parsed.contains(ep);
+            let absolute_match = absolute_offset > 0
+                && parsed.contains(&ep.saturating_add(absolute_offset));
+            if relative_match || absolute_match {
                 score += 40;
+            } else if absolute_offset > 0 && !parsed.is_empty() {
+                // #30 — Phase 2 lets candidates through the franchise-alias
+                // pass even when their parsed number doesn't match either
+                // the relative or the absolute target. Those are false
+                // positives (e.g. "[Asahi-Anime Land] Jujutsu Kaisen 04"
+                // surfacing for a JJK S3 E9 absolute-56 target). Bury
+                // them with a large penalty so they sort to the bottom
+                // of the interactive list and drop below any realistic
+                // auto-search `custom_format_minimum_score` floor,
+                // without hard-rejecting in case the user actually wants
+                // a different episode that the parser mis-reads.
+                score -= 1000;
+            } else if absolute_offset > 0 && parsed.is_empty() {
+                // Unparseable episode number through the franchise pass
+                // ("Jujutsu Kaisen 04" with no dash separator) — smaller
+                // penalty than a wrong-number, since "can't tell" is
+                // less clearly wrong than "explicitly wrong."
+                score -= 500;
             }
         }
     }
@@ -1982,7 +2358,15 @@ pub fn normalize_title(input: &str) -> String {
 pub fn token_set(value: &str) -> HashSet<String> {
     value
         .split_whitespace()
-        .filter(|token| token.len() > 1)
+        // Keep single-character tokens only when they're numeric —
+        // single digits like "0" in "Jujutsu Kaisen 0" are the only
+        // thing distinguishing the prequel movie's sibling alias from
+        // the base franchise's own alias "Jujutsu Kaisen", so dropping
+        // them lets sibling_match_rejects tie on tokens and fail to
+        // reject the movie release for an S1 episode target. Single
+        // alphabetic characters (stray "a", "I", "N") remain filtered
+        // out because they carry no disambiguation value.
+        .filter(|token| token.len() > 1 || token.chars().all(|c| c.is_ascii_digit()))
         .map(|token| token.to_string())
         .collect()
 }
@@ -2030,11 +2414,34 @@ fn infer_season_from_title(title: &str) -> i32 {
                 return n;
             }
 
+    // #27 — Roman numeral II–IX at word boundary. Keeps AL-side inference
+    // in sync with the release-side parser so e.g. an AL entry titled
+    // "Made in Abyss: Retsujitsu no Ougonkyou" (no marker, season 1) and
+    // "Made in Abyss III" (season 3, Roman numeral) disambiguate against
+    // each other's releases instead of both reporting 0.
+    if let Some(caps) = RE_RELEASE_ROMAN.captures(&lower)
+        && let Some(m) = caps.get(1) {
+            let n = roman_to_i32(m.as_str());
+            if n >= 2 {
+                return n;
+            }
+        }
+
     0
 }
 
-/// Parse the season number from a release title.
-/// Returns 0 if no season indicator is found.
+/// Parse the season/cour number from a release title.
+/// Returns 0 if no season indicator is found — callers treat 0 as
+/// "absolute numbering / single cour, don't reject."
+///
+/// Signals tried in order (first hit wins):
+///  1. `SXXEXX` (`s2e03`)
+///  2. Standalone `SN` (` s3 `, `.s3.`, `[s3]`)
+///  3. `Season N`
+///  4. `Nth Season`
+///  5. `Part N` / `Cour N` *(#27 — symmetric with [`infer_season_from_title`])*
+///  6. Roman numeral II–IX at a word boundary *(#27 — catches "JJK II",
+///     "Rebuild III", "Kizumonogatari Part II")*
 pub fn parse_release_season(title: &str) -> i32 {
     let lower = title.to_lowercase();
 
@@ -2063,7 +2470,39 @@ pub fn parse_release_season(title: &str) -> i32 {
             return n;
         }
 
+    // "Part 2", "Cour 2"
+    if let Some(caps) = RE_RELEASE_PART_COUR.captures(&lower)
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+            && n >= 2 {
+                return n;
+            }
+
+    // Roman numeral II–IX.
+    if let Some(caps) = RE_RELEASE_ROMAN.captures(&lower)
+        && let Some(m) = caps.get(1) {
+            let n = roman_to_i32(m.as_str());
+            if n >= 2 {
+                return n;
+            }
+        }
+
     0
+}
+
+/// Tiny II–IX Roman-numeral decoder. Callers validate `n >= 2` before
+/// treating the result as a season indicator, so `I` (=1) and anything
+/// that doesn't parse returns 0 and gets filtered upstream.
+fn roman_to_i32(s: &str) -> i32 {
+    match s.to_ascii_lowercase().as_str() {
+        "ii" => 2,
+        "iii" => 3,
+        "iv" => 4,
+        "vi" => 6,
+        "vii" => 7,
+        "viii" => 8,
+        "ix" => 9,
+        _ => 0,
+    }
 }
 
 // ── Pre-compiled regexes for extract_part_number ───────────────────────────
@@ -3654,9 +4093,7 @@ mod tests {
                 &aliases,
                 &no_siblings,
                 &SearchTarget::Episode(1),
-                0,
-                false,
-            ),
+                0, false, 0),
             "unrelated release should not match via token overlap alone"
         );
     }
@@ -3671,9 +4108,7 @@ mod tests {
             &aliases,
             &no_siblings,
             &SearchTarget::Single,
-            0,
-            false,
-        ));
+            0, false, 0));
     }
 
     #[test]
@@ -3696,9 +4131,7 @@ mod tests {
                 &own,
                 &precompute,
                 &SearchTarget::Episode(6),
-                1,
-                false,
-            ),
+                1, false, 0),
             "sibling arc release must not match the base-franchise target"
         );
     }
@@ -3718,9 +4151,7 @@ mod tests {
             &own,
             &precompute,
             &SearchTarget::Episode(6),
-            1,
-            false,
-        ));
+            1, false, 0));
     }
 
     #[test]
@@ -3739,8 +4170,103 @@ mod tests {
             &own,
             &precompute,
             &SearchTarget::Episode(6),
-            0,
+            0, false, 0));
+    }
+
+    // ── #30 — absolute-vs-relative Nyaa episode numbering ──────────────
+    //
+    // SubsPlease (and others) number sequel cours either as the AL-own
+    // relative number ("Otonari S2 - 03") or as the absolute number
+    // continuing from S1 ("Jujutsu Kaisen - 56" for JJK S3 E9,
+    // "Re Zero - 68" for a post-S2 episode). Before #30 the filter was
+    // strict-relative, so the absolute releases were dropped from both
+    // interactive and auto search.
+    //
+    // `episode_match` is the shared check used by both paths; these
+    // tests pin both numbering conventions against realistic parsed
+    // sets, and then verify the public `matches_target` applies the
+    // same rule end-to-end.
+
+    fn parsed(nums: &[i32]) -> std::collections::HashSet<i32> {
+        nums.iter().copied().collect()
+    }
+
+    #[test]
+    fn episode_match_accepts_relative_number_without_offset() {
+        // First-season / offset=0: only the relative number counts,
+        // which matches the legacy strict-relative behavior.
+        assert!(episode_match(&parsed(&[3]), 3, 0));
+        assert!(!episode_match(&parsed(&[25]), 3, 0));
+    }
+
+    #[test]
+    fn episode_match_accepts_relative_number_even_when_offset_set() {
+        // SubsPlease "Otonari no Tenshi-sama S2 - 03" (relative
+        // numbering) against a target with an S1 prequel of 12
+        // episodes must still pass — relative numbering is the more
+        // common convention and we can't know which one any given
+        // release picked.
+        assert!(episode_match(&parsed(&[3]), 3, 12));
+    }
+
+    #[test]
+    fn episode_match_accepts_absolute_number_against_relative_target() {
+        // JJK S3 E9 ships as "Jujutsu Kaisen - 56" — absolute numbering
+        // continuing from S1 (24) + S2 (23) = 47 prior cour episodes.
+        assert!(episode_match(&parsed(&[56]), 9, 47));
+        // Re:Zero - 68 is another realistic example.
+        assert!(episode_match(&parsed(&[68]), 18, 50));
+    }
+
+    #[test]
+    fn episode_match_rejects_unrelated_numbers_with_offset() {
+        // An absolute number from a different episode is still wrong.
+        // Target is S3 E9 (= absolute 56); release is absolute 60
+        // (= S3 E13) — rejected.
+        assert!(!episode_match(&parsed(&[60]), 9, 47));
+        // Target is S3 E1 (= absolute 48); release is relative 5 — rejected.
+        assert!(!episode_match(&parsed(&[5]), 1, 47));
+    }
+
+    #[test]
+    fn matches_target_accepts_subsplease_absolute_numbered_sequel_cour() {
+        // Full-path regression: a SubsPlease absolute-numbered release
+        // for JJK S3 E9 must pass through `matches_target` when the
+        // cumulative S1+S2 offset (47) is supplied.
+        let own = vec!["Jujutsu Kaisen".to_string()];
+        let no_siblings = SiblingRejectPrecompute::build(&own, &[]);
+        let release = "[SubsPlease] Jujutsu Kaisen - 56 (1080p) [0F106B43].mkv";
+        assert!(matches_target(
+            release,
+            &own,
+            &no_siblings,
+            &SearchTarget::Episode(9),
+            // `expected_season` is the season_mismatch target, not the
+            // numbering target — this is 3 because we're asking for S3.
+            3,
             false,
+            47,
+        ));
+    }
+
+    #[test]
+    fn matches_target_rejects_absolute_numbered_sibling_cour_against_wrong_target() {
+        // Mirror of the above: a release carrying an absolute number
+        // that doesn't line up with our target (even once the offset
+        // is added) must still be rejected. target = S3 E1
+        // (absolute 48); release is absolute 60 = S3 E13 — wrong
+        // episode.
+        let own = vec!["Jujutsu Kaisen".to_string()];
+        let no_siblings = SiblingRejectPrecompute::build(&own, &[]);
+        let release = "[SubsPlease] Jujutsu Kaisen - 60 (1080p).mkv";
+        assert!(!matches_target(
+            release,
+            &own,
+            &no_siblings,
+            &SearchTarget::Episode(1),
+            3,
+            false,
+            47,
         ));
     }
 
@@ -5157,5 +5683,244 @@ mod tests {
             &tags,
         );
         assert_eq!(targets.len(), 1, "auto-classified row should be upgraded");
+    }
+
+    // ── #27 — cour-aware reject parser coverage ────────────────────────────
+    //
+    // The existing `season_mismatch` reject is hard, but its parsers were
+    // missing `Part N`, `Cour N`, and Roman numerals on the release side,
+    // and Roman numerals on the AL side. These tests pin the JJK / Bleach
+    // TYBW / Demon Slayer / Made in Abyss corpus so a future change that
+    // weakens the parsers shows up as a red test, not as a wrong-cour
+    // grab reported by a user.
+
+    #[test]
+    fn parse_release_season_catches_part_n() {
+        assert_eq!(parse_release_season("Jujutsu Kaisen Part 2 - 01 (1080p).mkv"), 2);
+        assert_eq!(parse_release_season("Chainsaw Man Part 3 - 07.mkv"), 3);
+    }
+
+    #[test]
+    fn parse_release_season_catches_cour_n() {
+        assert_eq!(parse_release_season("Show Name Cour 2 - 01.mkv"), 2);
+    }
+
+    #[test]
+    fn parse_release_season_catches_roman_numerals() {
+        // Rebuild of Evangelion III is season 3. Was returning 0 before.
+        assert_eq!(parse_release_season("Evangelion III.mkv"), 3);
+        // "Monogatari II" (season 2). Trailing dash terminator.
+        assert_eq!(parse_release_season("Monogatari II - 01.mkv"), 2);
+        // "JJK II" inside brackets.
+        assert_eq!(parse_release_season("[Group] JJK II [1080p].mkv"), 2);
+    }
+
+    #[test]
+    fn parse_release_season_catches_roman_numeral_bracket_paren_comma_terminators() {
+        // Review fix: prior terminator class `[:\-\s\.]` silently
+        // missed these shapes because `]`, `)`, and `,` weren't in it.
+        // Bracketed cour marker: `[II]` is the whole tag.
+        assert_eq!(parse_release_season("[Group] Monogatari [II] - 01.mkv"), 2);
+        // Parenthesized cour marker: `(Part II)` is the whole qualifier.
+        assert_eq!(parse_release_season("Frieren (Part II).mkv"), 2);
+        // Comma-separated: `Name, II - 01` is an uncommon but legal shape.
+        assert_eq!(parse_release_season("Title, II - 01.mkv"), 2);
+    }
+
+    #[test]
+    fn parse_release_season_rejects_bare_single_letter_romans() {
+        // "I" inside a title must not be read as cour 1 — that's the
+        // whole reason we excluded single-letter Romans. A bare "V" or
+        // "X" would also be ambiguous.
+        assert_eq!(parse_release_season("I Want to Eat Your Pancreas.mkv"), 0);
+    }
+
+    #[test]
+    fn season_mismatch_rejects_subsplease_jjk_s3_when_target_is_s1() {
+        // Motivating case: JJK S1 target, SubsPlease releases cour 2
+        // (which AniList calls "Jujutsu Kaisen 2nd Season") as S2. The
+        // existing `Season 2` path catches this; test pins the behavior.
+        assert!(season_mismatch(
+            "[SubsPlease] Jujutsu Kaisen Season 2 - 12 (1080p).mkv",
+            1,
+        ));
+    }
+
+    #[test]
+    fn season_mismatch_rejects_roman_numeral_release_against_s1_target() {
+        // A release titled "Monogatari II" against an S1 target must
+        // reject — this is the new signal #27 adds to the reject layer.
+        assert!(season_mismatch("[Group] Monogatari II - 01 (1080p).mkv", 1));
+    }
+
+    #[test]
+    fn season_mismatch_allows_absolute_numbered_release_without_season_token() {
+        // Release carries no season indicator — allow (absolute numbering
+        // or single-cour). Conservative choice to avoid rejecting the
+        // common `[Group] Show - 12 (1080p).mkv` shape.
+        assert!(!season_mismatch("[Group] Show - 12 (1080p).mkv", 2));
+    }
+
+    #[test]
+    fn season_mismatch_allows_matching_cour() {
+        assert!(!season_mismatch(
+            "[SubsPlease] Jujutsu Kaisen Season 2 - 12 (1080p).mkv",
+            2,
+        ));
+        // Roman numeral match.
+        assert!(!season_mismatch("[Group] Monogatari II - 01 (1080p).mkv", 2));
+        // Part N match.
+        assert!(!season_mismatch("[Group] Show Part 3 - 01.mkv", 3));
+    }
+
+    // ── #23 — Search override resolver + token append ──────────────────────
+
+    fn series_with_overrides(tokens: &str, user: &str) -> crate::models::series::Series {
+        crate::models::series::Series {
+            id: 1,
+            anilist_id: 1,
+            mal_id: None,
+            title: String::new(),
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            format: "TV".to_string(),
+            status: String::new(),
+            episodes: None,
+            season_year: None,
+            end_year: None,
+            folder_name: String::new(),
+            monitor_mode: "future".to_string(),
+            allow_upgrades: true,
+            custom_query_tokens: tokens.to_string(),
+            restrict_to_uploader: user.to_string(),
+            cumulative_prior_episodes: 0,
+        }
+    }
+
+    fn cfg_with_defaults(tokens: &str, user: &str) -> Config {
+        let mut c = Config::default();
+        c.default_custom_query_tokens = tokens.to_string();
+        c.default_restrict_to_uploader = user.to_string();
+        c
+    }
+
+    #[test]
+    fn resolve_overrides_per_series_wins_over_global() {
+        let series = series_with_overrides("bd 1080p", "SubsPlease");
+        let cfg = cfg_with_defaults("web 720p", "Erai-raws");
+        let ctx = resolve_search_overrides_from_row(&series, &cfg);
+        assert_eq!(ctx.custom_tokens, "bd 1080p");
+        assert_eq!(ctx.restrict_user, "SubsPlease");
+    }
+
+    #[test]
+    fn resolve_overrides_falls_back_to_global_when_series_blank() {
+        let series = series_with_overrides("", "");
+        let cfg = cfg_with_defaults("web 720p", "Erai-raws");
+        let ctx = resolve_search_overrides_from_row(&series, &cfg);
+        assert_eq!(ctx.custom_tokens, "web 720p");
+        assert_eq!(ctx.restrict_user, "Erai-raws");
+    }
+
+    #[test]
+    fn resolve_overrides_per_field_independent_fallback() {
+        // One field set, the other blank — blank inherits, set wins.
+        let series = series_with_overrides("", "SubsPlease");
+        let cfg = cfg_with_defaults("web 720p", "Erai-raws");
+        let ctx = resolve_search_overrides_from_row(&series, &cfg);
+        assert_eq!(ctx.custom_tokens, "web 720p", "blank field should inherit global");
+        assert_eq!(ctx.restrict_user, "SubsPlease", "set field should beat global");
+    }
+
+    #[test]
+    fn resolve_overrides_surfaces_absolute_offset_from_series_row() {
+        // #30 — series row carries the cached prior-cour episode count,
+        // resolver lifts it verbatim onto the context used by the query
+        // sweep.
+        let mut series = series_with_overrides("", "");
+        series.cumulative_prior_episodes = 47; // e.g. JJK S3 = S1(24) + S2(23)
+        let cfg = cfg_with_defaults("", "");
+        let ctx = resolve_search_overrides_from_row(&series, &cfg);
+        assert_eq!(ctx.absolute_offset, 47);
+    }
+
+    #[test]
+    fn resolve_overrides_negative_offset_clamped_to_zero() {
+        // Defensive: a bad write somewhere upstream mustn't produce
+        // negative episode numbers at the filter layer.
+        let mut series = series_with_overrides("", "");
+        series.cumulative_prior_episodes = -5;
+        let cfg = cfg_with_defaults("", "");
+        let ctx = resolve_search_overrides_from_row(&series, &cfg);
+        assert_eq!(ctx.absolute_offset, 0);
+    }
+
+    #[test]
+    fn append_tokens_is_noop_when_empty() {
+        let qs = vec!["Frieren 01".to_string(), "Frieren - 01".to_string()];
+        assert_eq!(append_custom_tokens(qs.clone(), ""), qs);
+        assert_eq!(append_custom_tokens(qs.clone(), "   "), qs);
+    }
+
+    #[test]
+    fn append_tokens_adds_to_each_query() {
+        let qs = vec!["Frieren 01".to_string(), "Frieren - 01".to_string()];
+        let out = append_custom_tokens(qs, "bd 1080p");
+        assert_eq!(out, vec![
+            "Frieren 01 bd 1080p".to_string(),
+            "Frieren - 01 bd 1080p".to_string(),
+        ]);
+    }
+
+    // ── #23 follow-up — collapsed query variants when ?u= is active ────
+
+    #[test]
+    fn build_queries_full_mode_emits_four_episode_variants() {
+        // Regression pin. The full sweep is what runs when no Nyaa
+        // uploader filter is set; dropping any of these variants would
+        // silently break coverage for uploaders that skip padding,
+        // use a specific separator, etc.
+        let aliases = vec!["Frieren".to_string()];
+        let out = build_queries_from_aliases(&aliases, &SearchTarget::Episode(9), false);
+        assert_eq!(out.len(), 4, "full-sweep episode target should emit 4 per alias, got {out:?}");
+        assert!(out.contains(&"Frieren 9".to_string()));
+        assert!(out.contains(&"Frieren - 09".to_string()));
+        assert!(out.contains(&"Frieren 09".to_string()));
+        assert!(out.contains(&"\"Frieren\" 09".to_string()));
+    }
+
+    #[test]
+    fn build_queries_collapsed_mode_emits_one_episode_variant() {
+        // With /user/<name> scope active, extra variants all return the
+        // same uploader's catalog so we drop from 4→1 to cut wall-time.
+        let aliases = vec!["Frieren".to_string()];
+        let out = build_queries_from_aliases(&aliases, &SearchTarget::Episode(9), true);
+        assert_eq!(out, vec!["Frieren 09".to_string()]);
+    }
+
+    #[test]
+    fn build_queries_collapsed_mode_emits_one_single_variant() {
+        let aliases = vec!["Jujutsu Kaisen 0".to_string()];
+        let out = build_queries_from_aliases(&aliases, &SearchTarget::Single, true);
+        assert_eq!(out, vec!["Jujutsu Kaisen 0".to_string()]);
+    }
+
+    #[test]
+    fn build_queries_collapsed_scales_with_alias_count() {
+        // One variant per alias — the case-insensitive dedupe on
+        // `dedupe_strings` collapses romaji/english when they share a
+        // lowercase key ("Jujutsu Kaisen" and "JUJUTSU KAISEN"), so a
+        // typical three-field AL detail still produces two distinct
+        // collapsed queries.
+        let aliases = vec![
+            "Jujutsu Kaisen".to_string(),
+            "JUJUTSU KAISEN".to_string(),
+            "呪術廻戦".to_string(),
+        ];
+        let out = build_queries_from_aliases(&aliases, &SearchTarget::Episode(56), true);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|q| q.ends_with(" 56")));
     }
 }

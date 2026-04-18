@@ -277,6 +277,151 @@ pub async fn get_relations_for_provider(db: &SqlitePool, provider_id: i64) -> Re
     get_relations_table(db, "provider_relations_cache", "provider_id", provider_id).await
 }
 
+/// #30 — Walk the PREQUEL chain backwards from `root_provider_id` and
+/// collect the titles of every ancestor along the way. Used to build
+/// franchise-root Nyaa queries so absolute-numbered releases surface
+/// (e.g. `[SubsPlease] Jujutsu Kaisen - 56` for a JJK S3 E9 target —
+/// the S3 AL entry's own titles carry the "Shimetsu Kaiyuu / Culling
+/// Game Part 1" subtitle, which no SubsPlease release uses).
+///
+/// Returns up to a small set of unique titles. Same walk rules as
+/// [`compute_cumulative_prior_episodes`]: TV-format only, pick the
+/// larger episode-count branch, cycle-guarded. Titles come from
+/// `provider_metadata_cache.detail_json` so they match what
+/// `collect_aliases` would produce for that entry if it were fetched
+/// directly.
+pub async fn resolve_franchise_aliases(
+    db: &SqlitePool,
+    root_provider_id: i64,
+) -> Vec<String> {
+    const MAX_DEPTH: usize = 20;
+
+    if root_provider_id == 0 {
+        return Vec::new();
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut current = root_provider_id;
+    let mut visited: HashSet<i64> = HashSet::new();
+    visited.insert(current);
+
+    for _ in 0..MAX_DEPTH {
+        let row = sqlx::query(
+            "SELECT pr.related_provider_id, \
+                    COALESCE(json_extract(pm.detail_json, '$.title_romaji'), '') AS title_romaji, \
+                    COALESCE(json_extract(pm.detail_json, '$.title_english'), '') AS title_english, \
+                    COALESCE(json_extract(pm.detail_json, '$.title_native'), '') AS title_native \
+             FROM provider_relations_cache pr \
+             LEFT JOIN provider_metadata_cache pm ON pm.provider_id = pr.related_provider_id \
+             WHERE pr.provider_id = ? AND pr.relation_type = 'PREQUEL' AND pr.format = 'TV' \
+             ORDER BY COALESCE(pr.episodes, 0) DESC \
+             LIMIT 1",
+        )
+        .bind(current)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+
+        let Some(row) = row else { break };
+        let prev_id: i64 = row.get("related_provider_id");
+        if !visited.insert(prev_id) {
+            break;
+        }
+        for col in ["title_romaji", "title_english", "title_native"] {
+            let t: String = row.try_get(col).unwrap_or_default();
+            if !t.trim().is_empty() {
+                out.push(t);
+            }
+        }
+        current = prev_id;
+    }
+
+    // Lowercase-dedupe preserving first occurrence.
+    let mut seen: HashSet<String> = HashSet::new();
+    out.into_iter()
+        .filter(|t| seen.insert(t.to_lowercase()))
+        .collect()
+}
+
+/// #30 — Walk the PREQUEL chain backwards from `root_provider_id` through
+/// `provider_relations_cache` and return the cumulative episode count.
+///
+/// Used to accept absolute-numbered Nyaa releases against a relative-numbered
+/// AL cour target. `[SubsPlease] Jujutsu Kaisen - 56` is JJK S3 E9 because
+/// S1 (24 episodes) + S2 (23 episodes) = 47, and 47 + 9 = 56. The cumulative
+/// offset for S3 is therefore 47. First-season entries and entries whose
+/// relation cache is empty return `0`.
+///
+/// Why this is a pure cache read:
+/// - `metadata_sync::hydrate_relation_tree` already BFS-walks the whole
+///   franchise graph and writes both forward and reverse edges to
+///   `provider_relations_cache`.
+/// - We never fetch AL here — this function is called on the
+///   refresh/add-series hot path and must not fan out to the network.
+///
+/// Format filter:
+/// - TV-only. SubsPlease-style absolute numbering is a TV release
+///   convention; movies and specials are not part of the cour count
+///   (`Jujutsu Kaisen 0` does not bump S3's absolute offset from 47 to
+///   48). ONA is deliberately excluded for the same reason — most
+///   ONAs are one-off series not folded into a TV franchise's
+///   cumulative count.
+///
+/// Branching:
+/// - When an entry has multiple TV PREQUELs (rare, but shows with both
+///   a main prequel and a prequel side-story do exist), pick the one
+///   with the largest episode count. Main shows always outlast
+///   side-stories in episode count, so this picks the canonical chain
+///   without extra metadata.
+///
+/// Cycle guard:
+/// - Small cap on walk depth (20 hops) and a `visited` set. Relation
+///   graphs have no legitimate reason to cycle, but a bad cache row
+///   could in principle form a loop.
+pub async fn compute_cumulative_prior_episodes(
+    db: &SqlitePool,
+    root_provider_id: i64,
+) -> i32 {
+    const MAX_DEPTH: usize = 20;
+
+    if root_provider_id == 0 {
+        return 0;
+    }
+
+    let mut offset: i32 = 0;
+    let mut current = root_provider_id;
+    let mut visited: HashSet<i64> = HashSet::new();
+    visited.insert(current);
+
+    for _ in 0..MAX_DEPTH {
+        let row = sqlx::query(
+            "SELECT related_provider_id, episodes \
+             FROM provider_relations_cache \
+             WHERE provider_id = ? AND relation_type = 'PREQUEL' AND format = 'TV' \
+             ORDER BY COALESCE(episodes, 0) DESC \
+             LIMIT 1",
+        )
+        .bind(current)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+
+        let Some(row) = row else { break };
+        let prev_id: i64 = row.get("related_provider_id");
+        let prev_episodes: Option<i32> = row.get("episodes");
+
+        if !visited.insert(prev_id) {
+            break;
+        }
+        offset = offset.saturating_add(prev_episodes.unwrap_or(0).max(0));
+        current = prev_id;
+    }
+
+    offset
+}
+
 async fn replace_episode_table(
     db: &SqlitePool,
     table: &str,
@@ -347,4 +492,187 @@ pub async fn get_episode_map_for_series(db: &SqlitePool, series_id: i64) -> Resu
 
 pub async fn get_episode_map_for_provider(db: &SqlitePool, provider_id: i64) -> Result<HashMap<i32, CachedEpisodeMetadata>, sqlx::Error> {
     get_episode_table(db, "provider_episode_metadata", "provider_id", provider_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fresh in-memory pool with the full migration applied. We need
+    /// the whole migration because `provider_relations_cache` depends
+    /// on earlier CREATE TABLE statements running first.
+    async fn test_pool() -> SqlitePool {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+        db
+    }
+
+    async fn insert_prequel(
+        db: &SqlitePool,
+        provider_id: i64,
+        related_id: i64,
+        episodes: Option<i32>,
+        format: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO provider_relations_cache \
+             (provider_id, related_provider_id, episodes, format, relation_type, media_type) \
+             VALUES (?, ?, ?, ?, 'PREQUEL', 'ANIME')",
+        )
+        .bind(provider_id)
+        .bind(related_id)
+        .bind(episodes)
+        .bind(format)
+        .execute(db)
+        .await
+        .expect("insert prequel");
+    }
+
+    #[tokio::test]
+    async fn cumulative_prior_is_zero_for_first_season_entry() {
+        // No PREQUEL rows at all — offset must be 0 so the legacy
+        // strict-relative filter behavior is preserved for single-cour
+        // shows and for new adds before the relation cache is populated.
+        let db = test_pool().await;
+        assert_eq!(compute_cumulative_prior_episodes(&db, 1).await, 0);
+    }
+
+    #[tokio::test]
+    async fn cumulative_prior_sums_tv_chain() {
+        // JJK S3 (id=3) ← S2 (id=2, 23 ep) ← S1 (id=1, 24 ep).
+        // Expected offset = 24 + 23 = 47.
+        let db = test_pool().await;
+        insert_prequel(&db, 3, 2, Some(23), "TV").await;
+        insert_prequel(&db, 2, 1, Some(24), "TV").await;
+        assert_eq!(compute_cumulative_prior_episodes(&db, 3).await, 47);
+    }
+
+    #[tokio::test]
+    async fn cumulative_prior_skips_movie_prequels() {
+        // JJK 0 (MOVIE) is a prequel to JJK S1 but SubsPlease absolute
+        // numbering does NOT include it — S1 E1 = absolute 1, not 2.
+        // The walker must filter by format = 'TV' to match that
+        // convention.
+        let db = test_pool().await;
+        // S3 ← S2 (TV, 23) ← S1 (TV, 24) ← JJK 0 (MOVIE, 1)
+        insert_prequel(&db, 3, 2, Some(23), "TV").await;
+        insert_prequel(&db, 2, 1, Some(24), "TV").await;
+        // Movie prequel present in the cache but different format.
+        insert_prequel(&db, 1, 0, Some(1), "MOVIE").await;
+        assert_eq!(compute_cumulative_prior_episodes(&db, 3).await, 47);
+    }
+
+    #[tokio::test]
+    async fn cumulative_prior_handles_null_episodes() {
+        // An entry with NULL episodes (still-airing prequel, or a
+        // relation row written before AL populated the count) must not
+        // crash the walker or produce a negative offset — it just
+        // contributes zero.
+        let db = test_pool().await;
+        insert_prequel(&db, 2, 1, None, "TV").await;
+        assert_eq!(compute_cumulative_prior_episodes(&db, 2).await, 0);
+    }
+
+    #[tokio::test]
+    async fn cumulative_prior_picks_larger_tv_prequel_on_branch() {
+        // Two TV PREQUELs from the same node (uncommon but possible
+        // when both a main show and a prequel side-story point
+        // backwards). The canonical main chain is always the entry
+        // with more episodes, so the walker picks the higher count.
+        let db = test_pool().await;
+        insert_prequel(&db, 10, 5, Some(12), "TV").await; // side-story
+        insert_prequel(&db, 10, 6, Some(24), "TV").await; // main
+        assert_eq!(compute_cumulative_prior_episodes(&db, 10).await, 24);
+    }
+
+    async fn insert_provider_titles(
+        db: &SqlitePool,
+        provider_id: i64,
+        romaji: &str,
+        english: &str,
+        native: &str,
+    ) {
+        let json = serde_json::json!({
+            "title_romaji": romaji,
+            "title_english": english,
+            "title_native": native,
+        });
+        sqlx::query(
+            "INSERT INTO provider_metadata_cache (provider_id, mal_id, detail_json) \
+             VALUES (?, NULL, ?)",
+        )
+        .bind(provider_id)
+        .bind(json.to_string())
+        .execute(db)
+        .await
+        .expect("insert provider detail");
+    }
+
+    #[tokio::test]
+    async fn franchise_aliases_returns_root_titles_via_prequel_chain() {
+        // JJK S3 (id=3) ← S2 (id=2) ← S1 (id=1, the root).
+        // Franchise aliases for S3 must include S1's titles so the
+        // absolute-number query path can actually hit SubsPlease uploads
+        // titled just "Jujutsu Kaisen".
+        let db = test_pool().await;
+        insert_prequel(&db, 3, 2, Some(23), "TV").await;
+        insert_prequel(&db, 2, 1, Some(24), "TV").await;
+        insert_provider_titles(&db, 2, "Jujutsu Kaisen 2nd Season", "JUJUTSU KAISEN Season 2", "呪術廻戦 2期").await;
+        insert_provider_titles(&db, 1, "Jujutsu Kaisen", "JUJUTSU KAISEN", "呪術廻戦").await;
+
+        let aliases = resolve_franchise_aliases(&db, 3).await;
+        // The root's romaji "Jujutsu Kaisen" must surface somewhere —
+        // the english variant "JUJUTSU KAISEN" has the same lowercase
+        // key so the case-insensitive dedupe can legitimately fold one
+        // into the other, but the franchise-base alias must appear.
+        assert!(
+            aliases.iter().any(|a| a.eq_ignore_ascii_case("Jujutsu Kaisen")),
+            "franchise-root base title must appear, got {aliases:?}"
+        );
+        // Native title has a distinct lowercase key, so it must appear
+        // as its own entry.
+        assert!(
+            aliases.iter().any(|a| a == "呪術廻戦"),
+            "root native title must appear, got {aliases:?}"
+        );
+        // Intermediate S2 titles should also surface since SubsPlease /
+        // similar might use S2-era aliases on pack titles during the
+        // cross-cour transition.
+        assert!(
+            aliases.iter().any(|a| a.contains("2nd Season") || a.contains("Season 2")),
+            "intermediate S2 title should appear, got {aliases:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn franchise_aliases_empty_for_first_season_entry() {
+        // No PREQUEL rows — nothing to surface.
+        let db = test_pool().await;
+        assert!(resolve_franchise_aliases(&db, 1).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn franchise_aliases_dedupes_case_insensitive() {
+        // Same title appearing in multiple ancestor language fields
+        // (or at multiple chain depths) must collapse to one entry.
+        let db = test_pool().await;
+        insert_prequel(&db, 2, 1, Some(12), "TV").await;
+        insert_provider_titles(&db, 1, "Same Title", "SAME TITLE", "").await;
+        let aliases = resolve_franchise_aliases(&db, 2).await;
+        assert_eq!(aliases.len(), 1, "expected case-insensitive dedupe, got {aliases:?}");
+    }
+
+    #[tokio::test]
+    async fn cumulative_prior_terminates_on_cycle() {
+        // Defensive: if a bad cache row points A → B → A, the walker
+        // must stop rather than loop to MAX_DEPTH.
+        let db = test_pool().await;
+        insert_prequel(&db, 1, 2, Some(12), "TV").await;
+        insert_prequel(&db, 2, 1, Some(24), "TV").await;
+        // Start at 1: visit 2 (add 12), then 2's PREQUEL is 1 which is
+        // already visited → stop. Offset should be 12, not unbounded.
+        assert_eq!(compute_cumulative_prior_episodes(&db, 1).await, 12);
+    }
 }

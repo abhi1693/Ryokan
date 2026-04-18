@@ -50,6 +50,20 @@ pub struct Config {
     /// `Ryokan.SeaDexBestSpecification` Custom Format installed — that
     /// CF replaces the hardcoded boost with a user-controlled score.
     pub seadex_enabled: bool,
+    /// #23 — Global default extra tokens appended to every Nyaa query
+    /// (e.g. `bd 1080p`). Per-series override on `series` takes
+    /// precedence when set. Empty means no tokens.
+    pub default_custom_query_tokens: String,
+    /// #23 — Global default Nyaa **uploader** restriction. When
+    /// non-empty, Ryokan sets `?u=<name>` on every Nyaa search so only
+    /// that account's uploads come back. Much tighter than a
+    /// `[Group]` title-contains filter: no third-party re-uploads,
+    /// no filename-token false matches. Trade-off is that the name
+    /// must match an actual Nyaa account — groups without a dedicated
+    /// account (HorribleSubs, etc.) will return zero results and the
+    /// user has to clear the field. Per-series override takes
+    /// precedence. Empty means no restriction.
+    pub default_restrict_to_uploader: String,
 }
 
 impl Default for Config {
@@ -89,6 +103,8 @@ impl Default for Config {
             upgrade_search_enabled: false,
             custom_format_minimum_score: i32::MIN,
             seadex_enabled: false,
+            default_custom_query_tokens: String::new(),
+            default_restrict_to_uploader: String::new(),
         }
     }
 }
@@ -129,12 +145,14 @@ struct ConfigRow {
     upgrade_search_enabled: i64,
     custom_format_minimum_score: i64,
     seadex_enabled: i64,
+    default_custom_query_tokens: String,
+    default_restrict_to_uploader: String,
 }
 
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled FROM config WHERE id = 1",
+        "SELECT qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -174,6 +192,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         upgrade_search_enabled: r.upgrade_search_enabled != 0,
         custom_format_minimum_score: r.custom_format_minimum_score as i32,
         seadex_enabled: r.seadex_enabled != 0,
+        default_custom_query_tokens: r.default_custom_query_tokens,
+        default_restrict_to_uploader: r.default_restrict_to_uploader,
     }))
 }
 
@@ -181,8 +201,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             qbit_url = excluded.qbit_url,
             qbit_user = excluded.qbit_user,
@@ -217,7 +237,9 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             radarr_api_key = excluded.radarr_api_key,
             upgrade_search_enabled = excluded.upgrade_search_enabled,
             custom_format_minimum_score = excluded.custom_format_minimum_score,
-            seadex_enabled = excluded.seadex_enabled
+            seadex_enabled = excluded.seadex_enabled,
+            default_custom_query_tokens = excluded.default_custom_query_tokens,
+            default_restrict_to_uploader = excluded.default_restrict_to_uploader
         "#,
     )
     .bind(&config.qbit_url)
@@ -254,6 +276,8 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(if config.upgrade_search_enabled { 1_i64 } else { 0_i64 })
     .bind(config.custom_format_minimum_score as i64)
     .bind(if config.seadex_enabled { 1_i64 } else { 0_i64 })
+    .bind(&config.default_custom_query_tokens)
+    .bind(&config.default_restrict_to_uploader)
     .execute(db)
     .await?;
 

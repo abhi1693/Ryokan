@@ -947,9 +947,11 @@ pub async fn classify_release(
     let filename = classify_filename(title);
 
     let mut evidence = filename.evidence.clone();
+    let mut group_web_kind = WebKind::Unknown;
     if let Some(group) = filename.release_group.as_deref()
-        && let Some(group_ev) = classify_group(db, group).await {
-            evidence.push(group_ev);
+        && let Some(group_cls) = classify_group(db, group).await {
+            evidence.push(group_cls.evidence);
+            group_web_kind = group_cls.web_kind;
         }
 
     // Layer 4 — temporal inference. Pure synchronous function with no I/O,
@@ -1016,9 +1018,18 @@ pub async fn classify_release(
     result.is_bdmv = filename.is_bdmv;
     // Web sub-classification only carries through when the aggregator
     // also landed on Source::Web — propagating WebKind onto a BluRay
-    // verdict would be nonsensical.
+    // verdict would be nonsensical. The filename's web_kind wins when
+    // present (an explicit `WEB-DL` / `WEBRip` token is the most
+    // specific signal we have); otherwise fall back to the group
+    // table's hint (e.g. SubsPlease → WEB-DL) so SubsPlease-style
+    // releases without any source token in the filename stop
+    // labelling as the generic "WEB" tier.
     if result.source == Source::Web {
-        result.web_kind = filename.web_kind;
+        result.web_kind = if filename.web_kind != WebKind::Unknown {
+            filename.web_kind
+        } else {
+            group_web_kind
+        };
     }
 
     log_classification("classify_release", title, &result);
@@ -1074,9 +1085,11 @@ pub async fn classify_post_download(
     let mut evidence = filename.evidence.clone();
 
     // L3 — release group identity.
+    let mut group_web_kind = WebKind::Unknown;
     if let Some(group) = filename.release_group.as_deref()
-        && let Some(group_ev) = classify_group(db, group).await {
-            evidence.push(group_ev);
+        && let Some(group_cls) = classify_group(db, group).await {
+            evidence.push(group_cls.evidence);
+            group_web_kind = group_cls.web_kind;
         }
 
     // L4 — temporal inference (when we have series context). Post-download
@@ -1122,8 +1135,15 @@ pub async fn classify_post_download(
     };
     result.is_remux = filename.is_remux;
     result.is_bdmv = filename.is_bdmv;
+    // Same precedence as classify_release: filename's explicit WEB-DL
+    // / WEBRip token wins, otherwise fall back to the group table's
+    // hint.
     if result.source == Source::Web {
-        result.web_kind = filename.web_kind;
+        result.web_kind = if filename.web_kind != WebKind::Unknown {
+            filename.web_kind
+        } else {
+            group_web_kind
+        };
     }
 
     log_classification("classify_post_download", original_title, &result);

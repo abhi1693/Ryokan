@@ -32,7 +32,7 @@ fn is_errored(state: &str) -> bool {
 }
 
 /// Check if a grab is older than `max_age_secs` seconds.
-fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
+pub fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
     // grabbed_at is SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
     let Some(grab_time) = chrono::NaiveDateTime::parse_from_str(grabbed_at, "%Y-%m-%d %H:%M:%S").ok() else {
         return false;
@@ -160,6 +160,36 @@ async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
             )
             .await;
         }
+    }
+}
+
+/// #30 — Decide what offset to subtract from a parsed filename episode
+/// number when the file isn't covered by a Phase 2 auto-expand route
+/// row. Used by the legacy single-series path so absolute-numbered
+/// releases of sequel cours (`[SubsPlease] Jujutsu Kaisen - 56` for
+/// JJK S3 E9 with prior-cour total 47) land on the correct relative
+/// episode.
+///
+/// Rule: if the series has a non-zero `cumulative_prior_episodes` AND
+/// the parsed number exceeds that cumulative, treat the filename as
+/// absolute-numbered and subtract. Otherwise return 0 (relative
+/// numbering, file renames to its parsed number as-is).
+///
+/// Example with JJK S3 (cumulative = 47, own episodes = 12):
+///   - raw = 56 (SubsPlease absolute) → 56 > 47 → offset = 47 → ep = 9. ✓
+///   - raw = 9 (Erai-raws relative) → 9 ≤ 47 → offset = 0 → ep = 9. ✓
+///   - raw = 25 (stray S2 E1 file that got mis-grabbed) → 25 ≤ 47 →
+///     offset = 0, file lands as E25 of S3 (which doesn't exist,
+///     subsequent rename fails loudly — correct behavior).
+///
+/// First-season entries (cumulative = 0) short-circuit to offset = 0
+/// so the legacy behavior is preserved everywhere absolute numbering
+/// can't apply.
+fn fallback_ep_offset(raw_ep_num: i32, cumulative_prior_episodes: i32) -> i32 {
+    if cumulative_prior_episodes > 0 && raw_ep_num > cumulative_prior_episodes {
+        cumulative_prior_episodes
+    } else {
+        0
     }
 }
 
@@ -339,6 +369,24 @@ async fn import_torrent(
         .collect();
 
     if video_files.is_empty() {
+        // #27 — log this at debug rather than silently looping. qBit
+        // reported the torrent state as complete but nothing here looks
+        // like a finished video file. Most of the time this is a race
+        // where the post-proc tick beat qBit's per-file progress update;
+        // the next tick will find the files. Rare pathological case is
+        // a samples/.nfo-only torrent that stays Ok(false) forever —
+        // those would need the stuck-pending timeout fix (future work,
+        // tracked separately from this commit).
+        logger::debug(
+            &state.db,
+            LogCategory::PostProcess,
+            &format!(
+                "No complete video files yet for '{}' — retrying next tick",
+                grab.torrent_name
+            ),
+            "",
+        )
+        .await;
         return Ok(false);
     }
 
@@ -388,10 +436,17 @@ async fn import_torrent(
         // grabs and for any completed video file whose index wasn't
         // covered by a route (e.g. extension mismatch between
         // `auto_search::is_media_filename` and [`is_video_file`]).
-        let (target_series_id, ep_offset) = routes_by_file
+        //
+        // `ep_offset` is computed below, once `ctx` is loaded and the
+        // filename is parsed — the legacy fallback needs
+        // `series.cumulative_prior_episodes` (#30) to pick the right
+        // offset for absolute-numbered releases like
+        // `[SubsPlease] Jujutsu Kaisen - 56` (which must land as S3 E9,
+        // not S3 E56).
+        let target_series_id = routes_by_file
             .get(file_idx)
-            .copied()
-            .unwrap_or((grab.series_id, 0));
+            .map(|(sid, _)| *sid)
+            .unwrap_or(grab.series_id);
 
         // Can't use the clean `Entry::or_insert_with_async` pattern
         // because the loader is async and `entry()` borrows the map
@@ -453,14 +508,32 @@ async fn import_torrent(
             continue;
         };
 
-        // Apply per-route episode_offset. For absolute-numbered
-        // continuation packs (smol Monogatari S07E14 → Owari S2 E01,
-        // NoobSubs JoJo E25 → Egypt-hen E01), the offset was computed
-        // at detection time as parent_cap so E14 - 13 = E01. A non-
-        // positive result means the route/file mismatch is bad (file
+        // Decide the episode-number offset to subtract:
+        //   1. If a route row covered this file (Phase 2 batch auto-
+        //      expansion), use the offset the auto-expand path stored
+        //      at grab time — e.g. smol Monogatari S07E14 → Owari S2 E01
+        //      with offset 13, NoobSubs JoJo E25 → Egypt-hen E01 with
+        //      offset 24.
+        //   2. Otherwise (single-series legacy fallback) use the
+        //      series's cumulative prior-cour episode count (#30) when
+        //      the parsed number is clearly in the absolute-numbering
+        //      range (greater than the prior-cour total). Example:
+        //      `[SubsPlease] Jujutsu Kaisen - 56` → raw_ep_num=56,
+        //      cumulative=47, 56 > 47 → offset=47, 56 - 47 = E9 of S3.
+        //      A relative-numbered release from the same series
+        //      ("Jujutsu Kaisen - 09", raw=9) correctly falls through
+        //      to offset=0 because 9 is not greater than 47.
+        //
+        // A non-positive result after subtraction means the file
         // landed on a sibling whose offset is larger than the file's
-        // own episode number) — log and skip rather than write a
-        // bogus E0 file.
+        // own episode number — log and skip rather than write a bogus
+        // E0 file.
+        let ep_offset = routes_by_file
+            .get(file_idx)
+            .map(|(_, off)| *off)
+            .unwrap_or_else(|| {
+                fallback_ep_offset(raw_ep_num, ctx.series.cumulative_prior_episodes)
+            });
         let ep_num = raw_ep_num - ep_offset;
         if ep_num <= 0 {
             logger::warn(
@@ -939,8 +1012,17 @@ pub async fn run_once(state: &AppState) {
 
         let Some(torrent) = matched else {
             // Torrent not found in qBittorrent. If the grab is old enough
-            // (> 5 minutes), the user likely deleted it — mark as removed.
-            if grab_is_stale(&grab.grabbed_at, 300) {
+            // (> 60 seconds), the user likely deleted it — mark as
+            // removed. The grace window used to be 5 minutes to cover
+            // qBit restarts, but in practice the `all_torrents` call
+            // would fail outright during a restart (we'd not even reach
+            // this branch with a valid torrent list), so the long grace
+            // window just delayed reconciliation of manual qBit deletes
+            // for no safety gain. A minute is enough slack for a slow
+            // first-poll after an add-torrent RPC, short enough that
+            // "deleted ep 9 in qBit and it still shows pending" becomes
+            // "shows cancelled within a minute."
+            if grab_is_stale(&grab.grabbed_at, 60) {
                 logger::warn(
                     &state.db,
                     LogCategory::PostProcess,
@@ -996,6 +1078,19 @@ pub async fn run_once(state: &AppState) {
             Ok(true) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
+                // #27 — log every successful import so there's a trail
+                // from grab → complete in System → Logs. Before this,
+                // the only log a successful grab produced was the grab
+                // itself and maybe the Jellyfin refresh at the end.
+                // Operators who went looking for "did this episode
+                // land?" had to check the library row or disk.
+                logger::info(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!("Imported '{}'", grab.torrent_name),
+                    &format!("series_id={} episodes={:?}", grab.series_id, grab.episode_numbers),
+                )
+                .await;
                 // Episode tag "grabbed → completed" flips happen inside
                 // `import_torrent` itself so a Phase 2 routed batch can
                 // mark each sibling's tags under the sibling's own
@@ -1005,6 +1100,12 @@ pub async fn run_once(state: &AppState) {
             }
             Ok(false) => {
                 // Torrent complete but no video files yet — leave as pending.
+                // The caller (qBit) might still be finalizing the files,
+                // or the torrent could be all samples/.nfo (pathological).
+                // We intentionally don't escalate here — next post-proc
+                // tick retries. A stuck-forever failsafe would need a
+                // "pending too long" timer; covered by the plan's
+                // future work, not this commit.
             }
             Err(e) => {
                 logger::error(
@@ -1479,4 +1580,55 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
     .await;
 
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── #30 fallback offset selection ─────────────────────────────────
+
+    #[test]
+    fn fallback_offset_absolute_jjk_s3_subsplease() {
+        // Motivating case: [SubsPlease] Jujutsu Kaisen - 56 → S3 E9.
+        // S1 (24) + S2 (23) = 47 prior-cour episodes. Parsed 56 > 47,
+        // so the filename is absolute-numbered and offset = 47.
+        assert_eq!(fallback_ep_offset(56, 47), 47);
+    }
+
+    #[test]
+    fn fallback_offset_relative_release_within_cour() {
+        // Erai-raws / cour-specific releases number from 1: raw 9 is
+        // relative, 9 ≤ 47, offset = 0. Subtracting zero leaves E9.
+        assert_eq!(fallback_ep_offset(9, 47), 0);
+    }
+
+    #[test]
+    fn fallback_offset_zero_for_first_season_entry() {
+        // First-season entry has no prior cours (cumulative = 0), so
+        // the legacy behavior is preserved regardless of parsed number.
+        assert_eq!(fallback_ep_offset(56, 0), 0);
+        assert_eq!(fallback_ep_offset(1, 0), 0);
+    }
+
+    #[test]
+    fn fallback_offset_mis_grabbed_prior_cour_number() {
+        // Pathological: parsed 25 (S2 E1) somehow downloaded into the
+        // S3 series folder. 25 ≤ 47 → offset = 0, file lands as E25 of
+        // S3. S3 doesn't have E25 so the subsequent rename step fails
+        // — the right loud failure rather than silently translating to
+        // a plausible-looking E-22.
+        assert_eq!(fallback_ep_offset(25, 47), 0);
+    }
+
+    #[test]
+    fn fallback_offset_equal_to_cumulative() {
+        // Boundary: raw exactly equals cumulative. That value would be
+        // ambiguous (last episode of the prior cour, or legitimate
+        // relative E47 of a show with 47+ episodes). Without more
+        // signal we keep it as relative (offset 0) — the alternative
+        // (offset = cumulative) would silently map legitimate E47
+        // releases of a 48-episode show to E0.
+        assert_eq!(fallback_ep_offset(47, 47), 0);
+    }
 }
