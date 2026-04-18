@@ -210,7 +210,7 @@ pub struct SettingsForm {
     upgrade_search_enabled: Option<String>,
     seadex_enabled: Option<String>,
     default_custom_query_tokens: Option<String>,
-    default_restrict_to_group: Option<String>,
+    default_restrict_to_uploader: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -503,10 +503,10 @@ pub async fn settings_submit(
         } else {
             existing_cfg.as_ref().map(|c| c.default_custom_query_tokens.clone()).unwrap_or_default()
         },
-        default_restrict_to_group: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
-            form.default_restrict_to_group.unwrap_or_default().trim().to_string()
+        default_restrict_to_uploader: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
+            form.default_restrict_to_uploader.unwrap_or_default().trim().to_string()
         } else {
-            existing_cfg.as_ref().map(|c| c.default_restrict_to_group.clone()).unwrap_or_default()
+            existing_cfg.as_ref().map(|c| c.default_restrict_to_uploader.clone()).unwrap_or_default()
         },
     };
 

@@ -168,8 +168,8 @@
             <div class="monitoring-controls" style="flex-direction:column;align-items:stretch;gap:12px;margin-top:10px">
                 <div class="form-group" style="margin:0">
                     <label for="series-restrict-to-group">Restrict to Nyaa uploader</label>
-                    <input type="text" id="series-restrict-to-group" value="{{ restrict_to_group }}"
-                        placeholder="{% if !default_restrict_to_group.is_empty() %}global: {{ default_restrict_to_group }}{% else %}(none){% endif %}">
+                    <input type="text" id="series-restrict-to-group" value="{{ restrict_to_uploader }}"
+                        placeholder="{% if !default_restrict_to_uploader.is_empty() %}global: {{ default_restrict_to_uploader }}{% else %}(none){% endif %}">
                     <span class="form-hint">Per-series override of the global default. Ryokan sets <code>?u=&lt;name&gt;</code> on every Nyaa search for this show so only this uploader's releases come back. Leave blank to inherit the global default.</span>
                 </div>
                 <div class="form-group" style="margin:0">
@@ -1512,7 +1512,7 @@ function saveSeriesSearchOverrides(btn) {
         body: JSON.stringify({
             series_id: dbId,
             custom_query_tokens: tokens,
-            restrict_to_group: restrict,
+            restrict_to_uploader: restrict,
         }),
     })
     .then(async r => {

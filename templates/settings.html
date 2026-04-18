@@ -156,8 +156,8 @@
             {# #23 — Global search defaults. Per-series overrides on the
                series detail page take precedence when set. #}
             <div class="form-group">
-                <label for="default_restrict_to_group">Default Restrict to Nyaa Uploader</label>
-                <input type="text" name="default_restrict_to_group" id="default_restrict_to_group" value="{{ config.default_restrict_to_group }}" placeholder="SubsPlease">
+                <label for="default_restrict_to_uploader">Default Restrict to Nyaa Uploader</label>
+                <input type="text" name="default_restrict_to_uploader" id="default_restrict_to_uploader" value="{{ config.default_restrict_to_uploader }}" placeholder="SubsPlease">
                 <span class="form-hint">When set, every Nyaa search is scoped to <code>?u=&lt;name&gt;</code> so only this uploader's releases come back. Tighter and faster than a title-contains group filter. Must match an actual Nyaa account — groups without a dedicated uploader return zero results. Per-series overrides on the series page beat this default.</span>
             </div>
             <div class="form-group">

@@ -67,11 +67,11 @@ struct SeriesTemplate {
     custom_query_tokens: String,
     /// #23 — Per-series Nyaa uploader restriction. Empty string means
     /// "use the global default in config."
-    restrict_to_group: String,
+    restrict_to_uploader: String,
     /// #23 — Global defaults, surfaced as placeholder hints so the user
     /// can see what the per-series field will inherit when left blank.
     default_custom_query_tokens: String,
-    default_restrict_to_group: String,
+    default_restrict_to_uploader: String,
     /// Whether post-processing (file move + rename + NFO) is enabled in
     /// config. Rendered into the page as a JS global so the episode-row
     /// poller knows whether to show "Importing…" between a 100%-download
@@ -213,7 +213,7 @@ pub struct SetSearchOverridesForm {
     custom_query_tokens: String,
     /// Nyaa uploader to restrict to (`?u=<name>`). Empty string clears.
     #[serde(default)]
-    restrict_to_group: String,
+    restrict_to_uploader: String,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -773,17 +773,17 @@ pub async fn series_detail(
         .as_ref()
         .map(|s| s.custom_query_tokens.clone())
         .unwrap_or_default();
-    let restrict_to_group = db_series
+    let restrict_to_uploader = db_series
         .as_ref()
-        .map(|s| s.restrict_to_group.clone())
+        .map(|s| s.restrict_to_uploader.clone())
         .unwrap_or_default();
     let default_custom_query_tokens = cfg
         .as_ref()
         .map(|c| c.default_custom_query_tokens.clone())
         .unwrap_or_default();
-    let default_restrict_to_group = cfg
+    let default_restrict_to_uploader = cfg
         .as_ref()
-        .map(|c| c.default_restrict_to_group.clone())
+        .map(|c| c.default_restrict_to_uploader.clone())
         .unwrap_or_default();
     let post_processing_enabled = cfg
         .as_ref()
@@ -812,9 +812,9 @@ pub async fn series_detail(
         all_monitored,
         allow_upgrades,
         custom_query_tokens,
-        restrict_to_group,
+        restrict_to_uploader,
         default_custom_query_tokens,
-        default_restrict_to_group,
+        default_restrict_to_uploader,
         post_processing_enabled,
     };
     Html(template.render().unwrap_or_default())
@@ -2135,7 +2135,7 @@ pub async fn set_search_overrides(
         &state.db,
         form.series_id,
         &form.custom_query_tokens,
-        &form.restrict_to_group,
+        &form.restrict_to_uploader,
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2146,14 +2146,14 @@ pub async fn set_search_overrides(
         &format!(
             "tokens={:?} restrict_to={:?}",
             form.custom_query_tokens.trim(),
-            form.restrict_to_group.trim(),
+            form.restrict_to_uploader.trim(),
         ),
     ).await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
         "custom_query_tokens": form.custom_query_tokens.trim(),
-        "restrict_to_group": form.restrict_to_group.trim(),
+        "restrict_to_uploader": form.restrict_to_uploader.trim(),
     })))
 }
 

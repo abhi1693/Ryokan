@@ -63,14 +63,23 @@ static RE_RELEASE_PART_COUR: LazyLock<Regex> = LazyLock::new(||
     Regex::new(r"\b(?:part|cour)\s+(\d+)").unwrap()
 );
 /// Roman numerals II–IX at a word boundary, terminated by space/dot/
-/// punctuation/end-of-string. Single-letter Romans (`I`, `V`, `X`) are
-/// deliberately excluded — matching bare `I` would fire on any title
-/// containing the English pronoun and silently reject every release
-/// whose filename has no other season indicator. The Roman-numeral
-/// arm is for *rejecting* a release whose title explicitly names cour
-/// II/III/IV when the target is cour 1, not for pinning cour 1.
+/// punctuation/closing-bracket/comma/end-of-string. Single-letter
+/// Romans (`I`, `V`, `X`) are deliberately excluded — matching bare
+/// `I` would fire on any title containing the English pronoun and
+/// silently reject every release whose filename has no other season
+/// indicator. The Roman-numeral arm is for *rejecting* a release
+/// whose title explicitly names cour II/III/IV when the target is
+/// cour 1, not for pinning cour 1.
+///
+/// `(?i)` is omitted because every caller (`parse_release_season` and
+/// `infer_season_from_title`) lowercases before matching.
+///
+/// Terminator class: `]`, `)`, `,` included alongside the obvious
+/// whitespace / punctuation so shapes like `[II]`, `(Part II)`, and
+/// `Name, II - 01` reject-match. Prior version only had `: - \s .`
+/// and silently missed these.
 static RE_RELEASE_ROMAN: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"(?i)\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-\s\.]|$)").unwrap()
+    Regex::new(r"\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-\s\.\]\)\,]|$)").unwrap()
 );
 
 #[derive(Debug, Clone)]
@@ -1306,7 +1315,7 @@ async fn resolve_search_overrides(
         Some(s) => resolve_search_overrides_from_row_async(db, &s, config).await,
         None => SeriesSearchCtx {
             custom_tokens: config.default_custom_query_tokens.clone(),
-            restrict_user: config.default_restrict_to_group.clone(),
+            restrict_user: config.default_restrict_to_uploader.clone(),
             // No series row means the entry isn't in the library yet;
             // no relation cache to pull an offset from, so the filter
             // stays strict-relative. This only affects provisional
@@ -1342,10 +1351,10 @@ fn resolve_search_overrides_from_row(
     } else {
         series.custom_query_tokens.clone()
     };
-    let restrict_user = if series.restrict_to_group.is_empty() {
-        config.default_restrict_to_group.clone()
+    let restrict_user = if series.restrict_to_uploader.is_empty() {
+        config.default_restrict_to_uploader.clone()
     } else {
-        series.restrict_to_group.clone()
+        series.restrict_to_uploader.clone()
     };
     SeriesSearchCtx {
         custom_tokens,
@@ -5707,6 +5716,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_release_season_catches_roman_numeral_bracket_paren_comma_terminators() {
+        // Review fix: prior terminator class `[:\-\s\.]` silently
+        // missed these shapes because `]`, `)`, and `,` weren't in it.
+        // Bracketed cour marker: `[II]` is the whole tag.
+        assert_eq!(parse_release_season("[Group] Monogatari [II] - 01.mkv"), 2);
+        // Parenthesized cour marker: `(Part II)` is the whole qualifier.
+        assert_eq!(parse_release_season("Frieren (Part II).mkv"), 2);
+        // Comma-separated: `Name, II - 01` is an uncommon but legal shape.
+        assert_eq!(parse_release_season("Title, II - 01.mkv"), 2);
+    }
+
+    #[test]
     fn parse_release_season_rejects_bare_single_letter_romans() {
         // "I" inside a title must not be read as cour 1 — that's the
         // whole reason we excluded single-letter Romans. A bare "V" or
@@ -5773,7 +5794,7 @@ mod tests {
             monitor_mode: "future".to_string(),
             allow_upgrades: true,
             custom_query_tokens: tokens.to_string(),
-            restrict_to_group: user.to_string(),
+            restrict_to_uploader: user.to_string(),
             cumulative_prior_episodes: 0,
         }
     }
@@ -5781,7 +5802,7 @@ mod tests {
     fn cfg_with_defaults(tokens: &str, user: &str) -> Config {
         let mut c = Config::default();
         c.default_custom_query_tokens = tokens.to_string();
-        c.default_restrict_to_group = user.to_string();
+        c.default_restrict_to_uploader = user.to_string();
         c
     }
 

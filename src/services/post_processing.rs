@@ -163,6 +163,36 @@ async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
     }
 }
 
+/// #30 — Decide what offset to subtract from a parsed filename episode
+/// number when the file isn't covered by a Phase 2 auto-expand route
+/// row. Used by the legacy single-series path so absolute-numbered
+/// releases of sequel cours (`[SubsPlease] Jujutsu Kaisen - 56` for
+/// JJK S3 E9 with prior-cour total 47) land on the correct relative
+/// episode.
+///
+/// Rule: if the series has a non-zero `cumulative_prior_episodes` AND
+/// the parsed number exceeds that cumulative, treat the filename as
+/// absolute-numbered and subtract. Otherwise return 0 (relative
+/// numbering, file renames to its parsed number as-is).
+///
+/// Example with JJK S3 (cumulative = 47, own episodes = 12):
+///   - raw = 56 (SubsPlease absolute) → 56 > 47 → offset = 47 → ep = 9. ✓
+///   - raw = 9 (Erai-raws relative) → 9 ≤ 47 → offset = 0 → ep = 9. ✓
+///   - raw = 25 (stray S2 E1 file that got mis-grabbed) → 25 ≤ 47 →
+///     offset = 0, file lands as E25 of S3 (which doesn't exist,
+///     subsequent rename fails loudly — correct behavior).
+///
+/// First-season entries (cumulative = 0) short-circuit to offset = 0
+/// so the legacy behavior is preserved everywhere absolute numbering
+/// can't apply.
+fn fallback_ep_offset(raw_ep_num: i32, cumulative_prior_episodes: i32) -> i32 {
+    if cumulative_prior_episodes > 0 && raw_ep_num > cumulative_prior_episodes {
+        cumulative_prior_episodes
+    } else {
+        0
+    }
+}
+
 /// Per-series derived state used during an import. Built once per target
 /// series_id on demand inside [`import_torrent`] so a multi-series batch
 /// grab doesn't re-fetch the same rows or re-create the same directories
@@ -406,10 +436,17 @@ async fn import_torrent(
         // grabs and for any completed video file whose index wasn't
         // covered by a route (e.g. extension mismatch between
         // `auto_search::is_media_filename` and [`is_video_file`]).
-        let (target_series_id, ep_offset) = routes_by_file
+        //
+        // `ep_offset` is computed below, once `ctx` is loaded and the
+        // filename is parsed — the legacy fallback needs
+        // `series.cumulative_prior_episodes` (#30) to pick the right
+        // offset for absolute-numbered releases like
+        // `[SubsPlease] Jujutsu Kaisen - 56` (which must land as S3 E9,
+        // not S3 E56).
+        let target_series_id = routes_by_file
             .get(file_idx)
-            .copied()
-            .unwrap_or((grab.series_id, 0));
+            .map(|(sid, _)| *sid)
+            .unwrap_or(grab.series_id);
 
         // Can't use the clean `Entry::or_insert_with_async` pattern
         // because the loader is async and `entry()` borrows the map
@@ -471,14 +508,32 @@ async fn import_torrent(
             continue;
         };
 
-        // Apply per-route episode_offset. For absolute-numbered
-        // continuation packs (smol Monogatari S07E14 → Owari S2 E01,
-        // NoobSubs JoJo E25 → Egypt-hen E01), the offset was computed
-        // at detection time as parent_cap so E14 - 13 = E01. A non-
-        // positive result means the route/file mismatch is bad (file
+        // Decide the episode-number offset to subtract:
+        //   1. If a route row covered this file (Phase 2 batch auto-
+        //      expansion), use the offset the auto-expand path stored
+        //      at grab time — e.g. smol Monogatari S07E14 → Owari S2 E01
+        //      with offset 13, NoobSubs JoJo E25 → Egypt-hen E01 with
+        //      offset 24.
+        //   2. Otherwise (single-series legacy fallback) use the
+        //      series's cumulative prior-cour episode count (#30) when
+        //      the parsed number is clearly in the absolute-numbering
+        //      range (greater than the prior-cour total). Example:
+        //      `[SubsPlease] Jujutsu Kaisen - 56` → raw_ep_num=56,
+        //      cumulative=47, 56 > 47 → offset=47, 56 - 47 = E9 of S3.
+        //      A relative-numbered release from the same series
+        //      ("Jujutsu Kaisen - 09", raw=9) correctly falls through
+        //      to offset=0 because 9 is not greater than 47.
+        //
+        // A non-positive result after subtraction means the file
         // landed on a sibling whose offset is larger than the file's
-        // own episode number) — log and skip rather than write a
-        // bogus E0 file.
+        // own episode number — log and skip rather than write a bogus
+        // E0 file.
+        let ep_offset = routes_by_file
+            .get(file_idx)
+            .map(|(_, off)| *off)
+            .unwrap_or_else(|| {
+                fallback_ep_offset(raw_ep_num, ctx.series.cumulative_prior_episodes)
+            });
         let ep_num = raw_ep_num - ep_offset;
         if ep_num <= 0 {
             logger::warn(
@@ -1516,4 +1571,55 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
     .await;
 
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── #30 fallback offset selection ─────────────────────────────────
+
+    #[test]
+    fn fallback_offset_absolute_jjk_s3_subsplease() {
+        // Motivating case: [SubsPlease] Jujutsu Kaisen - 56 → S3 E9.
+        // S1 (24) + S2 (23) = 47 prior-cour episodes. Parsed 56 > 47,
+        // so the filename is absolute-numbered and offset = 47.
+        assert_eq!(fallback_ep_offset(56, 47), 47);
+    }
+
+    #[test]
+    fn fallback_offset_relative_release_within_cour() {
+        // Erai-raws / cour-specific releases number from 1: raw 9 is
+        // relative, 9 ≤ 47, offset = 0. Subtracting zero leaves E9.
+        assert_eq!(fallback_ep_offset(9, 47), 0);
+    }
+
+    #[test]
+    fn fallback_offset_zero_for_first_season_entry() {
+        // First-season entry has no prior cours (cumulative = 0), so
+        // the legacy behavior is preserved regardless of parsed number.
+        assert_eq!(fallback_ep_offset(56, 0), 0);
+        assert_eq!(fallback_ep_offset(1, 0), 0);
+    }
+
+    #[test]
+    fn fallback_offset_mis_grabbed_prior_cour_number() {
+        // Pathological: parsed 25 (S2 E1) somehow downloaded into the
+        // S3 series folder. 25 ≤ 47 → offset = 0, file lands as E25 of
+        // S3. S3 doesn't have E25 so the subsequent rename step fails
+        // — the right loud failure rather than silently translating to
+        // a plausible-looking E-22.
+        assert_eq!(fallback_ep_offset(25, 47), 0);
+    }
+
+    #[test]
+    fn fallback_offset_equal_to_cumulative() {
+        // Boundary: raw exactly equals cumulative. That value would be
+        // ambiguous (last episode of the prior cour, or legitimate
+        // relative E47 of a show with 47+ episodes). Without more
+        // signal we keep it as relative (offset 0) — the alternative
+        // (offset = cumulative) would silently map legitimate E47
+        // releases of a 48-episode show to E0.
+        assert_eq!(fallback_ep_offset(47, 47), 0);
+    }
 }
