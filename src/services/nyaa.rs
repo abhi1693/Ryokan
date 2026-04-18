@@ -416,25 +416,27 @@ pub async fn enrich_results_with_group_map(
 
     // Small per-batch cache so we only hit the DB once per unique group
     // across a typical 75-row result page.
-    let mut seen: std::collections::HashMap<String, Option<Source>> =
-        std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<
+        String,
+        Option<(Source, crate::services::source::WebKind)>,
+    > = std::collections::HashMap::new();
 
     for r in results.iter_mut() {
         if !r.source.is_empty() || r.group.is_empty() {
             continue;
         }
         let group_key = r.group.to_ascii_lowercase();
-        let source_opt = if let Some(cached) = seen.get(&group_key) {
+        let group_hint = if let Some(cached) = seen.get(&group_key) {
             *cached
         } else {
             let looked_up = classify_group(db, &r.group)
                 .await
-                .map(|ev| ev.source);
+                .map(|cls| (cls.evidence.source, cls.web_kind));
             seen.insert(group_key, looked_up);
             looked_up
         };
 
-        if let Some(src) = source_opt {
+        if let Some((src, web_kind)) = group_hint {
             r.source = src.as_str().to_string();
             // Rebuild quality_label now that source is known. Resolution
             // string is bare digits ("1080"); translate back into the
@@ -444,8 +446,16 @@ pub async fn enrich_results_with_group_map(
             } else {
                 Resolution::from_str(&format!("{}p", r.resolution))
             };
+            // Web releases use the group table's web_kind hint (#33) so
+            // SubsPlease / HorribleSubs uploads label as `WEBDL` in
+            // interactive search instead of the generic `WEB`, matching
+            // the post-download classifier's output on the same files.
             let source_label = match src {
-                Source::Web => "WEB".to_string(), // bare WEB, not WEB-DL — group map doesn't know sub-variant
+                Source::Web => match web_kind {
+                    crate::services::source::WebKind::WebDl => "WEBDL".to_string(),
+                    crate::services::source::WebKind::WebRip => "WEBRip".to_string(),
+                    crate::services::source::WebKind::Unknown => "WEB".to_string(),
+                },
                 Source::BluRay => "BD".to_string(),
                 other => other.as_str().to_string(),
             };
@@ -906,7 +916,11 @@ mod tests {
         enrich_results_with_group_map(&pool, &mut results).await;
 
         assert_eq!(results[0].source, "Web");
-        assert_eq!(results[0].quality_label, "WEB-1080p");
+        // SubsPlease ships WEB-DL exclusively (direct CR/HIDIVE stream
+        // remuxes) and the group table carries that hint, so the
+        // label resolves to the specific `WEBDL` tier rather than the
+        // generic `WEB` one.
+        assert_eq!(results[0].quality_label, "WEBDL-1080p");
     }
 
     #[tokio::test]

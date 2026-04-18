@@ -12,7 +12,7 @@
 
 use sqlx::{Row, SqlitePool};
 
-use crate::services::source::Source;
+use crate::services::source::{Source, WebKind};
 
 /// A single group → source mapping.
 #[derive(Debug, Clone)]
@@ -22,7 +22,31 @@ pub struct GroupSourceEntry {
     pub confidence: f32,
     pub is_user_edit: bool,
     pub notes: String,
+    /// Optional Web sub-tier hint. Set on groups that ship **exclusively**
+    /// direct stream remuxes (WEB-DL) or exclusively re-encoded WEB
+    /// releases (WEB-Rip). Ignored unless `source == Source::Web`.
+    ///
+    /// Lets the aggregator distinguish `WEBDL-1080p` from a plain
+    /// `WEB-1080p` label when the filename itself carries no explicit
+    /// `WEB-DL` / `WEBRip` token — the SubsPlease / HorribleSubs
+    /// convention of just `(1080p)` in the release name was leaving
+    /// every Web release labelled as the generic tier, even though
+    /// those groups are always direct CR/HIDIVE remuxes.
+    pub web_kind: WebKind,
 }
+
+/// Known-WEB-DL / -WEB-Rip groups, layered on top of `SEED_DEFAULTS` by
+/// the seed pass. A group only appears here when its output is
+/// consistently one sub-tier — most groups mix (Erai-raws ships both
+/// AVC remuxes and HEVC re-encodes, filename tokens distinguish;
+/// Judas mixes BD and WEB). Those get left as `WebKind::Unknown` so
+/// the filename / ffprobe layers stay authoritative.
+pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[
+    // Direct simulcast stream remuxes — `.mkv` with softsubs overlaid,
+    // video bitstream untouched from the CR/HIDIVE source.
+    ("SubsPlease", WebKind::WebDl),
+    ("HorribleSubs", WebKind::WebDl),
+];
 
 // ─────────────────────────────────────────────────────────────────────────
 // Seed data
@@ -348,6 +372,14 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // ADD COLUMN on existing DBs; CREATE TABLE above already has the
+    // column for fresh installs. `.ok()` silently absorbs "duplicate
+    // column" on upgrade paths where the column is already present.
+    sqlx::query("ALTER TABLE group_source_map ADD COLUMN web_kind TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query("DELETE FROM group_source_map WHERE is_user_edit = 0")
         .execute(db)
         .await?;
@@ -375,6 +407,22 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .bind(source.as_str())
         .bind(*confidence)
         .bind(notes)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // Layer the Web sub-tier hints on top. Separate pass (instead of
+    // widening the SEED_DEFAULTS tuple) because only a handful of
+    // groups carry a stable WEB-DL vs WEB-Rip signal, and threading a
+    // fifth column through every one of the ~100 source-only rows
+    // would be noise. Update-only so user-edited rows are left alone.
+    for (name, web_kind) in SEED_WEB_KIND {
+        sqlx::query(
+            "UPDATE group_source_map
+             SET web_kind = ?
+             WHERE group_name = ? AND is_user_edit = 0",
+        )
+        .bind(web_kind.as_str())
+        .bind(name)
         .execute(&mut *tx)
         .await?;
     }
@@ -423,7 +471,8 @@ pub async fn get(
     group_name: &str,
 ) -> Result<Option<GroupSourceEntry>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT group_name, source, confidence, is_user_edit, notes
+        "SELECT group_name, source, confidence, is_user_edit, notes,
+                COALESCE(web_kind, '') AS web_kind
          FROM group_source_map WHERE group_name = ?",
     )
     .bind(group_name)
@@ -436,7 +485,8 @@ pub async fn get(
 /// List all entries, alphabetically sorted.
 pub async fn list_all(db: &SqlitePool) -> Result<Vec<GroupSourceEntry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT group_name, source, confidence, is_user_edit, notes
+        "SELECT group_name, source, confidence, is_user_edit, notes,
+                COALESCE(web_kind, '') AS web_kind
          FROM group_source_map ORDER BY group_name COLLATE NOCASE ASC",
     )
     .fetch_all(db)
@@ -485,12 +535,14 @@ pub async fn delete(db: &SqlitePool, group_name: &str) -> Result<(), sqlx::Error
 fn row_to_entry(row: sqlx::sqlite::SqliteRow) -> GroupSourceEntry {
     let source_str: String = row.get("source");
     let is_user_edit_int: i64 = row.get("is_user_edit");
+    let web_kind_str: String = row.try_get("web_kind").unwrap_or_default();
     GroupSourceEntry {
         group_name: row.get("group_name"),
         source: Source::from_str(&source_str),
         confidence: row.get::<f64, _>("confidence") as f32,
         is_user_edit: is_user_edit_int != 0,
         notes: row.get("notes"),
+        web_kind: WebKind::from_str(&web_kind_str),
     }
 }
 

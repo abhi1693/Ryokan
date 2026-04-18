@@ -12,31 +12,48 @@
 use sqlx::SqlitePool;
 
 use crate::models::group_source_map;
-use crate::services::source::{Origin, SourceEvidence};
+use crate::services::source::{Origin, SourceEvidence, WebKind};
 
 const ORIGIN: Origin = Origin::Group;
 
-/// Look up a release group and, if known, return a single
-/// [`SourceEvidence`] record tagged with the group's source and confidence.
+/// Group-table classification output. Bundles the source evidence record
+/// the aggregator consumes with a Web sub-tier hint that the aggregator
+/// applies when the filename didn't determine WEB-DL vs WEB-Rip on its
+/// own — see [`WebKind`] and the `classify_release` comment block.
+///
+/// `web_kind` is `WebKind::Unknown` for the vast majority of groups; only
+/// a handful ship exclusively one Web sub-tier (SubsPlease, HorribleSubs
+/// — both direct CR/HIDIVE stream remuxes).
+#[derive(Debug, Clone)]
+pub struct GroupClassification {
+    pub evidence: SourceEvidence,
+    pub web_kind: WebKind,
+}
+
+/// Look up a release group and, if known, return a source-evidence
+/// record plus a Web sub-tier hint.
 ///
 /// Returns `None` when:
 /// - the group name is empty
 /// - the group isn't in the table
 /// - the database lookup fails (logged, not bubbled up — classification
 ///   should degrade gracefully if the table becomes unavailable)
-pub async fn classify_group(db: &SqlitePool, group_name: &str) -> Option<SourceEvidence> {
+pub async fn classify_group(db: &SqlitePool, group_name: &str) -> Option<GroupClassification> {
     let trimmed = group_name.trim();
     if trimmed.is_empty() {
         return None;
     }
 
     match group_source_map::get(db, trimmed).await {
-        Ok(Some(entry)) => Some(SourceEvidence::new(
-            entry.source,
-            entry.confidence,
-            ORIGIN,
-            format!("group table: {}", entry.group_name),
-        )),
+        Ok(Some(entry)) => Some(GroupClassification {
+            evidence: SourceEvidence::new(
+                entry.source,
+                entry.confidence,
+                ORIGIN,
+                format!("group table: {}", entry.group_name),
+            ),
+            web_kind: entry.web_kind,
+        }),
         Ok(None) => None,
         Err(err) => {
             tracing::warn!(
@@ -72,13 +89,30 @@ mod tests {
         let db = test_pool().await;
         // VCB-Studio is a well-known legacy BD-only encoder and is always
         // part of the seed set.
-        let ev = classify_group(&db, "VCB-Studio")
+        let cls = classify_group(&db, "VCB-Studio")
             .await
             .expect("VCB-Studio should be seeded");
-        assert_eq!(ev.source, Source::BluRay);
-        assert!((ev.confidence - 0.95).abs() < f32::EPSILON);
-        assert_eq!(ev.origin, Origin::Group);
-        assert!(ev.detail.contains("VCB-Studio"));
+        assert_eq!(cls.evidence.source, Source::BluRay);
+        assert!((cls.evidence.confidence - 0.95).abs() < f32::EPSILON);
+        assert_eq!(cls.evidence.origin, Origin::Group);
+        assert!(cls.evidence.detail.contains("VCB-Studio"));
+        // BD-only group → no Web sub-tier hint.
+        assert_eq!(cls.web_kind, WebKind::Unknown);
+    }
+
+    #[tokio::test]
+    async fn subsplease_is_tagged_webdl() {
+        // Motivating case for the web_kind column: SubsPlease filenames
+        // carry no "WEB-DL" / "WEBRip" token, so the filename layer
+        // leaves web_kind Unknown. The group table provides the hint
+        // so the aggregator can label the release as WEBDL-1080p
+        // instead of the generic WEB-1080p.
+        let db = test_pool().await;
+        let cls = classify_group(&db, "SubsPlease")
+            .await
+            .expect("SubsPlease should be seeded");
+        assert_eq!(cls.evidence.source, Source::Web);
+        assert_eq!(cls.web_kind, WebKind::WebDl);
     }
 
     #[tokio::test]
@@ -109,10 +143,10 @@ mod tests {
         let db = test_pool().await;
         // Leading/trailing whitespace from noisy parsers must not break
         // lookups against otherwise-valid group names.
-        let ev = classify_group(&db, "  VCB-Studio  ")
+        let cls = classify_group(&db, "  VCB-Studio  ")
             .await
             .expect("trimmed lookup should hit");
-        assert_eq!(ev.source, Source::BluRay);
+        assert_eq!(cls.evidence.source, Source::BluRay);
     }
 
     #[tokio::test]
@@ -121,10 +155,10 @@ mod tests {
         // The table uses `COLLATE NOCASE` on the primary key, so any
         // casing of a known group name should resolve.
         for variant in ["vcb-studio", "VCB-STUDIO", "Vcb-Studio"] {
-            let ev = classify_group(&db, variant)
+            let cls = classify_group(&db, variant)
                 .await
                 .unwrap_or_else(|| panic!("case-insensitive lookup failed for {variant}"));
-            assert_eq!(ev.source, Source::BluRay);
+            assert_eq!(cls.evidence.source, Source::BluRay);
         }
     }
 
@@ -144,10 +178,10 @@ mod tests {
         .await
         .expect("upsert user edit");
 
-        let ev = classify_group(&db, "VCB-Studio")
+        let cls = classify_group(&db, "VCB-Studio")
             .await
             .expect("user edit should be visible");
-        assert_eq!(ev.source, Source::Web);
-        assert!((ev.confidence - 0.80).abs() < f32::EPSILON);
+        assert_eq!(cls.evidence.source, Source::Web);
+        assert!((cls.evidence.confidence - 0.80).abs() < f32::EPSILON);
     }
 }
