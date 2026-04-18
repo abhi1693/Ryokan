@@ -4270,6 +4270,25 @@ pub async fn cancel_pending_episode(
         );
     }
 
+    // Diagnostic: log the exact set of grabs we're about to touch so
+    // we can confirm a cancel for one episode isn't accidentally
+    // matching a batch grab that covers the whole season. Batch grabs
+    // have `episode_numbers.len() > 1` and are the one case where
+    // cancelling "one episode" legitimately takes the whole torrent
+    // out — the UI should surface a batch-cancel confirmation in that
+    // case. For now at least the log trail makes the distinction
+    // obvious.
+    tracing::debug!(
+        target: "ryokan::library",
+        series_id = tracked.id,
+        episode = episode_number,
+        grab_count = pending.len(),
+        grab_ids = ?pending.iter().map(|g| g.id).collect::<Vec<_>>(),
+        grab_names = ?pending.iter().map(|g| g.torrent_name.clone()).collect::<Vec<_>>(),
+        batch_grabs = ?pending.iter().filter(|g| g.episode_numbers.len() > 1).map(|g| g.id).collect::<Vec<_>>(),
+        "cancel_pending_episode: matching grabs"
+    );
+
     // Pull the qBit client once — if qBit isn't configured we still
     // want to clear the DB state so a stale grab row doesn't
     // permanently block a re-grab.
@@ -4528,7 +4547,15 @@ pub async fn episode_download_progress(
         }
     };
 
-    let torrents = qbit.get_torrents().await.unwrap_or_default();
+    // Propagate the qBit query result instead of swallowing errors into
+    // an empty list. Without this distinction, a qBit restart / network
+    // blip makes `by_hash` empty, and the reconciliation pass below
+    // would falsely mark every pending grab as removed. Returning empty
+    // on error keeps the UI stale briefly but preserves DB state.
+    let torrents = match qbit.get_torrents().await {
+        Ok(t) => t,
+        Err(_) => return Ok(Json(Vec::new())),
+    };
     let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
         .iter()
         .map(|t| (t.hash.to_lowercase(), t))
@@ -4557,8 +4584,40 @@ pub async fn episode_download_progress(
         };
 
         let Some(t) = torrent else {
-            // Torrent not in qBittorrent — skip it so the UI clears the stale
-            // progress bar. The post-processing tick will mark old orphans as failed.
+            // Torrent not in qBittorrent. qBit responded successfully
+            // (we'd have returned early on error above), so the torrent
+            // is truly gone — almost always because the user deleted it
+            // manually in qBit. Reconcile immediately so the UI reflects
+            // the change on next render, instead of waiting for the
+            // 60s post-processing tick. A 30s grace guards against the
+            // brief window between our grab RPC and qBit ingesting it
+            // where the hash may transiently not yet appear in the
+            // torrent list.
+            if crate::services::post_processing::grab_is_stale(&grab.grabbed_at, 30) {
+                logger::info(
+                    &state.db,
+                    LogCategory::QBit,
+                    &format!(
+                        "Torrent removed in qBittorrent — reconciling '{}'",
+                        grab.torrent_name
+                    ),
+                    &format!(
+                        "series_id={} grab_id={} hash={}",
+                        grab.series_id, grab.id, grab.hash
+                    ),
+                )
+                .await;
+                let _ = crate::models::grabbed_torrents::mark_removed(
+                    &state.db, grab.id,
+                )
+                .await;
+                let _ = crate::models::episode_tags::clear_tags_for_removal(
+                    &state.db,
+                    grab.series_id,
+                    &grab.episode_numbers,
+                )
+                .await;
+            }
             continue;
         };
 

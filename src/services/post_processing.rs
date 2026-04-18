@@ -32,7 +32,7 @@ fn is_errored(state: &str) -> bool {
 }
 
 /// Check if a grab is older than `max_age_secs` seconds.
-fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
+pub fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
     // grabbed_at is SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
     let Some(grab_time) = chrono::NaiveDateTime::parse_from_str(grabbed_at, "%Y-%m-%d %H:%M:%S").ok() else {
         return false;
@@ -1012,8 +1012,17 @@ pub async fn run_once(state: &AppState) {
 
         let Some(torrent) = matched else {
             // Torrent not found in qBittorrent. If the grab is old enough
-            // (> 5 minutes), the user likely deleted it — mark as removed.
-            if grab_is_stale(&grab.grabbed_at, 300) {
+            // (> 60 seconds), the user likely deleted it — mark as
+            // removed. The grace window used to be 5 minutes to cover
+            // qBit restarts, but in practice the `all_torrents` call
+            // would fail outright during a restart (we'd not even reach
+            // this branch with a valid torrent list), so the long grace
+            // window just delayed reconciliation of manual qBit deletes
+            // for no safety gain. A minute is enough slack for a slow
+            // first-poll after an add-torrent RPC, short enough that
+            // "deleted ep 9 in qBit and it still shows pending" becomes
+            // "shows cancelled within a minute."
+            if grab_is_stale(&grab.grabbed_at, 60) {
                 logger::warn(
                     &state.db,
                     LogCategory::PostProcess,
