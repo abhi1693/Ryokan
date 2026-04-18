@@ -4366,12 +4366,40 @@ pub async fn cancel_pending_episode(
             grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
                 .await
         {
-            let seen: std::collections::HashSet<i64> =
-                pending.iter().map(|g| g.id).collect();
-            for g in stuck {
-                if !seen.contains(&g.id) {
-                    pending.push(g);
+            // Re-read the tag state *after* the drift-lookup completes.
+            // Narrows the race where a post-processing tick flips the
+            // tag 'grabbed' → 'completed' between our first tag read
+            // and the qBit delete loop: if that happened, the user's
+            // library file is now legitimately present and we should
+            // not tear down the torrent with `delete_files=true`. The
+            // pending-grab list (if any) still gets cancelled — the
+            // user's explicit action on a live-pending row is honored
+            // regardless of the stuck-drift path.
+            let tag_state_recheck: Option<String> = sqlx::query_scalar(
+                "SELECT state FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+            )
+            .bind(tracked.id)
+            .bind(episode_number)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+            if matches!(tag_state_recheck.as_deref(), Some("grabbed")) {
+                let seen: std::collections::HashSet<i64> =
+                    pending.iter().map(|g| g.id).collect();
+                for g in stuck {
+                    if !seen.contains(&g.id) {
+                        pending.push(g);
+                    }
                 }
+            } else {
+                tracing::debug!(
+                    target: "ryokan::library",
+                    series_id = tracked.id,
+                    episode = episode_number,
+                    tag_state_now = ?tag_state_recheck,
+                    "cancel_pending_episode: tag flipped away from 'grabbed' mid-handler — skipping drift-repair branch"
+                );
             }
         }
     }
@@ -4383,7 +4411,12 @@ pub async fn cancel_pending_episode(
         // UI returns the episode to missing even without a torrent to
         // remove.
         if tag_is_grabbed {
-            let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
+            let _ = episode_tags::clear_tags_for_removal(
+                &state.db,
+                tracked.id,
+                &[episode_number],
+            )
+            .await;
             return (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({
@@ -4461,7 +4494,19 @@ pub async fn cancel_pending_episode(
         }
     }
 
-    let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
+    // `clear_tags_for_removal` (vs `clear_episode_tag`) also flips any
+    // lingering 'grabbed' history rows to 'removed' so the grab-history
+    // modal stops showing stale entries for a torrent we just deleted.
+    // Consistency with the qBit-removal reconciliation path (which
+    // already calls this on the progress-poll and post-processing
+    // stale branches) — a cancel should leave history in the same
+    // shape as an external qBit delete.
+    let _ = episode_tags::clear_tags_for_removal(
+        &state.db,
+        tracked.id,
+        &[episode_number],
+    )
+    .await;
 
     logger::info(
         &state.db,
@@ -4678,14 +4723,25 @@ pub async fn episode_download_progress(
         }
     };
 
-    // Propagate the qBit query result instead of swallowing errors into
-    // an empty list. Without this distinction, a qBit restart / network
-    // blip makes `by_hash` empty, and the reconciliation pass below
-    // would falsely mark every pending grab as removed. Returning empty
-    // on error keeps the UI stale briefly but preserves DB state.
+    // Propagate the qBit query result instead of swallowing errors. A
+    // qBit restart / network blip makes `by_hash` empty; the
+    // reconciliation pass below would then falsely mark every pending
+    // grab as removed. Returning 503 (a) preserves DB state by
+    // short-circuiting before the reconcile path, and (b) lets the UI
+    // distinguish "qBit unreachable" from "no active downloads" — the
+    // prior `Ok(Json(Vec::new()))` collapsed both into the same empty
+    // response, so progress bars would silently reset on every
+    // transient outage. The poller JS on the series page already ignores
+    // non-200s (`r.ok ? r.json() : []`), so existing clients simply
+    // keep the last-known progress state until the next successful poll.
     let torrents = match qbit.get_torrents().await {
         Ok(t) => t,
-        Err(_) => return Ok(Json(Vec::new())),
+        Err(err) => {
+            return Err((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("qBittorrent unavailable: {err}"),
+            ))
+        }
     };
     let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
         .iter()

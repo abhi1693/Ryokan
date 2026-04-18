@@ -1323,6 +1323,30 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+    // Rename BEFORE the ADD passes below. On a local DB that still has
+    // the pre-merge `*_to_group` column populated, running ADD first
+    // would create an empty `*_to_uploader` column alongside the
+    // legacy one, and the subsequent RENAME would return "duplicate
+    // column" → `.ok()` → user data stranded in an orphan column.
+    //
+    // In the reversed order both paths converge:
+    //   Legacy DB: RENAME brings the populated column forward; ADD
+    //              no-ops because the renamed column now exists.
+    //   Fresh DB:  RENAME no-ops ("no such column"); ADD creates the
+    //              column empty as intended.
+    //
+    // RENAME COLUMN works on SQLite ≥ 3.25. `.ok()` absorbs both the
+    // fresh-install "no such column" and the upgrade "duplicate"
+    // cases.
+    sqlx::query("ALTER TABLE config RENAME COLUMN default_restrict_to_group TO default_restrict_to_uploader")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE series RENAME COLUMN restrict_to_group TO restrict_to_uploader")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query("ALTER TABLE config ADD COLUMN default_restrict_to_uploader TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
@@ -1332,21 +1356,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
     sqlx::query("ALTER TABLE series ADD COLUMN restrict_to_uploader TEXT NOT NULL DEFAULT ''")
-        .execute(db)
-        .await
-        .ok();
-
-    // Rename legacy columns from the pre-merge `restrict_to_group` name.
-    // The value stored in `?u=<name>` is a Nyaa uploader — not a release
-    // group — so the column name was misleading. PR #37's review caught
-    // this before merge. RENAME COLUMN works on SQLite ≥ 3.25; the `.ok()`
-    // silently absorbs "no such column" when the legacy name was never
-    // present (fresh install on a post-rename build).
-    sqlx::query("ALTER TABLE config RENAME COLUMN default_restrict_to_group TO default_restrict_to_uploader")
-        .execute(db)
-        .await
-        .ok();
-    sqlx::query("ALTER TABLE series RENAME COLUMN restrict_to_group TO restrict_to_uploader")
         .execute(db)
         .await
         .ok();

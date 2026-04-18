@@ -88,10 +88,25 @@ pub async fn record_grab(
         return Ok(None);
     }
 
-    // Step 2 — dedup hit. Reactivate the existing row so post-
-    // processing picks the torrent up again. `RETURNING id` gives us
-    // the existing grab's primary key so callers get a consistent
-    // `Some(id)` regardless of fresh-vs-reactivated.
+    // Step 2 — dedup hit. Reactivate the existing row ONLY when it's
+    // already imported. `RETURNING id` gives us the existing grab's
+    // primary key so callers get a consistent `Some(id)` on the drift
+    // path.
+    //
+    // Why gate on `state='imported'` instead of `IN ('pending',
+    // 'imported')`:
+    //   A `pending` row means another concurrent flow — most likely
+    //   post-processing mid-import — is actively working on the
+    //   torrent. `stamp_qbit_content_path` runs BEFORE `import_torrent`,
+    //   so at that moment the row is `pending` with a non-empty
+    //   `qbit_content_path`. If we null-clobbered those columns here,
+    //   the in-flight import would finish on a row that no longer
+    //   knows where qBit left the file. Leaving pending rows alone
+    //   (and returning Ok(None) when the insert is deduped against a
+    //   pending row) matches the pre-reactivation "silent dedup"
+    //   semantics for the narrow "already in progress" case and only
+    //   diverges for the drift case (imported row the user wants to
+    //   re-import).
     //
     // Refresh series_id / episode_numbers / torrent_name / is_batch
     // from the new request: a user who re-grabs typed a release
@@ -108,7 +123,7 @@ pub async fn record_grab(
              episode_numbers = ?,
              torrent_name = ?,
              is_batch = ?
-         WHERE hash = ? AND state IN ('pending', 'imported')
+         WHERE hash = ? AND state = 'imported'
          RETURNING id",
     )
     .bind(series_id)
@@ -977,18 +992,22 @@ mod tests {
             .expect("first record_grab")
             .expect("first must insert");
 
-        // Second active grab with same hash dedups AND reactivates the
-        // existing row. Returns the same id — callers shouldn't see a
-        // new row appear, but the existing row's fields get refreshed
-        // to the new request.
+        // Second grab with same hash against a PENDING row dedups
+        // silently — reactivation only runs on 'imported' rows to
+        // avoid null-clobbering an in-flight import's
+        // qbit_content_path / imported_at. Returns Ok(None) and the
+        // existing row's fields are left alone.
         let id2 = record_grab(&db, "racehash", "release b", series_id, &[2], false)
             .await
-            .expect("second record_grab")
-            .expect("dedup path must still yield the existing id");
-        assert_eq!(id2, id1, "reactivation must return the existing row's id");
+            .expect("second record_grab");
+        assert!(
+            id2.is_none(),
+            "pending-row dedup must not reactivate: {:?}",
+            id2
+        );
 
-        // Confirm only one row exists for that hash — dedup is real,
-        // not a second insert.
+        // Confirm only one row exists and the pending fields are
+        // intact (no silent rewrite).
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents WHERE hash = 'racehash'")
                 .fetch_one(&db)
@@ -996,7 +1015,6 @@ mod tests {
                 .expect("count");
         assert_eq!(count, 1);
 
-        // Fields were refreshed from the second call.
         let row: (String, String, String) = sqlx::query_as(
             "SELECT torrent_name, episode_numbers, state FROM grabbed_torrents WHERE id = ?",
         )
@@ -1004,9 +1022,9 @@ mod tests {
         .fetch_one(&db)
         .await
         .expect("fetch row");
-        assert_eq!(row.0, "release b", "torrent_name must update on reactivation");
-        assert_eq!(row.1, "[2]", "episode_numbers must update on reactivation");
-        assert_eq!(row.2, "pending", "state must be 'pending' after reactivation");
+        assert_eq!(row.0, "release a", "pending row's fields must be untouched");
+        assert_eq!(row.1, "[1]", "pending row's episode_numbers must be untouched");
+        assert_eq!(row.2, "pending", "pending row stays pending");
 
         // The original drift case: mark the row 'imported' (as
         // post-processing would have), then re-grab the same hash.

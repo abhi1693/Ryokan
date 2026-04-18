@@ -184,4 +184,50 @@ mod tests {
         assert_eq!(cls.evidence.source, Source::Web);
         assert!((cls.evidence.confidence - 0.80).abs() < f32::EPSILON);
     }
+
+    #[tokio::test]
+    async fn user_edited_row_keeps_web_kind_across_reseed() {
+        // SEED_WEB_KIND's UPDATE is gated on `is_user_edit = 0`, so a
+        // user-edited row should hang onto whatever web_kind it had
+        // before the user edit — including the empty default, which
+        // matters for groups the user wants to *remove* the WEB-DL
+        // hint from (e.g. reclassifying a group we tagged as WEB-DL
+        // that actually ships WEB-Rips).
+        let db = test_pool().await;
+
+        // Seed pass populated SubsPlease → (Web, WebDl).
+        let seeded = classify_group(&db, "SubsPlease")
+            .await
+            .expect("SubsPlease seeded");
+        assert_eq!(seeded.web_kind, WebKind::WebDl);
+
+        // User overrides source → is_user_edit flips to 1.
+        // `upsert_user_edit` doesn't touch `web_kind`, so whatever was
+        // there stays — that's the pin.
+        group_source_map::upsert_user_edit(
+            &db,
+            "SubsPlease",
+            Source::BluRay,
+            0.90,
+            "imaginary override",
+        )
+        .await
+        .expect("upsert user edit");
+
+        // Re-run the migration → seed pass attempts SEED_WEB_KIND
+        // update but the `is_user_edit = 0` filter excludes this row.
+        group_source_map::migrate(&db)
+            .await
+            .expect("re-migrate");
+
+        let after = classify_group(&db, "SubsPlease")
+            .await
+            .expect("user row survives re-migrate");
+        assert_eq!(after.evidence.source, Source::BluRay, "user source wins");
+        assert_eq!(
+            after.web_kind,
+            WebKind::WebDl,
+            "user-edited row's web_kind must survive the re-seed pass"
+        );
+    }
 }
