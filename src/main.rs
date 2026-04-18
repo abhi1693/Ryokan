@@ -329,7 +329,7 @@ async fn main() {
         } else {
             tracing::warn!(
                 "RYOKAN_RESET_AUTH is set but data/.reset-auth sentinel is missing; \
-                 refusing to reset auth. See /help for the recovery recipe."
+                 refusing to reset auth. See /forgot-password for the recovery recipe."
             );
         }
     }
@@ -391,6 +391,11 @@ async fn main() {
     let public_routes = Router::new()
         .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
         .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
+        // #39 — Account recovery page. Linked from /login's "Forgot
+        // password?" so a locked-out user can read the recipe without
+        // needing to authenticate first. Dedicated template so they
+        // don't see the authed top-nav / Logout link they can't use.
+        .route("/forgot-password", get(handlers::auth::forgot_password_page))
         .layer(middleware::from_fn(handlers::auth::csrf_public));
 
     // Routes that require auth.
@@ -470,7 +475,7 @@ async fn main() {
         .route("/api/tasks/upgrade-search", post(handlers::system::api_force_upgrade_search))
         .route("/api/system/rebuild-anilist-cache", post(handlers::system::api_rebuild_cached_metadata))
         .route("/api/system/reload-anibridge", post(handlers::system::api_anibridge_reload))
-        .route("/help", get(handlers::system::system_page))
+        .route("/help", get(handlers::help::help_page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
         .route("/api/logs/client", post(handlers::system::api_logs_client))

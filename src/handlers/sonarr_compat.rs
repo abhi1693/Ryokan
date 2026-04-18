@@ -518,57 +518,169 @@ pub async fn add_series(
 
     // #26 — TMDB often models multi-cour anime as one flat season
     // (JJK, Bleach TYBW, Demon Slayer) so Seerr requests "season 1"
-    // even when it covers 2–3 AL entries. anibridge hands back the
-    // full list, but HashMap iteration order is unstable so [0] picked
-    // arbitrary cours — JJK would sometimes resolve to the S3 entry
-    // instead of S1. Sort by AL ID ascending before picking the
-    // primary so the earliest-aired cour wins deterministically.
-    // AniList IDs are assigned chronologically at entry-creation time,
-    // which usually (though not always) matches cour order.
-    //
-    // Full fan-out to all AL entries when len > 1 is the plan's piece
-    // 1 for #26 — punted to a follow-up commit. For now, log when
-    // len > 1 so operators can see which shows are candidates.
+    // even when it covers 2–3 AL entries. Sort by AL ID ascending so
+    // the earliest-aired cour is the "primary" we return to Seerr —
+    // AL IDs are assigned chronologically at entry-creation time, so
+    // this picks the right cour as the face of the request even though
+    // all siblings get added below.
     anime_ids.sort_by_key(|a| a.anilist_id.unwrap_or(i64::MAX));
 
     tracing::info!(
         "Anibridge resolved TVDB {} season {:?} → {} entries: {:?}",
         tvdb_id, requested_season, anime_ids.len(), anime_ids,
     );
-    if anime_ids.len() > 1 {
-        let al_ids: Vec<i64> = anime_ids.iter().filter_map(|a| a.anilist_id).collect();
-        logger::info(
-            &state.db,
-            LogCategory::Library,
-            &format!(
-                "Seerr add: TVDB {} season {:?} maps to {} AniList entries — picking earliest",
-                tvdb_id, requested_season, anime_ids.len()
-            ),
-            &format!("al_ids_sorted={:?}, selected={:?}", al_ids, al_ids.first()),
-        ).await;
-    }
 
-    let detail = if let Some(ids) = anime_ids.first().filter(|a| a.anilist_id.is_some() || a.mal_id.is_some()) {
-        // Anibridge has a mapping — fetch detail via AniList/Jikan.
-        if let Some(al_id) = ids.anilist_id {
-            match anilist::get_anime_detail(al_id).await {
-                Ok(d) => d,
-                Err(_) if ids.mal_id.is_some() => {
-                    crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap())
-                        .await
-                        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-                }
-                Err(e) => return Err((StatusCode::BAD_GATEWAY, e)),
+    // #26 — Squashed-merge detection. >1 AL entry means TMDB collapsed
+    // multiple cours into a single season; we fan out one Ryokan series
+    // per AL entry so a single Seerr request seeds all the relevant
+    // cours at once. Single-entry adds skip the fan-out path and behave
+    // exactly as before.
+    let is_squashed_merge = anime_ids.len() > 1;
+
+    // Squashed-merge regrab shortcut: if every AL entry the anibridge
+    // mapping returned is already present in Ryokan's DB, skip all
+    // AL/Jikan detail fetches — the user has already added this
+    // franchise once, Seerr is just re-asking. We still re-apply
+    // monitoring and re-trigger auto-search below so a regrab from the
+    // Seerr UI actually does something.
+    let existing_siblings: Vec<Option<series::Series>> = {
+        let mut v = Vec::with_capacity(anime_ids.len());
+        for ids in &anime_ids {
+            let row = if let Some(al) = ids.anilist_id {
+                series::get_by_anilist_id(&state.db, al)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            } else if let Some(mal) = ids.mal_id {
+                series::get_by_mal_id(&state.db, mal)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            } else {
+                None
+            };
+            v.push(row);
+        }
+        v
+    };
+    let all_exist = !anime_ids.is_empty() && existing_siblings.iter().all(|o| o.is_some());
+
+    // Gather the series rows we ultimately apply monitoring + auto-search
+    // to. For the regrab path this is populated from `existing_siblings`
+    // directly. For the fresh (or partial-fresh) path each missing entry
+    // takes the AL/Jikan fetch + upsert branch below.
+    let mut processed: Vec<series::Series> = Vec::new();
+    // Used purely for the "Added via Seerr: <title>" log line so a regrab
+    // doesn't claim to have "added" anything.
+    let mut newly_added = 0_usize;
+
+    if all_exist {
+        for row in existing_siblings.iter().flatten() {
+            processed.push(row.clone());
+        }
+        if is_squashed_merge {
+            logger::info(
+                &state.db,
+                LogCategory::Library,
+                &format!(
+                    "Seerr regrab: TVDB {} season {:?} already mapped to {} existing series — skipping AL fetch",
+                    tvdb_id, requested_season, processed.len()
+                ),
+                &format!("series_ids={:?}", processed.iter().map(|s| s.id).collect::<Vec<_>>()),
+            ).await;
+        }
+    } else if !anime_ids.is_empty()
+        && anime_ids.iter().any(|a| a.anilist_id.is_some() || a.mal_id.is_some())
+    {
+        if is_squashed_merge {
+            let al_ids: Vec<i64> = anime_ids.iter().filter_map(|a| a.anilist_id).collect();
+            logger::info(
+                &state.db,
+                LogCategory::Library,
+                &format!(
+                    "Seerr add: TVDB {} season {:?} maps to {} AniList entries — fanning out",
+                    tvdb_id, requested_season, anime_ids.len()
+                ),
+                &format!("al_ids_sorted={:?}", al_ids),
+            ).await;
+        }
+
+        for (ids, existing) in anime_ids.iter().zip(existing_siblings.into_iter()) {
+            // Skip entries that already exist — regrab-within-fresh case.
+            // A partial fan-out (user added JJK S1 manually last month, now
+            // Seerr adds JJK) shouldn't re-fetch S1's detail.
+            if let Some(row) = existing {
+                processed.push(row);
+                continue;
             }
-        } else if let Some(mal_id) = ids.mal_id {
-            crate::services::jikan::get_anime_detail_cached(mal_id)
+            if ids.anilist_id.is_none() && ids.mal_id.is_none() {
+                continue;
+            }
+
+            let detail_result = if let Some(al_id) = ids.anilist_id {
+                match anilist::get_anime_detail(al_id).await {
+                    Ok(d) => Ok(d),
+                    Err(_) if ids.mal_id.is_some() => {
+                        crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap()).await
+                    }
+                    Err(e) => Err(e),
+                }
+            } else if let Some(mal_id) = ids.mal_id {
+                crate::services::jikan::get_anime_detail_cached(mal_id).await
+            } else {
+                unreachable!("checked above");
+            };
+
+            let detail = match detail_result {
+                Ok(d) => d,
+                Err(e) => {
+                    // In a squashed fan-out, a single sibling's detail
+                    // fetch failing shouldn't nuke the whole add — log
+                    // it and keep going. For a single-entry add this
+                    // leaves `processed` empty and we fall through to
+                    // the error return below.
+                    logger::warn(
+                        &state.db,
+                        LogCategory::Library,
+                        &format!(
+                            "Seerr add: skipped AL entry {:?} / MAL {:?} after detail fetch failure",
+                            ids.anilist_id, ids.mal_id
+                        ),
+                        &e,
+                    ).await;
+                    continue;
+                }
+            };
+
+            let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+            let (id, _created) = series::upsert(
+                &state.db,
+                series::SeriesCore {
+                    anilist_id: detail.id,
+                    mal_id: detail.id_mal,
+                    title,
+                    title_romaji: &detail.title_romaji,
+                    title_english: &detail.title_english,
+                    title_native: &detail.title_native,
+                    cover_url: &detail.cover_url,
+                    format: &detail.format,
+                    status: &detail.status,
+                    episodes: detail.episodes,
+                    season_year: detail.season_year,
+                    end_year: detail.end_year,
+                },
+            )
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            let s = series::get_by_id(&state.db, id)
                 .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-        } else {
-            return Err((StatusCode::BAD_GATEWAY, "No AniList or MAL ID available for anibridge mapping".to_string()));
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Series not found after insert".to_string()))?;
+            processed.push(s);
+            newly_added += 1;
         }
     } else {
         // No anibridge mapping — fall back to AniList title search.
+        // Single-path only: we have nothing to fan out over.
         let search_title = body.title.as_deref().unwrap_or("");
         if search_title.is_empty() {
             return Err((StatusCode::BAD_REQUEST, format!("No mapping for TVDB ID {} and no title provided", tvdb_id)));
@@ -582,78 +694,108 @@ pub async fn add_series(
         let best = results.first()
             .ok_or((StatusCode::NOT_FOUND, format!("No AniList results for '{}'", search_title)))?;
 
-        anilist::get_anime_detail(best.id)
+        let detail = anilist::get_anime_detail(best.id)
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-    };
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
-    let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+        let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+        let (id, _created) = series::upsert(
+            &state.db,
+            series::SeriesCore {
+                anilist_id: detail.id,
+                mal_id: detail.id_mal,
+                title,
+                title_romaji: &detail.title_romaji,
+                title_english: &detail.title_english,
+                title_native: &detail.title_native,
+                cover_url: &detail.cover_url,
+                format: &detail.format,
+                status: &detail.status,
+                episodes: detail.episodes,
+                season_year: detail.season_year,
+                end_year: detail.end_year,
+            },
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Add to Ryokan's library.
-    let (id, _created) = series::upsert(
-        &state.db,
-        series::SeriesCore {
-            anilist_id: detail.id,
-            mal_id: detail.id_mal,
-            title,
-            title_romaji: &detail.title_romaji,
-            title_english: &detail.title_english,
-            title_native: &detail.title_native,
-            cover_url: &detail.cover_url,
-            format: &detail.format,
-            status: &detail.status,
-            episodes: detail.episodes,
-            season_year: detail.season_year,
-            end_year: detail.end_year,
-        },
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let s = series::get_by_id(&state.db, id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Series not found after insert".to_string()))?;
+        processed.push(s);
+        newly_added += 1;
+    }
 
-    // Set monitoring based on what Seerr requested.
-    // For multi-season TVDB shows, check whether the specific season we resolved
-    // is monitored. For single-season shows, use the series-level flag.
+    if processed.is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("No usable AniList/MAL mapping for TVDB ID {}", tvdb_id),
+        ));
+    }
+
+    // Set monitoring based on what Seerr requested. Applied to every
+    // sibling in a fan-out — Seerr's "monitor this season" intent covers
+    // the whole squashed merge, so each fanned-out cour inherits it.
     let should_monitor = if let Some(ref seasons) = body.seasons {
         if let Some(req_s) = requested_season {
-            // Multi-season: monitor if the requested season is monitored.
             seasons.iter().any(|s| s.season_number == req_s && s.monitored)
         } else {
-            // No specific season requested — use series-level flag.
             body.monitored.unwrap_or(true)
         }
     } else {
         body.monitored.unwrap_or(true)
     };
-
     let monitor_mode = if should_monitor {
         monitoring::MonitorMode::All
     } else {
         monitoring::MonitorMode::None
     };
-    let _ = monitoring_service::apply_monitor_mode(&state.db, id, monitor_mode).await;
+    for s in &processed {
+        let _ = monitoring_service::apply_monitor_mode(&state.db, s.id, monitor_mode).await;
+    }
 
-    logger::info(
-        &state.db,
-        LogCategory::Library,
-        &format!("Added via Seerr: {}", title),
-        &format!("tvdb_id={}, provider_id={}, id={}", tvdb_id, detail.id, id),
-    ).await;
+    if newly_added > 0 {
+        let primary_title = &processed[0].title;
+        let added_ids: Vec<i64> = processed.iter().map(|s| s.id).collect();
+        logger::info(
+            &state.db,
+            LogCategory::Library,
+            &format!(
+                "Added via Seerr: {}{}",
+                primary_title,
+                if is_squashed_merge {
+                    format!(" (+{} sibling cour{})", processed.len().saturating_sub(1), if processed.len() == 2 { "" } else { "s" })
+                } else {
+                    String::new()
+                }
+            ),
+            &format!("tvdb_id={}, series_ids={:?}, newly_added={}", tvdb_id, added_ids, newly_added),
+        ).await;
+    }
 
-    // Auto-search if requested.
+    // Auto-search if requested. Each sibling in a fan-out gets its own
+    // spawned auto-search — the grab-time hydration hook inside
+    // `auto_search_series` will lazily walk each series' PREQUEL chain
+    // and set `cumulative_prior_episodes` on first run so absolute-
+    // numbered releases route to the right cour.
     if body.add_options
         .as_ref()
         .and_then(|o| o.search_for_missing_episodes)
         .unwrap_or(false)
     {
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let _ = super::library::auto_search_series(
-                axum::extract::State(state_clone),
-                axum::extract::Path(id),
-                axum::extract::Query(super::library::AutoSearchQuery::default()),
-            ).await;
-        });
+        for s in &processed {
+            let state_clone = state.clone();
+            let id = s.id;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let _ = super::library::auto_search_series(
+                    axum::extract::State(state_clone),
+                    axum::extract::Path(id),
+                    axum::extract::Query(super::library::AutoSearchQuery::default()),
+                ).await;
+            });
+        }
     }
 
     let cfg = config::get_config(&state.db)
@@ -662,12 +804,13 @@ pub async fn add_series(
         .flatten()
         .unwrap_or_default();
 
-    let s = series::get_by_id(&state.db, id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Series not found after insert".to_string()))?;
-
-    Ok(Json(build_sonarr_series_from_tracked(&s, tvdb_id, &cfg)))
+    // Return the primary (earliest AL ID) as the Sonarr payload. Seerr
+    // keys off tvdb_id, not the Ryokan series id, so a single response
+    // representing the whole request is what it expects — the sibling
+    // cours exist in Ryokan's DB but don't need to be reflected in the
+    // Sonarr response shape.
+    let primary = &processed[0];
+    Ok(Json(build_sonarr_series_from_tracked(primary, tvdb_id, &cfg)))
 }
 
 /// PUT /api/v3/series — update an existing series.

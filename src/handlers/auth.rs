@@ -199,6 +199,10 @@ struct SetupTemplate {
     error: Option<String>,
 }
 
+#[derive(Template)]
+#[template(path = "forgot_password.html")]
+struct ForgotPasswordTemplate;
+
 // ---------- Form data ----------
 
 #[derive(Deserialize)]
@@ -508,6 +512,22 @@ pub async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
 
     let template = LoginTemplate { error: None };
     Html(template.render().unwrap_or_default()).into_response()
+}
+
+/// #39 — Account-recovery instructions rendered as a standalone
+/// auth-page template (no nav, no logout link). Reached from the
+/// "Forgot password?" link on `/login`, so it must be on the
+/// unauthenticated route group — a locked-out user can't pass
+/// `require_auth`, and that's the one page they need.
+///
+/// Rendering a dedicated template (rather than sharing `/help`)
+/// keeps the recovery shell clean: unauthenticated visitors don't
+/// see the authed top-nav or a Logout link they can't use, and the
+/// rest of `/help`'s content (scoring tables, search tips, grab
+/// instructions) stays behind the auth wall where it belongs.
+pub async fn forgot_password_page() -> Html<String> {
+    let template = ForgotPasswordTemplate;
+    Html(template.render().unwrap_or_default())
 }
 
 pub async fn login_submit(

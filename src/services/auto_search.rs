@@ -1287,9 +1287,9 @@ struct SeriesSearchCtx {
     absolute_offset: i32,
     /// #30 — Titles of every TV-format ancestor on the PREQUEL chain.
     /// Used to build queries like `Jujutsu Kaisen 56` that a Nyaa text
-    /// search will actually match against `[SubsPlease] Jujutsu Kaisen
-    /// - 56`. The cour-specific AL titles ("JUJUTSU KAISEN Season 3:
-    /// The Culling Game Part 1", "Jujutsu Kaisen: Shimetsu Kaiyuu -
+    /// search will actually match against a SubsPlease-shaped release
+    /// title. The cour-specific AL titles (e.g. "JUJUTSU KAISEN Season
+    /// 3: The Culling Game Part 1", "Jujutsu Kaisen: Shimetsu Kaiyuu
     /// Zenpen") don't appear in SubsPlease release names, so without
     /// these franchise-root titles the absolute-numbered release is
     /// never in the candidate pool — loosening the filter alone is
