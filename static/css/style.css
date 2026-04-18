@@ -397,11 +397,101 @@ body {
     border-radius: var(--radius-lg);
 }
 
-/* Wider variant for content-heavy auth pages (e.g. /forgot-password,
-   which embeds the full recovery recipe with code blocks and an
-   ordered list and doesn't fit the 380px sign-in container). */
-.auth-container-wide {
-    max-width: 640px;
+/* #39 — Account-recovery container. Dedicated rather than a wider
+   variant of .auth-container because the recovery page's content
+   (numbered list + a <pre> holding `sqlite3 data/ryokan.db "..."`
+   that's ~60 chars wide in a monospace font) needs both a wider
+   shell and an overflow-safe code-block style — a 640px
+   .auth-container-wide was overflowing the sqlite line past the
+   right edge of the card. min-width:0 lets the card shrink below
+   its intrinsic content width on narrow viewports; the pre style
+   then wraps/scrolls the long command instead of pushing the card
+   wider than the viewport. */
+.recovery-container {
+    width: 100%;
+    max-width: 720px;
+    min-width: 0;
+    padding: 40px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+}
+
+.recovery-container .help-content { max-width: none; }
+
+.recovery-container pre {
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin: 12px 0;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text);
+}
+
+.recovery-container pre code {
+    background: none;
+    padding: 0;
+    border: none;
+    white-space: inherit;
+    font-size: inherit;
+}
+
+.recovery-container code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--text);
+    word-break: break-word;
+}
+
+.recovery-container h4 {
+    font-size: 15px;
+    color: var(--text-bright);
+    margin: 20px 0 8px;
+}
+
+.recovery-container ol {
+    margin: 12px 0;
+    padding-left: 22px;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.7;
+}
+
+.recovery-container ol li { margin-bottom: 6px; }
+
+/* Mobile: below --bp-phone (640px, see :root) drop the card chrome
+   so the recovery content reads as a plain full-width document.
+   The 40px padding would eat ~half of a 375px viewport after the
+   vertical-centering flex of .auth-page; swapping to 20px
+   horizontal and losing the border lets long monospace lines
+   actually fit on phone without horizontal scroll.
+
+   align-self: flex-start pairs with the .auth-page flex layout so
+   a tall recovery page starts at the top of the viewport on phone
+   rather than being vertically centered and pushing the brand
+   header off-screen on first paint. */
+@media (max-width: 640px) {
+    .recovery-container {
+        padding: 24px 20px;
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        align-self: flex-start;
+    }
+    .recovery-container pre {
+        padding: 10px 12px;
+        font-size: 12px;
+    }
 }
 
 .auth-brand {
