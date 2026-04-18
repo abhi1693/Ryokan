@@ -5,7 +5,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
 
 use crate::models::{config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, monitoring, series};
 use crate::models::log::LogCategory;
@@ -256,6 +257,78 @@ async fn force_mal_fallback_enabled(db: &SqlitePool) -> bool {
         .flatten()
         .map(|c| c.force_mal_fallback)
         .unwrap_or(false)
+}
+
+/// #26 — Process-local set of series IDs that have had grab-time
+/// PREQUEL-chain hydration attempted this process lifetime. Stops
+/// `maybe_hydrate_cumulative_offset` from re-running on every
+/// auto-search when a previous hydration legitimately yielded a
+/// cumulative of 0 (or failed due to a transient AL rate-limit). A
+/// process restart or the periodic `metadata_refresh` sweep will
+/// re-try naturally.
+static HYDRATED_CUMULATIVE: LazyLock<Mutex<HashSet<i64>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// #26 — Grab-time lazy hydration of `cumulative_prior_episodes`.
+///
+/// The Seerr fan-out path in `sonarr_compat::add_series` seeds new
+/// sibling Ryokan series without walking each one's PREQUEL chain,
+/// because fanning that out inline would stall the Seerr response
+/// behind N × the hydration cost. Instead we defer the walk until the
+/// first auto-search actually runs for a series — at which point we
+/// need the offset for absolute-numbered release routing anyway, and
+/// the cost is amortized against work the user is explicitly asking
+/// for.
+///
+/// Gate: fires only when the stored cumulative is 0 AND the cached
+/// detail advertises a TV PREQUEL edge. First-cour series with no TV
+/// prequel (Attack on Titan S1, JJK S1 — whose only prequel is the
+/// movie JJK 0, which the TV filter excludes) skip the walk since
+/// cumulative=0 is already the correct answer.
+///
+/// Memoization: a process-local set ensures one hydration attempt per
+/// series per process. Persistent AL rate-limit or a legitimately
+/// zero-summing TV prequel chain (possible when an airing prequel
+/// hasn't had its episode count confirmed yet) don't hammer this path
+/// on every search.
+async fn maybe_hydrate_cumulative_offset(
+    db: &SqlitePool,
+    tracked: Option<series::Series>,
+    detail: &anilist::AnimeDetail,
+) -> Option<series::Series> {
+    let t = tracked?;
+    if t.cumulative_prior_episodes != 0 {
+        return Some(t);
+    }
+    let has_tv_prequel = detail.relations.iter().any(|r| {
+        r.relation_type == "PREQUEL"
+            && r.media_type == "ANIME"
+            && r.format == "TV"
+    });
+    if !has_tv_prequel {
+        return Some(t);
+    }
+    {
+        let mut set = HYDRATED_CUMULATIVE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !set.insert(t.id) {
+            return Some(t);
+        }
+    }
+    let force_mal = force_mal_fallback_enabled(db).await;
+    match metadata_sync::refresh_series_metadata(db, &t, force_mal).await {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                target: "ryokan::library",
+                series_id = t.id,
+                "grab-time PREQUEL hydration failed: {e}"
+            );
+            return Some(t);
+        }
+    }
+    series::get_by_id(db, t.id).await.ok().flatten().or(Some(t))
 }
 
 async fn force_kitsu_fallback_enabled(db: &SqlitePool) -> bool {
@@ -3233,6 +3306,7 @@ pub async fn auto_search_series(
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
+    let tracked = maybe_hydrate_cumulative_offset(&state.db, tracked, &detail).await;
     let folder_name = tracked.as_ref().map(|s| s.folder_name.clone()).unwrap_or_default();
     let existing_files = media::scan_series_folder(&cfg.media_root, &folder_name);
     let existing_eps: Vec<i32> = existing_files.iter().map(|f| f.episode_number).collect();
@@ -5279,6 +5353,118 @@ mod tests {
         assert!(
             routes.is_empty(),
             "no sibling → no routes, post-processing falls back to grab.series_id"
+        );
+    }
+
+    /// #26 — Grab-time hydration gate must NOT fire when a series'
+    /// only PREQUEL is a movie (format = "MOVIE"). JJK S1's only
+    /// AL prequel is the JJK 0 movie; since absolute-numbered TV
+    /// releases don't count movies, the existing cumulative = 0 is
+    /// correct and we must not trigger an AL refresh on every
+    /// auto-search.
+    ///
+    /// Verifies the gate returns the series unchanged (cumulative
+    /// still 0) WITHOUT attempting network I/O — if the gate were
+    /// wrong, refresh_series_metadata would be called and the test
+    /// would hit AL (and fail with a flaky network error).
+    #[tokio::test]
+    async fn cumulative_hydration_skips_movie_only_prequel() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 113415,
+                mal_id: None,
+                title: "Jujutsu Kaisen",
+                title_romaji: "Jujutsu Kaisen",
+                title_english: "Jujutsu Kaisen",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(24),
+                season_year: Some(2020),
+                end_year: Some(2021),
+            },
+        )
+        .await
+        .expect("upsert");
+
+        let tracked = series::get_by_id(&db, series_id)
+            .await
+            .expect("get_by_id")
+            .expect("series exists");
+        assert_eq!(tracked.cumulative_prior_episodes, 0);
+
+        let mut detail = empty_anime_detail(113415, "Jujutsu Kaisen");
+        let mut jjk0 = related_entry(145064, "Jujutsu Kaisen 0", None);
+        jjk0.relation_type = "PREQUEL".to_string();
+        jjk0.format = "MOVIE".to_string();
+        detail.relations.push(jjk0);
+
+        let result = maybe_hydrate_cumulative_offset(&db, Some(tracked), &detail).await;
+        let after = result.expect("series still returned");
+        assert_eq!(
+            after.cumulative_prior_episodes, 0,
+            "movie-only prequel must not trigger hydration"
+        );
+    }
+
+    /// #26 — Gate must short-circuit when cumulative is already
+    /// non-zero: a series that's been hydrated before (e.g. by the
+    /// periodic metadata_refresh sweep) should not re-hydrate on
+    /// every auto-search.
+    #[tokio::test]
+    async fn cumulative_hydration_skips_already_populated_series() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 145064,
+                mal_id: None,
+                title: "Jujutsu Kaisen S2",
+                title_romaji: "Jujutsu Kaisen S2",
+                title_english: "Jujutsu Kaisen S2",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(23),
+                season_year: Some(2023),
+                end_year: Some(2023),
+            },
+        )
+        .await
+        .expect("upsert");
+        series::update_cumulative_prior_episodes(&db, series_id, 24)
+            .await
+            .expect("set cumulative");
+
+        let tracked = series::get_by_id(&db, series_id)
+            .await
+            .expect("get_by_id")
+            .expect("series exists");
+        assert_eq!(tracked.cumulative_prior_episodes, 24);
+
+        let mut detail = empty_anime_detail(145064, "Jujutsu Kaisen S2");
+        let mut prev = related_entry(113415, "Jujutsu Kaisen", Some(24));
+        prev.relation_type = "PREQUEL".to_string();
+        prev.format = "TV".to_string();
+        detail.relations.push(prev);
+
+        let result = maybe_hydrate_cumulative_offset(&db, Some(tracked), &detail).await;
+        let after = result.expect("series still returned");
+        assert_eq!(
+            after.cumulative_prior_episodes, 24,
+            "populated cumulative short-circuits the gate"
         );
     }
 }
