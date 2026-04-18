@@ -1743,7 +1743,15 @@ function updateEpisodeRow(epNum, state, group) {
                 qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
             }
         } else if (state === 'deleted') {
-            row.classList.remove('ep-row-have');
+            // Strip both have/queued so a cancelled pending row doesn't
+            // stay visually styled as queued (grey progress-bar row)
+            // after the text content switches to "Missing". The prior
+            // version only removed `ep-row-have`, which left a cancelled
+            // pending row wearing both `ep-row-queued` and
+            // `ep-row-missing` simultaneously until the next force-
+            // refresh arrived — hence the "cancel one visually cancels
+            // all" / "stuck queued" marker.
+            row.classList.remove('ep-row-have', 'ep-row-queued');
             row.classList.add('ep-row-missing');
             const statusCell = row.querySelector('.ep-col-status');
             if (statusCell) {
@@ -1752,6 +1760,10 @@ function updateEpisodeRow(epNum, state, group) {
             const qualityCell = row.querySelector('.ep-col-quality');
             if (qualityCell) {
                 qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+                // Drop the cached `originalHtml` stash so future
+                // showings of a progress bar on this row don't restore
+                // the stale queued HTML.
+                delete qualityCell.dataset.originalHtml;
             }
         }
         break;
