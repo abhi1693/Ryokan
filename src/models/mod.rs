@@ -38,6 +38,70 @@ async fn column_exists(db: &SqlitePool, table: &str, column: &str) -> bool {
         .any(|r| r.try_get::<String, _>("name").ok().as_deref() == Some(column))
 }
 
+/// Recover any of the four possible states a column-rename migration
+/// can leave a user's DB in when the first attempt is broken.
+///
+/// State matrix:
+///
+/// | legacy | new | action                                             |
+/// |--------|-----|----------------------------------------------------|
+/// |   ✓    | ✓   | copy legacy→new (only when new is empty), drop legacy |
+/// |   ✓    | ✗   | rename legacy→new                                  |
+/// |   ✗    | ✓   | no-op                                              |
+/// |   ✗    | ✗   | add new (empty default)                            |
+///
+/// The "both columns exist" row is the one PR #37's first migration
+/// attempt produced: it ran ADD-then-RENAME, so ADD succeeded, RENAME
+/// hit "duplicate column" → `.ok()` → data stranded in the legacy
+/// column alongside an empty new column.
+///
+/// `legacy` / `new` are hardcoded column-name string literals from
+/// the callers in `migrate()`, so inline interpolation into the SQL
+/// is safe (no user input reaches PRAGMA or ALTER TABLE here).
+async fn reconcile_restrict_to_group_rename(
+    db: &SqlitePool,
+    table: &str,
+    legacy: &str,
+    new: &str,
+) {
+    let legacy_exists = column_exists(db, table, legacy).await;
+    let new_exists = column_exists(db, table, new).await;
+
+    match (legacy_exists, new_exists) {
+        (true, true) => {
+            // Recovery path for the PR #37 half-migrated state.
+            // Copy legacy→new where new is still the default
+            // (empty string). Guard with `new = ''` so a later pass
+            // that legitimately set new via UPDATE isn't overwritten
+            // from the stale legacy value.
+            let copy = format!(
+                "UPDATE {table} SET {new} = {legacy} WHERE {new} = '' AND {legacy} IS NOT NULL"
+            );
+            let _ = sqlx::query(&copy).execute(db).await;
+
+            // SQLite ≥ 3.35 supports DROP COLUMN. Silently absorb
+            // if it fails — in that case the legacy column stays,
+            // duplicating data, but the new column has the live
+            // value and that's the one the app reads.
+            let drop = format!("ALTER TABLE {table} DROP COLUMN {legacy}");
+            let _ = sqlx::query(&drop).execute(db).await;
+        }
+        (true, false) => {
+            // Clean pre-PR-#37 DB with only the legacy name.
+            let rename = format!("ALTER TABLE {table} RENAME COLUMN {legacy} TO {new}");
+            let _ = sqlx::query(&rename).execute(db).await;
+        }
+        (false, true) => {
+            // Already migrated, nothing to do.
+        }
+        (false, false) => {
+            // Fresh install — ADD with empty default.
+            let add = format!("ALTER TABLE {table} ADD COLUMN {new} TEXT NOT NULL DEFAULT ''");
+            let _ = sqlx::query(&add).execute(db).await;
+        }
+    }
+}
+
 /// Run all database migrations.
 pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -1323,42 +1387,23 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
-    // Rename BEFORE the ADD passes below. On a local DB that still has
-    // the pre-merge `*_to_group` column populated, running ADD first
-    // would create an empty `*_to_uploader` column alongside the
-    // legacy one, and the subsequent RENAME would return "duplicate
-    // column" → `.ok()` → user data stranded in an orphan column.
-    //
-    // In the reversed order both paths converge:
-    //   Legacy DB: RENAME brings the populated column forward; ADD
-    //              no-ops because the renamed column now exists.
-    //   Fresh DB:  RENAME no-ops ("no such column"); ADD creates the
-    //              column empty as intended.
-    //
-    // RENAME COLUMN works on SQLite ≥ 3.25. `.ok()` absorbs both the
-    // fresh-install "no such column" and the upgrade "duplicate"
-    // cases.
-    sqlx::query("ALTER TABLE config RENAME COLUMN default_restrict_to_group TO default_restrict_to_uploader")
-        .execute(db)
-        .await
-        .ok();
-    sqlx::query("ALTER TABLE series RENAME COLUMN restrict_to_group TO restrict_to_uploader")
-        .execute(db)
-        .await
-        .ok();
-
-    sqlx::query("ALTER TABLE config ADD COLUMN default_restrict_to_uploader TEXT NOT NULL DEFAULT ''")
-        .execute(db)
-        .await
-        .ok();
     sqlx::query("ALTER TABLE series ADD COLUMN custom_query_tokens TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
         .ok();
-    sqlx::query("ALTER TABLE series ADD COLUMN restrict_to_uploader TEXT NOT NULL DEFAULT ''")
-        .execute(db)
-        .await
-        .ok();
+
+    // Rename `*_to_group` → `*_to_uploader` with full recovery for the
+    // DBs that landed in a half-migrated state from PR #37's first-
+    // pass migration (which added the new column before renaming, so
+    // `ADD` succeeded and the subsequent `RENAME` failed as "duplicate
+    // column" — leaving the user's uploader value stranded in an
+    // orphan legacy column alongside an empty new one).
+    //
+    // `reconcile_restrict_to_group_rename` handles the four possible
+    // states — legacy-only, new-only, both, neither — in the order
+    // that makes each a one-shot forward move without data loss.
+    reconcile_restrict_to_group_rename(db, "config", "default_restrict_to_group", "default_restrict_to_uploader").await;
+    reconcile_restrict_to_group_rename(db, "series", "restrict_to_group", "restrict_to_uploader").await;
 
     // #30 — Cumulative episode count of the shortest TV-format PREQUEL
     // chain. Used at search time to accept absolute-numbered Nyaa
@@ -1455,5 +1500,193 @@ mod tests {
         // And the old column should no longer be there (RENAME moved it,
         // didn't duplicate it).
         assert!(!column_exists(&db, "episode_grab_history", "torrent_name").await);
+    }
+
+    /// PR #37's first migration attempt ran ADD-then-RENAME for the
+    /// `restrict_to_group` → `restrict_to_uploader` rename, so any DB
+    /// that booted that build ended up with both columns: the legacy
+    /// one populated with the user's uploader value, the new one
+    /// empty. The fix for that ships the recovery pass tested here
+    /// — on a DB with both columns present, the user's value must
+    /// land in the new column and the legacy column must drop.
+    #[tokio::test]
+    async fn reconcile_rename_recovers_half_migrated_restrict_to_group() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+
+        // Simulate the PR #37 v1 broken state: pre-create `config`
+        // with BOTH columns, legacy populated, new empty.
+        sqlx::query(
+            r#"CREATE TABLE config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                default_restrict_to_group     TEXT NOT NULL DEFAULT '',
+                default_restrict_to_uploader  TEXT NOT NULL DEFAULT ''
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .expect("create legacy config");
+        sqlx::query(
+            "INSERT INTO config (id, default_restrict_to_group, default_restrict_to_uploader)
+             VALUES (1, 'SubsPlease', '')",
+        )
+        .execute(&db)
+        .await
+        .expect("seed legacy row");
+
+        reconcile_restrict_to_group_rename(
+            &db,
+            "config",
+            "default_restrict_to_group",
+            "default_restrict_to_uploader",
+        )
+        .await;
+
+        let uploader: String = sqlx::query_scalar(
+            "SELECT default_restrict_to_uploader FROM config WHERE id = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("fetch uploader");
+        assert_eq!(
+            uploader, "SubsPlease",
+            "user's uploader value must be copied forward into the new column"
+        );
+
+        // Legacy column should be gone after the reconcile.
+        assert!(
+            !column_exists(&db, "config", "default_restrict_to_group").await,
+            "orphan legacy column must be dropped once data has been copied"
+        );
+    }
+
+    /// Legacy-only state (DB migrated from a build predating PR #37):
+    /// rename the column in place, keep the data.
+    #[tokio::test]
+    async fn reconcile_rename_brings_legacy_column_forward() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+
+        sqlx::query(
+            r#"CREATE TABLE config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                default_restrict_to_group TEXT NOT NULL DEFAULT ''
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .expect("create legacy config");
+        sqlx::query(
+            "INSERT INTO config (id, default_restrict_to_group) VALUES (1, 'SubsPlease')",
+        )
+        .execute(&db)
+        .await
+        .expect("seed legacy row");
+
+        reconcile_restrict_to_group_rename(
+            &db,
+            "config",
+            "default_restrict_to_group",
+            "default_restrict_to_uploader",
+        )
+        .await;
+
+        let uploader: String = sqlx::query_scalar(
+            "SELECT default_restrict_to_uploader FROM config WHERE id = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("fetch uploader");
+        assert_eq!(uploader, "SubsPlease");
+        assert!(!column_exists(&db, "config", "default_restrict_to_group").await);
+    }
+
+    /// Both columns, new column already populated — user's live value
+    /// must win over the stale legacy value. Edge case: the old
+    /// rename attempt was half-successful somehow (or a user
+    /// manually edited the new column).
+    #[tokio::test]
+    async fn reconcile_rename_does_not_overwrite_populated_new_column() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+
+        sqlx::query(
+            r#"CREATE TABLE config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                default_restrict_to_group     TEXT NOT NULL DEFAULT '',
+                default_restrict_to_uploader  TEXT NOT NULL DEFAULT ''
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .expect("create legacy config");
+        sqlx::query(
+            "INSERT INTO config (id, default_restrict_to_group, default_restrict_to_uploader)
+             VALUES (1, 'StaleLegacy', 'LiveNew')",
+        )
+        .execute(&db)
+        .await
+        .expect("seed row");
+
+        reconcile_restrict_to_group_rename(
+            &db,
+            "config",
+            "default_restrict_to_group",
+            "default_restrict_to_uploader",
+        )
+        .await;
+
+        let uploader: String = sqlx::query_scalar(
+            "SELECT default_restrict_to_uploader FROM config WHERE id = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("fetch uploader");
+        assert_eq!(
+            uploader, "LiveNew",
+            "non-empty new column must not be overwritten by stale legacy"
+        );
+    }
+
+    /// Fresh install — neither column exists yet. Reconcile must
+    /// ADD the new column with the empty default.
+    #[tokio::test]
+    async fn reconcile_rename_adds_new_column_on_fresh_install() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+
+        sqlx::query(
+            r#"CREATE TABLE config (
+                id INTEGER PRIMARY KEY CHECK (id = 1)
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .expect("create bare config");
+        sqlx::query("INSERT INTO config (id) VALUES (1)")
+            .execute(&db)
+            .await
+            .expect("seed empty row");
+
+        reconcile_restrict_to_group_rename(
+            &db,
+            "config",
+            "default_restrict_to_group",
+            "default_restrict_to_uploader",
+        )
+        .await;
+
+        assert!(column_exists(&db, "config", "default_restrict_to_uploader").await);
+        let uploader: String = sqlx::query_scalar(
+            "SELECT default_restrict_to_uploader FROM config WHERE id = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("fetch uploader");
+        assert_eq!(uploader, "", "fresh install starts with the default empty");
     }
 }
