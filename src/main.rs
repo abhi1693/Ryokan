@@ -391,11 +391,6 @@ async fn main() {
     let public_routes = Router::new()
         .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
         .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
-        // /help is reachable pre-login because the "Forgot password?"
-        // link on /login points at /help#forgot-password (#39). Keeping
-        // it behind require_auth meant users locked out of their account
-        // could not read the recovery recipe — the one thing they need.
-        .route("/help", get(handlers::help::help_page))
         .layer(middleware::from_fn(handlers::auth::csrf_public));
 
     // Routes that require auth.
@@ -475,6 +470,7 @@ async fn main() {
         .route("/api/tasks/upgrade-search", post(handlers::system::api_force_upgrade_search))
         .route("/api/system/rebuild-anilist-cache", post(handlers::system::api_rebuild_cached_metadata))
         .route("/api/system/reload-anibridge", post(handlers::system::api_anibridge_reload))
+        .route("/help", get(handlers::system::system_page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
         .route("/api/logs/client", post(handlers::system::api_logs_client))
