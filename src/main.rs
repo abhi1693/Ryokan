@@ -59,6 +59,7 @@ use services::{
         handlers::library::grab_interactive_result,
         handlers::library::grab_batch_result,
         handlers::library::delete_episode_file,
+        handlers::library::cancel_pending_episode,
         handlers::library::get_episode_grab_history,
         handlers::library::mark_episode_failed,
         handlers::library::episode_download_progress,
@@ -417,6 +418,7 @@ async fn main() {
         .route("/api/series/{anilist_id}/grab/{episode_number}", post(handlers::library::grab_interactive_result))
         .route("/api/series/{anilist_id}/grab-batch", post(handlers::library::grab_batch_result))
         .route("/api/series/{anilist_id}/delete-file/{episode_number}", post(handlers::library::delete_episode_file))
+        .route("/api/series/{anilist_id}/cancel-pending/{episode_number}", post(handlers::library::cancel_pending_episode))
         .route("/api/series/{anilist_id}/grab-history/{episode_number}", get(handlers::library::get_episode_grab_history))
         .route("/api/series/{anilist_id}/mark-failed/{episode_number}", post(handlers::library::mark_episode_failed))
         .route("/api/series/{anilist_id}/download-progress", get(handlers::library::episode_download_progress))

@@ -395,6 +395,10 @@
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
                 Delete File
             </button>
+            <button class="btn-delete-file" id="btn-cancel-pending" style="display:none" onclick="cancelPendingEpisode()">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                Cancel Pending
+            </button>
         </div>
     </div>
 </div>
@@ -632,11 +636,28 @@ function showEpisodeDetail(epNum, btn) {
     const titleEl = document.getElementById('ep-detail-title');
     const body = document.getElementById('ep-detail-body');
     const deleteBtn = document.getElementById('btn-delete-file');
+    const cancelBtn = document.getElementById('btn-cancel-pending');
     _currentEpNum = epNum;
     titleEl.textContent = 'Episode ' + epNum;
 
     // Show/hide delete button
     if (deleteBtn) deleteBtn.style.display = onDisk ? '' : 'none';
+    // Cancel-pending button: visible when the episode row is in the
+    // 'grabbed' state (torrent sent but post-processing hasn't landed
+    // yet). Detect via the `ep-row-queued` class that updateEpisodeRow
+    // toggles on the row when a grab lands; hidden otherwise so it
+    // doesn't clutter on-disk / missing rows where it would be a no-op.
+    if (cancelBtn) {
+        const rows = document.querySelectorAll('.episode-table tbody tr');
+        let isPending = false;
+        for (const row of rows) {
+            const numCell = row.querySelector('.ep-col-num');
+            if (!numCell || parseInt(numCell.textContent.trim()) !== epNum) continue;
+            isPending = row.classList.contains('ep-row-queued');
+            break;
+        }
+        cancelBtn.style.display = isPending ? '' : 'none';
+    }
 
     // Two stable slots the grab-history loader patches in place once
     // data arrives: the library-side file path (media_root-relative,
@@ -868,6 +889,49 @@ async function deleteEpisodeFile() {
                 kind: 'error',
                 category: 'library',
                 title: `Delete failed for episode ${epNum}`,
+                body: err && err.message ? err.message : 'Unknown error',
+            });
+        });
+}
+
+// Cancel an in-flight grab: removes the torrent from qBit (with its
+// partial/complete data), marks the grab 'removed' in the DB, clears
+// the episode's quality tag. Does NOT trigger a re-search — the user
+// wanted to drop this one, not find a replacement. Mirrors
+// `deleteEpisodeFile` for the pending-grab state.
+async function cancelPendingEpisode() {
+    const epNum = _currentEpNum;
+    if (!epNum) return;
+    const confirmed = await window.ryokanConfirm({
+        title: 'Cancel pending grab',
+        body: `Remove the in-flight torrent for Episode ${epNum} from qBittorrent and mark it cancelled? This will delete any downloaded data and will not trigger a re-search.`,
+        yesLabel: 'Cancel grab',
+        noLabel: 'Keep',
+    });
+    if (!confirmed.ok) return;
+    const btn = document.getElementById('btn-cancel-pending');
+    if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
+    fetch(`/api/series/${SD.id}/cancel-pending/${epNum}`, { method: 'POST', headers: {'Content-Type': 'application/json'} })
+        .then(async r => {
+            let data = {};
+            try { data = await r.json(); } catch (_) {}
+            if (!r.ok) throw new Error(data.message || 'Cancel failed');
+            document.getElementById('ep-detail-modal').style.display = 'none';
+            updateEpisodeRow(epNum, 'deleted');
+            refreshEpisodeRows({ force: true });
+            window.ryokanToast({
+                kind: 'success',
+                category: 'library',
+                title: `Episode ${epNum} cancelled`,
+                body: `${data.cancelled || 0} pending grab(s) removed.`,
+            });
+        })
+        .catch(err => {
+            if (btn) { btn.disabled = false; btn.textContent = 'Cancel Pending'; }
+            window.ryokanToast({
+                kind: 'error',
+                category: 'library',
+                title: `Cancel failed for episode ${epNum}`,
                 body: err && err.message ? err.message : 'Unknown error',
             });
         });

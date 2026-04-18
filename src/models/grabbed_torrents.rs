@@ -506,6 +506,69 @@ pub async fn find_imported_for_episode(
         .collect())
 }
 
+/// Same shape as [`find_imported_for_episode`] but for pending rows —
+/// the torrent is in qBit but post-processing hasn't imported it yet.
+/// Used by the cancel-pending handler to find what to pull out of qBit
+/// before marking the row 'removed'.
+///
+/// `grabbed_torrents.state = 'pending'` is the on-the-wire label for
+/// this stage (distinct from `episode_tags.state = 'grabbed'`, which
+/// describes the episode's UI state and uses a different vocabulary
+/// — yes, it's confusing). Returns both direct single-series grabs
+/// and routed multi-series grabs (parent batch whose route targets
+/// this series+episode), same UNION shape as the imported variant.
+pub async fn find_pending_for_episode(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch FROM (
+             SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
+                    g.series_id AS series_id, g.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at,
+                    COALESCE(g.is_batch, 0) AS is_batch
+             FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
+             WHERE g.series_id = ? AND je.value = ? AND g.state = 'pending'
+             UNION
+             SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
+                    g.series_id AS series_id, g.episode_numbers AS episode_numbers,
+                    g.grabbed_at AS grabbed_at,
+                    COALESCE(g.is_batch, 0) AS is_batch
+             FROM grabbed_torrents g
+             JOIN grabbed_torrent_series r ON r.grab_id = g.id
+             , json_each(r.episode_numbers) AS je
+             WHERE r.series_id = ? AND je.value = ? AND g.state = 'pending'
+           )
+           ORDER BY grabbed_at DESC"#,
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .bind(series_id)
+    .bind(episode_number)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let eps_json: String = row.get("episode_numbers");
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
+            let is_batch_i: i64 = row.get("is_batch");
+            GrabbedTorrent {
+                id: row.get("id"),
+                hash: row.get("hash"),
+                torrent_name: row.get("torrent_name"),
+                series_id: row.get("series_id"),
+                episode_numbers,
+                state: "pending".to_string(),
+                grabbed_at: row.get("grabbed_at"),
+                is_batch: is_batch_i != 0,
+            }
+        })
+        .collect())
+}
+
 /// Bulk variant for post-processing's library scan: fetch every
 /// imported grab covering this series in one round-trip, including
 /// grabs that reach the series via the sibling-routes path. Returns
@@ -900,5 +963,82 @@ mod tests {
             .await
             .expect("empty-hash b");
         assert!(id4.is_some() && id5.is_some(), "empty-hash never dedups");
+    }
+
+    /// `find_pending_for_episode` backs the cancel-pending handler.
+    /// It must only return 'pending' rows (not 'imported' / 'failed' /
+    /// 'removed'), and must find both direct single-series grabs and
+    /// grabs that reach the series via a route row.
+    #[tokio::test]
+    async fn find_pending_filters_by_state_and_series() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 99999,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2024),
+                end_year: Some(2024),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        // Pending grab for ep 5 — should be found.
+        let pending_id = record_grab(
+            &db,
+            "pending0000000000000000000000000000000001",
+            "[Group] Show - 05",
+            series_id,
+            &[5],
+            false,
+        )
+        .await
+        .expect("pending grab")
+        .expect("id");
+
+        // Imported grab for ep 6 — must NOT be returned for ep 6 pending
+        // lookup (different state).
+        let imported_id = record_grab(
+            &db,
+            "imported000000000000000000000000000000002",
+            "[Group] Show - 06",
+            series_id,
+            &[6],
+            false,
+        )
+        .await
+        .expect("imported grab")
+        .expect("id");
+        mark_imported(&db, imported_id).await.expect("mark imported");
+
+        let hits_ep5 = find_pending_for_episode(&db, series_id, 5).await.expect("query");
+        assert_eq!(hits_ep5.len(), 1, "should find the one pending grab for ep 5");
+        assert_eq!(hits_ep5[0].id, pending_id);
+        assert_eq!(hits_ep5[0].state, "pending");
+
+        let hits_ep6 = find_pending_for_episode(&db, series_id, 6).await.expect("query");
+        assert!(hits_ep6.is_empty(), "imported grabs must not leak into pending lookup");
+
+        // Cancel path: mark_removed flips the state; a second lookup
+        // should no longer return the row.
+        mark_removed(&db, pending_id).await.expect("mark removed");
+        let hits_after_remove = find_pending_for_episode(&db, series_id, 5).await.expect("query");
+        assert!(
+            hits_after_remove.is_empty(),
+            "removed grabs must not reappear in pending lookup"
+        );
     }
 }

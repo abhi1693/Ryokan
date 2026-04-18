@@ -4199,6 +4199,146 @@ pub async fn delete_episode_file(
     }
 }
 
+/// Cancel an in-flight grab for an episode: remove the torrent from
+/// qBittorrent (with its partial/complete data), mark the grab row as
+/// 'removed', and clear the episode's quality tag so it returns to the
+/// missing state.
+///
+/// This is the delete-file path's twin for episodes that were grabbed
+/// but never imported — a torrent stuck at 99%, a mis-grabbed release
+/// the user wants to drop without re-searching, or a cancel-before-
+/// qBit-finishes action. `mark_episode_failed` already does most of
+/// this work but then re-triggers auto-search, which is the opposite
+/// of what the user wants here.
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/cancel-pending/{episode_number}",
+    tag = "Library",
+    summary = "Cancel pending episode grab",
+    description = "Remove the in-flight torrent from qBittorrent, mark the grab as removed, and clear the episode's quality tag. Does not trigger a re-search.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number"),
+    ),
+    responses(
+        (status = 200, description = "Pending grab cancelled", body = serde_json::Value),
+        (status = 400, description = "Series not in library"),
+        (status = 404, description = "No pending grab found for this episode"),
+    ),
+)]
+pub async fn cancel_pending_episode(
+    State(state): State<AppState>,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let json_err = |status: axum::http::StatusCode, msg: &str| {
+        (status, Json(serde_json::json!({"ok": false, "message": msg})))
+    };
+
+    let tracked = match resolve_tracked_series(&state.db, request_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return json_err(axum::http::StatusCode::BAD_REQUEST, "Series not in library")
+        }
+        Err(e) => {
+            return json_err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+            )
+        }
+    };
+
+    let pending = match grabbed_torrents::find_pending_for_episode(
+        &state.db,
+        tracked.id,
+        episode_number,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            return json_err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+            )
+        }
+    };
+
+    if pending.is_empty() {
+        return json_err(
+            axum::http::StatusCode::NOT_FOUND,
+            "No pending grab found for this episode",
+        );
+    }
+
+    // Pull the qBit client once — if qBit isn't configured we still
+    // want to clear the DB state so a stale grab row doesn't
+    // permanently block a re-grab.
+    let qbit = state.qbit.read().await.as_ref().cloned();
+
+    let mut removed_count = 0;
+    let mut torrent_failures: Vec<String> = Vec::new();
+    for grab in &pending {
+        if !grab.hash.is_empty()
+            && let Some(ref qbit) = qbit
+            && let Err(e) = qbit.delete_torrent(&grab.hash, true).await
+        {
+            torrent_failures.push(format!("{}: {}", grab.torrent_name, e));
+            logger::warn(
+                &state.db,
+                LogCategory::QBit,
+                &format!(
+                    "Failed to remove pending torrent for S?E{:02} cancel: '{}'",
+                    episode_number, grab.torrent_name
+                ),
+                &e,
+            )
+            .await;
+        }
+
+        if let Err(e) = grabbed_torrents::mark_removed(&state.db, grab.id).await {
+            logger::warn(
+                &state.db,
+                LogCategory::Library,
+                &format!(
+                    "Failed to mark grab {} as removed during cancel for S?E{:02}",
+                    grab.id, episode_number
+                ),
+                &e.to_string(),
+            )
+            .await;
+        } else {
+            removed_count += 1;
+        }
+    }
+
+    let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
+
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!(
+            "Cancelled pending grab for episode {}",
+            episode_number
+        ),
+        &format!(
+            "series_id={}, cancelled={}, qbit_failures={}",
+            tracked.id,
+            removed_count,
+            torrent_failures.len()
+        ),
+    )
+    .await;
+
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "cancelled": removed_count,
+            "torrent_failures": torrent_failures,
+        })),
+    )
+}
+
 /// Get grab history for a specific episode.
 #[utoipa::path(
     get,
