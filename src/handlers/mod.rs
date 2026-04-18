@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod downloads;
+pub mod help;
 pub mod library;
 pub mod progress;
 pub mod search;

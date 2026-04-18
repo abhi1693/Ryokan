@@ -397,6 +397,13 @@ body {
     border-radius: var(--radius-lg);
 }
 
+/* Wider variant for content-heavy auth pages (e.g. /forgot-password,
+   which embeds the full recovery recipe with code blocks and an
+   ordered list and doesn't fit the 380px sign-in container). */
+.auth-container-wide {
+    max-width: 640px;
+}
+
 .auth-brand {
     font-size: 28px;
     color: var(--text-bright);

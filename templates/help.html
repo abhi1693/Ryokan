@@ -56,24 +56,9 @@
         <p>Click the <strong>Grab</strong> button next to any result to send it to qBittorrent. The torrent will be added with your configured category. Make sure qBittorrent is running and the connection is configured in Settings.</p>
     </section>
 
-    <section class="help-section" id="forgot-password">
+    <section class="help-section">
         <h3>Forgot your password?</h3>
-        <p>Ryokan stores the admin account in the same SQLite database as the rest of its config. There are two ways to recover access if you've forgotten your password. Both only wipe the <code>users</code> and <code>sessions</code> tables; your Jellyfin / qBittorrent credentials and other settings survive the reset.</p>
-
-        <h4>Option 1: restart with the reset flag</h4>
-        <p>On the machine running Ryokan:</p>
-        <ol>
-            <li>Create an empty sentinel file alongside the database: <code>touch data/.reset-auth</code></li>
-            <li>Restart Ryokan with the environment variable <code>RYOKAN_RESET_AUTH=1</code> set, or with the <code>--reset-auth</code> CLI flag.</li>
-            <li>Open Ryokan in your browser. You'll be redirected to the first-run setup page; create a new admin account.</li>
-            <li>Remove the sentinel file: <code>rm data/.reset-auth</code>. Leaving it in place is harmless, but the env var alone won't wipe auth again without the sentinel.</li>
-        </ol>
-        <p>The sentinel file is required so that a stuck-on <code>RYOKAN_RESET_AUTH=1</code> in a <code>docker-compose.yml</code> can't accidentally wipe auth on every boot. Recovery is always a deliberate two-step action.</p>
-
-        <h4>Option 2: sqlite3 recipe</h4>
-        <p>If you can't easily restart Ryokan with a new environment variable (e.g. you're on a managed deployment), shut Ryokan down and run this once against the database:</p>
-        <pre><code>sqlite3 data/ryokan.db "DELETE FROM users; DELETE FROM sessions;"</code></pre>
-        <p>Then start Ryokan back up and create a new admin account through the first-run setup.</p>
+        <p>Recovery steps live on the <a href="/forgot-password">forgot-password page</a>, which is also reachable from the login screen when you're signed out.</p>
     </section>
 </div>
 {% endblock %}
