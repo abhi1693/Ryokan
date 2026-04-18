@@ -628,6 +628,27 @@ function toggleEpisodeMonitor(dbId, epNum, currentlyMonitored, btn) {
 
 let _currentEpNum = null;
 
+// Restore a footer button (Delete File / Cancel Pending) to its
+// ready-to-click shape on every modal open. The fetch success path
+// intentionally leaves the button with `disabled = true` + loading
+// text so a double-click can't fire a second request in flight; but
+// the modal closes immediately and the button lives on in the DOM
+// (it's a singleton footer element, not re-rendered per episode),
+// so without this reset the next modal opens with a stuck
+// "Deleting…" / "Cancelling…" label and disabled state.
+//
+// The initial HTML snapshot is captured on first use via
+// `dataset.defaultHtml` — avoids having to re-declare the SVG +
+// label inline in the JS.
+function resetFooterButton(btn) {
+    if (!btn) return;
+    if (!btn.dataset.defaultHtml) {
+        btn.dataset.defaultHtml = btn.innerHTML;
+    }
+    btn.innerHTML = btn.dataset.defaultHtml;
+    btn.disabled = false;
+}
+
 function showEpisodeDetail(epNum, btn) {
     const filename = btn.dataset.filename || '';
     const size = btn.dataset.size || '';
@@ -639,6 +660,12 @@ function showEpisodeDetail(epNum, btn) {
     const cancelBtn = document.getElementById('btn-cancel-pending');
     _currentEpNum = epNum;
     titleEl.textContent = 'Episode ' + epNum;
+
+    // Reset both footer buttons before toggling visibility so a button
+    // that was mid-request when its modal was closed shows up clean in
+    // the next episode's modal.
+    resetFooterButton(deleteBtn);
+    resetFooterButton(cancelBtn);
 
     // Show/hide delete button
     if (deleteBtn) deleteBtn.style.display = onDisk ? '' : 'none';
