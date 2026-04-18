@@ -328,7 +328,22 @@ async fn maybe_hydrate_cumulative_offset(
             return Some(t);
         }
     }
-    series::get_by_id(db, t.id).await.ok().flatten().or(Some(t))
+    let refreshed = series::get_by_id(db, t.id).await.ok().flatten();
+    if let Some(ref r) = refreshed {
+        logger::info(
+            db,
+            LogCategory::AniList,
+            &format!(
+                "Hydrated PREQUEL chain for {}: cumulative_prior_episodes={}",
+                r.title, r.cumulative_prior_episodes
+            ),
+            &format!(
+                "series_id={}, anilist_id={}, prior={}",
+                r.id, r.anilist_id, t.cumulative_prior_episodes
+            ),
+        ).await;
+    }
+    refreshed.or(Some(t))
 }
 
 async fn force_kitsu_fallback_enabled(db: &SqlitePool) -> bool {
