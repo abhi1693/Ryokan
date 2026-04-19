@@ -619,6 +619,22 @@ async fn lookup_by_tmdb_id(
         return Ok(Json(vec![build_stub_movie(tmdb_id, cfg)]));
     }
 
+    // Pre-batch every AniList id into one `Page(media(id_in:[]))` call
+    // so the per-entry loop hits DETAIL_CACHE instead of issuing N
+    // sequential GraphQL queries. A 7-entry TMDB fan-out becomes 1
+    // round-trip + 7 cache hits instead of 7 throttled-serial round-trips.
+    let prefetch_ids: Vec<i64> = anime_ids
+        .iter()
+        .filter_map(|ids| ids.anilist_id.filter(|id| *id > 0))
+        .collect();
+    if !prefetch_ids.is_empty()
+        && let Err(e) = anilist::get_anime_details_batch(&prefetch_ids).await
+    {
+        tracing::debug!(
+            "Radarr fan-out: AL batch prefetch failed (per-id loop will retry): {e}"
+        );
+    }
+
     let mut results = Vec::new();
     for ids in &anime_ids {
         let detail = if let Some(al_id) = ids.anilist_id {

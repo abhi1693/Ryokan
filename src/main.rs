@@ -348,6 +348,12 @@ async fn main() {
     let cf_cache: CompiledCfCache =
         Arc::new(RwLock::new(Arc::new(custom_formats::load_compiled_cfs(&db).await)));
 
+    // Warm the SeaDex lookup cache from SQLite so a restart doesn't
+    // re-hit releases.moe for every series in the library on the next
+    // RSS sweep. Failures are logged and ignored — a cold cache just
+    // means the first lookup per series pays the round-trip again.
+    services::auto_search::seadex_warm_cache_from_db(&db).await;
+
     // Prime the `users_exist` cache at startup so a running instance with
     // an existing admin account never pays the `SELECT COUNT(*) FROM users`
     // cost on the auth hot path.

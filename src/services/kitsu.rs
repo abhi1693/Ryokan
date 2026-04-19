@@ -326,6 +326,88 @@ pub async fn get_anime_detail_by_titles(titles: &[String], wanted_year: Option<i
     Ok(to_anime_detail(candidate))
 }
 
+/// Resolve Kitsu detail by MAL id via the dedicated `/mappings`
+/// endpoint. One round-trip, exact match — collapses what
+/// `best_candidate` does across 1–4 fuzzy title queries when the
+/// caller already has the MAL id (the AniList → Jikan path always
+/// does). Returns `Ok(None)` when no Kitsu mapping exists for this
+/// MAL id, so the caller can fall through to the title-fuzz path.
+///
+/// Endpoint shape (verified live 2026-04-19):
+/// `GET /mappings?filter[externalSite]=myanimelist/anime
+///       &filter[externalId]={mal_id}&include=item`
+/// returns a mapping resource plus the linked anime in the JSON:API
+/// `included` array — so we get both the mapping confirmation and
+/// the full anime attributes in a single request.
+///
+/// Note: filtering on `/anime?filter[mappings.externalSite]=…` is
+/// rejected by Kitsu (`Filter not allowed`); the dedicated
+/// `/mappings` endpoint with a top-level `filter[externalSite]` is
+/// the supported shape.
+pub async fn get_anime_detail_by_mal_id(mal_id: i64) -> Result<Option<AnimeDetail>, String> {
+    let mal_id_str = mal_id.to_string();
+    let url = format!("{}/mappings", KITSU_API);
+    let resp = HTTP_CLIENT
+        .get(&url)
+        .query(&[
+            ("filter[externalSite]", "myanimelist/anime"),
+            ("filter[externalId]", mal_id_str.as_str()),
+            ("include", "item"),
+            ("page[limit]", "1"),
+        ])
+        .header("Accept", "application/vnd.api+json")
+        .header("Content-Type", "application/vnd.api+json")
+        .header("User-Agent", "Ryokan/0.1")
+        .send()
+        .await
+        .map_err(|e| format!("Kitsu mapping request failed: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("Kitsu mapping request failed: {}", e))?;
+
+    let body: MappingLookupResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Kitsu mapping response: {}", e))?;
+
+    Ok(body
+        .included
+        .into_iter()
+        .find(|r| r.item_type == "anime")
+        .and_then(|r| {
+            // Reuse `to_candidate` by adapting the mapping-included
+            // resource into the same `Resource<AnimeAttributes>` shape
+            // — `to_candidate` parses the id string and pulls fields
+            // off `attributes`.
+            to_candidate(Resource {
+                id: r.id,
+                attributes: r.attributes,
+            })
+        })
+        .map(to_anime_detail))
+}
+
+/// JSON:API response shape for `GET /mappings?...&include=item`.
+/// The mapping resources themselves live in `data` but we don't
+/// actually need them — the linked anime resource is in `included`,
+/// which is what we want.
+#[derive(Debug, Deserialize)]
+struct MappingLookupResponse {
+    #[serde(default)]
+    included: Vec<MappingIncludedItem>,
+}
+
+/// One item from the `included` array. `type` lets us filter to
+/// anime resources only — manga mappings would land here too if
+/// some future caller asked for `myanimelist/manga`, and we don't
+/// want to feed manga attributes into `to_candidate`.
+#[derive(Debug, Deserialize)]
+struct MappingIncludedItem {
+    id: String,
+    #[serde(rename = "type")]
+    item_type: String,
+    attributes: AnimeAttributes,
+}
+
 async fn fetch_episode_page_via_relationship(kitsu_id: i64, offset: i32) -> Result<CollectionResponse<EpisodeAttributes>, String> {
     let offset_str = offset.to_string();
     let params = [("page[limit]", "20"), ("page[offset]", offset_str.as_str()), ("sort", "number")];

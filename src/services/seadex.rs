@@ -204,9 +204,9 @@ impl From<PbFile> for SeaDexFile {
 ///   `items` array came back empty — not an error)
 /// - `Err(_)` on HTTP / parse failures
 ///
-/// No caching in V1 — see plan §10. The caller (scoring integration)
-/// skips calling this entirely when `seadex_enabled=false`, which
-/// already gives us zero API round-trips for the default config.
+/// Caching lives one layer up in `auto_search` (in-memory + SQLite
+/// persistence with in-flight coalescing); this function just owns the
+/// network round-trip + parse.
 pub async fn lookup(anilist_id: i64) -> Result<Option<SeaDexEntry>, String> {
     let url = format!(
         "{}?filter=alID%3D{}&expand=trs",
@@ -236,6 +236,130 @@ pub async fn lookup(anilist_id: i64) -> Result<Option<SeaDexEntry>, String> {
     parse_list_response(&body)
 }
 
+/// Maximum AniList ids to OR-batch into a single PocketBase filter
+/// query. PocketBase itself accepts `perPage=500` (and 1000 on newer
+/// versions), but the bottleneck here is URL length: each id costs
+/// roughly `alID=1234567||` (≈14 chars), so 50 ids fits comfortably
+/// inside any sane URL-length cap with overhead to spare. Bump cautiously.
+///
+/// Exposed `pub(crate)` so callers (e.g. the upgrade-sweep prewarm in
+/// `auto_search`) can compute accurate chunk counts for logging without
+/// inlining their own copy of the literal.
+pub(crate) const SEADEX_BATCH_SIZE: usize = 50;
+
+/// Look up multiple AniList ids in one PocketBase request using the
+/// `||` (OR) filter operator. Returns a map keyed by every requested id:
+/// hits map to `Some(entry)`, misses (no record on releases.moe) map
+/// to `None`. Ids are chunked at [`SEADEX_BATCH_SIZE`] and chunks are
+/// issued with bounded parallelism (`SEADEX_BATCH_PARALLELISM`-wide).
+/// 2-wide is safe: releases.moe is fronted by Cloudflare which only
+/// rate-limits at far higher concurrency than this, and we still keep
+/// the round-trip count to `ceil(N / SEADEX_BATCH_SIZE)`. A chunk
+/// failure aborts the whole call so the caller can decide whether to
+/// fall back to per-id lookups.
+pub async fn lookup_batch(
+    anilist_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Option<SeaDexEntry>>, String> {
+    let mut out: std::collections::HashMap<i64, Option<SeaDexEntry>> =
+        std::collections::HashMap::with_capacity(anilist_ids.len());
+    // Seed every requested id as a miss — chunk responses overwrite
+    // the entry on hit. Without this seed, callers would have to
+    // distinguish "id wasn't requested" from "id was requested but
+    // SeaDex has no record."
+    for id in anilist_ids {
+        out.entry(*id).or_insert(None);
+    }
+
+    // Build all chunk URLs up front so the parallel runner is just
+    // "fire each request, parse, fold." Owned ids per chunk keeps
+    // them 'static for the spawn closure.
+    let chunk_urls: Vec<String> = anilist_ids
+        .chunks(SEADEX_BATCH_SIZE)
+        .filter(|c| !c.is_empty())
+        .map(|chunk| {
+            // Build `(alID=A||alID=B||...)` and URL-encode just the operators.
+            // `=` and digits are URL-safe; `||` becomes `%7C%7C`.
+            let mut filter = String::with_capacity(chunk.len() * 16);
+            for (i, id) in chunk.iter().enumerate() {
+                if i > 0 {
+                    filter.push_str("%7C%7C");
+                }
+                filter.push_str("alID%3D");
+                filter.push_str(&id.to_string());
+            }
+            // perPage covers the whole chunk in one page so we never
+            // paginate a single request.
+            format!(
+                "{}?filter={}&expand=trs&perPage={}",
+                SEADEX_API,
+                filter,
+                chunk.len()
+            )
+        })
+        .collect();
+
+    // Run chunks with bounded concurrency via a semaphore. The
+    // ordering of completion doesn't matter because we fold every
+    // entry into the same output map keyed by anilist_id.
+    use tokio::sync::Semaphore;
+    let permits = std::sync::Arc::new(Semaphore::new(SEADEX_BATCH_PARALLELISM));
+    let mut join_set: tokio::task::JoinSet<Result<Vec<SeaDexEntry>, String>> =
+        tokio::task::JoinSet::new();
+    for url in chunk_urls {
+        let permits = permits.clone();
+        join_set.spawn(async move {
+            let _permit = permits
+                .acquire()
+                .await
+                .map_err(|e| format!("SeaDex batch semaphore closed: {e}"))?;
+            let response = HTTP_CLIENT
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("SeaDex batch request failed: {e}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "SeaDex batch API returned HTTP {}",
+                    response.status().as_u16()
+                ));
+            }
+            let body = response
+                .text()
+                .await
+                .map_err(|e| format!("SeaDex batch read body failed: {e}"))?;
+            parse_list_response_multi(&body)
+        });
+    }
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok(entries)) => {
+                for entry in entries {
+                    out.insert(entry.anilist_id, Some(entry));
+                }
+            }
+            Ok(Err(e)) => {
+                // Best-effort: cancel any in-flight chunks so we don't
+                // keep hammering after the caller has already learned
+                // the call failed.
+                join_set.shutdown().await;
+                return Err(e);
+            }
+            Err(join_err) => {
+                join_set.shutdown().await;
+                return Err(format!("SeaDex batch task join failed: {join_err}"));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// How many SeaDex batch chunks may be in flight at once. 2-wide
+/// roughly halves wall time on libraries that need ≥ 2 chunks
+/// (≥ 51 ids in this prewarm pass). Cloudflare's rate-limit floor
+/// is far higher than 2 RPS so we don't risk a 429 here.
+const SEADEX_BATCH_PARALLELISM: usize = 2;
+
 /// Internal parser — split out so unit tests can feed it a fixture
 /// without touching the network.
 fn parse_list_response(body: &str) -> Result<Option<SeaDexEntry>, String> {
@@ -243,6 +367,14 @@ fn parse_list_response(body: &str) -> Result<Option<SeaDexEntry>, String> {
         .map_err(|e| format!("SeaDex parse failed: {e}"))?;
 
     Ok(parsed.items.into_iter().next().map(Into::into))
+}
+
+/// Multi-item variant of [`parse_list_response`] for the batched-OR
+/// query. Returns every entry in the page rather than just the first.
+fn parse_list_response_multi(body: &str) -> Result<Vec<SeaDexEntry>, String> {
+    let parsed: PbListResponse = serde_json::from_str(body)
+        .map_err(|e| format!("SeaDex batch parse failed: {e}"))?;
+    Ok(parsed.items.into_iter().map(Into::into).collect())
 }
 
 // ───────────────────────────────────────────────────────────────────────────

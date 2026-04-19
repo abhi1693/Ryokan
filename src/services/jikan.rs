@@ -259,6 +259,13 @@ struct FullAnime {
     themes: Option<Vec<NamedItem>>,
     demographics: Option<Vec<NamedItem>>,
     aired: Option<AiredInfo>,
+    /// `/anime/{id}/full` already returns the same relation graph that
+    /// `/anime/{id}/relations` would — pulling it out of the full payload
+    /// avoids a second round-trip per detail fetch. Falls through empty
+    /// if Jikan ever changes the contract; we only re-issue the dedicated
+    /// `/relations` call when this is `None` or empty.
+    #[serde(default)]
+    relations: Option<Vec<RelationGroupResponse>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -442,15 +449,12 @@ async fn fetch_relation_card_detail(mal_id: i64, fallback_name: &str) -> Related
     }
 }
 
-async fn fetch_relations(mal_id: i64) -> Vec<RelatedEntry> {
-    let client = &*HTTP_CLIENT;
-    let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
-    let url = format!("{}/anime/{}/relations", api_base.trim_end_matches('/'), mal_id);
-    let body: RelationsResponse = match get_json_with_retry(client, &url).await {
-        Ok(body) => body,
-        Err(_) => return Vec::new(),
-    };
-
+/// Build the per-relation card list given an already-fetched relation
+/// group set. Hits `/anime/{id}` once per ANIME entry (up to
+/// `MAX_RELATION_FETCHES`) for cover/title detail; the relation-group
+/// fetch itself is now done as part of `/anime/{id}/full`, so this no
+/// longer pays for a separate `/relations` round-trip.
+async fn enrich_relations(groups: Vec<RelationGroupResponse>) -> Vec<RelatedEntry> {
     // Jikan's documented anonymous limit is ~3 req/s AND ~60 req/min.
     // The per-second budget is the easy one; the per-minute budget is
     // tight enough that a 10-entry relations graph (sequels, prequels,
@@ -468,7 +472,7 @@ async fn fetch_relations(mal_id: i64) -> Vec<RelatedEntry> {
 
     let mut out = Vec::new();
     let mut request_count: usize = 0;
-    'outer: for group in body.data {
+    'outer: for group in groups {
         let rel_type = group.relation.to_uppercase().replace(' ', "_");
         for entry in group.entry {
             if !entry.media_type.eq_ignore_ascii_case("ANIME") {
@@ -492,6 +496,7 @@ async fn fetch_relations(mal_id: i64) -> Vec<RelatedEntry> {
     }
     out
 }
+
 
 fn non_empty(value: &str, fallback: &str) -> String {
     if value.trim().is_empty() { fallback.to_string() } else { value.to_string() }
@@ -546,7 +551,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
         .await
         .map_err(|e| format!("Jikan detail failed: {}", e))?;
 
-    let anime = body.data;
+    let mut anime = body.data;
     let mut genres = Vec::new();
     if let Some(items) = anime.genres {
         genres.extend(items.into_iter().map(|g| g.name));
@@ -564,7 +569,9 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
     let end_year = parse_air_year(anime.aired.as_ref().and_then(|a| a.to.as_deref()));
     let (format, _) = normalize_enum_label(anime.anime_type.clone());
     let (status, status_display) = normalize_enum_label(anime.status.clone());
-    let relations = fetch_relations(anime.mal_id).await;
+    // Relations come pre-baked in the `/full` payload (Jikan v4 — confirmed
+    // 2026-04). Skip the redundant `/anime/{id}/relations` round-trip.
+    let relations = enrich_relations(anime.relations.take().unwrap_or_default()).await;
 
     Ok(AnimeDetail {
         id: -anime.mal_id,

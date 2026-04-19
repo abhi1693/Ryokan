@@ -1418,6 +1418,25 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // SeaDex lookup cache, persisted across restarts. The in-memory cache
+    // in `services::auto_search` already de-duplicates within a process,
+    // but cold-boot RSS sweeps were re-fetching every series's SeaDex
+    // entry on the first 24h cycle after every restart. Persisting the
+    // 24h window to SQLite means a restart picks up where the cache left
+    // off. Error-marked entries (5-min TTL) are deliberately NOT persisted
+    // — they reflect upstream health, which restart should re-probe.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS seadex_lookup_cache (
+            anilist_id INTEGER PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            cached_at INTEGER NOT NULL
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
     Ok(())
 }
 

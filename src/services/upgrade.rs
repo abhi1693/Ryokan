@@ -69,6 +69,24 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     )
     .await;
 
+    // SeaDex prewarm: collapses the typical "most series don't have a
+    // SeaDex entry" tail of the per-series loop from N sequential
+    // round-trips into ceil(N/50) batched OR-filter requests. Only
+    // runs when SeaDex is actually consulted by the scoring path
+    // (config toggle OR a SeaDex-using Custom Format installed).
+    let seadex_will_be_consulted =
+        cfg.seadex_enabled || crate::services::custom_formats::has_seadex_cf(&cfs);
+    if seadex_will_be_consulted {
+        let anilist_ids: Vec<i64> = tracked
+            .iter()
+            .filter(|r| r.allow_upgrades && !r.folder_name.is_empty() && r.anilist_id > 0)
+            .map(|r| r.anilist_id)
+            .collect();
+        if !anilist_ids.is_empty() {
+            auto_search::prewarm_seadex_negative(&state.db, &anilist_ids).await;
+        }
+    }
+
     for row in &tracked {
         // Skip series with no folder (not set up yet).
         if row.folder_name.is_empty() {

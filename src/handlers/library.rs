@@ -401,35 +401,33 @@ async fn maybe_reconcile_mal_entry(
         return None;
     }
 
-    let matched = match anilist::find_anime_by_mal_id(mal_id).await {
-        Ok(Some(entry)) => entry,
+    // Single round-trip: AniList's `Media(idMal:)` query returns the same
+    // full detail payload we'd get from `Media(id:)`, so the previous
+    // "find then fetch detail" two-step has been collapsed.
+    let detail = match anilist::find_anime_detail_by_mal_id(mal_id).await {
+        Ok(Some(d)) => d,
         _ => return None,
     };
 
-    let detail = match anilist::get_anime_detail(matched.id).await {
-        Ok(detail) => detail,
-        Err(_) => return None,
-    };
-
-    let primary_title = if !matched.title_english.is_empty() {
-        matched.title_english.clone()
+    let primary_title = if !detail.title_english.is_empty() {
+        detail.title_english.clone()
     } else {
-        matched.title_romaji.clone()
+        detail.title_romaji.clone()
     };
     if series::upsert(
         db,
         series::SeriesCore {
-            anilist_id: matched.id,
-            mal_id: matched.id_mal,
+            anilist_id: detail.id,
+            mal_id: detail.id_mal,
             title: &primary_title,
-            title_romaji: &matched.title_romaji,
-            title_english: &matched.title_english,
-            title_native: &matched.title_native,
-            cover_url: &matched.cover_url,
-            format: &matched.format,
-            status: &matched.status,
-            episodes: matched.episodes,
-            season_year: matched.season_year,
+            title_romaji: &detail.title_romaji,
+            title_english: &detail.title_english,
+            title_native: &detail.title_native,
+            cover_url: &detail.cover_url,
+            format: &detail.format,
+            status: &detail.status,
+            episodes: detail.episodes,
+            season_year: detail.season_year,
             end_year: detail.end_year,
         },
     ).await.is_err() {
@@ -440,6 +438,27 @@ async fn maybe_reconcile_mal_entry(
         Ok(Some(row)) => row,
         _ => return None,
     };
+
+    // The series row now has the positive AniList id, but the metadata
+    // cache (`series_metadata_cache`) still holds the old MAL-sourced
+    // detail with `id < 0`. The series-detail page reads the cache
+    // first and uses `detail.id < 0` to decide whether to render a
+    // MyAnimeList vs AniList external link, so without this overwrite
+    // the page keeps showing the MAL link until the cache TTL expires
+    // (METADATA_REFRESH_INTERVAL_HOURS) or a manual rebuild fires.
+    // Best-effort: a write failure here just leaves the stale cache to
+    // expire on its own — reconciliation already updated the source of
+    // truth (series.anilist_id), so the next refresh sweep will fix it.
+    if let Err(e) =
+        metadata_cache::upsert(db, refreshed.id, detail.id, detail.id_mal, &detail).await
+    {
+        tracing::warn!(
+            "reconcile: failed to refresh series_metadata_cache for series_id={}: {}",
+            refreshed.id,
+            e
+        );
+    }
+
     Some((refreshed, detail))
 }
 
@@ -516,6 +535,13 @@ async fn resolve_series_context(
                         Ok(detail) => detail,
                         Err(je) => {
                             if let Some(ref tracked) = db_series {
+                                // Try Kitsu's MAL-mapping filter first (1 exact-match
+                                // request) before falling back to the title-fuzz path
+                                // (1–4 fuzzy requests).
+                                if let Ok(Some(kitsu_detail)) = kitsu::get_anime_detail_by_mal_id(mid).await {
+                                    logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (mapping)", &tracked.title).await;
+                                    return Ok((db_series, kitsu_detail.id, kitsu_detail));
+                                }
                                 let kitsu_titles = vec![
                                     tracked.title.clone(),
                                     tracked.title_romaji.clone(),
@@ -523,7 +549,7 @@ async fn resolve_series_context(
                                     tracked.title_native.clone(),
                                 ];
                                 if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes).await {
-                                    logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
+                                    logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (titles)", &tracked.title).await;
                                     return Ok((db_series, kitsu_detail.id, kitsu_detail));
                                 }
                             }
@@ -541,6 +567,15 @@ async fn resolve_series_context(
                             ).await;
                             return Ok((db_series, cached.provider_id, cached.detail));
                         }
+                        // Prefer Kitsu's MAL-mapping filter when a MAL id is
+                        // available — single exact-match request rather than the
+                        // 1–4 fuzzy queries the title path issues.
+                        if let Some(mid) = tracked.mal_id
+                            && let Ok(Some(kitsu_detail)) = kitsu::get_anime_detail_by_mal_id(mid).await
+                        {
+                            logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (mapping)", &tracked.title).await;
+                            return Ok((db_series, kitsu_detail.id, kitsu_detail));
+                        }
                         let kitsu_titles = vec![
                             tracked.title.clone(),
                             tracked.title_romaji.clone(),
@@ -548,7 +583,7 @@ async fn resolve_series_context(
                             tracked.title_native.clone(),
                         ];
                         if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes).await {
-                            logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback", &tracked.title).await;
+                            logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (titles)", &tracked.title).await;
                             return Ok((db_series, kitsu_detail.id, kitsu_detail));
                         }
                     }
@@ -2549,20 +2584,21 @@ async fn auto_expand_library_from_pack_with_files(
     // then graft its OWN relations onto the parent so
     // `detect_sibling_entries_in_pack` sees a broader candidate
     // pool. Fetches are capped by
-    // `auto_search::TRANSITIVE_WALK_MAX_FETCHES` and every call
-    // goes through the AL detail cache so repeat grabs within the
-    // TTL are free. Failures are soft — any neighbor we can't fetch
-    // is silently skipped and detection falls back to the parent's
-    // direct relations. Fetches are dispatched concurrently via a
-    // JoinSet so N neighbors take max(fetch_time), not sum — every
-    // hop previously blocked the grab path end-to-end.
-    let mut neighbor_details: std::collections::HashMap<i64, anilist::AnimeDetail> =
+    // `auto_search::TRANSITIVE_WALK_MAX_FETCHES`. Failures are soft
+    // — any neighbor we can't fetch is silently skipped and detection
+    // falls back to the parent's direct relations.
+    //
+    // Single batched `Page(media(id_in:[]))` request via
+    // `anilist::get_anime_details_batch` replaces the previous
+    // per-id JoinSet that fan-out N concurrent single-id queries.
+    // The single throttle gate had been serializing those concurrent
+    // requests anyway, so the JoinSet was paying coordination cost
+    // for no parallelism — one batched call does it in one round-trip.
+    let mut walk_ids: Vec<i64> = Vec::new();
+    let mut walk_id_to_type: std::collections::HashMap<i64, String> =
         std::collections::HashMap::new();
-    let mut walk_set: tokio::task::JoinSet<(i64, String, Result<anilist::AnimeDetail, String>)> =
-        tokio::task::JoinSet::new();
-    let mut dispatched = 0_usize;
     for rel in &parent_detail.relations {
-        if dispatched >= auto_search::TRANSITIVE_WALK_MAX_FETCHES {
+        if walk_ids.len() >= auto_search::TRANSITIVE_WALK_MAX_FETCHES {
             break;
         }
         if !auto_search::is_transitive_walk_source(&rel.relation_type) {
@@ -2574,35 +2610,38 @@ async fn auto_expand_library_from_pack_with_files(
         if rel.id <= 0 {
             continue;
         }
-        let rel_id = rel.id;
-        let rel_type = rel.relation_type.clone();
-        walk_set.spawn(async move {
-            let res = anilist::get_anime_detail(rel_id)
-                .await
-                .map_err(|e| e.to_string());
-            (rel_id, rel_type, res)
-        });
-        dispatched += 1;
+        walk_ids.push(rel.id);
+        walk_id_to_type.insert(rel.id, rel.relation_type.clone());
     }
-    while let Some(joined) = walk_set.join_next().await {
-        match joined {
-            Ok((rel_id, _rel_type, Ok(detail))) => {
-                neighbor_details.insert(rel_id, detail);
-            }
-            Ok((rel_id, rel_type, Err(e))) => {
+    let neighbor_details: std::collections::HashMap<i64, anilist::AnimeDetail> = if walk_ids
+        .is_empty()
+    {
+        std::collections::HashMap::new()
+    } else {
+        match anilist::get_anime_details_batch(&walk_ids).await {
+            Ok(map) => map,
+            Err(e) => {
                 tracing::debug!(
-                    "auto-expand: transitive neighbor fetch failed rel_id={} rel_type={} err={}",
-                    rel_id,
-                    rel_type,
+                    "auto-expand: transitive neighbor batch fetch failed err={}",
                     e
                 );
+                std::collections::HashMap::new()
             }
-            Err(join_err) => {
-                tracing::debug!(
-                    "auto-expand: transitive neighbor task panicked: {}",
-                    join_err
-                );
-            }
+        }
+    };
+    // Log any ids the batch didn't return — typically AniList simply
+    // has no Media for that id (deleted entry, NSFW filter, etc.).
+    for rel_id in &walk_ids {
+        if !neighbor_details.contains_key(rel_id) {
+            let rel_type = walk_id_to_type
+                .get(rel_id)
+                .cloned()
+                .unwrap_or_default();
+            tracing::debug!(
+                "auto-expand: transitive neighbor missing from batch rel_id={} rel_type={}",
+                rel_id,
+                rel_type
+            );
         }
     }
     let expanded_parent =
