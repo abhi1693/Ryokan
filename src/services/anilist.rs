@@ -906,6 +906,26 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
         .ok_or_else(|| "Anime not found".to_string())
 }
 
+/// Build the GraphQL `variables` map for the shared `Media(id:, idMal:)`
+/// query. AniList's resolver treats an explicit `id: null` (or
+/// `idMal: null`) as "filter where the field equals null" and returns
+/// 404, so the unused arm of [`MediaSelector`] must be **omitted** from
+/// the variables map (sent as undefined), not sent as JSON null.
+/// Verified live 2026-04-19: `{id: 1, idMal: null}` → "Not Found";
+/// `{id: 1}` → Cowboy Bebop. Tested in `media_selector_omits_unused_var`.
+fn build_media_selector_variables(selector: MediaSelector) -> serde_json::Map<String, serde_json::Value> {
+    let mut variables = serde_json::Map::new();
+    match selector {
+        MediaSelector::Id(v) => {
+            variables.insert("id".to_string(), serde_json::json!(v));
+        }
+        MediaSelector::IdMal(v) => {
+            variables.insert("idMal".to_string(), serde_json::json!(v));
+        }
+    }
+    variables
+}
+
 async fn fetch_media_detail(selector: MediaSelector) -> Result<Option<AnimeDetail>, String> {
     // Skip the round trip entirely when a recent 429/403/5xx has tripped
     // the global cooldown. Without this, a metadata-refresh sweep that
@@ -922,10 +942,7 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Option<AnimeDetai
         // from a different provider.
         return Err("AniList rate-limit cooldown active; skipping AniList request".to_string());
     }
-    let (id_var, id_mal_var) = match selector {
-        MediaSelector::Id(v) => (serde_json::json!(v), serde_json::Value::Null),
-        MediaSelector::IdMal(v) => (serde_json::Value::Null, serde_json::json!(v)),
-    };
+    let variables = build_media_selector_variables(selector);
     let gql = serde_json::json!({
         "query": r#"
             query ($id: Int, $idMal: Int) {
@@ -975,7 +992,7 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Option<AnimeDetai
                 }
             }
         "#,
-        "variables": { "id": id_var, "idMal": id_mal_var }
+        "variables": variables
     });
 
     // Pace the request based on the latest X-RateLimit-Remaining /
@@ -1385,6 +1402,27 @@ fn extract_graphql_error(body: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_selector_omits_unused_var() {
+        // Regression: AniList rejects `Media(id: null, idMal: 1)` as
+        // "Not Found" because the resolver treats explicit JSON null as
+        // "filter where id equals null." The variables map must OMIT
+        // the unused arm, not send it as null. Verified live 2026-04-19.
+        let by_id = build_media_selector_variables(MediaSelector::Id(42));
+        assert_eq!(by_id.get("id").and_then(|v| v.as_i64()), Some(42));
+        assert!(
+            !by_id.contains_key("idMal"),
+            "Id selector must NOT include idMal var (even as null) — sending null trips an AniList 404"
+        );
+
+        let by_mal = build_media_selector_variables(MediaSelector::IdMal(1));
+        assert_eq!(by_mal.get("idMal").and_then(|v| v.as_i64()), Some(1));
+        assert!(
+            !by_mal.contains_key("id"),
+            "IdMal selector must NOT include id var (even as null) — sending null trips an AniList 404"
+        );
+    }
 
     #[test]
     fn normalize_search_key_folds_whitespace_and_case() {
