@@ -262,8 +262,11 @@ struct FullAnime {
     /// `/anime/{id}/full` already returns the same relation graph that
     /// `/anime/{id}/relations` would — pulling it out of the full payload
     /// avoids a second round-trip per detail fetch. Falls through empty
-    /// if Jikan ever changes the contract; we only re-issue the dedicated
-    /// `/relations` call when this is `None` or empty.
+    /// (no implicit fallback to the dedicated endpoint) if Jikan ever
+    /// changes the contract; the relations panel for that fetch will
+    /// just be empty until the next refresh sweep. The dedicated
+    /// `/relations` helper still exists (used by `fetch_sequel_chain_ids`)
+    /// if a future caller needs an explicit fallback.
     #[serde(default)]
     relations: Option<Vec<RelationGroupResponse>>,
 }

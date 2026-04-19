@@ -843,6 +843,22 @@ pub async fn get_anime_detail(id: i64) -> Result<AnimeDetail, String> {
     get_anime_detail_with_options(id, None, false).await
 }
 
+/// Read-only probe of the in-process detail cache. Returns the entry
+/// only if it's present AND still fresh (within `DETAIL_CACHE_TTL_SECS`).
+/// Used by callers that want to recover partial results from a batch
+/// fetch's error path (e.g. transitive relation walks where chunk 1
+/// succeeded and seeded the cache before chunk 2 hit a 429).
+pub async fn cached_anime_detail(id: i64) -> Option<AnimeDetail> {
+    let cache = DETAIL_CACHE.read().await;
+    cache.get(&id).and_then(|entry| {
+        if entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS {
+            Some(entry.detail.clone())
+        } else {
+            None
+        }
+    })
+}
+
 pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, force_mal_fallback: bool) -> Result<AnimeDetail, String> {
     if id < 0 {
         return jikan::get_anime_detail_cached(-id).await;
@@ -1190,8 +1206,28 @@ fn parse_media_node(m: &serde_json::Value) -> AnimeDetail {
 /// library.rs) already needed the full payload anyway; AniList accepts
 /// `idMal` on the same `Media` query that returns full detail, so the
 /// extra "find then fetch" round-trip was wasted.
+///
+/// Populates `DETAIL_CACHE` keyed by the resolved AniList id on success
+/// so that downstream `get_anime_detail(detail.id)` calls in the same
+/// TTL window (Sonarr/Radarr fan-outs, metadata_sync BFS, relation
+/// walks) see a cache hit. The pre-PR two-step had this side-effect
+/// for free because the second leg went through `get_anime_detail`;
+/// the new one-shot helper has to do it explicitly.
 pub async fn find_anime_detail_by_mal_id(mal_id: i64) -> Result<Option<AnimeDetail>, String> {
-    fetch_media_detail(MediaSelector::IdMal(mal_id)).await
+    let result = fetch_media_detail(MediaSelector::IdMal(mal_id)).await?;
+    if let Some(detail) = &result
+        && detail.id > 0
+    {
+        let mut cache = DETAIL_CACHE.write().await;
+        cache.insert(
+            detail.id,
+            CacheEntry {
+                detail: detail.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+    Ok(result)
 }
 
 /// Maximum AniList ids to ask for in a single `Page(media(id_in:[]))`
@@ -1219,9 +1255,13 @@ const ANILIST_BATCH_SIZE: usize = 25;
 /// - Successful responses populate `DETAIL_CACHE` so subsequent
 ///   single-id `get_anime_detail` calls for the same ids are cache
 ///   hits.
-/// - On a chunk-level error, processing aborts and the partial map
-///   collected so far is returned alongside the error string. The
-///   global cooldown will already be set (via
+/// - On a chunk-level error, processing aborts and `Err(msg)` is
+///   returned. The accumulated map is dropped, but `DETAIL_CACHE`
+///   already received the per-id writes from any chunks that
+///   completed before the failure — callers that want to use those
+///   partial results on `Err` must probe `DETAIL_CACHE` per-id
+///   themselves (the `Result` shape can only carry one variant).
+///   The global cooldown will already be set (via
 ///   `record_rate_limit_headers` / 429 handling) so retrying the
 ///   remaining chunks would just bounce immediately anyway.
 /// - Negative-result ids (AL had no Media for them) simply don't
@@ -1376,7 +1416,11 @@ pub async fn get_anime_details_batch(
                 }
             }
             // Light eviction — same shape as the single-id path so a
-            // big batch can't unbounded-grow the cache.
+            // big batch can't unbounded-grow the cache. Drop expired
+            // entries first; if still over cap (typical when many
+            // batches in a row insert fresh ids), drop the oldest
+            // entry. Without this oldest-drop fallback, the cache
+            // grows monotonically until the TTL window finally ticks.
             if cache.len() > DETAIL_CACHE_MAX_ENTRIES {
                 let expired: Vec<i64> = cache
                     .iter()
@@ -1387,6 +1431,12 @@ pub async fn get_anime_details_batch(
                     .collect();
                 for k in &expired {
                     cache.remove(k);
+                }
+                if cache.len() > DETAIL_CACHE_MAX_ENTRIES
+                    && let Some((&oldest_key, _)) =
+                        cache.iter().min_by_key(|(_, e)| e.fetched_at)
+                {
+                    cache.remove(&oldest_key);
                 }
             }
         }

@@ -1880,9 +1880,17 @@ fn seadex_cache_put_with_ttl(anilist_id: i64, payload: SeaDexPayload, ttl: Durat
             for k in &expired {
                 cache.remove(k);
             }
+            // Exclude the entry we just inserted from the soonest-expires
+            // candidate set. Without this, an error entry (5-min TTL)
+            // inserted into a cache full of fresh success entries (24h
+            // TTL) immediately self-evicts because it's the row with the
+            // earliest `expires_at` — defeating the negative-cache
+            // coalescing the short TTL was added to provide.
             if cache.len() > SEADEX_CACHE_MAX_ENTRIES
-                && let Some((&oldest, _)) =
-                    cache.iter().min_by_key(|(_, (expires_at, _))| *expires_at)
+                && let Some((&oldest, _)) = cache
+                    .iter()
+                    .filter(|(k, _)| **k != anilist_id)
+                    .min_by_key(|(_, (expires_at, _))| *expires_at)
             {
                 cache.remove(&oldest);
             }

@@ -2625,7 +2625,25 @@ async fn auto_expand_library_from_pack_with_files(
                     "auto-expand: transitive neighbor batch fetch failed err={}",
                     e
                 );
-                std::collections::HashMap::new()
+                // Recover partial results from DETAIL_CACHE: chunks that
+                // completed before the failure already wrote their entries
+                // (the batch helper aborts on Err but the writes survive),
+                // and the `Result` shape can't return them directly.
+                // Without this probe a 429 on chunk 2 would silently
+                // discard chunk 1's 25 successful sibling fetches.
+                let mut partial = std::collections::HashMap::new();
+                for rel_id in &walk_ids {
+                    if let Some(detail) = anilist::cached_anime_detail(*rel_id).await {
+                        partial.insert(*rel_id, detail);
+                    }
+                }
+                if !partial.is_empty() {
+                    tracing::debug!(
+                        "auto-expand: recovered {} partial neighbor(s) from DETAIL_CACHE",
+                        partial.len()
+                    );
+                }
+                partial
             }
         }
     };

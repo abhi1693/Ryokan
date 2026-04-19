@@ -439,6 +439,24 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
     // the entire transfer.
     if status == reqwest::StatusCode::NOT_MODIFIED {
         tracing::info!("Anibridge mappings unchanged (HTTP 304); reusing disk cache");
+        // RFC 7232 §4.1 permits a 304 to carry refreshed validators (e.g.
+        // Azure may rotate an ETag without changing bytes). Capture them
+        // and persist alongside the existing body so the next conditional
+        // GET sends the current ETag — otherwise our stale `If-None-Match`
+        // eventually misses, and we pay a full 8.5 MB body transfer until
+        // the next 200 re-syncs the meta.
+        let refreshed_meta = DiskCacheMeta {
+            etag: resp
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+            last_modified: resp
+                .headers()
+                .get(reqwest::header::LAST_MODIFIED)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+        };
         let bytes = tokio::task::spawn_blocking(read_disk_cache_unconditional)
             .await
             .ok()
@@ -450,6 +468,13 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
             .unwrap_or_else(|e| Err(format!("touch join failed: {}", e)))
         {
             tracing::warn!("Failed to bump anibridge cache mtime after 304: {}", e);
+        }
+        if (refreshed_meta.etag.is_some() || refreshed_meta.last_modified.is_some())
+            && let Err(e) =
+                tokio::task::spawn_blocking(move || write_disk_cache_meta(&refreshed_meta)).await
+                    .unwrap_or_else(|e| Err(format!("disk meta write join failed: {}", e)))
+        {
+            tracing::warn!("Failed to refresh anibridge cache meta after 304: {}", e);
         }
         return parse_bytes(&bytes);
     }
@@ -487,20 +512,37 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
     // parsed mappings in memory and can serve this session from
     // them. The user will see a re-download on next restart but
     // nothing else breaks.
+    //
+    // The meta sidecar MUST only be persisted after the bytes write
+    // succeeds. If we wrote fresh meta over a stale body, the next
+    // refresh would attach the new ETag, get a 304 from upstream,
+    // and serve the stale body indefinitely (until upstream rotated
+    // the validator). Coupling the writes here keeps the disk pair
+    // mutually consistent.
     let bytes_vec = bytes.to_vec();
-    if let Err(e) = tokio::task::spawn_blocking(move || write_disk_cache(&bytes_vec)).await
-        .unwrap_or_else(|e| Err(format!("disk cache write join failed: {}", e)))
-    {
-        tracing::warn!("Failed to persist anibridge mappings to disk: {}", e);
-    }
-    // Persist sidecar meta only when we got at least one validator from
-    // upstream — without one, the next conditional GET would just be a
-    // regular GET anyway.
-    if (new_meta.etag.is_some() || new_meta.last_modified.is_some())
-        && let Err(e) = tokio::task::spawn_blocking(move || write_disk_cache_meta(&new_meta)).await
-            .unwrap_or_else(|e| Err(format!("disk meta write join failed: {}", e)))
-    {
-        tracing::warn!("Failed to persist anibridge cache meta to disk: {}", e);
+    let bytes_write_result = tokio::task::spawn_blocking(move || write_disk_cache(&bytes_vec))
+        .await
+        .unwrap_or_else(|e| Err(format!("disk cache write join failed: {}", e)));
+    match bytes_write_result {
+        Ok(()) => {
+            // Persist sidecar meta only when we got at least one validator
+            // from upstream — without one, the next conditional GET would
+            // just be a regular GET anyway.
+            if (new_meta.etag.is_some() || new_meta.last_modified.is_some())
+                && let Err(e) =
+                    tokio::task::spawn_blocking(move || write_disk_cache_meta(&new_meta)).await
+                        .unwrap_or_else(|e| Err(format!("disk meta write join failed: {}", e)))
+            {
+                tracing::warn!("Failed to persist anibridge cache meta to disk: {}", e);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to persist anibridge mappings to disk: {}", e);
+            // Don't write meta on a failed body write — that would
+            // leave {old bytes, new validators} on disk, which the
+            // next conditional GET would resolve to 304 and serve
+            // the stale bytes as if fresh.
+        }
     }
 
     Ok(cache)
