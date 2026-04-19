@@ -60,6 +60,62 @@ fn write_disk_cache(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Sidecar metadata for the on-disk mappings cache. Stores the upstream
+/// `ETag` / `Last-Modified` so the next refresh can issue a conditional
+/// GET (`If-None-Match` / `If-Modified-Since`) and skip the 8.5 MB
+/// download entirely on the ~50% of days the upstream hasn't changed.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct DiskCacheMeta {
+    #[serde(default)]
+    etag: Option<String>,
+    #[serde(default)]
+    last_modified: Option<String>,
+}
+
+fn meta_file_path() -> PathBuf {
+    cache_file_path().with_extension("meta.json")
+}
+
+fn read_disk_cache_meta() -> Option<DiskCacheMeta> {
+    let bytes = std::fs::read(meta_file_path()).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_disk_cache_meta(meta: &DiskCacheMeta) -> Result<(), String> {
+    let path = meta_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create anibridge meta dir failed: {}", e))?;
+    }
+    let json = serde_json::to_vec(meta)
+        .map_err(|e| format!("serialize anibridge meta failed: {}", e))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &json)
+        .map_err(|e| format!("write anibridge meta tmp failed: {}", e))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("rename anibridge meta tmp failed: {}", e))?;
+    Ok(())
+}
+
+/// Reset the on-disk mappings file's mtime to "now" so subsequent
+/// `read_fresh_disk_cache` calls treat it as fresh again. Called after
+/// a 304 response — the upstream confirms our copy is current, so the
+/// freshness window restarts even though we didn't rewrite the file.
+fn touch_disk_cache() -> Result<(), String> {
+    let f = std::fs::File::open(cache_file_path())
+        .map_err(|e| format!("open anibridge cache for touch failed: {}", e))?;
+    f.set_modified(SystemTime::now())
+        .map_err(|e| format!("set_modified anibridge cache failed: {}", e))?;
+    Ok(())
+}
+
+/// Read the on-disk mappings without freshness checking. Used on the
+/// 304 path where the upstream has confirmed our cached copy is the
+/// current version regardless of mtime.
+fn read_disk_cache_unconditional() -> Option<Vec<u8>> {
+    std::fs::read(cache_file_path()).ok()
+}
+
 /// Cached mapping data: TMDB show ID → list of (anilist_id, mal_id) pairs.
 /// A single TMDB show may map to multiple AniList entries (e.g. multi-season).
 ///
@@ -101,9 +157,12 @@ struct MappingCache {
 ///      for the next startup
 ///
 /// The disk path is what makes `cargo run` fast on subsequent
-/// launches — the GitHub download is ~20MB gzipped and can take
-/// several seconds, and it's wasteful to pay that on every restart
-/// when the data almost never changes day-to-day.
+/// launches — the GitHub download is ~8.5 MB and can take several
+/// seconds, and it's wasteful to pay that on every restart when the
+/// data almost never changes day-to-day. The conditional-GET path
+/// (ETag / Last-Modified) inside `download_parse_and_persist` further
+/// short-circuits to a 304 response on the days the upstream really
+/// is unchanged.
 pub async fn ensure_loaded() -> bool {
     // Fast path: cache exists and is fresh.
     {
@@ -335,23 +394,84 @@ fn parse_bytes(bytes: &[u8]) -> Result<MappingCache, String> {
 }
 
 async fn download_parse_and_persist() -> Result<MappingCache, String> {
-    tracing::info!("Downloading anibridge mappings...");
+    tracing::info!("Refreshing anibridge mappings...");
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    let resp = client
+    // Only attach conditional headers when both the meta and the cached
+    // bytes are present on disk — sending If-None-Match without having
+    // the bytes to fall back to means a 304 is unrecoverable.
+    let stored_meta = tokio::task::spawn_blocking(read_disk_cache_meta)
+        .await
+        .ok()
+        .flatten();
+    let cache_file_present = tokio::task::spawn_blocking(|| cache_file_path().exists())
+        .await
+        .unwrap_or(false);
+    let conditional_meta = if cache_file_present { stored_meta } else { None };
+
+    let mut req = client
         .get(MAPPINGS_URL)
-        .header("User-Agent", "Ryokan/0.1")
+        .header("User-Agent", "Ryokan/0.1");
+    if let Some(meta) = &conditional_meta {
+        if let Some(etag) = &meta.etag {
+            req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        if let Some(lm) = &meta.last_modified {
+            req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
+        }
+    }
+
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("Failed to download mappings: {}", e))?;
 
-    if !resp.status().is_success() {
-        return Err(format!("Mappings download failed: HTTP {}", resp.status()));
+    let status = resp.status();
+
+    // 304 Not Modified — upstream confirms our cached bytes are current.
+    // Read them off disk, bump the freshness mtime, and skip the 8.5 MB
+    // body. The Azure blob fronting this asset emits ETag + Last-Modified
+    // reliably; on the ~50% of days the upstream is unchanged this saves
+    // the entire transfer.
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        tracing::info!("Anibridge mappings unchanged (HTTP 304); reusing disk cache");
+        let bytes = tokio::task::spawn_blocking(read_disk_cache_unconditional)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                "Anibridge upstream returned 304 but disk cache is missing".to_string()
+            })?;
+        if let Err(e) = tokio::task::spawn_blocking(touch_disk_cache).await
+            .unwrap_or_else(|e| Err(format!("touch join failed: {}", e)))
+        {
+            tracing::warn!("Failed to bump anibridge cache mtime after 304: {}", e);
+        }
+        return parse_bytes(&bytes);
     }
+
+    if !status.is_success() {
+        return Err(format!("Mappings download failed: HTTP {}", status));
+    }
+
+    // Capture caching headers before consuming the body so we can
+    // persist them alongside the bytes for the next conditional GET.
+    let new_meta = DiskCacheMeta {
+        etag: resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string),
+        last_modified: resp
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string),
+    };
 
     let bytes = resp
         .bytes()
@@ -372,6 +492,15 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
         .unwrap_or_else(|e| Err(format!("disk cache write join failed: {}", e)))
     {
         tracing::warn!("Failed to persist anibridge mappings to disk: {}", e);
+    }
+    // Persist sidecar meta only when we got at least one validator from
+    // upstream — without one, the next conditional GET would just be a
+    // regular GET anyway.
+    if (new_meta.etag.is_some() || new_meta.last_modified.is_some())
+        && let Err(e) = tokio::task::spawn_blocking(move || write_disk_cache_meta(&new_meta)).await
+            .unwrap_or_else(|e| Err(format!("disk meta write join failed: {}", e)))
+    {
+        tracing::warn!("Failed to persist anibridge cache meta to disk: {}", e);
     }
 
     Ok(cache)

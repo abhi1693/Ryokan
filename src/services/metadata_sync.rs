@@ -96,7 +96,29 @@ async fn fetch_live_detail_for_ids(
                     target: "ryokan::metadata_sync",
                     mal_id = mid,
                     error = %err,
-                    "Jikan/MAL detail fetch failed; falling back to Kitsu by title"
+                    "Jikan/MAL detail fetch failed; falling back to Kitsu"
+                );
+            }
+        }
+
+        // Kitsu can resolve a MAL id directly via its mappings filter
+        // in one round-trip — try that before the multi-query title-fuzz
+        // path, which costs 1–4 requests and risks a sequel false match.
+        match kitsu::get_anime_detail_by_mal_id(mid).await {
+            Ok(Some(detail)) => return Ok(detail),
+            Ok(None) => {
+                tracing::debug!(
+                    target: "ryokan::metadata_sync",
+                    mal_id = mid,
+                    "Kitsu has no mapping for this MAL id; falling back to title fuzz"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "ryokan::metadata_sync",
+                    mal_id = mid,
+                    error = %err,
+                    "Kitsu mapping lookup failed; falling back to title fuzz"
                 );
             }
         }
@@ -321,6 +343,33 @@ async fn hydrate_relation_tree(
     let mut total_cooldown_wait = std::time::Duration::ZERO;
 
     loop {
+        // Pre-batch this round's pending AL ids into a single
+        // `Page(media(id_in:[]))` call so the per-id fetch loop below
+        // becomes a sequence of DETAIL_CACHE hits instead of N
+        // sequential GraphQL round-trips. Skipped in MAL mode (Jikan
+        // has no batch endpoint) and when AL is in cooldown (the
+        // batch helper would short-circuit anyway, so don't even ask).
+        if !mal_mode && !anilist::anilist_cooldown_active() {
+            let pending_ids: Vec<i64> = queue
+                .iter()
+                .filter(|(id, _)| *id > 0 && *id != root_provider_id)
+                .map(|(id, _)| *id)
+                .collect();
+            if !pending_ids.is_empty() {
+                if let Err(e) = anilist::get_anime_details_batch(&pending_ids).await {
+                    // Best-effort prefetch: a failure here just means
+                    // the per-id loop below pays the historical cost.
+                    // Cooldown / 429 has been recorded by the batch
+                    // helper already; the per-id loop will defer too.
+                    tracing::debug!(
+                        target: "ryokan::metadata_sync",
+                        error = %e,
+                        "AniList batch prefetch failed; falling back to per-id"
+                    );
+                }
+            }
+        }
+
         while let Some((provider_id, mal_id)) = queue.pop_front() {
             if processed >= MAX_RELATION_TREE_NODES {
                 break;

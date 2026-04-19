@@ -603,6 +603,30 @@ pub async fn add_series(
             ).await;
         }
 
+        // Pre-batch every still-missing AniList id into one
+        // `Page(media(id_in:[]))` call so the per-entry loop below
+        // hits DETAIL_CACHE instead of issuing N sequential GraphQL
+        // queries. A 7-entry fan-out becomes 1 round-trip + 7 cache
+        // hits instead of 7 throttled-serial round-trips.
+        let prefetch_ids: Vec<i64> = anime_ids
+            .iter()
+            .zip(existing_siblings.iter())
+            .filter_map(|(ids, existing)| {
+                if existing.is_some() {
+                    None
+                } else {
+                    ids.anilist_id.filter(|id| *id > 0)
+                }
+            })
+            .collect();
+        if !prefetch_ids.is_empty() {
+            if let Err(e) = anilist::get_anime_details_batch(&prefetch_ids).await {
+                tracing::debug!(
+                    "Seerr add: AL batch prefetch failed (per-id loop will retry): {e}"
+                );
+            }
+        }
+
         for (ids, existing) in anime_ids.iter().zip(existing_siblings.into_iter()) {
             // Skip entries that already exist — regrab-within-fresh case.
             // A partial fan-out (user added JJK S1 manually last month, now
