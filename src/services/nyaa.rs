@@ -1,5 +1,5 @@
 use scraper::{Html, Selector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -87,7 +87,7 @@ static SINGLE_EP_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
     .expect("SINGLE_EP_RE parses")
 });
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SearchResult {
     pub title: String,
     pub link: String,
@@ -126,6 +126,7 @@ pub struct SearchResult {
     pub info_hash: String,
 }
 
+#[derive(Clone)]
 pub struct SearchOptions {
     pub query: String,
     pub category: String,
