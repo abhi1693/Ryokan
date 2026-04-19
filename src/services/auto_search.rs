@@ -2017,7 +2017,15 @@ pub async fn prewarm_seadex_negative(db: &SqlitePool, anilist_ids: &[i64]) {
     let to_query: Vec<i64> = anilist_ids
         .iter()
         .copied()
-        .filter(|id| *id > 0 && seadex_cache_get(*id).is_none())
+        .filter(|id| {
+            *id > 0
+                && seadex_cache_get(*id).is_none()
+                // Don't prewarm an id that's already being fetched by another
+                // concurrent path (RSS sweep, manual button, anibridge request).
+                // The leader's `seadex_cache_put` will populate the cache for us;
+                // doubling the request would defeat the in-flight coalescing.
+                && !seadex_inflight_contains(*id)
+        })
         .collect::<HashSet<i64>>()
         .into_iter()
         .collect();
@@ -2046,8 +2054,18 @@ pub async fn prewarm_seadex_negative(db: &SqlitePool, anilist_ids: &[i64]) {
     }
     tracing::info!(
         "seadex: prewarm cached {cached} negative entries from {} batched lookup(s)",
-        to_query.len().div_ceil(50)
+        to_query.len().div_ceil(seadex::SEADEX_BATCH_SIZE)
     );
+}
+
+/// Cheap non-blocking check for "is this anilist_id currently being
+/// fetched by some other coalesced path?" Returns false on lock
+/// poisoning so prewarm errs on the side of doing the work.
+fn seadex_inflight_contains(anilist_id: i64) -> bool {
+    SEADEX_INFLIGHT
+        .lock()
+        .map(|m| m.contains_key(&anilist_id))
+        .unwrap_or(false)
 }
 
 /// Drop guard — removes the in-flight registry entry and wakes any
@@ -2143,7 +2161,25 @@ async fn fetch_seadex_payload(
         match role {
             Role::Lead(g) => break Some(g),
             Role::Wait(notify) => {
-                notify.notified().await;
+                // Subscribe BEFORE re-checking the cache. `Notify::notify_waiters`
+                // doesn't leave a permit for future `.notified()` calls — if the
+                // leader fires the notify between our unlock above and our
+                // first poll, we'd hang forever waiting for a notification
+                // that already happened. The recipe from tokio's docs is
+                // pin → enable → re-check → await: enabling registers our
+                // waiter atomically against the next `notify_waiters`, so
+                // any notification fired after `enable()` (including ones
+                // that race with our cache re-check) wakes us correctly.
+                let waiter = notify.notified();
+                tokio::pin!(waiter);
+                waiter.as_mut().enable();
+                if let Some(cached) = seadex_cache_get(anilist_id) {
+                    tracing::debug!(
+                        "seadex: coalesced wait hit for anilist_id={anilist_id}"
+                    );
+                    return cached;
+                }
+                waiter.await;
                 if let Some(cached) = seadex_cache_get(anilist_id) {
                     tracing::debug!(
                         "seadex: coalesced wait hit for anilist_id={anilist_id}"
@@ -6275,5 +6311,26 @@ mod tests {
         assert_eq!(count.0, 0);
         // But the in-memory cache should hold the (default) negative entry.
         assert!(seadex_cache_get(anilist_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn seadex_inflight_contains_tracks_registry() {
+        // Locks the contract that `prewarm_seadex_negative` relies on
+        // when filtering ids: an id with a registered Notify reads as
+        // "inflight" and an unregistered one doesn't. Without this
+        // gate the prewarm could redundantly issue a request that's
+        // already mid-flight on another path.
+        let anilist_id = 990_000_004;
+        // Sanity: not present at start.
+        assert!(!seadex_inflight_contains(anilist_id));
+        // Register a fake in-flight entry, then verify the helper sees it.
+        {
+            let mut map = SEADEX_INFLIGHT.lock().unwrap();
+            map.insert(anilist_id, Arc::new(Notify::new()));
+        }
+        assert!(seadex_inflight_contains(anilist_id));
+        // Clean up so other tests aren't affected.
+        SEADEX_INFLIGHT.lock().unwrap().remove(&anilist_id);
+        assert!(!seadex_inflight_contains(anilist_id));
     }
 }

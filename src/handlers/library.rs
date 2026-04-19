@@ -570,11 +570,11 @@ async fn resolve_series_context(
                         // Prefer Kitsu's MAL-mapping filter when a MAL id is
                         // available — single exact-match request rather than the
                         // 1–4 fuzzy queries the title path issues.
-                        if let Some(mid) = tracked.mal_id {
-                            if let Ok(Some(kitsu_detail)) = kitsu::get_anime_detail_by_mal_id(mid).await {
-                                logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (mapping)", &tracked.title).await;
-                                return Ok((db_series, kitsu_detail.id, kitsu_detail));
-                            }
+                        if let Some(mid) = tracked.mal_id
+                            && let Ok(Some(kitsu_detail)) = kitsu::get_anime_detail_by_mal_id(mid).await
+                        {
+                            logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (mapping)", &tracked.title).await;
+                            return Ok((db_series, kitsu_detail.id, kitsu_detail));
                         }
                         let kitsu_titles = vec![
                             tracked.title.clone(),

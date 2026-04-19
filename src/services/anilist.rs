@@ -1253,15 +1253,19 @@ pub async fn get_anime_details_batch(
         }
 
         let gql = serde_json::json!({
-            "query": r#"
-                query ($ids: [Int]) {
-                    Page(perPage: 25) {
-                        media(id_in: $ids, type: ANIME) {
+            // Inject ANILIST_BATCH_SIZE into the query so the const and the
+            // GraphQL `perPage` literal can't drift apart silently — bumping
+            // the const used to leave the query truncating to the old value
+            // and the extra ids would just disappear from the response.
+            "query": format!(r#"
+                query ($ids: [Int]) {{
+                    Page(perPage: {batch_size}) {{
+                        media(id_in: $ids, type: ANIME) {{
                             id
                             idMal
-                            title { romaji english native }
+                            title {{ romaji english native }}
                             synonyms
-                            coverImage { large extraLarge }
+                            coverImage {{ large extraLarge }}
                             bannerImage
                             format
                             status
@@ -1269,32 +1273,32 @@ pub async fn get_anime_details_batch(
                             duration
                             season
                             seasonYear
-                            endDate { year }
+                            endDate {{ year }}
                             description(asHtml: true)
                             genres
                             averageScore
-                            nextAiringEpisode { episode airingAt }
-                            streamingEpisodes { title thumbnail url site }
-                            relations {
-                                edges {
+                            nextAiringEpisode {{ episode airingAt }}
+                            streamingEpisodes {{ title thumbnail url site }}
+                            relations {{
+                                edges {{
                                     relationType(version: 2)
-                                    node {
+                                    node {{
                                         id
                                         idMal
-                                        title { romaji english native }
+                                        title {{ romaji english native }}
                                         format
                                         status
                                         episodes
-                                        coverImage { large }
+                                        coverImage {{ large }}
                                         type
                                         seasonYear
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            "#,
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            "#, batch_size = ANILIST_BATCH_SIZE),
             "variables": { "ids": chunk }
         });
 

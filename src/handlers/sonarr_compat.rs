@@ -619,12 +619,12 @@ pub async fn add_series(
                 }
             })
             .collect();
-        if !prefetch_ids.is_empty() {
-            if let Err(e) = anilist::get_anime_details_batch(&prefetch_ids).await {
-                tracing::debug!(
-                    "Seerr add: AL batch prefetch failed (per-id loop will retry): {e}"
-                );
-            }
+        if !prefetch_ids.is_empty()
+            && let Err(e) = anilist::get_anime_details_batch(&prefetch_ids).await
+        {
+            tracing::debug!(
+                "Seerr add: AL batch prefetch failed (per-id loop will retry): {e}"
+            );
         }
 
         for (ids, existing) in anime_ids.iter().zip(existing_siblings.into_iter()) {

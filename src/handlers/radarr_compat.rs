@@ -627,12 +627,12 @@ async fn lookup_by_tmdb_id(
         .iter()
         .filter_map(|ids| ids.anilist_id.filter(|id| *id > 0))
         .collect();
-    if !prefetch_ids.is_empty() {
-        if let Err(e) = anilist::get_anime_details_batch(&prefetch_ids).await {
-            tracing::debug!(
-                "Radarr fan-out: AL batch prefetch failed (per-id loop will retry): {e}"
-            );
-        }
+    if !prefetch_ids.is_empty()
+        && let Err(e) = anilist::get_anime_details_batch(&prefetch_ids).await
+    {
+        tracing::debug!(
+            "Radarr fan-out: AL batch prefetch failed (per-id loop will retry): {e}"
+        );
     }
 
     let mut results = Vec::new();

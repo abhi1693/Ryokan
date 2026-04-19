@@ -355,18 +355,18 @@ async fn hydrate_relation_tree(
                 .filter(|(id, _)| *id > 0 && *id != root_provider_id)
                 .map(|(id, _)| *id)
                 .collect();
-            if !pending_ids.is_empty() {
-                if let Err(e) = anilist::get_anime_details_batch(&pending_ids).await {
-                    // Best-effort prefetch: a failure here just means
-                    // the per-id loop below pays the historical cost.
-                    // Cooldown / 429 has been recorded by the batch
-                    // helper already; the per-id loop will defer too.
-                    tracing::debug!(
-                        target: "ryokan::metadata_sync",
-                        error = %e,
-                        "AniList batch prefetch failed; falling back to per-id"
-                    );
-                }
+            if !pending_ids.is_empty()
+                && let Err(e) = anilist::get_anime_details_batch(&pending_ids).await
+            {
+                // Best-effort prefetch: a failure here just means
+                // the per-id loop below pays the historical cost.
+                // Cooldown / 429 has been recorded by the batch
+                // helper already; the per-id loop will defer too.
+                tracing::debug!(
+                    target: "ryokan::metadata_sync",
+                    error = %e,
+                    "AniList batch prefetch failed; falling back to per-id"
+                );
             }
         }
 
