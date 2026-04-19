@@ -438,6 +438,27 @@ async fn maybe_reconcile_mal_entry(
         Ok(Some(row)) => row,
         _ => return None,
     };
+
+    // The series row now has the positive AniList id, but the metadata
+    // cache (`series_metadata_cache`) still holds the old MAL-sourced
+    // detail with `id < 0`. The series-detail page reads the cache
+    // first and uses `detail.id < 0` to decide whether to render a
+    // MyAnimeList vs AniList external link, so without this overwrite
+    // the page keeps showing the MAL link until the cache TTL expires
+    // (METADATA_REFRESH_INTERVAL_HOURS) or a manual rebuild fires.
+    // Best-effort: a write failure here just leaves the stale cache to
+    // expire on its own — reconciliation already updated the source of
+    // truth (series.anilist_id), so the next refresh sweep will fix it.
+    if let Err(e) =
+        metadata_cache::upsert(db, refreshed.id, detail.id, detail.id_mal, &detail).await
+    {
+        tracing::warn!(
+            "reconcile: failed to refresh series_metadata_cache for series_id={}: {}",
+            refreshed.id,
+            e
+        );
+    }
+
     Some((refreshed, detail))
 }
 
