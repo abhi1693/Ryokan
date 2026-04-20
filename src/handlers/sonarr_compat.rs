@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{Request, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -20,74 +20,23 @@ use crate::AppState;
 
 // ── Authentication middleware ──────────────────────────────────────────────
 
-/// Middleware that validates the API key from the `X-Api-Key` header or
-/// `?apikey=` query parameter against the configured Sonarr API key.
-/// Returns 401 if missing/invalid or if the Sonarr compat layer is disabled.
+/// Thin wrapper over [`crate::handlers::arr_auth::check_api_key`] that pins
+/// the config-field selector to the Sonarr slots. The shared helper carries
+/// the rationale for the 503/401 split, percent-decoding, and constant-time
+/// compare.
 pub async fn require_api_key(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // 503 (with Retry-After) for transient config-load failures and
-    // for "config row missing" (fresh install, user hasn't saved
-    // settings yet). Returning 500 here would have Seerr mark the
-    // indexer broken and back off for a long window — 503 advertises
-    // "try again soon" instead. The 401 (UNAUTHORIZED) path stays
-    // for "key mismatch" so a real auth failure is still visible.
-    let cfg = match config::get_config(&state.db).await {
-        Ok(Some(c)) => c,
-        Ok(None) | Err(_) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(axum::http::header::RETRY_AFTER, "5")],
-                "Ryokan config not yet available",
-            )
-                .into_response();
-        }
-    };
-
-    if !cfg.sonarr_enabled || cfg.sonarr_api_key.is_empty() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "Sonarr API compatibility layer is disabled").into_response();
-    }
-
-    // Check X-Api-Key header first, then fall back to ?apikey= query param.
-    // Query-string values are percent-decoded — Seerr URL-encodes apikey
-    // values that contain `+`, `=`, `&`, or `%` (all legal in API keys
-    // and not restricted by the settings UI), so a raw string compare
-    // would silently reject every Seerr request whose key contained any
-    // of those characters.
-    let api_key = req
-        .headers()
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            let query_str = req.uri().query().unwrap_or("");
-            query_str.split('&').find_map(|pair| {
-                let (key, val) = pair.split_once('=')?;
-                if key == "apikey" {
-                    Some(urlencoding::decode(val).ok()?.into_owned())
-                } else {
-                    None
-                }
-            })
-        });
-
-    // Constant-time compare so the equality check itself never becomes a
-    // timing oracle. The threat is largely theoretical over the network,
-    // but it costs nothing to remove.
-    let valid = match &api_key {
-        Some(key) => bool::from(subtle::ConstantTimeEq::ct_eq(
-            key.as_bytes(),
-            cfg.sonarr_api_key.as_bytes(),
-        )),
-        None => false,
-    };
-    if valid {
-        next.run(req).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response()
-    }
+    crate::handlers::arr_auth::check_api_key(
+        state,
+        req,
+        next,
+        |cfg| (cfg.sonarr_enabled, cfg.sonarr_api_key.clone()),
+        "Sonarr",
+    )
+    .await
 }
 
 // ── Sonarr-compatible types ────────────────────────────────────────────────
