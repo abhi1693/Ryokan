@@ -369,7 +369,7 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
                 format,
                 status,
                 status_display,
-                episodes: anime.episodes,
+                episodes: anime.episodes.filter(|&n| n > 0),
                 season_year: None, // Jikan search results don't include year
                 source: "mal".to_string(),
             }
@@ -445,7 +445,7 @@ async fn fetch_relation_card_detail(mal_id: i64, fallback_name: &str) -> Related
         format,
         status,
         status_display,
-        episodes: anime.episodes,
+        episodes: anime.episodes.filter(|&n| n > 0),
         relation_type: String::new(),
         season_year: anime.year,
         media_type: "ANIME".to_string(),
@@ -592,7 +592,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
         format,
         status,
         status_display,
-        episodes: anime.episodes,
+        episodes: anime.episodes.filter(|&n| n > 0),
         duration,
         season: anime.season.unwrap_or_default().to_uppercase(),
         season_year: anime.year,
