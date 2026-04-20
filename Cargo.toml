@@ -2,7 +2,7 @@
 name = "ryokan"
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [dependencies]
 # Web framework + async runtime
