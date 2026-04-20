@@ -16,7 +16,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 
 use crate::models::log::LogCategory;
-use crate::models::{config, episode_tags, grabbed_torrents, monitoring, series};
+use crate::models::{config, episode_tags, monitoring, series};
 use crate::services::{anilist, auto_search, logger, media, progress};
 use crate::AppState;
 
@@ -1501,6 +1501,7 @@ pub async fn grab_interactive_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::grabbed_torrents;
 
     fn empty_anime_detail(id: i64, title_english: &str) -> anilist::AnimeDetail {
         anilist::AnimeDetail {
