@@ -204,6 +204,18 @@ pub async fn write_series_nfo(
         ));
     }
 
+    // <art> block points Jellyfin at the sibling image files we
+    // actually write (`poster.jpg`, `banner.jpg`). Jellyfin already
+    // auto-discovers these by filename at the series root, but the
+    // explicit reference belts-and-suspenders against scanner
+    // variations (third-party NFO plugins, non-default image
+    // discovery settings) where auto-discovery doesn't fire and the
+    // metadata manager falls back to a TVDB/TMDB scrape for the slot.
+    xml.push_str("  <art>\n");
+    xml.push_str("    <poster>poster.jpg</poster>\n");
+    xml.push_str("    <banner>banner.jpg</banner>\n");
+    xml.push_str("  </art>\n");
+
     xml.push_str("</tvshow>\n");
 
     tokio::fs::write(path, xml).await
@@ -264,6 +276,15 @@ pub async fn write_season_nfo(
         "  <uniqueid type=\"anilist\" default=\"true\">{}</uniqueid>\n",
         series.anilist_id
     ));
+
+    // Season-scoped art: `folder.jpg` next to this season.nfo is the
+    // per-season poster that Jellyfin's season-card UI reads. Without
+    // the explicit pointer, some Jellyfin scanner configurations fall
+    // back to the series-root poster for the season card, which
+    // defeats the purpose of writing a season folder image at all.
+    xml.push_str("  <art>\n");
+    xml.push_str("    <poster>folder.jpg</poster>\n");
+    xml.push_str("  </art>\n");
 
     xml.push_str("</season>\n");
 
@@ -623,5 +644,37 @@ mod tests {
             std::fs::remove_dir(parent).ok();
         }
         assert!(xml.contains("<title>原題</title>"));
+    }
+
+    // ── <art> tag emission ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn series_nfo_emits_art_block_referencing_poster_and_banner() {
+        let xml = render_series_nfo(None).await;
+        // Art block must point Jellyfin at the files we actually copy
+        // onto disk next to the NFO — poster.jpg + banner.jpg at the
+        // series root.
+        assert!(xml.contains("<art>"));
+        assert!(xml.contains("<poster>poster.jpg</poster>"));
+        assert!(xml.contains("<banner>banner.jpg</banner>"));
+        assert!(xml.contains("</art>"));
+    }
+
+    #[tokio::test]
+    async fn season_nfo_emits_art_block_with_folder_poster() {
+        let path = unique_temp_path("season_art.nfo");
+        write_season_nfo(&path, 1, &series_stub(), None, "english")
+            .await
+            .expect("write season nfo");
+        let xml = std::fs::read_to_string(&path).expect("read season nfo");
+        std::fs::remove_file(&path).ok();
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir(parent).ok();
+        }
+        // Season-level art points at `folder.jpg` because that's the
+        // file post_processing writes alongside season.nfo.
+        assert!(xml.contains("<art>"));
+        assert!(xml.contains("<poster>folder.jpg</poster>"));
+        assert!(xml.contains("</art>"));
     }
 }

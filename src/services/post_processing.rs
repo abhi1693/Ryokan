@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use crate::models::log::LogCategory;
 use crate::models::{artwork_cache, config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series};
 use crate::services::source::{self, SeriesContext};
-use crate::services::{logger, media, nfo};
+use crate::services::{artwork, logger, media, nfo};
 use crate::AppState;
 
 static POST_PROC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
@@ -142,7 +142,22 @@ async fn copy_artwork(
 ) {
     let entry = match artwork_cache::get(db, cache_key).await {
         Ok(Some(e)) => e,
-        _ => return,
+        _ => {
+            // Cache miss. If the miss was permanent we'd silently no-op
+            // forever and the user would see "AL has a banner but my
+            // library doesn't" indefinitely. Log at debug so operators
+            // have a trail — the caller is expected to run
+            // `ensure_artwork_cached` before this copy if a source URL
+            // is available.
+            tracing::debug!(
+                target: "ryokan::post_processing",
+                series_id,
+                cache_key,
+                kind_label,
+                "artwork blob missing from cache; skipping copy",
+            );
+            return;
+        }
     };
     let src = std::path::PathBuf::from(&entry.local_path);
     let dst = dest.to_path_buf();
@@ -176,6 +191,66 @@ async fn copy_artwork(
 async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
     let cache_key = format!("series-{}-cover", series_id);
     copy_artwork(db, series_id, &cache_key, "poster", dest).await;
+}
+
+/// Populate `artwork_cache` on demand when the blob isn't there yet.
+///
+/// Motivation: `metadata_sync::refresh_series_metadata_inner` is the
+/// only path that eagerly caches series artwork, and every
+/// `artwork::cache_image` error there is swallowed by `let _ = ...`.
+/// So a transient fetch failure (AL CDN hiccup, a cancelled rebuild
+/// sweep, Jikan-fallback with an empty banner field, …) leaves the
+/// blob missing indefinitely, and `copy_banner` / `copy_poster`
+/// silently skip on every subsequent import.
+///
+/// This helper closes that hole at post-processing time: if we already
+/// hold an `AnimeDetail` with a non-empty source URL and the cache
+/// doesn't carry the blob, fetch+cache it now. `cache_image` is
+/// idempotent — on the happy path (cache already hot) this is one
+/// quick SELECT and we skip the HTTP entirely.
+async fn ensure_artwork_cached(
+    db: &sqlx::SqlitePool,
+    cache_key: &str,
+    parent_id: i64,
+    image_kind: &str,
+    source_url: &str,
+) {
+    if source_url.trim().is_empty() {
+        return;
+    }
+    let already_cached = artwork_cache::get(db, cache_key)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if already_cached {
+        return;
+    }
+    // Surface the on-demand fetch at debug so operators can trace
+    // "why is post-processing reaching for artwork" when diagnosing
+    // slow imports.
+    tracing::debug!(
+        target: "ryokan::post_processing",
+        series_id = parent_id,
+        cache_key,
+        image_kind,
+        "artwork cache miss; fetching on demand",
+    );
+    if let Err(err) =
+        artwork::cache_image(db, cache_key, "series", Some(parent_id), image_kind, source_url)
+            .await
+    {
+        // Do not bubble — the copy step will see the still-missing
+        // blob and skip gracefully. Just make the failure visible
+        // instead of swallowing it.
+        logger::warn(
+            db,
+            LogCategory::PostProcess,
+            &format!("On-demand artwork fetch failed for {image_kind} on series_id={parent_id}"),
+            &format!("source_url={source_url}, error={err}"),
+        )
+        .await;
+    }
 }
 
 /// Copy the cached series banner to `dest`. Jellyfin reads `banner.jpg`
@@ -999,6 +1074,31 @@ async fn import_torrent(
             &cfg.title_language,
         )
         .await;
+
+        // Self-heal the artwork cache if the blob wasn't populated
+        // upstream. metadata_sync is supposed to cache both cover and
+        // banner, but every `cache_image` error there is swallowed —
+        // a cancelled rebuild or a transient CDN error can leave the
+        // cache empty, and without this call the copy steps below
+        // would silently no-op forever.
+        if let Some(detail) = ctx.cached_detail.as_ref() {
+            ensure_artwork_cached(
+                &state.db,
+                &format!("series-{}-cover", ctx.series.id),
+                ctx.series.id,
+                "cover",
+                &detail.cover_url,
+            )
+            .await;
+            ensure_artwork_cached(
+                &state.db,
+                &format!("series-{}-banner", ctx.series.id),
+                ctx.series.id,
+                "banner",
+                &detail.banner_url,
+            )
+            .await;
+        }
 
         // Poster/banner are re-copied on every import. Previously
         // guarded behind `!dest.exists()`, which meant refreshed

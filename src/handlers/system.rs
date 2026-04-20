@@ -309,7 +309,48 @@ pub async fn api_logs_poll(
 pub async fn api_rebuild_cached_metadata(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let (rebuilt, skipped, failed) = metadata_sync::rebuild_cached_metadata_for_all(&state.db).await;
+    // Detach the sweep from the request handler's lifetime. Previously
+    // this was a direct `.await` on the sweep future — so when the
+    // client navigated away mid-rebuild, Axum dropped the handler
+    // future and cancellation propagated into the loop, stopping the
+    // rebuild partway through with no trace other than a browser-side
+    // `NetworkError when attempting to fetch resource.` bubbling back
+    // into the logs via the client's error toast.
+    //
+    // `tokio::spawn` runs the sweep on the runtime independently of
+    // this task, so dropping the handler cancels `handle.await` but
+    // does not cancel the spawned task. If the client stays on the
+    // page, awaiting the handle still yields the full rebuild result;
+    // if they leave, the sweep completes in the background and its
+    // status lands in `scheduled_tasks` for the System → Scheduled
+    // Tasks UI to display.
+    let db = state.db.clone();
+    let handle = tokio::spawn(async move {
+        let _ = scheduled_tasks::mark_started(
+            &db,
+            "metadata_refresh",
+            "Manual metadata cache rebuild started",
+        )
+        .await;
+        let (rebuilt, skipped, failed) =
+            metadata_sync::rebuild_cached_metadata_for_all(&db).await;
+        let status = if failed > 0 { "warn" } else { "ok" };
+        let detail = format!(
+            "rebuilt={}, skipped={}, failed={}",
+            rebuilt, skipped, failed
+        );
+        let _ =
+            scheduled_tasks::mark_finished(&db, "metadata_refresh", status, &detail).await;
+        (rebuilt, skipped, failed)
+    });
+
+    let (rebuilt, skipped, failed) = handle.await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("rebuild task failed to join: {}", e),
+        )
+    })?;
+
     let message = format!(
         "Metadata cache rebuild complete. Rebuilt: {}. Skipped: {}. Failed: {}.",
         rebuilt, skipped, failed
