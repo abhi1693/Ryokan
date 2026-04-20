@@ -17,8 +17,9 @@ use crate::services::{logger, media, metadata_sync, monitoring as monitoring_ser
 use super::reconcile::reconcile_all_fallback_entries;
 use super::search::{AutoSearchQuery, auto_search_series};
 use super::{
-    AddSeriesForm, RemoveSeriesForm, SetAllowUpgradesForm, SetEpisodeMonitoringForm, SetFolderForm,
-    SetManualOverrideForm, SetMonitoringForm, SetSearchOverridesForm,
+    AddSeriesForm, ReclassifyEpisodeForm, RemoveSeriesForm, SetAllowUpgradesForm,
+    SetEpisodeMonitoringForm, SetFolderForm, SetManualOverrideForm, SetMonitoringForm,
+    SetSearchOverridesForm,
 };
 
 #[utoipa::path(
@@ -721,6 +722,208 @@ pub async fn set_manual_override(
         "source": source_str,
         "resolution": resolution_str,
         "is_remux": form.is_remux,
+    })))
+}
+
+/// Re-run the full-pipeline classifier against a single episode on demand.
+///
+/// Useful when the user has just edited `group_source_map` or changed a
+/// custom format and wants to see the new verdict without waiting up to
+/// 6 hours for the next `library_classify` sweep. Runs the same
+/// `classify_post_download` + persist path as the sweep, but scoped to
+/// one (series, episode) pair. Respects `manual_override` — returns
+/// 409 if the row is pinned so the caller can decide whether to clear
+/// the override first.
+#[utoipa::path(
+    post,
+    path = "/api/library/reclassify-episode",
+    tag = "Library",
+    summary = "Re-classify a single episode",
+    description = "Run the full-pipeline classifier against the on-disk file for one episode, bypassing the six-hour sweep cadence and the #53 attempted-at skip rule. Will not overwrite a manually-pinned row — clear the override first if you want to force a re-classify.",
+    request_body = ReclassifyEpisodeForm,
+    responses(
+        (status = 200, description = "Classification applied", body = serde_json::Value),
+        (status = 404, description = "Series or on-disk file not found"),
+        (status = 409, description = "Episode is pinned via manual_override"),
+        (status = 500, description = "Database or classifier error"),
+    ),
+)]
+pub async fn reclassify_episode(
+    State(state): State<AppState>,
+    Json(form): Json<ReclassifyEpisodeForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use crate::services::source::{self, SeriesContext};
+    use std::path::Path;
+
+    let series_row = series::get_by_id(&state.db, form.series_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("series {} not found", form.series_id),
+        ))?;
+
+    // Honor user-pinned rows — a re-classify would silently be a no-op
+    // against `manual_override = 1` thanks to the COALESCE guard in
+    // `update_classification`, and that's more confusing than a hard
+    // 409. Caller clears the override first if they want to reclassify.
+    let existing_tags = episode_tags::get_for_series(&state.db, form.series_id)
+        .await
+        .unwrap_or_default();
+    if existing_tags
+        .get(&form.episode_number)
+        .map(|t| t.manual_override)
+        .unwrap_or(false)
+    {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "episode is pinned via manual override — clear the override first to re-classify"
+                .to_string(),
+        ));
+    }
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "config not initialized".to_string(),
+        ))?;
+
+    if series_row.folder_name.is_empty() || cfg.media_root.is_empty() {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "series has no on-disk folder yet".to_string(),
+        ));
+    }
+
+    let disk_files = media::scan_series_folder(&cfg.media_root, &series_row.folder_name);
+    let file = disk_files
+        .iter()
+        .find(|f| {
+            // Same season filter as `build_episodes`'s main pass —
+            // season 1 or unseasoned only.
+            let season_ok = match f.season_number {
+                Some(s) => s == 1,
+                None => true,
+            };
+            season_ok && f.episode_number == form.episode_number
+        })
+        .ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            format!(
+                "no file on disk for episode {} — import or download it first",
+                form.episode_number
+            ),
+        ))?;
+
+    let series_root = Path::new(&cfg.media_root).join(&series_row.folder_name);
+    let file_path = series_root.join(&file.filename);
+    if !file_path.exists() {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("file disappeared before classify: {}", file_path.display()),
+        ));
+    }
+
+    // Same L1-title precedence as `scan_library_for_unclassified`:
+    // prefer the original torrent name so release tags stripped from
+    // the post-import filename still feed the filename layer, fall
+    // back to the on-disk name for externally-imported files.
+    let imported_grabs = grabbed_torrents::imported_grabs_for_series(&state.db, form.series_id)
+        .await
+        .unwrap_or_default();
+    let classify_title = imported_grabs
+        .iter()
+        .find(|(_, eps)| eps.contains(&form.episode_number))
+        .map(|(name, _)| name.clone())
+        .or_else(|| imported_grabs.first().map(|(n, _)| n.clone()))
+        .unwrap_or_else(|| file.filename.clone());
+
+    let is_batch =
+        grabbed_torrents::get_is_batch_by_name(&state.db, form.series_id, &classify_title)
+            .await
+            .unwrap_or(false);
+
+    let result = source::classify_post_download(
+        &state.db,
+        &file_path,
+        Some(&series_root),
+        &classify_title,
+        Some(SeriesContext {
+            status: &series_row.status,
+            season_year: series_row.season_year,
+            end_year: series_row.end_year,
+        }),
+        is_batch,
+    )
+    .await;
+
+    // Persist via the same branching as the post-download / scan paths:
+    // UPDATE when a row exists, UPSERT via record_grab otherwise.
+    let row_exists = existing_tags.contains_key(&form.episode_number);
+    if row_exists {
+        episode_tags::update_classification(
+            &state.db,
+            form.series_id,
+            form.episode_number,
+            &result,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        let file_size = tokio::fs::metadata(&file_path)
+            .await
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+        episode_tags::record_grab(
+            &state.db,
+            form.series_id,
+            form.episode_number,
+            &result,
+            &classify_title,
+            "",
+            file_size,
+            is_batch,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        episode_tags::stamp_classification_attempted(
+            &state.db,
+            form.series_id,
+            form.episode_number,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    let label = result.label();
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!(
+            "Manual re-classify for series {} ep {}: {}",
+            form.series_id, form.episode_number, label
+        ),
+        &format!(
+            "confidence={:.2}, needs_review={}",
+            result.confidence, result.needs_review
+        ),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "series_id": form.series_id,
+        "episode_number": form.episode_number,
+        "quality_tag": label,
+        "source": result.source.as_str(),
+        "resolution": result.resolution.as_str(),
+        "is_remux": result.is_remux,
+        "is_bdmv": result.is_bdmv,
+        "web_kind": result.web_kind.as_str(),
+        "confidence": result.confidence,
+        "needs_review": result.needs_review,
     })))
 }
 

@@ -460,7 +460,8 @@
                 <div id="override-status" class="form-hint"></div>
             </div>
         </div>
-        <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
+        <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end;flex-wrap:wrap">
+            <button class="btn btn-secondary" type="button" onclick="reclassifyEpisode(this)" title="Re-run the full-pipeline classifier against this episode's on-disk file. Useful after editing Release Groups or Custom Formats — skip the 6-hour sweep. Pinned rows are rejected; clear the override first.">Re-classify</button>
             <button class="btn btn-secondary" type="button" onclick="clearManualOverride()">Clear override</button>
             <button class="btn btn-primary" type="button" onclick="applyManualOverride()">Apply</button>
         </div>
@@ -1558,6 +1559,50 @@ function clearManualOverride() {
     })
     .then(_ => { location.reload(); })
     .catch(err => { if (status) status.textContent = err.message || 'Failed to clear override'; });
+}
+
+// Ad-hoc trigger for the per-episode full-pipeline classifier.
+// Targets the same episode the modal is currently editing. Useful
+// after the user edits Release Groups or a custom format and wants
+// to see the new verdict without waiting up to 6h for the next
+// library-classify sweep.
+function reclassifyEpisode(btn) {
+    if (overrideTargetEpisode == null) return;
+    const dbId = parseInt(SD.dbId);
+    if (!dbId) return;
+    const status = document.getElementById('override-status');
+    if (status) status.textContent = 'Re-classifying…';
+    if (btn) btn.disabled = true;
+    fetch('/api/library/reclassify-episode', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            series_id: dbId,
+            episode_number: overrideTargetEpisode,
+        })
+    })
+    .then(async r => {
+        let text = await r.text();
+        // The endpoint returns plain-text error bodies from Axum's
+        // `Err((StatusCode, String))` shape, so surface the body
+        // verbatim rather than trying to JSON-parse a 409.
+        let data = {};
+        try { data = JSON.parse(text); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || text || `Re-classify failed (HTTP ${r.status})`);
+        return data;
+    })
+    .then(data => {
+        if (status) {
+            status.textContent = `→ ${data.quality_tag || 'unknown'} (conf ${Number(data.confidence || 0).toFixed(2)}${data.needs_review ? ', needs review' : ''})`;
+        }
+        // Reload so the episode row picks up the new tag everywhere it
+        // renders (quality badge, override modal pre-selection, etc.).
+        setTimeout(() => { location.reload(); }, 600);
+    })
+    .catch(err => {
+        if (status) status.textContent = err.message || 'Re-classify failed';
+        if (btn) btn.disabled = false;
+    });
 }
 
 function setAllowUpgrades(allow) {

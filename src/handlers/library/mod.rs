@@ -243,6 +243,12 @@ pub struct SetManualOverrideForm {
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
+pub struct ReclassifyEpisodeForm {
+    pub series_id: i64,
+    pub episode_number: i32,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct MarkEpisodeFailedForm {
     history_id: i64,
     #[serde(default)]

@@ -50,6 +50,7 @@ use services::{
         handlers::library::crud::set_allow_upgrades,
         handlers::library::crud::set_search_overrides,
         handlers::library::crud::set_manual_override,
+        handlers::library::crud::reclassify_episode,
         handlers::library::crud::list_folders,
         handlers::library::search::auto_search_series,
         handlers::library::search::auto_search_episode,
@@ -123,6 +124,7 @@ use services::{
         handlers::library::SetEpisodeMonitoringForm,
         handlers::library::SetAllowUpgradesForm,
         handlers::library::SetManualOverrideForm,
+        handlers::library::ReclassifyEpisodeForm,
         handlers::library::MarkEpisodeFailedForm,
         handlers::library::episodes::EpisodeProgress,
         handlers::search::GrabForm,
@@ -469,6 +471,10 @@ async fn main() {
         .route(
             "/api/library/manual-override",
             post(handlers::library::crud::set_manual_override),
+        )
+        .route(
+            "/api/library/reclassify-episode",
+            post(handlers::library::crud::reclassify_episode),
         )
         .route(
             "/api/series/{anilist_id}/auto-search",
