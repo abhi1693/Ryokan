@@ -194,9 +194,9 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     // cross-check catches cases where one strong single-layer signal
     // (e.g. a user-seeded group mapping) would otherwise override
     // multiple corroborating sub-strong signals from other layers. If
-    // the cross-check fails, we fall through to rule 2+3+4+5 — the same
-    // path disagreeing strong
-    // signals take — so the accumulated sub-strong evidence decides.
+    // the cross-check fails, we fall through to rule 2+3+4+5 — the
+    // same path disagreeing strong signals take — so the accumulated
+    // sub-strong evidence decides.
     let strong: Vec<&SourceEvidence> = evidence
         .iter()
         .filter(|e| e.confidence >= STRONG_THRESHOLD)

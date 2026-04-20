@@ -72,19 +72,25 @@ static SEASON_MARKER_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
     regex_lite::Regex::new(r"(?i)\b(s\d{1,2}|season\s*\d+)\b").expect("SEASON_MARKER_RE parses")
 });
 
-/// Bare Roman-numeral season marker: `II`, `III`, `IV`, `V`, `VI`,
-/// `VII`, `VIII`, `IX`, `X`. Common in anime sequel titles that spell
-/// the season out (`Mob Psycho 100 III`, `Overlord IV`, `KanColle II`)
-/// — SeaDex and many BD groups use this form, so without it the batch
-/// heuristic misses entire season packs.
+/// Bare Roman-numeral season marker: `II`, `III`, `IV`, `VI`, `VII`,
+/// `VIII`, `IX`. Common in anime sequel titles that spell the season
+/// out (`Mob Psycho 100 III`, `Overlord IV`, `KanColle II`) — SeaDex
+/// and many BD groups use this form, so without it the batch heuristic
+/// misses entire season packs.
+///
+/// Multi-character only: bare `I`, `V`, `X` are excluded. `I` alone is
+/// too noisy (pronoun, initialisms). Bare `V` collides with `Volume V`,
+/// `Vol V` and similar; bare `X` collides with franchise names (`Show
+/// X`, `X-Files`-style titles) and volume numbering. Anime rarely go
+/// past season IX, so the coverage loss is negligible and the false-
+/// positive floor drops meaningfully.
 ///
 /// Case-sensitive (uppercase only) to avoid matching lowercase letter
-/// sequences like `ix` or `vi` that could appear inside words. `I`
-/// alone is excluded — too noisy (pronoun, initialisms). Applied to
-/// the raw title, not the lowercased form used by the other batch
+/// sequences like `ix` or `vi` that could appear inside words. Applied
+/// to the raw title, not the lowercased form used by the other batch
 /// checks.
 static ROMAN_SEASON_MARKER_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r"\b(II|III|IV|V|VI|VII|VIII|IX|X)\b")
+    regex_lite::Regex::new(r"\b(II|III|IV|VI|VII|VIII|IX)\b")
         .expect("ROMAN_SEASON_MARKER_RE parses")
 });
 
@@ -867,6 +873,26 @@ mod tests {
         assert!(
             !detect_batch("[Group] Show I vs Y (some subtitle)"),
             "bare `I` must not be treated as a season marker"
+        );
+    }
+
+    #[test]
+    fn detect_batch_single_letter_roman_v_and_x_do_not_fire() {
+        // Bare `V` and `X` are excluded to avoid colliding with `Volume
+        // V` / `Vol V` volume markers, `X-Files`-style franchise names,
+        // and miscellaneous single-letter tokens. Multi-character
+        // Roman numerals (II/III/IV/VI/VII/VIII/IX) remain supported.
+        assert!(
+            !detect_batch("[Group] Volume V (1080p)"),
+            "`Volume V` with no other batch signal must not fire"
+        );
+        assert!(
+            !detect_batch("[Group] Show V (1080p)"),
+            "bare `V` must not be treated as a season marker"
+        );
+        assert!(
+            !detect_batch("[Group] The X Movie (1080p)"),
+            "bare `X` must not be treated as a season marker"
         );
     }
 
