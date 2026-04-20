@@ -102,6 +102,7 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
         .unwrap_or(0);
 
     let cached = media_probe_cache::get(db, path_str, mtime, size).await;
+    let cache_hit = cached.is_some();
     let probe_json = match cached {
         Some(j) => j,
         None => match run_ffprobe(path).await {
@@ -112,6 +113,14 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
             None => return FfprobeClassification::default(),
         },
     };
+    tracing::debug!(
+        target: "ryokan::source::ffprobe",
+        path = path_str,
+        cache_hit,
+        size,
+        mtime,
+        "ffprobe probe ready"
+    );
 
     scan_ffprobe_json_logged(path_str, &probe_json)
 }
@@ -211,11 +220,9 @@ fn scan_ffprobe_json_logged(path: &str, json: &str) -> FfprobeClassification {
         );
         return FfprobeClassification::default();
     }
-    let out = scan_ffprobe_json(json);
-    if !out.evidence.is_empty() {
-        return out;
-    }
-    if out.resolution.is_none() {
+    let (facts, out) = scan_ffprobe_json_with_facts(json);
+    log_ffprobe_summary(path, &facts, &out);
+    if out.evidence.is_empty() && out.resolution.is_none() {
         // No video stream at all — log at debug since this is normal for
         // audio-only files or probes of weird container formats, but
         // still worth tracing when debugging.
@@ -228,15 +235,79 @@ fn scan_ffprobe_json_logged(path: &str, json: &str) -> FfprobeClassification {
     out
 }
 
+/// Emit a one-line debug summary of every ffprobe pass. Captures the
+/// observed dimensions / resolution, video + audio codec fingerprints,
+/// subtitle / commentary flags, and the evidence vec the rules
+/// produced. Without this the only signal a probe ran was whatever
+/// pieces of evidence happened to bubble up into `log_classification`
+/// in `services/source/mod.rs` — a probe that emitted **zero** evidence
+/// (the "intentionally useless" path for AV1/Opus, or any file that
+/// didn't fingerprint a single rule) was completely silent, and the
+/// observed resolution was never logged anywhere even when it was the
+/// signal that overrode the filename layer.
+fn log_ffprobe_summary(path: &str, facts: &ProbeFacts, out: &FfprobeClassification) {
+    if !facts.has_video {
+        return;
+    }
+    let resolution_label = out
+        .resolution
+        .map(|r| r.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let audio_codecs = if facts.audio_codecs.is_empty() {
+        "(none)".to_string()
+    } else {
+        facts.audio_codecs.join(",")
+    };
+    let evidence_summary = if out.evidence.is_empty() {
+        "(none)".to_string()
+    } else {
+        out.evidence
+            .iter()
+            .map(|e| format!("{}:{:.2} \"{}\"", e.source.as_str(), e.confidence, e.detail))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    tracing::debug!(
+        target: "ryokan::source::ffprobe",
+        path,
+        width = facts.width,
+        height = facts.height,
+        resolution = %resolution_label,
+        video_codec = %facts.video_codec,
+        bit_depth = facts.bit_depth,
+        audio_codecs = %audio_codecs,
+        has_pgs_subs = facts.has_pgs_subs,
+        has_commentary = facts.has_commentary,
+        evidence = %evidence_summary,
+        "ffprobe scan"
+    );
+}
+
 /// Pure scanner: takes a ffprobe JSON document as a string and emits
 /// classification evidence. Kept free of I/O and fs access so the unit
 /// tests can feed in canned fixtures with no shell-out.
+///
+/// Production code now routes through [`scan_ffprobe_json_with_facts`]
+/// so the logged wrapper can surface the intermediate facts bag; this
+/// thin wrapper stays public for the existing test suite.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
+    scan_ffprobe_json_with_facts(json).1
+}
+
+/// Internal variant that also returns the intermediate [`ProbeFacts`]
+/// bag. Used by `scan_ffprobe_json_logged` to emit a structured debug
+/// summary of every probe — the observed dimensions, codecs, and
+/// fingerprint flags — alongside the final evidence vec. Tests stick
+/// with the thinner [`scan_ffprobe_json`] wrapper so they don't have
+/// to spell out facts that aren't relevant to whatever rule they're
+/// exercising.
+fn scan_ffprobe_json_with_facts(json: &str) -> (ProbeFacts, FfprobeClassification) {
     let Ok(root) = serde_json::from_str::<Value>(json) else {
-        return FfprobeClassification::default();
+        return (ProbeFacts::default(), FfprobeClassification::default());
     };
     let Some(streams) = root.get("streams").and_then(|s| s.as_array()) else {
-        return FfprobeClassification::default();
+        return (ProbeFacts::default(), FfprobeClassification::default());
     };
 
     // First pass: collect the facts we need for the rule evaluation.
@@ -333,7 +404,7 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
 
     let mut out = FfprobeClassification::default();
     if !facts.has_video {
-        return out;
+        return (facts, out);
     }
 
     // Observed resolution — always set if we have a video stream with
@@ -472,7 +543,7 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
         ));
     }
 
-    out
+    (facts, out)
 }
 
 #[derive(Default)]
