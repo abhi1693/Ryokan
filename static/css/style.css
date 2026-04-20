@@ -1910,9 +1910,18 @@ fieldset legend {
 
 /* When a row is itself a <details>, the summary should sit on the row
    line and the disclosed content should stack below it (not flex inline
-   beside the summary as a sibling flex item). */
+   beside the summary as a sibling flex item). When open, give the
+   disclosed form fields room to breathe — the default 10px row padding
+   reads as cramped once there's a stacked label / input / hint / label
+   / input / hint / button chain below the summary. */
 .monitoring-card details.monitoring-row {
     display: block;
+}
+.monitoring-card details.monitoring-row[open] {
+    padding: 12px 14px 18px;
+}
+.monitoring-card details.monitoring-row > summary {
+    padding: 2px 0;
 }
 
 .monitoring-divider {
