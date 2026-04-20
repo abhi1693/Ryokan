@@ -34,7 +34,6 @@ use crate::services::source::ClassificationResult;
 /// `episode_grab_history` rows alongside its route record. Without
 /// these, the sibling's series page shows UNKNOWN with no progress bar
 /// until post-processing runs and backfills the tags.
-#[derive(Clone)]
 pub struct AutoExpandGrabContext {
     pub classification: ClassificationResult,
     pub release_group: String,
