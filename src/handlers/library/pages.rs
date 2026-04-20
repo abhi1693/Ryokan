@@ -419,13 +419,34 @@ pub(super) async fn build_episodes(
     let use_cached_eps = !cached_eps.is_empty() && cached_matches_force;
 
     let episodic_format = !matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA");
-    let should_fetch_jikan =
-        !use_cached_eps && detail.id_mal.is_some() && (episodic_format || ep_count > 1);
+    // Issue #56: airing series whose episode total isn't known yet
+    // (typical for MAL-fed currently-airing entries — Jikan reports
+    // `episodes: null`) need the Jikan episodes endpoint as the *source*
+    // of episode rows, not just titles. Without the `is_airing` arm an
+    // ONA-format airing show like JoJo SBR ends up with `episodic_format
+    // = false` AND `ep_count == 0`, so Jikan is skipped, the main
+    // 1..=ep_count render loop emits nothing, and the page reads as a
+    // zero-episode series even though `/anime/{id}/episodes` would have
+    // returned the aired list.
+    let is_airing_status = matches!(
+        detail.status.as_str(),
+        "RELEASING" | "CURRENTLY_AIRING"
+    );
+    let should_fetch_jikan = !use_cached_eps
+        && detail.id_mal.is_some()
+        && (episodic_format || ep_count > 1 || is_airing_status);
     let jikan_eps = if should_fetch_jikan {
         jikan::fetch_episode_titles_for_detail(db, detail).await
     } else {
         HashMap::new()
     };
+
+    // Promote Jikan's aired-episode count up into ep_count for airing
+    // series whose total wasn't known. The downstream render loop
+    // (`for ep_num in 1..=ep_count`), the template's `ep_total > 0`
+    // section gate, and the monitoring counters all key off ep_count,
+    // so without this the fetched episodes stay invisible.
+    let ep_count = ep_count.max(jikan_eps.len() as i32);
 
     let should_try_kitsu = !use_cached_eps
         && ep_count > 1
