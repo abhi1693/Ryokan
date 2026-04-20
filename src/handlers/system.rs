@@ -317,15 +317,22 @@ pub async fn api_rebuild_cached_metadata(
     // `NetworkError when attempting to fetch resource.` bubbling back
     // into the logs via the client's error toast.
     //
-    // Two layers of `tokio::spawn`:
-    //   - **Outer** task owns `mark_started` + `mark_finished` so the
-    //     `scheduled_task_runs` row always transitions out of
-    //     `last_status = 'running'` even when the client has gone and
-    //     the rebuild panics mid-sweep.
-    //   - **Inner** task runs the actual sweep; its `JoinHandle.await`
-    //     yields an `Err(JoinError)` on panic, which the outer task
-    //     translates into a `mark_finished("error", ...)` call rather
-    //     than propagating the panic upward.
+    // Three layers of `tokio::spawn`:
+    //   - **Outer** task owns `mark_finished` + translates the middle
+    //     task's outcome into the HTTP response. Its body is
+    //     maximally simple — one spawn, one await returning Result,
+    //     one match, one DB update — so the `scheduled_task_runs`
+    //     row is guaranteed to exit `last_status = 'running'` even
+    //     if the middle layer panics in a code path we didn't
+    //     anticipate (bad future arm in a match, a panic inside
+    //     `mark_started`, etc.).
+    //   - **Middle** task owns `mark_started` and the inner rebuild
+    //     orchestration. Any panic here surfaces as `Err(JoinError)`
+    //     on the outer's `.await` and gets translated to a terminal
+    //     `"error"` status by the outer.
+    //   - **Inner** task runs the actual sweep; its JoinError (on
+    //     panic) is caught by the middle task and folded into its
+    //     own result so the outer sees a single combined outcome.
     //
     // Distinct task key (`metadata_rebuild`, not the shared
     // `metadata_refresh`) so the manual full-rebuild doesn't overwrite
@@ -334,21 +341,25 @@ pub async fn api_rebuild_cached_metadata(
     // operations and the audit trail for each should stand alone.
     let db = state.db.clone();
     let outer = tokio::spawn(async move {
-        let _ = scheduled_tasks::mark_started(
-            &db,
-            "metadata_rebuild",
-            "Manual metadata cache rebuild started",
-        )
-        .await;
+        let middle_db = db.clone();
+        let middle = tokio::spawn(async move {
+            let _ = scheduled_tasks::mark_started(
+                &middle_db,
+                "metadata_rebuild",
+                "Manual metadata cache rebuild started",
+            )
+            .await;
 
-        let rebuild_db = db.clone();
-        let inner = tokio::spawn(async move {
-            metadata_sync::rebuild_cached_metadata_for_all(&rebuild_db).await
+            let rebuild_db = middle_db.clone();
+            let inner = tokio::spawn(async move {
+                metadata_sync::rebuild_cached_metadata_for_all(&rebuild_db).await
+            });
+            inner.await // Result<(usize, usize, usize), JoinError>
         });
 
         let (status, detail, payload): (&str, String, Option<(usize, usize, usize)>) =
-            match inner.await {
-                Ok((rebuilt, skipped, failed)) => {
+            match middle.await {
+                Ok(Ok((rebuilt, skipped, failed))) => {
                     let st = if failed > 0 { "warn" } else { "ok" };
                     (
                         st,
@@ -356,11 +367,25 @@ pub async fn api_rebuild_cached_metadata(
                         Some((rebuilt, skipped, failed)),
                     )
                 }
-                Err(join_err) => {
+                Ok(Err(join_err)) => {
+                    // Inner panicked. The middle task caught it and
+                    // bubbled it up cleanly.
                     let kind = if join_err.is_panic() { "panicked" } else { "join error" };
                     (
                         "error",
-                        format!("rebuild task {kind}: {join_err}"),
+                        format!("rebuild sweep {kind}: {join_err}"),
+                        None,
+                    )
+                }
+                Err(join_err) => {
+                    // Middle itself panicked — e.g. `mark_started`
+                    // internals, or something between the nested
+                    // spawns. Still mark the run finished so the
+                    // status row exits `running`.
+                    let kind = if join_err.is_panic() { "panicked" } else { "join error" };
+                    (
+                        "error",
+                        format!("rebuild orchestration task {kind}: {join_err}"),
                         None,
                     )
                 }

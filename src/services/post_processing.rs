@@ -228,20 +228,25 @@ async fn copy_artwork(
     // Step 2: read the blob bytes once, fan out to each dest. Under
     // one `spawn_blocking` so an NFS-backed media root doesn't
     // serialize file-open round-trips from separate tokio tasks.
+    //
+    // Outcome is either `SourceReadFailed` (one error, affects every
+    // dest) or `PerDest` (dest-specific errors). Keeping these
+    // distinct lets the caller log the source-read failure exactly
+    // once instead of N times with misleading `dst=` paths.
+    enum CopyOutcome {
+        SourceReadFailed(std::io::Error),
+        PerDest(Vec<Result<(), std::io::Error>>),
+    }
+
     let src = std::path::PathBuf::from(&entry.local_path);
     let owned_dests: Vec<std::path::PathBuf> = dests.iter().map(|p| p.to_path_buf()).collect();
     let src_display = src.display().to_string();
-    let copy_result = tokio::task::spawn_blocking(move || -> Vec<Result<(), std::io::Error>> {
+    let copy_result = tokio::task::spawn_blocking(move || -> CopyOutcome {
         let bytes = match std::fs::read(&src) {
             Ok(b) => b,
-            Err(e) => {
-                // Fan the source-read error out to every dest so the
-                // caller sees `false` for each one; log once at the
-                // call site (below) with the source path.
-                return owned_dests.iter().map(|_| Err(std::io::Error::new(e.kind(), e.to_string()))).collect();
-            }
+            Err(e) => return CopyOutcome::SourceReadFailed(e),
         };
-        owned_dests
+        let per_dest = owned_dests
             .iter()
             .map(|dst| -> std::io::Result<()> {
                 if let Some(parent) = dst.parent() {
@@ -250,13 +255,26 @@ async fn copy_artwork(
                 std::fs::write(dst, &bytes)?;
                 Ok(())
             })
-            .collect()
+            .collect();
+        CopyOutcome::PerDest(per_dest)
     })
     .await;
 
-    let mut results = Vec::with_capacity(dests.len());
     match copy_result {
-        Ok(per_dest) => {
+        Ok(CopyOutcome::SourceReadFailed(err)) => {
+            logger::warn(
+                db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Failed to read cached {image_kind} blob for series_id={series_id}"
+                ),
+                &format!("src={}, error={}", src_display, err),
+            )
+            .await;
+            vec![false; dests.len()]
+        }
+        Ok(CopyOutcome::PerDest(per_dest)) => {
+            let mut results = Vec::with_capacity(dests.len());
             for (i, r) in per_dest.into_iter().enumerate() {
                 match r {
                     Ok(()) => results.push(true),
@@ -265,7 +283,7 @@ async fn copy_artwork(
                             db,
                             LogCategory::PostProcess,
                             &format!(
-                                "Failed to copy series {image_kind} for series_id={series_id}"
+                                "Failed to write series {image_kind} for series_id={series_id}"
                             ),
                             &format!(
                                 "src={}, dst={}, error={}",
@@ -279,6 +297,7 @@ async fn copy_artwork(
                     }
                 }
             }
+            results
         }
         Err(join_err) => {
             logger::warn(
@@ -288,39 +307,76 @@ async fn copy_artwork(
                 &format!("src={}, error={}", src_display, join_err),
             )
             .await;
-            results.extend((0..dests.len()).map(|_| false));
+            vec![false; dests.len()]
         }
     }
-    results
 }
 
-/// Copy the cached series poster to each of `dests`. The cache is
-/// self-healed from `source_url` if the blob is missing. Always
-/// written as JPEG regardless of original extension — Jellyfin
-/// accepts it.
-async fn copy_poster(
+/// Named result of a poster fan-out to the two slots Jellyfin reads:
+/// the series-root `poster.jpg` (series-level card) and the season
+/// folder's `folder.jpg` (season-card poster). Structural naming so
+/// the caller can't accidentally swap the two booleans via a slice
+/// reorder.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PosterOutcome {
+    /// True if the series-root `poster.jpg` landed on disk.
+    series_root: bool,
+    /// True if the `Season NN/folder.jpg` landed on disk.
+    season_folder: bool,
+}
+
+/// Copy the cached series poster blob to both the series-root
+/// `poster.jpg` and the season folder's `folder.jpg` — the two files
+/// Jellyfin reads for the series card + season card posters. The
+/// blob is self-healed from `source_url` if the cache is empty and
+/// read into memory once, fanned out to both dests under a single
+/// `spawn_blocking` (see [`copy_artwork`]).
+async fn copy_series_and_season_poster(
     db: &sqlx::SqlitePool,
     series_id: i64,
     source_url: Option<&str>,
-    dests: &[&Path],
-) -> Vec<bool> {
+    series_poster_dest: &Path,
+    season_folder_dest: &Path,
+) -> PosterOutcome {
     let cache_key = format!("series-{}-cover", series_id);
-    copy_artwork(db, series_id, &cache_key, "cover", source_url, dests).await
+    let results = copy_artwork(
+        db,
+        series_id,
+        &cache_key,
+        "cover",
+        source_url,
+        &[series_poster_dest, season_folder_dest],
+    )
+    .await;
+    // `copy_artwork`'s Vec<bool> contract is index-aligned to the
+    // `dests` slice — mapping those indices onto the named fields
+    // here (rather than at the caller) keeps the positional
+    // dependency contained to this 3-line function, where a swap
+    // would be immediately obvious to any reader.
+    PosterOutcome {
+        series_root: results.first().copied().unwrap_or(false),
+        season_folder: results.get(1).copied().unwrap_or(false),
+    }
 }
 
-/// Copy the cached series banner to each of `dests`. Usually just
-/// one dest (series-root `banner.jpg`). Jellyfin reads that slot for
-/// the series-level banner; writing it locally prevents the
-/// TVDB/TMDB fallback scrape from picking a mismatched banner when
-/// the anime doesn't cleanly map 1:1 to an external provider entry.
-async fn copy_banner(
+/// Copy the cached series banner to `dest` (typically
+/// `{series_folder}/banner.jpg`). Jellyfin reads that slot for the
+/// series-level banner; writing it locally prevents the TVDB/TMDB
+/// fallback scrape from picking a mismatched banner when the anime
+/// doesn't cleanly map 1:1 to an external provider entry. Returns
+/// `true` when the blob landed on disk.
+async fn copy_series_banner(
     db: &sqlx::SqlitePool,
     series_id: i64,
     source_url: Option<&str>,
-    dests: &[&Path],
-) -> Vec<bool> {
+    dest: &Path,
+) -> bool {
     let cache_key = format!("series-{}-banner", series_id);
-    copy_artwork(db, series_id, &cache_key, "banner", source_url, dests).await
+    copy_artwork(db, series_id, &cache_key, "banner", source_url, &[dest])
+        .await
+        .first()
+        .copied()
+        .unwrap_or(false)
 }
 
 /// #30 — Decide what offset to subtract from a parsed filename episode
@@ -1146,19 +1202,19 @@ async fn import_torrent(
         let cover_source = ctx.cached_detail.as_ref().map(|d| d.cover_url.as_str());
         let banner_source = ctx.cached_detail.as_ref().map(|d| d.banner_url.as_str());
 
-        let poster_results = copy_poster(
+        let poster_outcome = copy_series_and_season_poster(
             &state.db,
             ctx.series.id,
             cover_source,
-            &[&poster_dest, &season_poster_dest],
+            &poster_dest,
+            &season_poster_dest,
         )
         .await;
-        let has_poster = poster_results.first().copied().unwrap_or(false);
-        let has_folder_poster = poster_results.get(1).copied().unwrap_or(false);
+        let has_poster = poster_outcome.series_root;
+        let has_folder_poster = poster_outcome.season_folder;
 
-        let banner_results =
-            copy_banner(&state.db, ctx.series.id, banner_source, &[&banner_dest]).await;
-        let has_banner = banner_results.first().copied().unwrap_or(false);
+        let has_banner =
+            copy_series_banner(&state.db, ctx.series.id, banner_source, &banner_dest).await;
 
         // Always (re)write tvshow.nfo + season.nfo so refreshed
         // AniList metadata (status flips, plot updates, new genres)
@@ -1928,5 +1984,210 @@ mod tests {
         // (offset = cumulative) would silently map legitimate E47
         // releases of a 48-episode show to E0.
         assert_eq!(fallback_ep_offset(47, 47), 0);
+    }
+
+    // ── copy_artwork fan-out ──────────────────────────────────────────────
+    //
+    // The multi-dest fan-out in `copy_artwork` is the headline of the
+    // PR-51 review's dedupe item — one `std::fs::read` under a single
+    // `spawn_blocking`, N `fs::write`s to each dest. A regression that
+    // collapses back to per-dest spawns (or reads the blob once per
+    // dest) would be invisible to the existing NFO-level tests, so we
+    // pin the contract directly here.
+
+    /// Create just the two artwork tables we need, without dragging in
+    /// the full `models::migrate` schema. FKs aren't enforced on
+    /// in-memory SQLite unless `PRAGMA foreign_keys = ON` is set, so
+    /// the missing `series` parent row is harmless.
+    async fn setup_artwork_only_db() -> sqlx::SqlitePool {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("open in-memory db");
+        sqlx::query(
+            r#"CREATE TABLE image_blobs (
+                blob_hash TEXT PRIMARY KEY,
+                local_path TEXT NOT NULL DEFAULT '',
+                content_type TEXT NOT NULL DEFAULT '',
+                byte_size INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .expect("create image_blobs");
+        sqlx::query(
+            r#"CREATE TABLE image_refs (
+                cache_key TEXT PRIMARY KEY,
+                parent_kind TEXT NOT NULL DEFAULT '',
+                parent_id INTEGER,
+                image_kind TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                blob_hash TEXT NOT NULL,
+                last_write INTEGER NOT NULL DEFAULT 0,
+                cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .expect("create image_refs");
+        // The `logs` table is used by `logger::warn` on the failure
+        // paths; create a minimal shape so those calls don't spuriously
+        // fail the test when exercising the error branches.
+        sqlx::query(
+            r#"CREATE TABLE logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                level TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT ''
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .expect("create logs");
+        db
+    }
+
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        let nonce = format!(
+            "ryokan_pp_test_{}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            label,
+        );
+        let dir = std::env::temp_dir().join(nonce);
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        dir
+    }
+
+    async fn register_blob(
+        db: &sqlx::SqlitePool,
+        cache_key: &str,
+        blob_path: &std::path::Path,
+        blob_hash: &str,
+        byte_size: i64,
+    ) {
+        artwork_cache::upsert_blob(db, blob_hash, &blob_path.to_string_lossy(), "image/jpeg", byte_size)
+            .await
+            .expect("upsert_blob");
+        artwork_cache::upsert_ref(
+            db,
+            artwork_cache::RefUpsert {
+                cache_key,
+                parent_kind: "series",
+                parent_id: Some(42),
+                image_kind: "cover",
+                source_url: "",
+                blob_hash,
+                last_write: 0,
+            },
+        )
+        .await
+        .expect("upsert_ref");
+    }
+
+    #[tokio::test]
+    async fn copy_artwork_fans_out_single_blob_to_multiple_dests() {
+        let db = setup_artwork_only_db().await;
+        let dir = unique_test_dir("copy_fanout");
+        let blob_path = dir.join("blob.jpg");
+        let payload = b"\xFF\xD8\xFF\xE0test jpeg body".to_vec();
+        std::fs::write(&blob_path, &payload).expect("write blob");
+        register_blob(&db, "series-42-cover", &blob_path, "deadbeef", payload.len() as i64).await;
+
+        let dst_a = dir.join("poster.jpg");
+        let dst_b = dir.join("season/folder.jpg");
+
+        let results = copy_artwork(
+            &db,
+            42,
+            "series-42-cover",
+            "cover",
+            None,
+            &[&dst_a, &dst_b],
+        )
+        .await;
+
+        assert_eq!(results, vec![true, true], "both dests must report success");
+        assert_eq!(
+            std::fs::read(&dst_a).expect("read dst_a"),
+            payload,
+            "dst_a bytes must match source",
+        );
+        assert_eq!(
+            std::fs::read(&dst_b).expect("read dst_b"),
+            payload,
+            "dst_b bytes must match source (nested dir must be created)",
+        );
+
+        // Cleanup — best effort.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn copy_artwork_returns_all_false_when_cache_entry_missing_and_no_source() {
+        // Neither a cache row nor a source URL — function must degrade
+        // gracefully to `[false; N]` rather than erroring upward.
+        let db = setup_artwork_only_db().await;
+        let dir = unique_test_dir("copy_nocache");
+        let dst_a = dir.join("poster.jpg");
+        let dst_b = dir.join("folder.jpg");
+
+        let results = copy_artwork(
+            &db,
+            42,
+            "series-42-cover",
+            "cover",
+            None,
+            &[&dst_a, &dst_b],
+        )
+        .await;
+
+        assert_eq!(results, vec![false, false]);
+        assert!(!dst_a.exists(), "dst_a must not exist on cache miss");
+        assert!(!dst_b.exists(), "dst_b must not exist on cache miss");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn copy_artwork_source_read_failure_fans_false_to_all_dests() {
+        // Cache row exists but the blob file on disk has been removed
+        // (e.g. manual cleanup of the blob cache dir). The source-read
+        // failure path must return `[false; N]` and log once at the
+        // call site rather than N times — exercised here by calling
+        // the function and confirming all dests report false and
+        // nothing lands on disk.
+        let db = setup_artwork_only_db().await;
+        let dir = unique_test_dir("copy_srcgone");
+        let blob_path = dir.join("blob.jpg");
+        // Register the ref as if the blob were real, then remove the
+        // file so `fs::read` fails.
+        std::fs::write(&blob_path, b"stub").expect("write stub");
+        register_blob(&db, "series-42-cover", &blob_path, "deadbeef", 4).await;
+        std::fs::remove_file(&blob_path).expect("unlink blob");
+
+        let dst_a = dir.join("poster.jpg");
+        let dst_b = dir.join("folder.jpg");
+
+        let results = copy_artwork(
+            &db,
+            42,
+            "series-42-cover",
+            "cover",
+            None,
+            &[&dst_a, &dst_b],
+        )
+        .await;
+
+        assert_eq!(results, vec![false, false]);
+        assert!(!dst_a.exists());
+        assert!(!dst_b.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
