@@ -1092,6 +1092,29 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // ── Issue #53: stamp post-classify attempts so the library scan
+    //                doesn't loop-retry rows whose source layer can't
+    //                produce a confident verdict ──────────────────────
+    // NULL = "the full-pipeline classifier (ffprobe + dir + group +
+    // temporal + filename) has never been run against this row's file".
+    // CURRENT_TIMESTAMP after every `update_classification` write and
+    // after every `record_grab` write that came from
+    // `scan_library_for_unclassified` or post-processing's
+    // `classify_post_download`. Grab-time `record_grab` writes leave it
+    // NULL — they're filename-only and aren't a "real" attempt.
+    //
+    // The 6h library sweep skips rows where the source is empty or
+    // "unknown" AND this column IS NOT NULL: the classifier already
+    // tried with the file in hand and couldn't decide, so re-running
+    // ffprobe on the same bytes won't change the verdict and just
+    // wastes CPU and IO every six hours.
+    sqlx::query(
+        "ALTER TABLE episode_quality_tags ADD COLUMN classification_attempted_at TEXT",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     // ── Phase 1b: split quality_profile/quality_cutoff into explicit source
     //             and resolution fields ──────────────────────────────────
     // preferred_resolution already exists and stores a bare resolution

@@ -1136,6 +1136,8 @@ async fn import_torrent(
                 // imported files), UPDATE in-place via
                 // `update_classification` otherwise.
                 let persist_result = if row_exists {
+                    // `update_classification` stamps
+                    // classification_attempted_at internally.
                     episode_tags::update_classification(
                         &state.db,
                         target_series_id,
@@ -1144,7 +1146,7 @@ async fn import_torrent(
                     )
                     .await
                 } else {
-                    episode_tags::record_grab(
+                    let inserted = episode_tags::record_grab(
                         &state.db,
                         target_series_id,
                         ep_num,
@@ -1155,7 +1157,21 @@ async fn import_torrent(
                         grab.is_batch,
                     )
                     .await
-                    .map(|_| ())
+                    .map(|_| ());
+                    // Issue #53: post-classify call of `record_grab` —
+                    // explicitly stamp the attempt timestamp so the
+                    // library scan won't keep retrying this row if
+                    // `post` came back UNKNOWN. Grab-time `record_grab`
+                    // call sites (search.rs, auto_expand.rs, etc.) do
+                    // NOT stamp — they're filename-only and the file
+                    // hasn't landed yet.
+                    let _ = episode_tags::stamp_classification_attempted(
+                        &state.db,
+                        target_series_id,
+                        ep_num,
+                    )
+                    .await;
+                    inserted
                 };
                 if let Err(e) = persist_result {
                     logger::warn(
@@ -1736,6 +1752,26 @@ struct PendingClassification {
 /// episode) leaves a single row briefly stale and self-heals on the
 /// next scan.
 pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyReport {
+    scan_for_unclassified(state, None).await
+}
+
+/// Issue #53: same enumeration + classify pipeline as
+/// [`scan_library_for_unclassified`] but scoped to a single series.
+/// Called from the import flow (`handlers/library/crud::add_series`) as a
+/// one-shot tokio::spawn so a freshly-imported series with pre-existing
+/// files on disk gets a classification pass within seconds instead of
+/// waiting up to six hours for the next periodic sweep.
+pub async fn scan_series_for_unclassified(
+    state: &AppState,
+    series_id: i64,
+) -> LibraryClassifyReport {
+    scan_for_unclassified(state, Some(series_id)).await
+}
+
+async fn scan_for_unclassified(
+    state: &AppState,
+    only_series_id: Option<i64>,
+) -> LibraryClassifyReport {
     let mut report = LibraryClassifyReport::default();
 
     let pending: Vec<PendingClassification> = {
@@ -1750,7 +1786,17 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             return report;
         }
 
-        let tracked = series::get_all(&state.db).await.unwrap_or_default();
+        let tracked = match only_series_id {
+            // Single-series fast path used by the import hook — skip the
+            // full library enumeration when we know which series to look
+            // at. Bail silently when the id doesn't resolve (deleted
+            // between spawn and run).
+            Some(id) => match series::get_by_id(&state.db, id).await.ok().flatten() {
+                Some(row) => vec![row],
+                None => return report,
+            },
+            None => series::get_all(&state.db).await.unwrap_or_default(),
+        };
         let mut pending = Vec::new();
 
         for row in &tracked {
@@ -1837,6 +1883,17 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                     let src = t.source.trim();
                     let is_unknown = src.is_empty() || src.eq_ignore_ascii_case("unknown");
                     if !is_unknown {
+                        continue;
+                    }
+                    // Issue #53: an UNKNOWN row that was already attempted
+                    // by the full-pipeline classifier (ffprobe + dir +
+                    // group + temporal + filename) won't change verdict
+                    // on the same bytes. Skip it so we don't re-ffprobe
+                    // every six hours forever — the user can still force
+                    // a fresh attempt by clearing/re-applying a manual
+                    // override or running the sweep manually after
+                    // updating the source-pipeline rules.
+                    if t.classification_attempted_at.is_some() {
                         continue;
                     }
                 }
@@ -1962,6 +2019,17 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                 &[item.episode_number],
             )
             .await;
+            // Issue #53: stamp classification_attempted_at so the next
+            // sweep skips this row if `result` came back UNKNOWN. The
+            // grab-time path of `record_grab` deliberately leaves the
+            // column NULL, so we set it explicitly here for the
+            // post-classify path.
+            let _ = episode_tags::stamp_classification_attempted(
+                &state.db,
+                item.series_id,
+                item.episode_number,
+            )
+            .await;
             // Flip the fresh grab history row to 'completed' and stamp
             // in the on-disk file basename for the episode detail modal.
             let imported_basename = item
@@ -1979,6 +2047,9 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             )
             .await;
         } else {
+            // `update_classification` already sets
+            // classification_attempted_at internally — no extra stamp
+            // needed on this branch.
             let _ = episode_tags::update_classification(
                 &state.db,
                 item.series_id,

@@ -100,6 +100,43 @@ pub async fn add_series(
                 }
             }
         });
+
+        // Issue #53: kick off a one-shot classification scan for just
+        // this series. If the user's media root already has files for
+        // this show (pre-existing rip, manual drop, migration from
+        // another PVR), they otherwise sit as UNKNOWN until the next
+        // 6-hour `library_classify` sweep. The per-series scan reuses
+        // the same enumeration + classify pipeline as the periodic
+        // task, just scoped to the new id, and `stamp_classification_attempted`
+        // ensures a row that classifies as UNKNOWN doesn't get
+        // re-attempted on every future sweep.
+        let scan_state = state.clone();
+        let scan_title = tracked.title.clone();
+        let scan_id = id;
+        tokio::spawn(async move {
+            let report = crate::services::post_processing::scan_series_for_unclassified(
+                &scan_state,
+                scan_id,
+            )
+            .await;
+            // Only log when the scan actually did work — a typical add
+            // (no pre-existing files) returns zeros and would just spam
+            // the log with "Scanned 0 files for X" on every import.
+            if report.files_scanned > 0 {
+                logger::info(
+                    &scan_state.db,
+                    LogCategory::Library,
+                    &format!("Initial classify scan for {}", scan_title),
+                    &format!(
+                        "files_scanned={}, classified={}, needs_review={}",
+                        report.files_scanned,
+                        report.files_classified,
+                        report.files_needing_review,
+                    ),
+                )
+                .await;
+            }
+        });
     }
 
     let monitor = monitoring_service::recompute_series_monitoring(&state.db, id).await.ok();

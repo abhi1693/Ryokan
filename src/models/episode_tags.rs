@@ -125,6 +125,15 @@ pub struct EpisodeQualityTag {
     /// Empty string for legacy rows and for manually-overridden rows.
     /// Consumers (the Needs-Review UI) `serde_json::from_str` to rehydrate.
     pub classification_evidence: String,
+    /// ISO 8601 timestamp of the most recent post-download (full-pipeline)
+    /// classification attempt. Set by `update_classification` and by the
+    /// post-classify `record_grab` paths (post-processing import + the
+    /// library scan), left NULL by grab-time `record_grab` writes.
+    /// Issue #53: the library sweep uses `is_some()` here on
+    /// empty/"unknown" source rows as the "already tried, leave alone"
+    /// guard, so a file the classifier can't decide on doesn't get
+    /// re-ffprobed every six hours forever.
+    pub classification_attempted_at: Option<String>,
 }
 
 /// Record a new grab for an episode — inserts into history and upserts the
@@ -250,7 +259,8 @@ pub async fn get_for_series(
                 COALESCE(web_kind, '') AS web_kind,
                 classification_confidence, needs_review,
                 COALESCE(manual_override, 0) AS manual_override,
-                COALESCE(classification_evidence, '') AS classification_evidence
+                COALESCE(classification_evidence, '') AS classification_evidence,
+                classification_attempted_at
          FROM episode_quality_tags WHERE series_id = ?",
     )
     .bind(series_id)
@@ -334,6 +344,7 @@ pub async fn update_classification(
              classification_confidence = ?,
              needs_review = ?,
              classification_evidence = ?,
+             classification_attempted_at = CURRENT_TIMESTAMP,
              updated_at = CURRENT_TIMESTAMP
          WHERE series_id = ?
            AND episode_number = ?
@@ -353,6 +364,33 @@ pub async fn update_classification(
     .execute(db)
     .await?;
 
+    Ok(())
+}
+
+/// Stamp `classification_attempted_at = CURRENT_TIMESTAMP` on a row.
+/// Issue #53: called from the post-classify `record_grab` paths in
+/// `services/post_processing.rs` so the library scan can tell "the
+/// full-pipeline classifier saw this file" apart from "we've never
+/// tried with the file in hand."
+///
+/// Skipped on `manual_override = 1` rows for symmetry with the rest of
+/// the classification helpers — a user-pinned row's "attempt" timestamp
+/// would just be misleading.
+pub async fn stamp_classification_attempted(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE episode_quality_tags SET classification_attempted_at = CURRENT_TIMESTAMP
+         WHERE series_id = ?
+           AND episode_number = ?
+           AND COALESCE(manual_override, 0) = 0",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

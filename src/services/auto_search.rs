@@ -5940,6 +5940,7 @@ mod tests {
             needs_review: false,
             manual_override,
             classification_evidence: String::new(),
+            classification_attempted_at: None,
         }
     }
 
