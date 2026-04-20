@@ -406,7 +406,18 @@ fn evaluate_spec_kernel(spec: &CompiledSpec, ctx: &EvalContext) -> bool {
             match sonarr_value {
                 0 => c.source == Source::Unknown,
                 1 => matches!(c.source, Source::Hdtv | Source::Tv),
-                3 => c.source == Source::Web && c.web_kind == WebKind::WebDl,
+                // Sonarr's `SourceSpecification` value 3 is strict
+                // WebDl in vanilla Sonarr. Ryokan unifies WebDl and
+                // bare Web at the label layer (issue #48) because the
+                // filename-token-or-not asymmetry was confusing users.
+                // The CF evaluator mirrors that: value 3 fires on any
+                // Source::Web that isn't explicitly WebRip, so TRaSH
+                // `anime-web-tier-*` CFs still match SubsPlease /
+                // HorribleSubs / every other WEB release regardless
+                // of whether the filename carried a `WEB-DL` token.
+                // Value 4 stays strict WebRip so penalty CFs only fire
+                // on the lower-quality sub-tier.
+                3 => c.source == Source::Web && c.web_kind != WebKind::WebRip,
                 4 => c.source == Source::Web && c.web_kind == WebKind::WebRip,
                 5 => c.source == Source::Dvd,
                 6 => c.source == Source::BluRay && !c.is_bdmv,
@@ -996,11 +1007,20 @@ mod tests {
 
         assert!(evaluate(&webdl_cf, &ctx(&cand, &webdl, &hashes)));
         assert!(!evaluate(&webdl_cf, &ctx(&cand, &webrip, &hashes)));
-        assert!(!evaluate(&webdl_cf, &ctx(&cand, &bare, &hashes)));
+        // Issue #48: bare-WEB matches the WebDl CF spec. The label
+        // layer collapsed WebDl and bare Web into a single "WEB"
+        // render, so extending value-3 matching to cover both keeps
+        // TRaSH `anime-web-tier-*` CFs functional for SubsPlease /
+        // HorribleSubs / every release whose filename doesn't carry a
+        // `WEB-DL` token. Previously bare-WEB matched nothing in the
+        // source-spec space and those releases silently scored zero.
+        assert!(evaluate(&webdl_cf, &ctx(&cand, &bare, &hashes)));
 
         assert!(evaluate(&webrip_cf, &ctx(&cand, &webrip, &hashes)));
         assert!(!evaluate(&webrip_cf, &ctx(&cand, &webdl, &hashes)));
-        // Bare-WEB deliberately matches neither (plan §4.5).
+        // WebRip stays strict — only explicit-WebRip releases match
+        // the value-4 CF, so penalty CFs fire only on the lower-
+        // quality sub-tier.
         assert!(!evaluate(&webrip_cf, &ctx(&cand, &bare, &hashes)));
     }
 
