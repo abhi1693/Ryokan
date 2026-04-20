@@ -58,12 +58,12 @@ use services::{
         handlers::library::interactive_search_batches,
         handlers::library::grab_interactive_result,
         handlers::library::grab_batch_result,
-        handlers::library::delete_episode_file,
-        handlers::library::cancel_pending_episode,
-        handlers::library::get_episode_grab_history,
-        handlers::library::mark_episode_failed,
-        handlers::library::episode_download_progress,
-        handlers::library::series_episodes_json,
+        handlers::library::episodes::delete_episode_file,
+        handlers::library::episodes::cancel_pending_episode,
+        handlers::library::episodes::get_episode_grab_history,
+        handlers::library::episodes::mark_episode_failed,
+        handlers::library::episodes::episode_download_progress,
+        handlers::library::episodes::series_episodes_json,
         // Search
         handlers::search::search_page_api,
         handlers::search::grab_release,
@@ -79,14 +79,14 @@ use services::{
         handlers::settings::jellyfin_test,
         handlers::settings::jellyfin_refresh,
         // Settings — Custom Formats
-        handlers::settings::settings_custom_formats_upsert,
-        handlers::settings::settings_custom_formats_delete,
-        handlers::settings::settings_custom_formats_minimum_score,
-        handlers::settings::settings_custom_formats_import,
-        handlers::settings::settings_custom_formats_import_resolve,
-        handlers::settings::settings_custom_formats_install_defaults,
-        handlers::settings::settings_custom_formats_reset_defaults,
-        handlers::settings::settings_custom_formats_export,
+        handlers::settings::custom_formats::settings_custom_formats_upsert,
+        handlers::settings::custom_formats::settings_custom_formats_delete,
+        handlers::settings::custom_formats::settings_custom_formats_minimum_score,
+        handlers::settings::custom_formats::settings_custom_formats_import,
+        handlers::settings::custom_formats::settings_custom_formats_import_resolve,
+        handlers::settings::custom_formats::settings_custom_formats_install_defaults,
+        handlers::settings::custom_formats::settings_custom_formats_reset_defaults,
+        handlers::settings::custom_formats::settings_custom_formats_export,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
         handlers::system::api_logs_client,
@@ -124,17 +124,17 @@ use services::{
         handlers::library::SetAllowUpgradesForm,
         handlers::library::SetManualOverrideForm,
         handlers::library::MarkEpisodeFailedForm,
-        handlers::library::EpisodeProgress,
+        handlers::library::episodes::EpisodeProgress,
         handlers::search::GrabForm,
         handlers::downloads::TorrentActionForm,
         handlers::downloads::TorrentDeleteForm,
         handlers::downloads::BlocklistRemoveForm,
         handlers::settings::QbitTestForm,
         handlers::settings::JellyfinTestForm,
-        handlers::settings::CustomFormatUpsertForm,
-        handlers::settings::CustomFormatDeleteForm,
-        handlers::settings::CustomFormatMinScoreForm,
-        handlers::settings::CustomFormatImportForm,
+        handlers::settings::custom_formats::CustomFormatUpsertForm,
+        handlers::settings::custom_formats::CustomFormatDeleteForm,
+        handlers::settings::custom_formats::CustomFormatMinScoreForm,
+        handlers::settings::custom_formats::CustomFormatImportForm,
     )),
     tags(
         (name = "Library", description = "Anime library management — add, remove, search, and monitor series"),
@@ -428,12 +428,12 @@ async fn main() {
         .route("/api/series/{anilist_id}/interactive-search-batch", get(handlers::library::interactive_search_batches))
         .route("/api/series/{anilist_id}/grab/{episode_number}", post(handlers::library::grab_interactive_result))
         .route("/api/series/{anilist_id}/grab-batch", post(handlers::library::grab_batch_result))
-        .route("/api/series/{anilist_id}/delete-file/{episode_number}", post(handlers::library::delete_episode_file))
-        .route("/api/series/{anilist_id}/cancel-pending/{episode_number}", post(handlers::library::cancel_pending_episode))
-        .route("/api/series/{anilist_id}/grab-history/{episode_number}", get(handlers::library::get_episode_grab_history))
-        .route("/api/series/{anilist_id}/mark-failed/{episode_number}", post(handlers::library::mark_episode_failed))
-        .route("/api/series/{anilist_id}/download-progress", get(handlers::library::episode_download_progress))
-        .route("/api/series/{anilist_id}/episodes", get(handlers::library::series_episodes_json))
+        .route("/api/series/{anilist_id}/delete-file/{episode_number}", post(handlers::library::episodes::delete_episode_file))
+        .route("/api/series/{anilist_id}/cancel-pending/{episode_number}", post(handlers::library::episodes::cancel_pending_episode))
+        .route("/api/series/{anilist_id}/grab-history/{episode_number}", get(handlers::library::episodes::get_episode_grab_history))
+        .route("/api/series/{anilist_id}/mark-failed/{episode_number}", post(handlers::library::episodes::mark_episode_failed))
+        .route("/api/series/{anilist_id}/download-progress", get(handlers::library::episodes::episode_download_progress))
+        .route("/api/series/{anilist_id}/episodes", get(handlers::library::episodes::series_episodes_json))
         .route("/api/library/folders", get(handlers::library::list_folders))
         .route("/api/grab", post(handlers::search::grab_release))
         .route("/api/search/page", get(handlers::search::search_page_api))
@@ -446,9 +446,9 @@ async fn main() {
         .route("/settings", get(handlers::settings::settings_page).post(handlers::settings::settings_submit))
         .route("/settings/groups", post(handlers::settings::settings_groups_upsert))
         .route("/settings/groups/delete", post(handlers::settings::settings_groups_delete))
-        .route("/settings/custom-formats/upsert", post(handlers::settings::settings_custom_formats_upsert))
-        .route("/settings/custom-formats/delete", post(handlers::settings::settings_custom_formats_delete))
-        .route("/settings/custom-formats/minimum-score", post(handlers::settings::settings_custom_formats_minimum_score))
+        .route("/settings/custom-formats/upsert", post(handlers::settings::custom_formats::settings_custom_formats_upsert))
+        .route("/settings/custom-formats/delete", post(handlers::settings::custom_formats::settings_custom_formats_delete))
+        .route("/settings/custom-formats/minimum-score", post(handlers::settings::custom_formats::settings_custom_formats_minimum_score))
         // 256 KiB is generous for TRaSH-Guides anime CF JSON (the
         // entire vendored set is ~70 KiB) but well below axum's 2 MiB
         // default — keeps the hidden-field re-echo on the collision
@@ -456,17 +456,17 @@ async fn main() {
         // render a multi-MiB hidden form field.
         .route(
             "/settings/custom-formats/import",
-            post(handlers::settings::settings_custom_formats_import)
+            post(handlers::settings::custom_formats::settings_custom_formats_import)
                 .layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route(
             "/settings/custom-formats/import-resolve",
-            post(handlers::settings::settings_custom_formats_import_resolve)
+            post(handlers::settings::custom_formats::settings_custom_formats_import_resolve)
                 .layer(DefaultBodyLimit::max(256 * 1024)),
         )
-        .route("/settings/custom-formats/install-defaults", post(handlers::settings::settings_custom_formats_install_defaults))
-        .route("/settings/custom-formats/reset-defaults", post(handlers::settings::settings_custom_formats_reset_defaults))
-        .route("/settings/custom-formats/export", get(handlers::settings::settings_custom_formats_export))
+        .route("/settings/custom-formats/install-defaults", post(handlers::settings::custom_formats::settings_custom_formats_install_defaults))
+        .route("/settings/custom-formats/reset-defaults", post(handlers::settings::custom_formats::settings_custom_formats_reset_defaults))
+        .route("/settings/custom-formats/export", get(handlers::settings::custom_formats::settings_custom_formats_export))
         .route("/api/qbit/test", post(handlers::settings::qbit_test))
         .route("/api/jellyfin/test", post(handlers::settings::jellyfin_test))
         .route("/api/health", get(handlers::settings::api_health))

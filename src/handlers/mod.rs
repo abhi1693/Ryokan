@@ -7,6 +7,7 @@ pub mod search;
 pub mod settings;
 pub mod system;
 
+pub mod arr_auth;
 pub mod media;
 pub mod radarr_compat;
 pub mod sonarr_compat;

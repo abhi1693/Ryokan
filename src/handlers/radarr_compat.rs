@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{Request, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -20,63 +20,21 @@ use crate::AppState;
 
 // ── Authentication middleware ──────────────────────────────────────────────
 
-/// Middleware that validates the API key from the `X-Api-Key` header or
-/// `?apikey=` query parameter against the configured Radarr API key.
+/// Thin wrapper over [`crate::handlers::arr_auth::check_api_key`] that pins
+/// the config-field selector to the Radarr slots.
 pub async fn require_api_key(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // See sonarr_compat::require_api_key for the 503-vs-500 rationale.
-    let cfg = match config::get_config(&state.db).await {
-        Ok(Some(c)) => c,
-        Ok(None) | Err(_) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(axum::http::header::RETRY_AFTER, "5")],
-                "Ryokan config not yet available",
-            )
-                .into_response();
-        }
-    };
-
-    if !cfg.radarr_enabled || cfg.radarr_api_key.is_empty() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "Radarr API compatibility layer is disabled").into_response();
-    }
-
-    // Mirrors sonarr_compat::require_api_key — see that function for the
-    // full rationale on percent-decoding the query-string value and on
-    // the constant-time compare. Kept duplicated rather than extracted
-    // because the only difference is the cfg field accessed.
-    let api_key = req
-        .headers()
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            let query_str = req.uri().query().unwrap_or("");
-            query_str.split('&').find_map(|pair| {
-                let (key, val) = pair.split_once('=')?;
-                if key == "apikey" {
-                    Some(urlencoding::decode(val).ok()?.into_owned())
-                } else {
-                    None
-                }
-            })
-        });
-
-    let valid = match &api_key {
-        Some(key) => bool::from(subtle::ConstantTimeEq::ct_eq(
-            key.as_bytes(),
-            cfg.radarr_api_key.as_bytes(),
-        )),
-        None => false,
-    };
-    if valid {
-        next.run(req).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "Invalid or missing API key").into_response()
-    }
+    crate::handlers::arr_auth::check_api_key(
+        state,
+        req,
+        next,
+        |cfg| (cfg.radarr_enabled, cfg.radarr_api_key.clone()),
+        "Radarr",
+    )
+    .await
 }
 
 // ── Radarr-compatible types ───────────────────────────────────────────────
