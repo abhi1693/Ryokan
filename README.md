@@ -4,7 +4,8 @@ A self-hosted anime PVR written in Rust. Searches Nyaa for releases, scores them
 
 I built this because Sonarr doesn't always work well for anime. The RSS sync for currently airing shows works just fine, but downloading season batches of shows that've finished airing almost always hangs the interactive search. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named.
 
-This project's being actively developed. Expect rough edges around features and UX.
+This project's being actively developed. Expect some occasional bugs. See [Releases](https://github.com/johnthreekay/Ryokan/releases) for version-to-version changes.
+
 ## Screenshots
 
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/ab8d0588-a896-477e-b264-79d2a44fc118" />
@@ -50,7 +51,7 @@ Ryokan's post-processor reads completed torrents from qBittorrent and imports th
 
 ## Running locally
 
-Requires Rust 1.88+, a C linker, and OpenSSL dev headers.
+Requires Rust 1.95+, a C linker, and OpenSSL dev headers.
 
 ```bash
 cargo run
