@@ -52,10 +52,12 @@ pub async fn delete_session(db: &SqlitePool, token: &str) -> Result<(), sqlx::Er
     Ok(())
 }
 
-/// Generate a cryptographically random session token.
+/// Generate a cryptographically random session token. 32 bytes of CSPRNG
+/// output rendered as a 64-char hex string. `rand::random::<[u8; 32]>()`
+/// pulls from `ThreadRng` (ChaCha-based, reseeded automatically) — same
+/// security properties as the older `thread_rng().gen()` loop, just
+/// without the manual collection.
 fn generate_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..32).map(|_| rng.r#gen()).collect();
+    let bytes: [u8; 32] = rand::random();
     hex::encode(bytes)
 }
