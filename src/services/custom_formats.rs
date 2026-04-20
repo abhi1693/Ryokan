@@ -1402,8 +1402,8 @@ mod tests {
             .expect("defaults file top-level must be an array");
         assert_eq!(
             entries.len(),
-            7,
-            "bundled default CFs after #12 removed the casual-group CF"
+            8,
+            "bundled default CFs after the SubsPlease/Judas split into two CFs"
         );
         for (i, entry) in entries.iter().enumerate() {
             let name = entry
@@ -1583,17 +1583,18 @@ mod tests {
     #[test]
     fn kizumonogatari_regression_cf_ordering() {
         let cfs = load_default_cfs();
-        assert_eq!(cfs.len(), 7, "default CF set must be 7 CFs");
+        assert_eq!(cfs.len(), 8, "default CF set must be 8 CFs");
 
-        // Expected totals are computed from plan §7.2's score values:
-        //   Tier-S BD   = 1200 (Tier S) + 600 (BD source)
+        // Expected totals are computed from the bundled CF scores:
+        //   Tier-S BD   = 1200 (S-Tier) + 600 (BD source)
         //               + 300 (10-bit/x265) + 150 (FLAC) = 2250
-        //   WEB HEVC    = 400 (WEB groups) + 300 (hevc/10-bit) = 700
-        //   WEB plain   = 400 (WEB groups) = 400
+        //   WEB HEVC    = 100 (Judas) + 300 (hevc/10-bit) = 400
+        //   WEB plain   = 500 (SubsPlease)
         //   WEB neutral = 0 (matches no CF)
-        //   HorribleSubs WEB = 0 (not penalized by bundled defaults —
-        //       users install anime-web-tier-05.json from TRaSH Guides
-        //       for that signal; see #12)
+        //
+        // SubsPlease > Judas+HEVC is the weekly-ranking invariant from
+        // #47: SubsPlease's h264 release must outrank a Judas x265
+        // release even after the HEVC bonus lands.
         //
         // Groups are attached via the SearchResult.group field (the
         // 2nd argument to make_fixture), not the title. Titles are
@@ -1630,8 +1631,8 @@ mod tests {
         // expected) tuples used for both scoring and ordering checks.
         let fixture: Vec<(&str, &SearchResult, &ClassificationResult, i32)> = vec![
             ("Tier-S BD",      &tier_s_bd.0,       &tier_s_bd.1,       2250),
-            ("WEB HEVC",       &web_hevc.0,        &web_hevc.1,        700),
-            ("WEB plain",      &web_plain.0,       &web_plain.1,       400),
+            ("WEB plain",      &web_plain.0,       &web_plain.1,       500),
+            ("WEB HEVC",       &web_hevc.0,        &web_hevc.1,        400),
             ("WEB neutral",    &web_neutral.0,     &web_neutral.1,     0),
         ];
 
@@ -1660,8 +1661,8 @@ mod tests {
             labels_in_score_order,
             vec![
                 "Tier-S BD",
-                "WEB HEVC",
                 "WEB plain",
+                "WEB HEVC",
                 "WEB neutral",
             ],
             "default CF set must produce the expected regression ordering"

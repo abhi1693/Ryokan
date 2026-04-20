@@ -14,17 +14,17 @@
     ]
   },
   {
-    "name": "Tier S BD groups (MTBB, Yūrei, Arukoru, Bakemono-Kami, Sephirotic)",
+    "name": "S-Tier BD groups",
     "trash_id": null,
     "score": 1200,
     "specifications": [
       {
-        "name": "Tier S BD groups",
+        "name": "S-Tier BD groups",
         "implementation": "ReleaseGroupSpecification",
         "negate": false,
         "required": false,
         "fields": [
-          { "name": "value", "value": "^(MTBB|Yūrei|Yurei|Arukoru|Bakemono-Kami|Sephirotic)$" }
+          { "name": "value", "value": "^(MTBB|MiniMTBB|MegaMTBB|Okay-Subs|hchcsen|sam|NAN0|Headpatter|smol|Vodes|CRUCiBLE|YURASUKA|YURI|Beatrice-Raws|Kaleido-subs|PMR|Arid|LYS1TH3A|SubsMix)$" }
         ]
       }
     ]
@@ -42,30 +42,37 @@
         "fields": [
           { "name": "value", "value": 6 }
         ]
-      },
+      }
+    ]
+  },
+  {
+    "name": "Preferred WEB release group (SubsPlease)",
+    "trash_id": null,
+    "score": 500,
+    "specifications": [
       {
-        "name": "Bluray Raw",
-        "implementation": "SourceSpecification",
+        "name": "SubsPlease",
+        "implementation": "ReleaseGroupSpecification",
         "negate": false,
         "required": false,
         "fields": [
-          { "name": "value", "value": 7 }
+          { "name": "value", "value": "^SubsPlease$" }
         ]
       }
     ]
   },
   {
-    "name": "Prefer WEB release groups (SubsPlease, Judas)",
+    "name": "Preferred WEB release group (Judas)",
     "trash_id": null,
-    "score": 400,
+    "score": 100,
     "specifications": [
       {
-        "name": "Preferred WEB groups",
+        "name": "Judas",
         "implementation": "ReleaseGroupSpecification",
         "negate": false,
         "required": false,
         "fields": [
-          { "name": "value", "value": "^(SubsPlease|Judas)$" }
+          { "name": "value", "value": "^Judas$" }
         ]
       }
     ]
