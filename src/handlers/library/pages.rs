@@ -428,10 +428,7 @@ pub(super) async fn build_episodes(
     // 1..=ep_count render loop emits nothing, and the page reads as a
     // zero-episode series even though `/anime/{id}/episodes` would have
     // returned the aired list.
-    let is_airing_status = matches!(
-        detail.status.as_str(),
-        "RELEASING" | "CURRENTLY_AIRING"
-    );
+    let is_airing_status = matches!(detail.status.as_str(), "RELEASING" | "CURRENTLY_AIRING");
     let should_fetch_jikan = !use_cached_eps
         && detail.id_mal.is_some()
         && (episodic_format || ep_count > 1 || is_airing_status);
