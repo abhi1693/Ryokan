@@ -359,24 +359,62 @@ async fn copy_series_and_season_poster(
     }
 }
 
-/// Copy the cached series banner to `dest` (typically
-/// `{series_folder}/banner.jpg`). Jellyfin reads that slot for the
-/// series-level banner; writing it locally prevents the TVDB/TMDB
-/// fallback scrape from picking a mismatched banner when the anime
-/// doesn't cleanly map 1:1 to an external provider entry. Returns
-/// `true` when the blob landed on disk.
-async fn copy_series_banner(
+/// Named result of a banner fan-out to the two Jellyfin image slots
+/// we fill from the AniList `bannerImage`. Structural naming so the
+/// caller can't accidentally swap the two booleans via slice reorder.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct BannerOutcome {
+    /// True if `{series_folder}/banner.jpg` landed — Jellyfin
+    /// `ImageType::Banner` (3). Only surfaces in "Banner" library
+    /// layouts; mostly legacy in the current Jellyfin web UI.
+    series_banner: bool,
+    /// True if `{series_folder}/backdrop.jpg` landed — Jellyfin
+    /// `ImageType::Backdrop` (2). This is the slot the series detail
+    /// page reads for the hero image behind the header, and what the
+    /// home screen uses as the featured background. AniList's
+    /// `bannerImage` is semantically a backdrop (wide hero, 1900×400
+    /// typical), not a thin Kodi-style banner, so we copy the same
+    /// blob into both slots and let Jellyfin pick per UI context.
+    series_backdrop: bool,
+}
+
+/// Copy the cached AniList banner blob to the two series-level image
+/// slots Jellyfin cares about: `banner.jpg` (legacy banner slot) and
+/// `backdrop.jpg` (modern hero/fanart slot). One `cache_image` fetch
+/// on a miss, one `fs::read` of the cached blob, two `fs::write`s
+/// under a single `spawn_blocking`.
+///
+/// Background: Jellyfin 10.x's default UI barely renders `ImageType::
+/// Banner` — the prominent wide image on the series detail page is
+/// the Backdrop. Copying the AL banner only to `banner.jpg` left
+/// Jellyfin showing nothing (or scraping TVDB/TMDB) for the backdrop
+/// slot. Writing both files keeps the data path unambiguous: same
+/// source blob, two on-disk filenames so auto-discovery finds the
+/// right one per slot.
+async fn copy_series_banner_and_backdrop(
     db: &sqlx::SqlitePool,
     series_id: i64,
     source_url: Option<&str>,
-    dest: &Path,
-) -> bool {
+    banner_dest: &Path,
+    backdrop_dest: &Path,
+) -> BannerOutcome {
     let cache_key = format!("series-{}-banner", series_id);
-    copy_artwork(db, series_id, &cache_key, "banner", source_url, &[dest])
-        .await
-        .first()
-        .copied()
-        .unwrap_or(false)
+    let results = copy_artwork(
+        db,
+        series_id,
+        &cache_key,
+        "banner",
+        source_url,
+        &[banner_dest, backdrop_dest],
+    )
+    .await;
+    // Same positional-contract containment pattern as
+    // `copy_series_and_season_poster` — keep the slice-index
+    // mapping local to this 3-line helper.
+    BannerOutcome {
+        series_banner: results.first().copied().unwrap_or(false),
+        series_backdrop: results.get(1).copied().unwrap_or(false),
+    }
 }
 
 /// #30 — Decide what offset to subtract from a parsed filename episode
@@ -1198,6 +1236,7 @@ async fn import_torrent(
         let poster_dest = series_root.join("poster.jpg");
         let season_poster_dest = ctx.season_dir.join("folder.jpg");
         let banner_dest = series_root.join("banner.jpg");
+        let backdrop_dest = series_root.join("backdrop.jpg");
 
         let cover_source = ctx.cached_detail.as_ref().map(|d| d.cover_url.as_str());
         let banner_source = ctx.cached_detail.as_ref().map(|d| d.banner_url.as_str());
@@ -1213,8 +1252,16 @@ async fn import_torrent(
         let has_poster = poster_outcome.series_root;
         let has_folder_poster = poster_outcome.season_folder;
 
-        let has_banner =
-            copy_series_banner(&state.db, ctx.series.id, banner_source, &banner_dest).await;
+        let banner_outcome = copy_series_banner_and_backdrop(
+            &state.db,
+            ctx.series.id,
+            banner_source,
+            &banner_dest,
+            &backdrop_dest,
+        )
+        .await;
+        let has_banner = banner_outcome.series_banner;
+        let has_backdrop = banner_outcome.series_backdrop;
 
         // Always (re)write tvshow.nfo + season.nfo so refreshed
         // AniList metadata (status flips, plot updates, new genres)
@@ -1229,6 +1276,7 @@ async fn import_torrent(
             &cfg.title_language,
             has_poster,
             has_banner,
+            has_backdrop,
         )
         .await;
 

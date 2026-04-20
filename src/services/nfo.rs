@@ -129,6 +129,7 @@ pub async fn write_series_nfo(
     title_language: &str,
     has_poster: bool,
     has_banner: bool,
+    has_backdrop: bool,
 ) -> std::io::Result<()> {
     let title = xml_escape(&title_for_preference(series, title_language));
     let orig = xml_escape(&series.title_native);
@@ -238,6 +239,21 @@ pub async fn write_series_nfo(
             xml.push_str("    <banner>banner.jpg</banner>\n");
         }
         xml.push_str("  </art>\n");
+    }
+
+    // <fanart> is a sibling of <art> in the standard Kodi/Jellyfin
+    // tvshow.nfo schema, not a child. Jellyfin's NFO reader maps
+    // <fanart><thumb> into `ImageType::Backdrop` (2), which is the
+    // slot the series detail page reads for the hero image behind
+    // the header. AniList's `bannerImage` is semantically a backdrop
+    // (wide hero, 1900×400 typical), not a Kodi-style banner, so
+    // copying the same blob into `backdrop.jpg` and pointing the NFO
+    // there is what gets it actually displayed — the `banner.jpg`
+    // reference above only surfaces in the "Banner" library layout.
+    if has_backdrop {
+        xml.push_str("  <fanart>\n");
+        xml.push_str("    <thumb>backdrop.jpg</thumb>\n");
+        xml.push_str("  </fanart>\n");
     }
 
     xml.push_str("</tvshow>\n");
@@ -466,17 +482,17 @@ mod tests {
     }
 
     async fn render_series_nfo(detail: Option<&AnimeDetail>) -> String {
-        // Default to both-landed so the existing enrichment tests
-        // (which don't care about <art> presence) don't have to care
-        // about the flag plumbing.
-        render_series_nfo_full(detail, "english", true, true).await
+        // Default to all-landed so the existing enrichment tests
+        // (which don't care about <art>/<fanart> presence) don't have
+        // to care about the flag plumbing.
+        render_series_nfo_full(detail, "english", true, true, true).await
     }
 
     async fn render_series_nfo_with_lang(
         detail: Option<&AnimeDetail>,
         lang: &str,
     ) -> String {
-        render_series_nfo_full(detail, lang, true, true).await
+        render_series_nfo_full(detail, lang, true, true, true).await
     }
 
     async fn render_series_nfo_full(
@@ -484,11 +500,20 @@ mod tests {
         lang: &str,
         has_poster: bool,
         has_banner: bool,
+        has_backdrop: bool,
     ) -> String {
         let path = unique_temp_path("tvshow.nfo");
-        write_series_nfo(&path, &series_stub(), detail, lang, has_poster, has_banner)
-            .await
-            .expect("write nfo");
+        write_series_nfo(
+            &path,
+            &series_stub(),
+            detail,
+            lang,
+            has_poster,
+            has_banner,
+            has_backdrop,
+        )
+        .await
+        .expect("write nfo");
         let xml = std::fs::read_to_string(&path).expect("read nfo");
         std::fs::remove_file(&path).ok();
         if let Some(parent) = path.parent() {
@@ -683,7 +708,7 @@ mod tests {
 
     #[tokio::test]
     async fn series_nfo_emits_art_block_referencing_poster_and_banner_when_both_present() {
-        let xml = render_series_nfo_full(None, "english", true, true).await;
+        let xml = render_series_nfo_full(None, "english", true, true, false).await;
         assert!(xml.contains("<art>"));
         assert!(xml.contains("<poster>poster.jpg</poster>"));
         assert!(xml.contains("<banner>banner.jpg</banner>"));
@@ -695,17 +720,43 @@ mod tests {
         // Regression: the PR-51 review flagged that a hard-coded
         // <banner>banner.jpg</banner> would leave Jellyfin staring at
         // a missing file on every scan. Gate must hold.
-        let xml = render_series_nfo_full(None, "english", true, false).await;
+        let xml = render_series_nfo_full(None, "english", true, false, false).await;
         assert!(xml.contains("<poster>poster.jpg</poster>"));
         assert!(!xml.contains("<banner>"));
     }
 
     #[tokio::test]
-    async fn series_nfo_omits_entire_art_block_when_both_missing() {
-        let xml = render_series_nfo_full(None, "english", false, false).await;
+    async fn series_nfo_omits_all_art_blocks_when_nothing_landed() {
+        let xml = render_series_nfo_full(None, "english", false, false, false).await;
         assert!(!xml.contains("<art>"));
         assert!(!xml.contains("<poster>"));
         assert!(!xml.contains("<banner>"));
+        assert!(!xml.contains("<fanart>"));
+    }
+
+    #[tokio::test]
+    async fn series_nfo_emits_fanart_block_when_backdrop_landed() {
+        // <fanart><thumb>backdrop.jpg</thumb></fanart> is a sibling of
+        // <art>, not a child — that's what maps to Jellyfin's
+        // ImageType::Backdrop slot, which is what the series detail
+        // page actually renders behind the header.
+        let xml = render_series_nfo_full(None, "english", false, false, true).await;
+        assert!(xml.contains("<fanart>"));
+        assert!(xml.contains("<thumb>backdrop.jpg</thumb>"));
+        assert!(xml.contains("</fanart>"));
+        // Sibling, not child: the <fanart> block must not appear
+        // inside <art>.
+        assert!(
+            !xml.contains("<art>"),
+            "no poster or banner landed, so <art> should be skipped",
+        );
+    }
+
+    #[tokio::test]
+    async fn series_nfo_omits_fanart_when_backdrop_missing() {
+        let xml = render_series_nfo_full(None, "english", true, true, false).await;
+        assert!(!xml.contains("<fanart>"));
+        assert!(!xml.contains("backdrop.jpg"));
     }
 
     #[tokio::test]
