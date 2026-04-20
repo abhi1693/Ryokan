@@ -773,4 +773,50 @@ mod tests {
             Some((Some(0), 18))
         );
     }
+
+    // ── parse_quality branch ordering (issue #48) ────────────────────
+    //
+    // The unified-WEB branch in `parse_quality` uses `.contains("web")`
+    // which would swallow a WEBRip filename if evaluated first. These
+    // tests lock in the WebRip-before-unified-Web ordering — any
+    // reshuffle that lets a WebRip filename resolve as plain "WEB"
+    // would silently downgrade the label and potentially mislabel the
+    // release for scoring/upgrade decisions.
+
+    #[test]
+    fn parse_quality_webrip_wins_over_bare_web_branch() {
+        use super::parse_quality;
+        assert_eq!(
+            parse_quality("show.s01e01.web-rip.1080p.group.mkv"),
+            "WEBRip-1080p"
+        );
+        assert_eq!(
+            parse_quality("show.s01e01.webrip.1080p.group.mkv"),
+            "WEBRip-1080p"
+        );
+    }
+
+    #[test]
+    fn parse_quality_webdl_and_bare_web_both_render_as_web() {
+        use super::parse_quality;
+        // Issue #48 unified WebDl and bare-WEB to the same "WEB" label.
+        assert_eq!(
+            parse_quality("show.s01e01.web-dl.1080p.group.mkv"),
+            "WEB-1080p"
+        );
+        assert_eq!(
+            parse_quality("show.s01e01.webdl.1080p.group.mkv"),
+            "WEB-1080p"
+        );
+        assert_eq!(
+            parse_quality("[subsplease] show - 01 (1080p) [abcd].mkv"),
+            "1080p", // no WEB token in the filename → source stays blank
+        );
+        // A title that has `WEB` as its only source token resolves to
+        // the unified WEB label.
+        assert_eq!(
+            parse_quality("show.s01e01.web.1080p.group.mkv"),
+            "WEB-1080p"
+        );
+    }
 }

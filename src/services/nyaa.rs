@@ -106,7 +106,7 @@ pub struct SearchResult {
     /// for UI callers that render just the resolution tag; richer callers
     /// should use `quality_label` which encodes source+resolution+sub-tier.
     pub resolution: String,
-    /// Pre-computed Sonarr-parity label (`WEBDL-1080p`, `BD-1080p Remux`,
+    /// Pre-computed Sonarr-parity label (`WEB-1080p`, `BD-1080p Remux`,
     /// etc.) produced from the same [`crate::services::source::ClassificationResult::label`]
     /// logic as the grab-side pipeline, so the value the user sees in
     /// interactive search equals the value persisted once grabbed.

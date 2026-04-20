@@ -23,15 +23,20 @@ pub struct GroupSourceEntry {
     pub is_user_edit: bool,
     pub notes: String,
     /// Optional Web sub-tier hint. Set on groups that ship **exclusively**
-    /// direct stream remuxes (WEB-DL) or exclusively re-encoded WEB
-    /// releases (WEB-Rip). Ignored unless `source == Source::Web`.
+    /// re-encoded WEB releases (WEB-Rip). Ignored unless
+    /// `source == Source::Web`.
     ///
-    /// Lets the aggregator distinguish `WEBDL-1080p` from a plain
-    /// `WEB-1080p` label when the filename itself carries no explicit
-    /// `WEB-DL` / `WEBRip` token — the SubsPlease / HorribleSubs
-    /// convention of just `(1080p)` in the release name was leaving
-    /// every Web release labelled as the generic tier, even though
-    /// those groups are always direct CR/HIDIVE remuxes.
+    /// Since issue #48 the aggregator's label layer no longer
+    /// distinguishes `WEBDL` from bare `WEB` — both render as
+    /// `WEB-1080p`. The only remaining role of `web_kind = WebDl` on
+    /// a group is CF `SourceSpecification` value-3 matching, and
+    /// since the post-#48 predicate widened value 3 to match any
+    /// `Source::Web && !WebRip`, even that hint isn't load-bearing
+    /// for CFs — bare-Web releases already match. The column is kept
+    /// for the `WebRip` side (groups that consistently ship re-
+    /// encoded WEB) so the value-4 CF path can still gate on group
+    /// identity without a filename token, and for future re-
+    /// introduction of sub-tier-specific behavior.
     pub web_kind: WebKind,
 }
 
