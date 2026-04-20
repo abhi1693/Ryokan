@@ -297,13 +297,13 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
                     facts.has_commentary = true;
                 }
             }
-            "subtitle" => {
-                // PGS (Blu-ray) subtitles come through as "hdmv_pgs_subtitle"
-                // under codec_name. Also accept the older S_HDMV/PGS form that
-                // shows up in some mkvtoolnix-produced files.
-                if codec_name.contains("pgs") || codec_name.contains("hdmv_pgs") {
-                    facts.has_pgs_subs = true;
-                }
+            // PGS (Blu-ray) subtitles come through as "hdmv_pgs_subtitle"
+            // under codec_name. Also accept the older S_HDMV/PGS form that
+            // shows up in some mkvtoolnix-produced files.
+            "subtitle"
+                if codec_name.contains("pgs") || codec_name.contains("hdmv_pgs") =>
+            {
+                facts.has_pgs_subs = true;
             }
             _ => {}
         }

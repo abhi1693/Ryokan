@@ -1496,8 +1496,6 @@ pub async fn grab_interactive_result(
     })))
 }
 
-/// Delete an episode file from disk.
-
 #[cfg(test)]
 mod tests {
     use super::*;

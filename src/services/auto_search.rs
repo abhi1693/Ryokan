@@ -6118,10 +6118,11 @@ mod tests {
     }
 
     fn cfg_with_defaults(tokens: &str, user: &str) -> Config {
-        let mut c = Config::default();
-        c.default_custom_query_tokens = tokens.to_string();
-        c.default_restrict_to_uploader = user.to_string();
-        c
+        Config {
+            default_custom_query_tokens: tokens.to_string(),
+            default_restrict_to_uploader: user.to_string(),
+            ..Config::default()
+        }
     }
 
     #[test]

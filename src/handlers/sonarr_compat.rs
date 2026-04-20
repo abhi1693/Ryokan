@@ -576,7 +576,7 @@ pub async fn add_series(
             );
         }
 
-        for (ids, existing) in anime_ids.iter().zip(existing_siblings.into_iter()) {
+        for (ids, existing) in anime_ids.iter().zip(existing_siblings) {
             // Skip entries that already exist — regrab-within-fresh case.
             // A partial fan-out (user added JJK S1 manually last month, now
             // Seerr adds JJK) shouldn't re-fetch S1's detail.

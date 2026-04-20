@@ -1654,7 +1654,7 @@ mod tests {
             .iter()
             .map(|(label, cand, cls, _)| (label, score_against_defaults(&cfs, cand, cls)))
             .collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|s| std::cmp::Reverse(s.1));
         let labels_in_score_order: Vec<&str> =
             sorted.iter().map(|(label, _)| **label).collect();
         assert_eq!(

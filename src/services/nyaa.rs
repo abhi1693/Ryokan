@@ -325,7 +325,7 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
     }
 
     // Sort by score descending.
-    results.sort_by(|a, b| b.score.cmp(&a.score));
+    results.sort_by_key(|r| std::cmp::Reverse(r.score));
 
     // Detect if there's a next page.
     let has_next = {

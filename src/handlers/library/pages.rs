@@ -769,7 +769,7 @@ pub(super) async fn build_episodes(
         }
     }
 
-    episodes.sort_by(|a, b| b.number.cmp(&a.number));
+    episodes.sort_by_key(|e| std::cmp::Reverse(e.number));
 
     let size_display = format_size(total_size);
     (episodes, on_disk_count, downloaded_count, size_display, monitored_count)
