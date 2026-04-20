@@ -16,7 +16,17 @@ askama = { version = "0.12", features = ["with-axum"] }
 askama_axum = "0.4"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# default-features = false drops sqlx's `any`/`macros`/`migrate`/`json`
+# defaults — none of which Ryokan uses (queries are all runtime strings,
+# migrations live in models/mod.rs::migrate(), JSON goes through
+# serde_json directly). Without this opt-out, sqlx's `any` feature
+# pulls sqlx-mysql + sqlx-postgres into the lock for runtime backend
+# selection, which in turn drags in `rsa` (the MySQL crypto crate
+# affected by RUSTSEC-2023-0071, the Marvin Attack timing sidechannel)
+# even though we never compile or link it. Pruning the feature set
+# removes the phantom advisory at the source instead of papering over
+# it with `cargo audit ignore`.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "cookies"] }
