@@ -269,7 +269,21 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     // with WebRip above so the prior produces `Web (WebRip)` instead of
     // `BluRay`. `reconcile_episode_seed_drift` resets existing user rows
     // that had been stamped under the old BD prior.
-    ("EMBER", Source::Web, 0.95, "WebRip re-encoder"),
+    //
+    // Confidence sits at 0.85 rather than the 0.95 we use for
+    // single-source groups: EMBER has shipped occasional BD rips in the
+    // past (most recent 2025-11-14), so a high-confidence BD fingerprint
+    // from ffprobe — FLAC / PGS subs / native DVD dimensions, all 0.90
+    // in source_ffprobe.rs — should out-rank the WEB prior. 0.85 still
+    // comfortably beats the 0.80 WEB ffprobe fingerprint (same verdict
+    // anyway) and a filename-layer Web hint, which is what we want for
+    // the common case.
+    (
+        "EMBER",
+        Source::Web,
+        0.85,
+        "WebRip re-encoder (occasional BD)",
+    ),
     ("GHOST", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     // Judas is TRaSH BD tier 08 but also ships weekly WEB rips during airing,
     // so per the mixed-source rule in the module docs above we leave them out
