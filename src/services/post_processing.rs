@@ -122,144 +122,205 @@ async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
     .map_err(|e| std::io::Error::other(format!("join error: {}", e)))?
 }
 
-/// Copy a cached artwork blob (poster or banner) to `dest`. Runs the
-/// copy under `spawn_blocking` so a slow/network-backed media root
-/// can't stall the runtime while moving a multi-MB image. A failure
-/// here is non-fatal (Jellyfin can still scrape its own artwork), but
-/// silently swallowing the error left operators with an invisible
-/// "no artwork in Jellyfin" symptom and nothing in the logs to point
-/// at — so every failure path warns with enough detail to debug it.
+/// Copy a cached artwork blob (poster or banner) to every path in
+/// `dests`, self-healing the cache on a miss when `source_url` is
+/// available. Returns a `Vec<bool>` aligned to `dests` — `true` at
+/// position `i` means the blob landed at `dests[i]`.
 ///
-/// `kind_label` is only used in log text (e.g. "poster" or "banner")
-/// so operators can tell which artwork copy tripped when scanning
-/// logs.
+/// **Self-healing rationale:**
+/// `metadata_sync::refresh_series_metadata_inner` is the only path
+/// that eagerly caches series artwork, and every `artwork::cache_image`
+/// error there is swallowed via `let _ = ...`. A transient fetch
+/// failure (AL CDN hiccup, a cancelled rebuild sweep, Jikan-fallback
+/// with an empty banner field, …) leaves the blob missing
+/// indefinitely. Baking the re-fetch into `copy_artwork` itself
+/// (rather than a separate pre-step the caller has to remember to
+/// run) makes the self-heal an invariant: any future caller that
+/// supplies a source URL automatically inherits it.
+///
+/// **I/O shape:** the blob bytes are read into memory once and
+/// written to every dest under a single `spawn_blocking`, so a
+/// network-backed media root pays one open per import rather than
+/// `dests.len()` opens. Failures are non-fatal (Jellyfin can still
+/// scrape its own artwork) but every failure path warns with enough
+/// detail to debug it — silent "no artwork in Jellyfin" was the
+/// symptom the caller-side self-heal was designed to fix.
+///
+/// **Args:**
+/// - `cache_key` — e.g. `series-{id}-cover` or `series-{id}-banner`
+/// - `image_kind` — "cover" or "banner" (matches
+///   [`artwork::cache_image`]'s `image_kind`; also used verbatim in
+///   log text)
+/// - `source_url` — optional upstream URL to re-cache from on a miss;
+///   pass `None` when the caller has nothing to fetch from (e.g. a
+///   series that ran on the pure Jikan fallback with no banner field)
 async fn copy_artwork(
     db: &sqlx::SqlitePool,
     series_id: i64,
     cache_key: &str,
-    kind_label: &str,
-    dest: &Path,
-) {
-    let entry = match artwork_cache::get(db, cache_key).await {
-        Ok(Some(e)) => e,
-        _ => {
-            // Cache miss. If the miss was permanent we'd silently no-op
-            // forever and the user would see "AL has a banner but my
-            // library doesn't" indefinitely. Log at debug so operators
-            // have a trail — the caller is expected to run
-            // `ensure_artwork_cached` before this copy if a source URL
-            // is available.
-            tracing::debug!(
-                target: "ryokan::post_processing",
-                series_id,
-                cache_key,
-                kind_label,
-                "artwork blob missing from cache; skipping copy",
-            );
-            return;
-        }
-    };
-    let src = std::path::PathBuf::from(&entry.local_path);
-    let dst = dest.to_path_buf();
-    let src_display = src.display().to_string();
-    let dst_display = dst.display().to_string();
-    match tokio::task::spawn_blocking(move || std::fs::copy(src, dst)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(err)) => {
+    image_kind: &str,
+    source_url: Option<&str>,
+    dests: &[&Path],
+) -> Vec<bool> {
+    if dests.is_empty() {
+        return Vec::new();
+    }
+
+    // Step 1: cache miss + non-empty source URL → self-heal by
+    // re-fetching. Two SELECTs on the unhappy path, one on the happy
+    // path (the re-check after the fetch is necessary because the
+    // fetch may have partially succeeded — e.g. blob written but ref
+    // upsert failed).
+    //
+    // `metadata_sync::refresh_series_metadata_inner` is the only
+    // upstream caller of `cache_image`, and every error there is
+    // swallowed via `let _ = ...`. A transient fetch failure (AL CDN
+    // hiccup, a cancelled rebuild sweep, a Jikan-fallback with an
+    // empty banner field, …) would otherwise leave the blob missing
+    // indefinitely — baking the re-fetch in here makes the self-heal
+    // an invariant that any future caller supplying a source URL
+    // inherits automatically.
+    let mut cached = artwork_cache::get(db, cache_key).await.ok().flatten();
+    if cached.is_none()
+        && let Some(url) = source_url.filter(|u| !u.trim().is_empty())
+    {
+        tracing::debug!(
+            target: "ryokan::post_processing",
+            series_id,
+            cache_key,
+            image_kind,
+            "artwork cache miss; fetching on demand",
+        );
+        if let Err(err) = artwork::cache_image(
+            db,
+            cache_key,
+            "series",
+            Some(series_id),
+            image_kind,
+            url,
+        )
+        .await
+        {
             logger::warn(
                 db,
                 LogCategory::PostProcess,
-                &format!("Failed to copy series {kind_label} for series_id={series_id}"),
-                &format!("src={}, dst={}, error={}", src_display, dst_display, err),
+                &format!(
+                    "On-demand artwork fetch failed for {image_kind} on series_id={series_id}"
+                ),
+                &format!("source_url={url}, error={err}"),
             )
             .await;
+        }
+        cached = artwork_cache::get(db, cache_key).await.ok().flatten();
+    }
+
+    let Some(entry) = cached else {
+        tracing::debug!(
+            target: "ryokan::post_processing",
+            series_id,
+            cache_key,
+            image_kind,
+            "artwork blob missing from cache and no recoverable source; skipping copy",
+        );
+        return vec![false; dests.len()];
+    };
+
+    // Step 2: read the blob bytes once, fan out to each dest. Under
+    // one `spawn_blocking` so an NFS-backed media root doesn't
+    // serialize file-open round-trips from separate tokio tasks.
+    let src = std::path::PathBuf::from(&entry.local_path);
+    let owned_dests: Vec<std::path::PathBuf> = dests.iter().map(|p| p.to_path_buf()).collect();
+    let src_display = src.display().to_string();
+    let copy_result = tokio::task::spawn_blocking(move || -> Vec<Result<(), std::io::Error>> {
+        let bytes = match std::fs::read(&src) {
+            Ok(b) => b,
+            Err(e) => {
+                // Fan the source-read error out to every dest so the
+                // caller sees `false` for each one; log once at the
+                // call site (below) with the source path.
+                return owned_dests.iter().map(|_| Err(std::io::Error::new(e.kind(), e.to_string()))).collect();
+            }
+        };
+        owned_dests
+            .iter()
+            .map(|dst| -> std::io::Result<()> {
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(dst, &bytes)?;
+                Ok(())
+            })
+            .collect()
+    })
+    .await;
+
+    let mut results = Vec::with_capacity(dests.len());
+    match copy_result {
+        Ok(per_dest) => {
+            for (i, r) in per_dest.into_iter().enumerate() {
+                match r {
+                    Ok(()) => results.push(true),
+                    Err(err) => {
+                        logger::warn(
+                            db,
+                            LogCategory::PostProcess,
+                            &format!(
+                                "Failed to copy series {image_kind} for series_id={series_id}"
+                            ),
+                            &format!(
+                                "src={}, dst={}, error={}",
+                                src_display,
+                                dests[i].display(),
+                                err
+                            ),
+                        )
+                        .await;
+                        results.push(false);
+                    }
+                }
+            }
         }
         Err(join_err) => {
             logger::warn(
                 db,
                 LogCategory::PostProcess,
-                &format!("{kind_label} copy task panicked for series_id={series_id}"),
-                &format!("src={}, dst={}, error={}", src_display, dst_display, join_err),
+                &format!("{image_kind} copy task panicked for series_id={series_id}"),
+                &format!("src={}, error={}", src_display, join_err),
             )
             .await;
+            results.extend((0..dests.len()).map(|_| false));
         }
     }
+    results
 }
 
-/// Copy the cached series poster to `dest` (always written as JPEG
-/// regardless of original extension — Jellyfin accepts it).
-async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
-    let cache_key = format!("series-{}-cover", series_id);
-    copy_artwork(db, series_id, &cache_key, "poster", dest).await;
-}
-
-/// Populate `artwork_cache` on demand when the blob isn't there yet.
-///
-/// Motivation: `metadata_sync::refresh_series_metadata_inner` is the
-/// only path that eagerly caches series artwork, and every
-/// `artwork::cache_image` error there is swallowed by `let _ = ...`.
-/// So a transient fetch failure (AL CDN hiccup, a cancelled rebuild
-/// sweep, Jikan-fallback with an empty banner field, …) leaves the
-/// blob missing indefinitely, and `copy_banner` / `copy_poster`
-/// silently skip on every subsequent import.
-///
-/// This helper closes that hole at post-processing time: if we already
-/// hold an `AnimeDetail` with a non-empty source URL and the cache
-/// doesn't carry the blob, fetch+cache it now. `cache_image` is
-/// idempotent — on the happy path (cache already hot) this is one
-/// quick SELECT and we skip the HTTP entirely.
-async fn ensure_artwork_cached(
+/// Copy the cached series poster to each of `dests`. The cache is
+/// self-healed from `source_url` if the blob is missing. Always
+/// written as JPEG regardless of original extension — Jellyfin
+/// accepts it.
+async fn copy_poster(
     db: &sqlx::SqlitePool,
-    cache_key: &str,
-    parent_id: i64,
-    image_kind: &str,
-    source_url: &str,
-) {
-    if source_url.trim().is_empty() {
-        return;
-    }
-    let already_cached = artwork_cache::get(db, cache_key)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    if already_cached {
-        return;
-    }
-    // Surface the on-demand fetch at debug so operators can trace
-    // "why is post-processing reaching for artwork" when diagnosing
-    // slow imports.
-    tracing::debug!(
-        target: "ryokan::post_processing",
-        series_id = parent_id,
-        cache_key,
-        image_kind,
-        "artwork cache miss; fetching on demand",
-    );
-    if let Err(err) =
-        artwork::cache_image(db, cache_key, "series", Some(parent_id), image_kind, source_url)
-            .await
-    {
-        // Do not bubble — the copy step will see the still-missing
-        // blob and skip gracefully. Just make the failure visible
-        // instead of swallowing it.
-        logger::warn(
-            db,
-            LogCategory::PostProcess,
-            &format!("On-demand artwork fetch failed for {image_kind} on series_id={parent_id}"),
-            &format!("source_url={source_url}, error={err}"),
-        )
-        .await;
-    }
+    series_id: i64,
+    source_url: Option<&str>,
+    dests: &[&Path],
+) -> Vec<bool> {
+    let cache_key = format!("series-{}-cover", series_id);
+    copy_artwork(db, series_id, &cache_key, "cover", source_url, dests).await
 }
 
-/// Copy the cached series banner to `dest`. Jellyfin reads `banner.jpg`
-/// at the series root; writing it locally prevents the TVDB/TMDB
-/// fallback scrape from picking a mismatched banner when the anime
-/// doesn't cleanly map 1:1 to an external provider entry.
-async fn copy_banner(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
+/// Copy the cached series banner to each of `dests`. Usually just
+/// one dest (series-root `banner.jpg`). Jellyfin reads that slot for
+/// the series-level banner; writing it locally prevents the
+/// TVDB/TMDB fallback scrape from picking a mismatched banner when
+/// the anime doesn't cleanly map 1:1 to an external provider entry.
+async fn copy_banner(
+    db: &sqlx::SqlitePool,
+    series_id: i64,
+    source_url: Option<&str>,
+    dests: &[&Path],
+) -> Vec<bool> {
     let cache_key = format!("series-{}-banner", series_id);
-    copy_artwork(db, series_id, &cache_key, "banner", dest).await;
+    copy_artwork(db, series_id, &cache_key, "banner", source_url, dests).await
 }
 
 /// #30 — Decide what offset to subtract from a parsed filename episode
@@ -1066,62 +1127,55 @@ async fn import_torrent(
             continue;
         };
         let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
+
+        // Artwork copies run before NFO writes so the NFO's `<art>`
+        // block can reference only the files that actually landed on
+        // disk. A hard-coded `<banner>banner.jpg</banner>` tag in
+        // tvshow.nfo is worse than useless when banner.jpg doesn't
+        // exist — Jellyfin logs a missing-file error per scan and the
+        // external-scrape fallback still fires for the empty slot.
+        //
+        // Series-level cover also feeds the season-level folder.jpg
+        // slot, so we dispatch both dests in one `copy_poster` call;
+        // the blob is read into memory once and fanned out to both
+        // paths under a single `spawn_blocking` (see `copy_artwork`).
+        let poster_dest = series_root.join("poster.jpg");
+        let season_poster_dest = ctx.season_dir.join("folder.jpg");
+        let banner_dest = series_root.join("banner.jpg");
+
+        let cover_source = ctx.cached_detail.as_ref().map(|d| d.cover_url.as_str());
+        let banner_source = ctx.cached_detail.as_ref().map(|d| d.banner_url.as_str());
+
+        let poster_results = copy_poster(
+            &state.db,
+            ctx.series.id,
+            cover_source,
+            &[&poster_dest, &season_poster_dest],
+        )
+        .await;
+        let has_poster = poster_results.first().copied().unwrap_or(false);
+        let has_folder_poster = poster_results.get(1).copied().unwrap_or(false);
+
+        let banner_results =
+            copy_banner(&state.db, ctx.series.id, banner_source, &[&banner_dest]).await;
+        let has_banner = banner_results.first().copied().unwrap_or(false);
+
+        // Always (re)write tvshow.nfo + season.nfo so refreshed
+        // AniList metadata (status flips, plot updates, new genres)
+        // propagates. The `<art>` blocks are gated on what landed
+        // above so a missing banner doesn't leave a dangling
+        // reference in the NFO.
         let series_nfo = series_root.join("tvshow.nfo");
         let _ = nfo::write_series_nfo(
             &series_nfo,
             &ctx.series,
             ctx.cached_detail.as_ref(),
             &cfg.title_language,
+            has_poster,
+            has_banner,
         )
         .await;
 
-        // Self-heal the artwork cache if the blob wasn't populated
-        // upstream. metadata_sync is supposed to cache both cover and
-        // banner, but every `cache_image` error there is swallowed —
-        // a cancelled rebuild or a transient CDN error can leave the
-        // cache empty, and without this call the copy steps below
-        // would silently no-op forever.
-        if let Some(detail) = ctx.cached_detail.as_ref() {
-            ensure_artwork_cached(
-                &state.db,
-                &format!("series-{}-cover", ctx.series.id),
-                ctx.series.id,
-                "cover",
-                &detail.cover_url,
-            )
-            .await;
-            ensure_artwork_cached(
-                &state.db,
-                &format!("series-{}-banner", ctx.series.id),
-                ctx.series.id,
-                "banner",
-                &detail.banner_url,
-            )
-            .await;
-        }
-
-        // Poster/banner are re-copied on every import. Previously
-        // guarded behind `!dest.exists()`, which meant refreshed
-        // AniList artwork (post `metadata_refresh` pulling an updated
-        // key visual) never propagated to Jellyfin. The copies are
-        // cheap (single local-fs copy of a cached blob) so rewriting
-        // every run is fine.
-        let poster_dest = series_root.join("poster.jpg");
-        copy_poster(&state.db, ctx.series.id, &poster_dest).await;
-
-        // Banner at the series root. Jellyfin reads this for the
-        // series-level banner slot; without it the TVDB/TMDB fallback
-        // scrape picks whatever banner happens to match the title
-        // against an external provider, frequently the wrong cour for
-        // anime.
-        let banner_dest = series_root.join("banner.jpg");
-        copy_banner(&state.db, ctx.series.id, &banner_dest).await;
-
-        // Season-level artifacts. Ryokan hardcodes `season = 1` per
-        // AniList entry, and `season_dir` on the import ctx is that
-        // single Season 01/ folder. Writing season.nfo + a season
-        // poster there tells Jellyfin the season is already matched
-        // and stops it from scraping season metadata from TVDB.
         let season_nfo = ctx.season_dir.join("season.nfo");
         let _ = nfo::write_season_nfo(
             &season_nfo,
@@ -1129,10 +1183,9 @@ async fn import_torrent(
             &ctx.series,
             ctx.cached_detail.as_ref(),
             &cfg.title_language,
+            has_folder_poster,
         )
         .await;
-        let season_poster_dest = ctx.season_dir.join("folder.jpg");
-        copy_poster(&state.db, ctx.series.id, &season_poster_dest).await;
     }
 
     // Flip episode tag rows from "grabbed" to "completed" per target

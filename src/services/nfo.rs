@@ -76,13 +76,22 @@ pub fn best_title(series: &Series) -> String {
 }
 
 /// Display title chosen according to the user's `title_language`
-/// setting (`english` / `romaji` / `native`). Falls back to the other
-/// two fields plus `series.title` when the preferred field is empty,
-/// so a missing English title doesn't leave the NFO blank for an
-/// english-preference user.
+/// setting (`english` / `romaji` / `native`). Falls back through the
+/// other fields when the preferred one is empty so the NFO is never
+/// blank.
 ///
-/// Unknown preference strings fall through to the English-first order,
-/// matching [`best_title`].
+/// **Fallback order** (load-bearing — don't "fix" to symmetric
+/// fallbacks later):
+/// - `romaji` → english → native → title
+/// - `native` → english → romaji → title
+/// - `english` / unknown → romaji → native → title
+///
+/// English is the first fallback for non-english preferences because
+/// most non-native viewers can read it when the preferred-language
+/// field is missing. Going `romaji → native → english` in that case
+/// would hand a katakana-heavy romaji title to a user who explicitly
+/// said "I want native" and has no native string available, which is
+/// worse than just giving them the English fallback.
 pub fn title_for_preference(series: &Series, preference: &str) -> String {
     let e = series.title_english.as_str();
     let r = series.title_romaji.as_str();
@@ -118,6 +127,8 @@ pub async fn write_series_nfo(
     series: &Series,
     detail: Option<&AnimeDetail>,
     title_language: &str,
+    has_poster: bool,
+    has_banner: bool,
 ) -> std::io::Result<()> {
     let title = xml_escape(&title_for_preference(series, title_language));
     let orig = xml_escape(&series.title_native);
@@ -205,16 +216,29 @@ pub async fn write_series_nfo(
     }
 
     // <art> block points Jellyfin at the sibling image files we
-    // actually write (`poster.jpg`, `banner.jpg`). Jellyfin already
+    // actually wrote (`poster.jpg`, `banner.jpg`). Jellyfin already
     // auto-discovers these by filename at the series root, but the
     // explicit reference belts-and-suspenders against scanner
     // variations (third-party NFO plugins, non-default image
     // discovery settings) where auto-discovery doesn't fire and the
     // metadata manager falls back to a TVDB/TMDB scrape for the slot.
-    xml.push_str("  <art>\n");
-    xml.push_str("    <poster>poster.jpg</poster>\n");
-    xml.push_str("    <banner>banner.jpg</banner>\n");
-    xml.push_str("  </art>\n");
+    //
+    // Each tag is gated on the caller confirming the file actually
+    // landed — a hard-coded `<banner>banner.jpg</banner>` with no
+    // banner on disk would surface as a missing-file error on every
+    // Jellyfin scan and still not prevent the external fallback.
+    // Skip the whole `<art>` block when both are missing so the NFO
+    // doesn't carry an empty container.
+    if has_poster || has_banner {
+        xml.push_str("  <art>\n");
+        if has_poster {
+            xml.push_str("    <poster>poster.jpg</poster>\n");
+        }
+        if has_banner {
+            xml.push_str("    <banner>banner.jpg</banner>\n");
+        }
+        xml.push_str("  </art>\n");
+    }
 
     xml.push_str("</tvshow>\n");
 
@@ -243,6 +267,7 @@ pub async fn write_season_nfo(
     series: &Series,
     detail: Option<&AnimeDetail>,
     title_language: &str,
+    has_folder_poster: bool,
 ) -> std::io::Result<()> {
     let title = xml_escape(&title_for_preference(series, title_language));
 
@@ -282,9 +307,13 @@ pub async fn write_season_nfo(
     // the explicit pointer, some Jellyfin scanner configurations fall
     // back to the series-root poster for the season card, which
     // defeats the purpose of writing a season folder image at all.
-    xml.push_str("  <art>\n");
-    xml.push_str("    <poster>folder.jpg</poster>\n");
-    xml.push_str("  </art>\n");
+    // Only emit the reference when the file actually landed (mirrors
+    // the gating in `write_series_nfo`'s <art> block).
+    if has_folder_poster {
+        xml.push_str("  <art>\n");
+        xml.push_str("    <poster>folder.jpg</poster>\n");
+        xml.push_str("  </art>\n");
+    }
 
     xml.push_str("</season>\n");
 
@@ -437,15 +466,27 @@ mod tests {
     }
 
     async fn render_series_nfo(detail: Option<&AnimeDetail>) -> String {
-        render_series_nfo_with_lang(detail, "english").await
+        // Default to both-landed so the existing enrichment tests
+        // (which don't care about <art> presence) don't have to care
+        // about the flag plumbing.
+        render_series_nfo_full(detail, "english", true, true).await
     }
 
     async fn render_series_nfo_with_lang(
         detail: Option<&AnimeDetail>,
         lang: &str,
     ) -> String {
+        render_series_nfo_full(detail, lang, true, true).await
+    }
+
+    async fn render_series_nfo_full(
+        detail: Option<&AnimeDetail>,
+        lang: &str,
+        has_poster: bool,
+        has_banner: bool,
+    ) -> String {
         let path = unique_temp_path("tvshow.nfo");
-        write_series_nfo(&path, &series_stub(), detail, lang)
+        write_series_nfo(&path, &series_stub(), detail, lang, has_poster, has_banner)
             .await
             .expect("write nfo");
         let xml = std::fs::read_to_string(&path).expect("read nfo");
@@ -587,11 +628,13 @@ mod tests {
 
     // ── season NFO ────────────────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn season_nfo_emits_seasonnumber_and_anilist_uniqueid() {
-        let detail = detail_with_everything();
+    async fn render_season_nfo(
+        detail: Option<&AnimeDetail>,
+        lang: &str,
+        has_folder_poster: bool,
+    ) -> String {
         let path = unique_temp_path("season.nfo");
-        write_season_nfo(&path, 1, &series_stub(), Some(&detail), "english")
+        write_season_nfo(&path, 1, &series_stub(), detail, lang, has_folder_poster)
             .await
             .expect("write season nfo");
         let xml = std::fs::read_to_string(&path).expect("read season nfo");
@@ -599,6 +642,13 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::remove_dir(parent).ok();
         }
+        xml
+    }
+
+    #[tokio::test]
+    async fn season_nfo_emits_seasonnumber_and_anilist_uniqueid() {
+        let detail = detail_with_everything();
+        let xml = render_season_nfo(Some(&detail), "english", true).await;
 
         // Root is <season>, not <tvshow>. Jellyfin keys on this.
         assert!(xml.contains("<season>"));
@@ -617,16 +667,7 @@ mod tests {
 
     #[tokio::test]
     async fn season_nfo_without_detail_still_has_seasonnumber_and_id() {
-        let path = unique_temp_path("season_min.nfo");
-        write_season_nfo(&path, 1, &series_stub(), None, "english")
-            .await
-            .expect("write season nfo");
-        let xml = std::fs::read_to_string(&path).expect("read season nfo");
-        std::fs::remove_file(&path).ok();
-        if let Some(parent) = path.parent() {
-            std::fs::remove_dir(parent).ok();
-        }
-
+        let xml = render_season_nfo(None, "english", true).await;
         assert!(xml.contains("<seasonnumber>1</seasonnumber>"));
         assert!(xml.contains("<uniqueid type=\"anilist\" default=\"true\">12345</uniqueid>"));
         assert!(!xml.contains("<plot>"));
@@ -634,26 +675,15 @@ mod tests {
 
     #[tokio::test]
     async fn season_nfo_title_respects_preference() {
-        let path = unique_temp_path("season_pref.nfo");
-        write_season_nfo(&path, 1, &series_stub(), None, "native")
-            .await
-            .expect("write season nfo");
-        let xml = std::fs::read_to_string(&path).expect("read season nfo");
-        std::fs::remove_file(&path).ok();
-        if let Some(parent) = path.parent() {
-            std::fs::remove_dir(parent).ok();
-        }
+        let xml = render_season_nfo(None, "native", true).await;
         assert!(xml.contains("<title>原題</title>"));
     }
 
     // ── <art> tag emission ────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn series_nfo_emits_art_block_referencing_poster_and_banner() {
-        let xml = render_series_nfo(None).await;
-        // Art block must point Jellyfin at the files we actually copy
-        // onto disk next to the NFO — poster.jpg + banner.jpg at the
-        // series root.
+    async fn series_nfo_emits_art_block_referencing_poster_and_banner_when_both_present() {
+        let xml = render_series_nfo_full(None, "english", true, true).await;
         assert!(xml.contains("<art>"));
         assert!(xml.contains("<poster>poster.jpg</poster>"));
         assert!(xml.contains("<banner>banner.jpg</banner>"));
@@ -661,20 +691,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn season_nfo_emits_art_block_with_folder_poster() {
-        let path = unique_temp_path("season_art.nfo");
-        write_season_nfo(&path, 1, &series_stub(), None, "english")
-            .await
-            .expect("write season nfo");
-        let xml = std::fs::read_to_string(&path).expect("read season nfo");
-        std::fs::remove_file(&path).ok();
-        if let Some(parent) = path.parent() {
-            std::fs::remove_dir(parent).ok();
-        }
-        // Season-level art points at `folder.jpg` because that's the
-        // file post_processing writes alongside season.nfo.
+    async fn series_nfo_omits_banner_tag_when_banner_missing() {
+        // Regression: the PR-51 review flagged that a hard-coded
+        // <banner>banner.jpg</banner> would leave Jellyfin staring at
+        // a missing file on every scan. Gate must hold.
+        let xml = render_series_nfo_full(None, "english", true, false).await;
+        assert!(xml.contains("<poster>poster.jpg</poster>"));
+        assert!(!xml.contains("<banner>"));
+    }
+
+    #[tokio::test]
+    async fn series_nfo_omits_entire_art_block_when_both_missing() {
+        let xml = render_series_nfo_full(None, "english", false, false).await;
+        assert!(!xml.contains("<art>"));
+        assert!(!xml.contains("<poster>"));
+        assert!(!xml.contains("<banner>"));
+    }
+
+    #[tokio::test]
+    async fn season_nfo_emits_art_block_with_folder_poster_when_present() {
+        let xml = render_season_nfo(None, "english", true).await;
         assert!(xml.contains("<art>"));
         assert!(xml.contains("<poster>folder.jpg</poster>"));
         assert!(xml.contains("</art>"));
+    }
+
+    #[tokio::test]
+    async fn season_nfo_omits_art_block_when_folder_poster_missing() {
+        let xml = render_season_nfo(None, "english", false).await;
+        assert!(!xml.contains("<art>"));
+        assert!(!xml.contains("<poster>"));
     }
 }

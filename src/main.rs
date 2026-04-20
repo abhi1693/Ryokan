@@ -599,6 +599,11 @@ async fn main() {
     // Register background task definitions for the System > Scheduled Tasks tab.
     let _ = models::scheduled_tasks::touch_definition(&db, "rss_sync", "RSS sync", "Every N minutes", false).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "metadata_refresh", "Metadata refresh", "Every 12 hours", true).await;
+    // Manual full rebuild is a distinct operation from the periodic
+    // refresh — keep them on separate keys so a manual rebuild doesn't
+    // clobber the refresh's audit trail (and vice versa) when the
+    // two overlap.
+    let _ = models::scheduled_tasks::touch_definition(&db, "metadata_rebuild", "Metadata cache rebuild", "Manual", false).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "cleanup", "Cleanup", "Every 1 hour", true).await;
     let _ = models::scheduled_tasks::touch_definition(&db, "post_processing", "Post-processing", "Every 1 minute (when enabled)", false).await;
     let upgrade_enabled = models::config::get_config(&db).await.ok().flatten().map(|c| c.upgrade_search_enabled).unwrap_or(false);
