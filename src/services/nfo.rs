@@ -59,7 +59,12 @@ fn strip_html_tags(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Best display title for a series: English → Romaji → title.
+/// Best display title for a series: English → Romaji → title. Used as
+/// the one-time default for `series.folder_name` generation and for
+/// anywhere else a stable title is needed regardless of the user's
+/// current preference. NFO writes should use
+/// [`title_for_preference`] instead so `<title>` in tvshow.nfo /
+/// season.nfo / episode.nfo matches the language setting.
 pub fn best_title(series: &Series) -> String {
     if !series.title_english.is_empty() {
         series.title_english.clone()
@@ -67,6 +72,37 @@ pub fn best_title(series: &Series) -> String {
         series.title_romaji.clone()
     } else {
         series.title.clone()
+    }
+}
+
+/// Display title chosen according to the user's `title_language`
+/// setting (`english` / `romaji` / `native`). Falls back to the other
+/// two fields plus `series.title` when the preferred field is empty,
+/// so a missing English title doesn't leave the NFO blank for an
+/// english-preference user.
+///
+/// Unknown preference strings fall through to the English-first order,
+/// matching [`best_title`].
+pub fn title_for_preference(series: &Series, preference: &str) -> String {
+    let e = series.title_english.as_str();
+    let r = series.title_romaji.as_str();
+    let n = series.title_native.as_str();
+    let t = series.title.as_str();
+    let pick = |primary: &str, fallbacks: [&str; 3]| -> String {
+        if !primary.is_empty() {
+            return primary.to_string();
+        }
+        for f in fallbacks {
+            if !f.is_empty() {
+                return f.to_string();
+            }
+        }
+        String::new()
+    };
+    match preference {
+        "romaji" => pick(r, [e, n, t]),
+        "native" => pick(n, [e, r, t]),
+        _ => pick(e, [r, n, t]),
     }
 }
 
@@ -81,8 +117,9 @@ pub async fn write_series_nfo(
     path: &Path,
     series: &Series,
     detail: Option<&AnimeDetail>,
+    title_language: &str,
 ) -> std::io::Result<()> {
-    let title = xml_escape(&best_title(series));
+    let title = xml_escape(&title_for_preference(series, title_language));
     let orig = xml_escape(&series.title_native);
     let status = match series.status.as_str() {
         "FINISHED" | "FINISHED_AIRING" => "Ended",
@@ -168,6 +205,67 @@ pub async fn write_series_nfo(
     }
 
     xml.push_str("</tvshow>\n");
+
+    tokio::fs::write(path, xml).await
+}
+
+/// Write a `Season NN/season.nfo` so Jellyfin treats the season as
+/// already-matched and doesn't fall back to TVDB/TMDB for the season
+/// description, poster, or banner.
+///
+/// Without this file Jellyfin's metadata-match cascade runs on every
+/// season folder — for an anime that's on TVDB as a different cour,
+/// the scraped season data can belong to a different show entirely
+/// (TVDB collapses cours differently than AniList). Writing season.nfo
+/// pins the season to the same AniList entry as the parent series.
+///
+/// Ryokan hardcodes `season = 1` per AniList entry (one cour = one
+/// entry), so there is exactly one season folder per series and it
+/// carries the same plot/premiered/rating as the parent `tvshow.nfo`.
+/// The season-level NFO just needs to exist in a shape Jellyfin
+/// accepts — the metadata is semantically redundant with tvshow.nfo,
+/// but omitting it re-opens the external-scrape path.
+pub async fn write_season_nfo(
+    path: &Path,
+    season_number: i32,
+    series: &Series,
+    detail: Option<&AnimeDetail>,
+    title_language: &str,
+) -> std::io::Result<()> {
+    let title = xml_escape(&title_for_preference(series, title_language));
+
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <season>\n\
+         \x20\x20<title>{title}</title>\n\
+         \x20\x20<seasonnumber>{season}</seasonnumber>\n",
+        title = title,
+        season = season_number,
+    );
+
+    if let Some(d) = detail {
+        let plot = strip_html_tags(&d.description);
+        if !plot.trim().is_empty() {
+            xml.push_str(&format!("  <plot>{}</plot>\n", xml_escape(plot.trim())));
+        }
+        if let Some(year) = d.season_year {
+            xml.push_str(&format!("  <premiered>{}-01-01</premiered>\n", year));
+            xml.push_str(&format!("  <year>{}</year>\n", year));
+        }
+        if let Some(score) = d.average_score {
+            xml.push_str(&format!(
+                "  <rating>{:.1}</rating>\n",
+                (score as f32) / 10.0
+            ));
+        }
+    }
+
+    xml.push_str(&format!(
+        "  <uniqueid type=\"anilist\" default=\"true\">{}</uniqueid>\n",
+        series.anilist_id
+    ));
+
+    xml.push_str("</season>\n");
 
     tokio::fs::write(path, xml).await
 }
@@ -318,8 +416,17 @@ mod tests {
     }
 
     async fn render_series_nfo(detail: Option<&AnimeDetail>) -> String {
+        render_series_nfo_with_lang(detail, "english").await
+    }
+
+    async fn render_series_nfo_with_lang(
+        detail: Option<&AnimeDetail>,
+        lang: &str,
+    ) -> String {
         let path = unique_temp_path("tvshow.nfo");
-        write_series_nfo(&path, &series_stub(), detail).await.expect("write nfo");
+        write_series_nfo(&path, &series_stub(), detail, lang)
+            .await
+            .expect("write nfo");
         let xml = std::fs::read_to_string(&path).expect("read nfo");
         std::fs::remove_file(&path).ok();
         if let Some(parent) = path.parent() {
@@ -405,5 +512,116 @@ mod tests {
         assert!(!xml.contains("<runtime>"));
         // Empty title falls back to "Episode N".
         assert!(xml.contains("<title>Episode 5</title>"));
+    }
+
+    // ── title_for_preference ─────────────────────────────────────────────
+
+    #[test]
+    fn title_for_preference_picks_english_by_default_and_falls_back_in_order() {
+        let s = series_stub();
+        // English available → english preference returns English.
+        assert_eq!(title_for_preference(&s, "english"), "English Title");
+        // Unknown preference defaults to english-first.
+        assert_eq!(title_for_preference(&s, "bogus"), "English Title");
+        // Empty english falls through to romaji → native → title.
+        let mut s2 = s.clone();
+        s2.title_english.clear();
+        assert_eq!(title_for_preference(&s2, "english"), "Romaji Title");
+        s2.title_romaji.clear();
+        assert_eq!(title_for_preference(&s2, "english"), "原題");
+    }
+
+    #[test]
+    fn title_for_preference_romaji_and_native_respect_preference() {
+        let s = series_stub();
+        assert_eq!(title_for_preference(&s, "romaji"), "Romaji Title");
+        assert_eq!(title_for_preference(&s, "native"), "原題");
+    }
+
+    #[test]
+    fn title_for_preference_empty_preferred_field_falls_back() {
+        // Romaji preference but only english is populated — should fall
+        // back to english rather than emit the empty string.
+        let mut s = series_stub();
+        s.title_romaji.clear();
+        s.title_native.clear();
+        s.title.clear();
+        assert_eq!(title_for_preference(&s, "romaji"), "English Title");
+    }
+
+    // ── preference propagates into series NFO <title> ────────────────────
+
+    #[tokio::test]
+    async fn series_nfo_title_respects_romaji_preference() {
+        let xml = render_series_nfo_with_lang(None, "romaji").await;
+        assert!(xml.contains("<title>Romaji Title</title>"));
+        assert!(!xml.contains("<title>English Title</title>"));
+    }
+
+    #[tokio::test]
+    async fn series_nfo_title_respects_native_preference() {
+        let xml = render_series_nfo_with_lang(None, "native").await;
+        assert!(xml.contains("<title>原題</title>"));
+    }
+
+    // ── season NFO ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn season_nfo_emits_seasonnumber_and_anilist_uniqueid() {
+        let detail = detail_with_everything();
+        let path = unique_temp_path("season.nfo");
+        write_season_nfo(&path, 1, &series_stub(), Some(&detail), "english")
+            .await
+            .expect("write season nfo");
+        let xml = std::fs::read_to_string(&path).expect("read season nfo");
+        std::fs::remove_file(&path).ok();
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir(parent).ok();
+        }
+
+        // Root is <season>, not <tvshow>. Jellyfin keys on this.
+        assert!(xml.contains("<season>"));
+        assert!(xml.contains("</season>"));
+        // Season number is the load-bearing field — without it
+        // Jellyfin re-scrapes.
+        assert!(xml.contains("<seasonnumber>1</seasonnumber>"));
+        // AniList unique id so Jellyfin matches the season to the
+        // series, not to an unrelated TVDB entry.
+        assert!(xml.contains("<uniqueid type=\"anilist\" default=\"true\">12345</uniqueid>"));
+        // Plot/year/rating enrichment when detail is provided.
+        assert!(xml.contains("<plot>A brilliant story. About things.</plot>"));
+        assert!(xml.contains("<year>2024</year>"));
+        assert!(xml.contains("<rating>8.5</rating>"));
+    }
+
+    #[tokio::test]
+    async fn season_nfo_without_detail_still_has_seasonnumber_and_id() {
+        let path = unique_temp_path("season_min.nfo");
+        write_season_nfo(&path, 1, &series_stub(), None, "english")
+            .await
+            .expect("write season nfo");
+        let xml = std::fs::read_to_string(&path).expect("read season nfo");
+        std::fs::remove_file(&path).ok();
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir(parent).ok();
+        }
+
+        assert!(xml.contains("<seasonnumber>1</seasonnumber>"));
+        assert!(xml.contains("<uniqueid type=\"anilist\" default=\"true\">12345</uniqueid>"));
+        assert!(!xml.contains("<plot>"));
+    }
+
+    #[tokio::test]
+    async fn season_nfo_title_respects_preference() {
+        let path = unique_temp_path("season_pref.nfo");
+        write_season_nfo(&path, 1, &series_stub(), None, "native")
+            .await
+            .expect("write season nfo");
+        let xml = std::fs::read_to_string(&path).expect("read season nfo");
+        std::fs::remove_file(&path).ok();
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir(parent).ok();
+        }
+        assert!(xml.contains("<title>原題</title>"));
     }
 }

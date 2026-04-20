@@ -122,17 +122,25 @@ async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
     .map_err(|e| std::io::Error::other(format!("join error: {}", e)))?
 }
 
-/// Copy the cached series poster to `dest` (always written as JPEG regardless
-/// of original extension — Jellyfin accepts it). Runs the copy under
-/// `spawn_blocking` so a slow/network-backed media root can't stall the
-/// runtime while moving a multi-MB poster. A failure here is non-fatal
-/// (Jellyfin can still scrape its own poster), but silently swallowing
-/// the error left operators with an invisible "no poster in Jellyfin"
-/// symptom and nothing in the logs to point at — so every failure path
-/// now warns with enough detail to debug it.
-async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
-    let cache_key = format!("series-{}-cover", series_id);
-    let entry = match artwork_cache::get(db, &cache_key).await {
+/// Copy a cached artwork blob (poster or banner) to `dest`. Runs the
+/// copy under `spawn_blocking` so a slow/network-backed media root
+/// can't stall the runtime while moving a multi-MB image. A failure
+/// here is non-fatal (Jellyfin can still scrape its own artwork), but
+/// silently swallowing the error left operators with an invisible
+/// "no artwork in Jellyfin" symptom and nothing in the logs to point
+/// at — so every failure path warns with enough detail to debug it.
+///
+/// `kind_label` is only used in log text (e.g. "poster" or "banner")
+/// so operators can tell which artwork copy tripped when scanning
+/// logs.
+async fn copy_artwork(
+    db: &sqlx::SqlitePool,
+    series_id: i64,
+    cache_key: &str,
+    kind_label: &str,
+    dest: &Path,
+) {
+    let entry = match artwork_cache::get(db, cache_key).await {
         Ok(Some(e)) => e,
         _ => return,
     };
@@ -146,7 +154,7 @@ async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
             logger::warn(
                 db,
                 LogCategory::PostProcess,
-                &format!("Failed to copy series poster for series_id={}", series_id),
+                &format!("Failed to copy series {kind_label} for series_id={series_id}"),
                 &format!("src={}, dst={}, error={}", src_display, dst_display, err),
             )
             .await;
@@ -155,12 +163,28 @@ async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
             logger::warn(
                 db,
                 LogCategory::PostProcess,
-                &format!("Poster copy task panicked for series_id={}", series_id),
+                &format!("{kind_label} copy task panicked for series_id={series_id}"),
                 &format!("src={}, dst={}, error={}", src_display, dst_display, join_err),
             )
             .await;
         }
     }
+}
+
+/// Copy the cached series poster to `dest` (always written as JPEG
+/// regardless of original extension — Jellyfin accepts it).
+async fn copy_poster(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
+    let cache_key = format!("series-{}-cover", series_id);
+    copy_artwork(db, series_id, &cache_key, "poster", dest).await;
+}
+
+/// Copy the cached series banner to `dest`. Jellyfin reads `banner.jpg`
+/// at the series root; writing it locally prevents the TVDB/TMDB
+/// fallback scrape from picking a mismatched banner when the anime
+/// doesn't cleanly map 1:1 to an external provider entry.
+async fn copy_banner(db: &sqlx::SqlitePool, series_id: i64, dest: &Path) {
+    let cache_key = format!("series-{}-banner", series_id);
+    copy_artwork(db, series_id, &cache_key, "banner", dest).await;
 }
 
 /// #30 — Decide what offset to subtract from a parsed filename episode
@@ -251,7 +275,12 @@ async fn load_series_import_ctx(
         series.folder_name.clone()
     };
 
-    let series_title = nfo::best_title(&series);
+    // `series_title` flows into `<showtitle>` in every episode NFO and
+    // into the renamed filename stem, so it respects the user's
+    // `title_language` preference. `folder_name` above stays on
+    // `best_title` because it's a one-time persisted default — later
+    // preference changes should not rename folders.
+    let series_title = nfo::title_for_preference(&series, &cfg.title_language);
     let season_dir = Path::new(&cfg.media_root)
         .join(&folder_name)
         .join(format!("Season {:02}", 1_i32));
@@ -963,12 +992,47 @@ async fn import_torrent(
         };
         let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
         let series_nfo = series_root.join("tvshow.nfo");
-        let _ = nfo::write_series_nfo(&series_nfo, &ctx.series, ctx.cached_detail.as_ref()).await;
+        let _ = nfo::write_series_nfo(
+            &series_nfo,
+            &ctx.series,
+            ctx.cached_detail.as_ref(),
+            &cfg.title_language,
+        )
+        .await;
 
+        // Poster/banner are re-copied on every import. Previously
+        // guarded behind `!dest.exists()`, which meant refreshed
+        // AniList artwork (post `metadata_refresh` pulling an updated
+        // key visual) never propagated to Jellyfin. The copies are
+        // cheap (single local-fs copy of a cached blob) so rewriting
+        // every run is fine.
         let poster_dest = series_root.join("poster.jpg");
-        if !poster_dest.exists() {
-            copy_poster(&state.db, ctx.series.id, &poster_dest).await;
-        }
+        copy_poster(&state.db, ctx.series.id, &poster_dest).await;
+
+        // Banner at the series root. Jellyfin reads this for the
+        // series-level banner slot; without it the TVDB/TMDB fallback
+        // scrape picks whatever banner happens to match the title
+        // against an external provider, frequently the wrong cour for
+        // anime.
+        let banner_dest = series_root.join("banner.jpg");
+        copy_banner(&state.db, ctx.series.id, &banner_dest).await;
+
+        // Season-level artifacts. Ryokan hardcodes `season = 1` per
+        // AniList entry, and `season_dir` on the import ctx is that
+        // single Season 01/ folder. Writing season.nfo + a season
+        // poster there tells Jellyfin the season is already matched
+        // and stops it from scraping season metadata from TVDB.
+        let season_nfo = ctx.season_dir.join("season.nfo");
+        let _ = nfo::write_season_nfo(
+            &season_nfo,
+            1,
+            &ctx.series,
+            ctx.cached_detail.as_ref(),
+            &cfg.title_language,
+        )
+        .await;
+        let season_poster_dest = ctx.season_dir.join("folder.jpg");
+        copy_poster(&state.db, ctx.series.id, &season_poster_dest).await;
     }
 
     // Flip episode tag rows from "grabbed" to "completed" per target
