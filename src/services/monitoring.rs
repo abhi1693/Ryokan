@@ -4,7 +4,11 @@ use chrono::{NaiveDate, Utc};
 use sqlx::SqlitePool;
 
 use crate::{
-    models::{config, local_metadata, metadata_cache, monitoring::{self, EpisodeMonitorState, MonitorMode}, series},
+    models::{
+        config, local_metadata, metadata_cache,
+        monitoring::{self, EpisodeMonitorState, MonitorMode},
+        series,
+    },
     services::{jikan, media},
 };
 
@@ -15,15 +19,25 @@ pub struct MonitoringSummary {
     pub total_count: usize,
 }
 
-pub async fn apply_monitor_mode(db: &SqlitePool, series_id: i64, mode: MonitorMode) -> Result<MonitoringSummary, String> {
+pub async fn apply_monitor_mode(
+    db: &SqlitePool,
+    series_id: i64,
+    mode: MonitorMode,
+) -> Result<MonitoringSummary, String> {
     series::update_monitor_mode(db, series_id, mode.as_str())
         .await
         .map_err(|e| e.to_string())?;
     recompute_series_monitoring(db, series_id).await
 }
 
-pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Result<MonitoringSummary, String> {
-    let Some(row) = series::get_by_id(db, series_id).await.map_err(|e| e.to_string())? else {
+pub async fn recompute_series_monitoring(
+    db: &SqlitePool,
+    series_id: i64,
+) -> Result<MonitoringSummary, String> {
+    let Some(row) = series::get_by_id(db, series_id)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
         return Err("Series not found".to_string());
     };
 
@@ -35,7 +49,11 @@ pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Res
         monitoring::replace_series_states(db, row.id, &[])
             .await
             .map_err(|e| e.to_string())?;
-        return Ok(MonitoringSummary { mode, monitored_count: 0, total_count: 0 });
+        return Ok(MonitoringSummary {
+            mode,
+            monitored_count: 0,
+            total_count: 0,
+        });
     }
 
     let cfg = config::get_config(db)
@@ -47,7 +65,8 @@ pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Res
     let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
     let existing_eps: HashSet<i32> = disk_files.iter().map(|f| f.episode_number).collect();
     let episode_info = load_episode_info(db, &row).await;
-    let monitored_eps = resolve_monitored_episodes(&row, &episode_numbers, &existing_eps, &episode_info, mode);
+    let monitored_eps =
+        resolve_monitored_episodes(&row, &episode_numbers, &existing_eps, &episode_info, mode);
 
     let states: Vec<EpisodeMonitorState> = episode_numbers
         .iter()
@@ -68,7 +87,10 @@ pub async fn recompute_series_monitoring(db: &SqlitePool, series_id: i64) -> Res
     })
 }
 
-pub async fn ensure_series_monitoring_rows(db: &SqlitePool, tracked: &series::Series) -> Result<MonitoringSummary, String> {
+pub async fn ensure_series_monitoring_rows(
+    db: &SqlitePool,
+    tracked: &series::Series,
+) -> Result<MonitoringSummary, String> {
     let total = effective_episode_count(db, tracked).await;
     let episode_numbers: Vec<i32> = (1..=total).collect();
     let existing = monitoring::get_series_states(db, tracked.id)
@@ -100,9 +122,10 @@ pub async fn ensure_series_monitoring_rows(db: &SqlitePool, tracked: &series::Se
 /// to toggle.
 async fn effective_episode_count(db: &SqlitePool, row: &series::Series) -> i32 {
     if let Some(n) = row.episodes
-        && n > 0 {
-            return n;
-        }
+        && n > 0
+    {
+        return n;
+    }
     if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, row.id).await {
         let n = cached.detail.effective_episode_count();
         if n > 0 {
@@ -110,20 +133,33 @@ async fn effective_episode_count(db: &SqlitePool, row: &series::Series) -> i32 {
         }
     }
     if let Ok(map) = local_metadata::get_episode_map_for_series(db, row.id).await
-        && let Some(max) = map.keys().copied().max() {
-            return max;
-        }
+        && let Some(max) = map.keys().copied().max()
+    {
+        return max;
+    }
     0
 }
 
-async fn load_episode_info(db: &SqlitePool, row: &series::Series) -> HashMap<i32, jikan::EpisodeInfo> {
+async fn load_episode_info(
+    db: &SqlitePool,
+    row: &series::Series,
+) -> HashMap<i32, jikan::EpisodeInfo> {
     if let Ok(cached) = local_metadata::get_episode_map_for_series(db, row.id).await
-        && !cached.is_empty() {
-            return cached
-                .into_iter()
-                .map(|(num, ep)| (num, jikan::EpisodeInfo { title: ep.title, aired: ep.aired }))
-                .collect();
-        }
+        && !cached.is_empty()
+    {
+        return cached
+            .into_iter()
+            .map(|(num, ep)| {
+                (
+                    num,
+                    jikan::EpisodeInfo {
+                        title: ep.title,
+                        aired: ep.aired,
+                    },
+                )
+            })
+            .collect();
+    }
     let Some(mal_id) = row.mal_id else {
         return HashMap::new();
     };
@@ -143,13 +179,17 @@ fn resolve_monitored_episodes(
     for ep in episode_numbers {
         if let Some(info) = episode_info.get(ep)
             && let Some(aired) = parse_aired_date(&info.aired)
-                && aired <= today {
-                    latest_aired_known = latest_aired_known.max(*ep);
-                }
+            && aired <= today
+        {
+            latest_aired_known = latest_aired_known.max(*ep);
+        }
     }
 
     let max_existing = existing_eps.iter().copied().max().unwrap_or(0);
-    let is_finished = matches!(row.status.trim().to_ascii_uppercase().as_str(), "FINISHED" | "FINISHED_AIRING" | "CANCELLED");
+    let is_finished = matches!(
+        row.status.trim().to_ascii_uppercase().as_str(),
+        "FINISHED" | "FINISHED_AIRING" | "CANCELLED"
+    );
 
     episode_numbers
         .iter()
@@ -166,9 +206,10 @@ fn resolve_monitored_episodes(
                     return true;
                 }
                 if let Some(info) = episode_info.get(ep)
-                    && let Some(aired) = parse_aired_date(&info.aired) {
-                        return aired <= today;
-                    }
+                    && let Some(aired) = parse_aired_date(&info.aired)
+                {
+                    return aired <= today;
+                }
                 *ep <= latest_aired_known && latest_aired_known > 0
             }
             MonitorMode::Future => {
@@ -176,9 +217,10 @@ fn resolve_monitored_episodes(
                     return false;
                 }
                 if let Some(info) = episode_info.get(ep)
-                    && let Some(aired) = parse_aired_date(&info.aired) {
-                        return aired > today;
-                    }
+                    && let Some(aired) = parse_aired_date(&info.aired)
+                {
+                    return aired > today;
+                }
                 if latest_aired_known > 0 {
                     *ep > latest_aired_known
                 } else {

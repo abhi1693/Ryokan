@@ -17,7 +17,11 @@ pub fn score_result(r: &SearchResult, opts: &SearchOptions) -> i32 {
     score_result_with_sub_pref(r, opts, true)
 }
 
-pub fn score_result_with_sub_pref(r: &SearchResult, opts: &SearchOptions, prefer_subs: bool) -> i32 {
+pub fn score_result_with_sub_pref(
+    r: &SearchResult,
+    opts: &SearchOptions,
+    prefer_subs: bool,
+) -> i32 {
     let mut score: i32 = 0;
 
     // Seeders.

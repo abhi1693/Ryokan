@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use crate::AppState;
 use crate::models::log::LogCategory;
-use crate::models::{artwork_cache, config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series};
+use crate::models::{
+    artwork_cache, config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series,
+};
 use crate::services::source::{self, SeriesContext};
 use crate::services::{artwork, logger, media, nfo};
-use crate::AppState;
 
 static POST_PROC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -34,7 +36,9 @@ fn is_errored(state: &str) -> bool {
 /// Check if a grab is older than `max_age_secs` seconds.
 pub fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
     // grabbed_at is SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
-    let Some(grab_time) = chrono::NaiveDateTime::parse_from_str(grabbed_at, "%Y-%m-%d %H:%M:%S").ok() else {
+    let Some(grab_time) =
+        chrono::NaiveDateTime::parse_from_str(grabbed_at, "%Y-%m-%d %H:%M:%S").ok()
+    else {
         return false;
     };
     let now = chrono::Utc::now().naive_utc();
@@ -191,15 +195,8 @@ async fn copy_artwork(
             image_kind,
             "artwork cache miss; fetching on demand",
         );
-        if let Err(err) = artwork::cache_image(
-            db,
-            cache_key,
-            "series",
-            Some(series_id),
-            image_kind,
-            url,
-        )
-        .await
+        if let Err(err) =
+            artwork::cache_image(db, cache_key, "series", Some(series_id), image_kind, url).await
         {
             logger::warn(
                 db,
@@ -292,9 +289,7 @@ async fn copy_artwork(
             logger::warn(
                 db,
                 LogCategory::PostProcess,
-                &format!(
-                    "Failed to read cached {image_kind} blob for series_id={series_id}"
-                ),
+                &format!("Failed to read cached {image_kind} blob for series_id={series_id}"),
                 &format!("src={}, error={}", src_display, err),
             )
             .await;
@@ -829,10 +824,7 @@ async fn import_torrent(
                         logger::error(
                             &state.db,
                             LogCategory::PostProcess,
-                            &format!(
-                                "Failed to load series context for id={}",
-                                target_series_id
-                            ),
+                            &format!("Failed to load series context for id={}", target_series_id),
                             &e,
                         )
                         .await;
@@ -1010,13 +1002,10 @@ async fn import_torrent(
             // unions across the legacy grabbed_torrents column and the
             // routes table, so a prior sibling-routed import still
             // surfaces here.
-            let old_grabs = grabbed_torrents::find_imported_for_episode(
-                &state.db,
-                target_series_id,
-                ep_num,
-            )
-            .await
-            .unwrap_or_default();
+            let old_grabs =
+                grabbed_torrents::find_imported_for_episode(&state.db, target_series_id, ep_num)
+                    .await
+                    .unwrap_or_default();
 
             if old_grabs.is_empty() {
                 // No older import record — likely a re-run of the same grab. Skip.
@@ -1031,7 +1020,10 @@ async fn import_torrent(
                     logger::error(
                         &state.db,
                         LogCategory::PostProcess,
-                        &format!("Failed to remove old file for upgrade: {}", old_file.display()),
+                        &format!(
+                            "Failed to remove old file for upgrade: {}",
+                            old_file.display()
+                        ),
                         &e.to_string(),
                     )
                     .await;
@@ -1039,7 +1031,8 @@ async fn import_torrent(
                 // Remove corresponding NFO (old stem may differ from new dest_stem
                 // if the episode title changed between grabs).
                 if let Some(stem) = old_file.file_stem().and_then(|s| s.to_str()) {
-                    let _ = tokio::fs::remove_file(ctx.season_dir.join(format!("{}.nfo", stem))).await;
+                    let _ =
+                        tokio::fs::remove_file(ctx.season_dir.join(format!("{}.nfo", stem))).await;
                 }
             }
 
@@ -1136,15 +1129,12 @@ async fn import_torrent(
                 // imported files), UPDATE in-place via
                 // `update_classification` otherwise.
                 let persist_result = if row_exists {
-                    episode_tags::update_classification(
-                        &state.db,
-                        target_series_id,
-                        ep_num,
-                        &post,
-                    )
-                    .await
+                    // `update_classification` stamps
+                    // classification_attempted_at internally.
+                    episode_tags::update_classification(&state.db, target_series_id, ep_num, &post)
+                        .await
                 } else {
-                    episode_tags::record_grab(
+                    let inserted = episode_tags::record_grab(
                         &state.db,
                         target_series_id,
                         ep_num,
@@ -1155,7 +1145,21 @@ async fn import_torrent(
                         grab.is_batch,
                     )
                     .await
-                    .map(|_| ())
+                    .map(|_| ());
+                    // Issue #53: post-classify call of `record_grab` —
+                    // explicitly stamp the attempt timestamp so the
+                    // library scan won't keep retrying this row if
+                    // `post` came back UNKNOWN. Grab-time `record_grab`
+                    // call sites (search.rs, auto_expand.rs, etc.) do
+                    // NOT stamp — they're filename-only and the file
+                    // hasn't landed yet.
+                    let _ = episode_tags::stamp_classification_attempted(
+                        &state.db,
+                        target_series_id,
+                        ep_num,
+                    )
+                    .await;
+                    inserted
                 };
                 if let Err(e) = persist_result {
                     logger::warn(
@@ -1343,11 +1347,7 @@ async fn import_torrent(
         let _ = episode_tags::mark_completed(&state.db, *series_id, &ep_nums).await;
         for (ep_num, file_size, file_name) in episodes {
             let _ = episode_tags::mark_grab_history_completed(
-                &state.db,
-                *series_id,
-                *ep_num,
-                file_name,
-                *file_size,
+                &state.db, *series_id, *ep_num, file_name, *file_size,
             )
             .await;
         }
@@ -1496,12 +1496,7 @@ pub async fn run_once(state: &AppState) {
         } else {
             torrent.save_path.clone()
         };
-        let _ = grabbed_torrents::stamp_qbit_content_path(
-            &state.db,
-            grab.id,
-            &qbit_path,
-        )
-        .await;
+        let _ = grabbed_torrents::stamp_qbit_content_path(&state.db, grab.id, &qbit_path).await;
 
         match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
             Ok(true) => {
@@ -1517,7 +1512,10 @@ pub async fn run_once(state: &AppState) {
                     &state.db,
                     LogCategory::PostProcess,
                     &format!("Imported '{}'", grab.torrent_name),
-                    &format!("series_id={} episodes={:?}", grab.series_id, grab.episode_numbers),
+                    &format!(
+                        "series_id={} episodes={:?}",
+                        grab.series_id, grab.episode_numbers
+                    ),
                 )
                 .await;
                 // Episode tag "grabbed → completed" flips happen inside
@@ -1549,26 +1547,25 @@ pub async fn run_once(state: &AppState) {
         }
     }
 
-    if any_imported
-        && let Some(jellyfin) = state.jellyfin.read().await.as_ref() {
-            if let Err(e) = jellyfin.refresh_library().await {
-                logger::warn(
-                    &state.db,
-                    LogCategory::PostProcess,
-                    "Jellyfin refresh failed after import",
-                    &e,
-                )
-                .await;
-            } else {
-                logger::info(
-                    &state.db,
-                    LogCategory::PostProcess,
-                    "Triggered Jellyfin library refresh",
-                    "",
-                )
-                .await;
-            }
+    if any_imported && let Some(jellyfin) = state.jellyfin.read().await.as_ref() {
+        if let Err(e) = jellyfin.refresh_library().await {
+            logger::warn(
+                &state.db,
+                LogCategory::PostProcess,
+                "Jellyfin refresh failed after import",
+                &e,
+            )
+            .await;
+        } else {
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                "Triggered Jellyfin library refresh",
+                "",
+            )
+            .await;
         }
+    }
 }
 
 /// Lightweight variant of `run_once` used when post-processing is
@@ -1625,12 +1622,7 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         } else {
             torrent.save_path.clone()
         };
-        let _ = grabbed_torrents::stamp_qbit_content_path(
-            &state.db,
-            grab.id,
-            &qbit_path,
-        )
-        .await;
+        let _ = grabbed_torrents::stamp_qbit_content_path(&state.db, grab.id, &qbit_path).await;
 
         // Mark the grab row as finalized so we stop polling it and the
         // UI stops treating it as in-flight. Use `mark_completed_no_import`
@@ -1646,12 +1638,8 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
             .await
             .unwrap_or_default();
         if routes.is_empty() {
-            let _ = episode_tags::mark_completed(
-                &state.db,
-                grab.series_id,
-                &grab.episode_numbers,
-            )
-            .await;
+            let _ = episode_tags::mark_completed(&state.db, grab.series_id, &grab.episode_numbers)
+                .await;
         } else {
             for route in &routes {
                 let _ = episode_tags::mark_completed(
@@ -1736,6 +1724,26 @@ struct PendingClassification {
 /// episode) leaves a single row briefly stale and self-heals on the
 /// next scan.
 pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyReport {
+    scan_for_unclassified(state, None).await
+}
+
+/// Issue #53: same enumeration + classify pipeline as
+/// [`scan_library_for_unclassified`] but scoped to a single series.
+/// Called from the import flow (`handlers/library/crud::add_series`) as a
+/// one-shot tokio::spawn so a freshly-imported series with pre-existing
+/// files on disk gets a classification pass within seconds instead of
+/// waiting up to six hours for the next periodic sweep.
+pub async fn scan_series_for_unclassified(
+    state: &AppState,
+    series_id: i64,
+) -> LibraryClassifyReport {
+    scan_for_unclassified(state, Some(series_id)).await
+}
+
+async fn scan_for_unclassified(
+    state: &AppState,
+    only_series_id: Option<i64>,
+) -> LibraryClassifyReport {
     let mut report = LibraryClassifyReport::default();
 
     let pending: Vec<PendingClassification> = {
@@ -1750,7 +1758,17 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             return report;
         }
 
-        let tracked = series::get_all(&state.db).await.unwrap_or_default();
+        let tracked = match only_series_id {
+            // Single-series fast path used by the import hook — skip the
+            // full library enumeration when we know which series to look
+            // at. Bail silently when the id doesn't resolve (deleted
+            // between spawn and run).
+            Some(id) => match series::get_by_id(&state.db, id).await.ok().flatten() {
+                Some(row) => vec![row],
+                None => return report,
+            },
+            None => series::get_all(&state.db).await.unwrap_or_default(),
+        };
         let mut pending = Vec::new();
 
         for row in &tracked {
@@ -1774,10 +1792,9 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             // most_recent_imported_torrent_name_for_series) that ran
             // inside the held POST_PROC_LOCK — that was ~4800
             // round-trips per pass on a 100-series, 24-ep library.
-            let imported_grabs =
-                grabbed_torrents::imported_grabs_for_series(&state.db, row.id)
-                    .await
-                    .unwrap_or_default();
+            let imported_grabs = grabbed_torrents::imported_grabs_for_series(&state.db, row.id)
+                .await
+                .unwrap_or_default();
             // Per-episode lookup; first occurrence (DESC by grabbed_at)
             // wins, so each episode maps to its most recent grab. This
             // matches the prior find_imported_for_episode .next()
@@ -1837,6 +1854,17 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                     let src = t.source.trim();
                     let is_unknown = src.is_empty() || src.eq_ignore_ascii_case("unknown");
                     if !is_unknown {
+                        continue;
+                    }
+                    // Issue #53: an UNKNOWN row that was already attempted
+                    // by the full-pipeline classifier (ffprobe + dir +
+                    // group + temporal + filename) won't change verdict
+                    // on the same bytes. Skip it so we don't re-ffprobe
+                    // every six hours forever — the user can still force
+                    // a fresh attempt by clearing/re-applying a manual
+                    // override or running the sweep manually after
+                    // updating the source-pipeline rules.
+                    if t.classification_attempted_at.is_some() {
                         continue;
                     }
                 }
@@ -1956,10 +1984,17 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
                 is_batch,
             )
             .await;
-            let _ = episode_tags::mark_completed(
+            let _ = episode_tags::mark_completed(&state.db, item.series_id, &[item.episode_number])
+                .await;
+            // Issue #53: stamp classification_attempted_at so the next
+            // sweep skips this row if `result` came back UNKNOWN. The
+            // grab-time path of `record_grab` deliberately leaves the
+            // column NULL, so we set it explicitly here for the
+            // post-classify path.
+            let _ = episode_tags::stamp_classification_attempted(
                 &state.db,
                 item.series_id,
-                &[item.episode_number],
+                item.episode_number,
             )
             .await;
             // Flip the fresh grab history row to 'completed' and stamp
@@ -1979,6 +2014,9 @@ pub async fn scan_library_for_unclassified(state: &AppState) -> LibraryClassifyR
             )
             .await;
         } else {
+            // `update_classification` already sets
+            // classification_attempted_at internally — no extra stamp
+            // needed on this branch.
             let _ = episode_tags::update_classification(
                 &state.db,
                 item.series_id,
@@ -2146,9 +2184,15 @@ mod tests {
         blob_hash: &str,
         byte_size: i64,
     ) {
-        artwork_cache::upsert_blob(db, blob_hash, &blob_path.to_string_lossy(), "image/jpeg", byte_size)
-            .await
-            .expect("upsert_blob");
+        artwork_cache::upsert_blob(
+            db,
+            blob_hash,
+            &blob_path.to_string_lossy(),
+            "image/jpeg",
+            byte_size,
+        )
+        .await
+        .expect("upsert_blob");
         artwork_cache::upsert_ref(
             db,
             artwork_cache::RefUpsert {
@@ -2172,20 +2216,20 @@ mod tests {
         let blob_path = dir.join("blob.jpg");
         let payload = b"\xFF\xD8\xFF\xE0test jpeg body".to_vec();
         std::fs::write(&blob_path, &payload).expect("write blob");
-        register_blob(&db, "series-42-cover", &blob_path, "deadbeef", payload.len() as i64).await;
+        register_blob(
+            &db,
+            "series-42-cover",
+            &blob_path,
+            "deadbeef",
+            payload.len() as i64,
+        )
+        .await;
 
         let dst_a = dir.join("poster.jpg");
         let dst_b = dir.join("season/folder.jpg");
 
-        let results = copy_artwork(
-            &db,
-            42,
-            "series-42-cover",
-            "cover",
-            None,
-            &[&dst_a, &dst_b],
-        )
-        .await;
+        let results =
+            copy_artwork(&db, 42, "series-42-cover", "cover", None, &[&dst_a, &dst_b]).await;
 
         assert_eq!(results, vec![true, true], "both dests must report success");
         assert_eq!(
@@ -2234,7 +2278,14 @@ mod tests {
         let blob_path = dir.join("blob.jpg");
         let payload = b"\xFF\xD8\xFF\xE0anchor-inode-test".to_vec();
         std::fs::write(&blob_path, &payload).expect("write blob");
-        register_blob(&db, "series-42-banner", &blob_path, "deadbeef", payload.len() as i64).await;
+        register_blob(
+            &db,
+            "series-42-banner",
+            &blob_path,
+            "deadbeef",
+            payload.len() as i64,
+        )
+        .await;
 
         // Both dests live in the same directory (same fs guaranteed
         // on tmpfs/ext4) so hardlink must succeed without falling
@@ -2324,15 +2375,8 @@ mod tests {
         let dst_a = dir.join("poster.jpg");
         let dst_b = dir.join("folder.jpg");
 
-        let results = copy_artwork(
-            &db,
-            42,
-            "series-42-cover",
-            "cover",
-            None,
-            &[&dst_a, &dst_b],
-        )
-        .await;
+        let results =
+            copy_artwork(&db, 42, "series-42-cover", "cover", None, &[&dst_a, &dst_b]).await;
 
         assert_eq!(results, vec![false, false]);
         assert!(!dst_a.exists(), "dst_a must not exist on cache miss");
@@ -2361,15 +2405,8 @@ mod tests {
         let dst_a = dir.join("poster.jpg");
         let dst_b = dir.join("folder.jpg");
 
-        let results = copy_artwork(
-            &db,
-            42,
-            "series-42-cover",
-            "cover",
-            None,
-            &[&dst_a, &dst_b],
-        )
-        .await;
+        let results =
+            copy_artwork(&db, 42, "series-42-cover", "cover", None, &[&dst_a, &dst_b]).await;
 
         assert_eq!(results, vec![false, false]);
         assert!(!dst_a.exists());

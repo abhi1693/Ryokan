@@ -1,10 +1,10 @@
-pub mod nyaa;
-pub mod qbit;
 pub mod anilist;
-pub mod scoring;
-pub mod media;
 pub mod jikan;
 pub mod kitsu;
+pub mod media;
+pub mod nyaa;
+pub mod qbit;
+pub mod scoring;
 
 pub mod jellyfin;
 
@@ -18,7 +18,6 @@ pub mod rss;
 
 pub mod monitoring;
 
-
 pub mod metadata_sync;
 
 pub mod artwork;
@@ -31,8 +30,8 @@ pub mod post_processing;
 pub mod anibridge;
 pub mod upgrade;
 
-pub mod seadex;
 pub mod custom_formats;
+pub mod seadex;
 
 // Classification pipeline (Phase 1a foundations).
 pub mod source;

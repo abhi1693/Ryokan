@@ -102,6 +102,7 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
         .unwrap_or(0);
 
     let cached = media_probe_cache::get(db, path_str, mtime, size).await;
+    let cache_hit = cached.is_some();
     let probe_json = match cached {
         Some(j) => j,
         None => match run_ffprobe(path).await {
@@ -112,6 +113,14 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
             None => return FfprobeClassification::default(),
         },
     };
+    tracing::debug!(
+        target: "ryokan::source::ffprobe",
+        path = path_str,
+        cache_hit,
+        size,
+        mtime,
+        "ffprobe probe ready"
+    );
 
     scan_ffprobe_json_logged(path_str, &probe_json)
 }
@@ -211,11 +220,9 @@ fn scan_ffprobe_json_logged(path: &str, json: &str) -> FfprobeClassification {
         );
         return FfprobeClassification::default();
     }
-    let out = scan_ffprobe_json(json);
-    if !out.evidence.is_empty() {
-        return out;
-    }
-    if out.resolution.is_none() {
+    let (facts, out) = scan_ffprobe_json_with_facts(json);
+    log_ffprobe_summary(path, &facts, &out);
+    if out.evidence.is_empty() && out.resolution.is_none() {
         // No video stream at all — log at debug since this is normal for
         // audio-only files or probes of weird container formats, but
         // still worth tracing when debugging.
@@ -228,15 +235,79 @@ fn scan_ffprobe_json_logged(path: &str, json: &str) -> FfprobeClassification {
     out
 }
 
+/// Emit a one-line debug summary of every ffprobe pass. Captures the
+/// observed dimensions / resolution, video + audio codec fingerprints,
+/// subtitle / commentary flags, and the evidence vec the rules
+/// produced. Without this the only signal a probe ran was whatever
+/// pieces of evidence happened to bubble up into `log_classification`
+/// in `services/source/mod.rs` — a probe that emitted **zero** evidence
+/// (the "intentionally useless" path for AV1/Opus, or any file that
+/// didn't fingerprint a single rule) was completely silent, and the
+/// observed resolution was never logged anywhere even when it was the
+/// signal that overrode the filename layer.
+fn log_ffprobe_summary(path: &str, facts: &ProbeFacts, out: &FfprobeClassification) {
+    if !facts.has_video {
+        return;
+    }
+    let resolution_label = out
+        .resolution
+        .map(|r| r.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let audio_codecs = if facts.audio_codecs.is_empty() {
+        "(none)".to_string()
+    } else {
+        facts.audio_codecs.join(",")
+    };
+    let evidence_summary = if out.evidence.is_empty() {
+        "(none)".to_string()
+    } else {
+        out.evidence
+            .iter()
+            .map(|e| format!("{}:{:.2} \"{}\"", e.source.as_str(), e.confidence, e.detail))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    tracing::debug!(
+        target: "ryokan::source::ffprobe",
+        path,
+        width = facts.width,
+        height = facts.height,
+        resolution = %resolution_label,
+        video_codec = %facts.video_codec,
+        bit_depth = facts.bit_depth,
+        audio_codecs = %audio_codecs,
+        has_pgs_subs = facts.has_pgs_subs,
+        has_commentary = facts.has_commentary,
+        evidence = %evidence_summary,
+        "ffprobe scan"
+    );
+}
+
 /// Pure scanner: takes a ffprobe JSON document as a string and emits
 /// classification evidence. Kept free of I/O and fs access so the unit
 /// tests can feed in canned fixtures with no shell-out.
+///
+/// Production code now routes through [`scan_ffprobe_json_with_facts`]
+/// so the logged wrapper can surface the intermediate facts bag; this
+/// thin wrapper stays public for the existing test suite.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
+    scan_ffprobe_json_with_facts(json).1
+}
+
+/// Internal variant that also returns the intermediate [`ProbeFacts`]
+/// bag. Used by `scan_ffprobe_json_logged` to emit a structured debug
+/// summary of every probe — the observed dimensions, codecs, and
+/// fingerprint flags — alongside the final evidence vec. Tests stick
+/// with the thinner [`scan_ffprobe_json`] wrapper so they don't have
+/// to spell out facts that aren't relevant to whatever rule they're
+/// exercising.
+fn scan_ffprobe_json_with_facts(json: &str) -> (ProbeFacts, FfprobeClassification) {
     let Ok(root) = serde_json::from_str::<Value>(json) else {
-        return FfprobeClassification::default();
+        return (ProbeFacts::default(), FfprobeClassification::default());
     };
     let Some(streams) = root.get("streams").and_then(|s| s.as_array()) else {
-        return FfprobeClassification::default();
+        return (ProbeFacts::default(), FfprobeClassification::default());
     };
 
     // First pass: collect the facts we need for the rule evaluation.
@@ -255,6 +326,29 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
 
         match codec_type.as_str() {
             "video" => {
+                // Skip attached-picture streams (cover art, album thumbnails,
+                // poster frames). ffprobe labels them `codec_type = "video"`
+                // but their dimensions are the cover image (often small and
+                // portrait — 600x900 posters, 300x400 thumbnails) rather
+                // than the actual video track. Without this guard they'd
+                // overwrite the real video stream's width/height when they
+                // sit later in the streams array, which is how an EMBER
+                // Wajutsushi release came back with the 1080p main track
+                // silently replaced by a ~150-tall thumbnail — the height
+                // dropped below the `from_dimensions` 460-pixel floor so
+                // every affected episode rendered with no resolution tag
+                // at all. Check `disposition.attached_pic` (ffprobe sets it
+                // to 1 for these streams) and treat it as "not a real video
+                // stream" — skip it entirely.
+                let attached_pic = s
+                    .get("disposition")
+                    .and_then(|d| d.get("attached_pic"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    != 0;
+                if attached_pic {
+                    continue;
+                }
                 facts.has_video = true;
                 facts.video_codec = codec_name.clone();
                 facts.width = s.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
@@ -275,9 +369,10 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
                 }
                 if let Some(bps) = s.get("bits_per_raw_sample").and_then(|v| v.as_str())
                     && let Ok(n) = bps.parse::<u8>()
-                        && n > 0 {
-                            facts.bit_depth = n;
-                        }
+                    && n > 0
+                {
+                    facts.bit_depth = n;
+                }
             }
             "audio" => {
                 facts.audio_codecs.push(codec_name.clone());
@@ -297,13 +392,11 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
                     facts.has_commentary = true;
                 }
             }
-            "subtitle" => {
-                // PGS (Blu-ray) subtitles come through as "hdmv_pgs_subtitle"
-                // under codec_name. Also accept the older S_HDMV/PGS form that
-                // shows up in some mkvtoolnix-produced files.
-                if codec_name.contains("pgs") || codec_name.contains("hdmv_pgs") {
-                    facts.has_pgs_subs = true;
-                }
+            // PGS (Blu-ray) subtitles come through as "hdmv_pgs_subtitle"
+            // under codec_name. Also accept the older S_HDMV/PGS form that
+            // shows up in some mkvtoolnix-produced files.
+            "subtitle" if codec_name.contains("pgs") || codec_name.contains("hdmv_pgs") => {
+                facts.has_pgs_subs = true;
             }
             _ => {}
         }
@@ -311,7 +404,7 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
 
     let mut out = FfprobeClassification::default();
     if !facts.has_video {
-        return out;
+        return (facts, out);
     }
 
     // Observed resolution — always set if we have a video stream with
@@ -450,7 +543,7 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
         ));
     }
 
-    out
+    (facts, out)
 }
 
 #[derive(Default)]
@@ -500,6 +593,21 @@ mod tests {
         })
     }
 
+    /// Cover-art / attached-picture stream — what ffprobe emits for the
+    /// embedded poster/thumbnail many MKV releases carry. ffprobe tags
+    /// these with `codec_type = "video"` but marks them via
+    /// `disposition.attached_pic = 1`. Used to pin down the attached-pic
+    /// regression where these streams overwrote the real video track.
+    fn attached_pic_stream(codec: &str, width: u32, height: u32) -> Value {
+        serde_json::json!({
+            "codec_type": "video",
+            "codec_name": codec,
+            "width": width,
+            "height": height,
+            "disposition": { "attached_pic": 1 },
+        })
+    }
+
     fn audio_stream_with_title(codec: &str, title: &str) -> Value {
         serde_json::json!({
             "codec_type": "audio",
@@ -534,6 +642,36 @@ mod tests {
         let out = scan_ffprobe_json(&probe_json(vec![video_stream(
             "h264", 1920, 1080, "yuv420p",
         )]));
+        assert_eq!(out.resolution, Some(Resolution::R1080p));
+    }
+
+    /// Attached-picture streams (MKV cover art) must not clobber the main
+    /// video's width/height. Regression guard for an EMBER Wajutsushi
+    /// release where a ~150-tall thumbnail sat after the real 1080p
+    /// track and dropped the reported height below
+    /// `Resolution::from_dimensions`'s 460-pixel floor — classification
+    /// for 11 of 12 episodes came back with no resolution tag at all.
+    #[test]
+    fn attached_pic_after_main_video_does_not_overwrite_resolution() {
+        let out = scan_ffprobe_json(&probe_json(vec![
+            video_stream("h264", 1920, 1080, "yuv420p"),
+            attached_pic_stream("mjpeg", 500, 150),
+            audio_stream("eac3"),
+        ]));
+        assert_eq!(out.resolution, Some(Resolution::R1080p));
+    }
+
+    /// Same bug, reversed stream order — attached_pic first (as some
+    /// containers emit), then the real video. Without the disposition
+    /// check the real video's dims would overwrite the thumbnail's and
+    /// the test would coincidentally pass, so we keep both orderings.
+    #[test]
+    fn attached_pic_before_main_video_does_not_overwrite_resolution() {
+        let out = scan_ffprobe_json(&probe_json(vec![
+            attached_pic_stream("mjpeg", 500, 150),
+            video_stream("h264", 1920, 1080, "yuv420p"),
+            audio_stream("eac3"),
+        ]));
         assert_eq!(out.resolution, Some(Resolution::R1080p));
     }
 
@@ -600,10 +738,11 @@ mod tests {
             audio_stream("dts"), // fake — dts_hd_ma shows up as "dts" with a profile
         ]));
         // Plain DTS doesn't fire — we need "dts" + "hd" in the name.
-        assert!(!out.evidence.iter().any(|e| {
-            e.source == Source::BluRay
-                && e.detail.contains("DTS")
-        }));
+        assert!(
+            !out.evidence
+                .iter()
+                .any(|e| { e.source == Source::BluRay && e.detail.contains("DTS") })
+        );
         let out2 = scan_ffprobe_json(&probe_json(vec![
             video_stream("hevc", 1920, 1080, "yuv420p"),
             audio_stream("dts_hd_ma"),

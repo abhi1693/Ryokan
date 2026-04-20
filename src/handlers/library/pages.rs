@@ -16,25 +16,28 @@ use axum::{
 };
 use sqlx::SqlitePool;
 
+use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, local_metadata, monitoring, series};
-use crate::services::{anilist, artwork, jikan, kitsu, logger, media, monitoring as monitoring_service};
-use crate::AppState;
+use crate::services::{
+    anilist, artwork, jikan, kitsu, logger, media, monitoring as monitoring_service,
+};
 
 use super::reconcile::{
     force_kitsu_fallback_enabled, populate_series_cover_urls, resolve_series_context,
 };
-use super::{Episode, ErrorTemplate, IndexTemplate, NeedsReviewTemplate, RelationCard, RelationGroup, SeriesTemplate};
+use super::{
+    Episode, ErrorTemplate, IndexTemplate, NeedsReviewTemplate, RelationCard, RelationGroup,
+    SeriesTemplate,
+};
 
 pub async fn index(State(state): State<AppState>) -> Html<String> {
     // Fetch the library list and config concurrently — they're independent
     // and each was previously serialized on the other. `get_all` is the
     // larger query of the two so this shaves the smaller query's RTT off
     // the critical path.
-    let (library_res, cfg_res) = tokio::join!(
-        series::get_all(&state.db),
-        config::get_config(&state.db),
-    );
+    let (library_res, cfg_res) =
+        tokio::join!(series::get_all(&state.db), config::get_config(&state.db),);
     let mut library = library_res.unwrap_or_default();
     let cfg = cfg_res.ok().flatten();
 
@@ -49,7 +52,9 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
     let template = IndexTemplate {
         page: "library".to_string(),
         library,
-        title_language: cfg.map(|c| c.title_language).unwrap_or_else(|| "english".to_string()),
+        title_language: cfg
+            .map(|c| c.title_language)
+            .unwrap_or_else(|| "english".to_string()),
     };
     Html(template.render().unwrap_or_default())
 }
@@ -58,7 +63,9 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
 /// classifier couldn't land a confident verdict on, with a deep link back
 /// to the series detail page so the user can open the override modal.
 pub async fn needs_review_page(State(state): State<AppState>) -> Html<String> {
-    let mut entries = episode_tags::get_needs_review(&state.db).await.unwrap_or_default();
+    let mut entries = episode_tags::get_needs_review(&state.db)
+        .await
+        .unwrap_or_default();
 
     populate_series_cover_urls(
         &state.db,
@@ -79,10 +86,18 @@ pub async fn series_detail(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
 ) -> Html<String> {
-    let (db_series, provider_id, mut detail) = match resolve_series_context(&state.db, request_id).await {
+    let (db_series, provider_id, mut detail) = match resolve_series_context(&state.db, request_id)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
-            logger::error(&state.db, LogCategory::AniList, &format!("Failed to fetch detail for {}", request_id), &e).await;
+            logger::error(
+                &state.db,
+                LogCategory::AniList,
+                &format!("Failed to fetch detail for {}", request_id),
+                &e,
+            )
+            .await;
             let (title, message, tech_detail) = if e.contains("403") {
                 (
                     "Metadata Provider Unavailable".to_string(),
@@ -92,7 +107,10 @@ pub async fn series_detail(
             } else if e.contains("not found") || e.contains("Not Found") {
                 (
                     "Series Not Found".to_string(),
-                    format!("Could not find a series with ID {}. It may have been removed from the metadata provider.", request_id),
+                    format!(
+                        "Could not find a series with ID {}. It may have been removed from the metadata provider.",
+                        request_id
+                    ),
                     e,
                 )
             } else {
@@ -113,7 +131,10 @@ pub async fn series_detail(
     };
     let is_tracked = db_series.is_some();
     let db_id = db_series.as_ref().map(|s| s.id);
-    let folder_name = db_series.as_ref().map(|s| s.folder_name.clone()).unwrap_or_default();
+    let folder_name = db_series
+        .as_ref()
+        .map(|s| s.folder_name.clone())
+        .unwrap_or_default();
 
     // Ensure monitoring rows first — this writes to DB, and `build_episodes`
     // below reads the monitored set, so these cannot run concurrently
@@ -122,7 +143,9 @@ pub async fn series_detail(
     let mut monitor_mode = "future".to_string();
     let mut monitor_mode_label = monitoring::MonitorMode::Future.label().to_string();
     if let Some(ref tracked) = db_series {
-        if let Ok(summary) = monitoring_service::ensure_series_monitoring_rows(&state.db, tracked).await {
+        if let Ok(summary) =
+            monitoring_service::ensure_series_monitoring_rows(&state.db, tracked).await
+        {
             monitor_mode = summary.mode.as_str().to_string();
             monitor_mode_label = summary.mode.label().to_string();
         } else {
@@ -165,7 +188,9 @@ pub async fn series_detail(
     };
 
     let cover_key = db_series.as_ref().map(|s| format!("series-{}-cover", s.id));
-    let banner_key = db_series.as_ref().map(|s| format!("series-{}-banner", s.id));
+    let banner_key = db_series
+        .as_ref()
+        .map(|s| format!("series-{}-banner", s.id));
     let cover_url_src = detail.cover_url.clone();
     let banner_url_src = detail.banner_url.clone();
     let detail_id = detail.id;
@@ -215,7 +240,8 @@ pub async fn series_detail(
         banner_fut,
     );
     let cfg = cfg.ok().flatten();
-    let ((episodes, on_disk_count, downloaded_count, size_display, monitored_count), media_root) = episodes_out;
+    let ((episodes, on_disk_count, downloaded_count, size_display, monitored_count), media_root) =
+        episodes_out;
     detail.cover_url = cover_url;
     detail.banner_url = banner_url;
 
@@ -227,7 +253,8 @@ pub async fn series_detail(
     let ep_total = detail.effective_episode_count();
     let (external_url, external_label) = if detail.id < 0 {
         (
-            detail.id_mal
+            detail
+                .id_mal
                 .map(|id| format!("https://myanimelist.net/anime/{}", id))
                 .unwrap_or_default(),
             "MyAnimeList".to_string(),
@@ -310,7 +337,9 @@ where
         return false;
     }
 
-    let missing = (1..=ep_count).filter(|ep_num| !has_jikan_title(*ep_num)).count() as i32;
+    let missing = (1..=ep_count)
+        .filter(|ep_num| !has_jikan_title(*ep_num))
+        .count() as i32;
     missing > JIKAN_MAL_LAG_TOLERANCE
 }
 
@@ -385,17 +414,48 @@ pub(super) async fn build_episodes(
         quality_tags_fut,
     );
     let disk_files = disk_files_res.unwrap_or_default();
-    let cached_matches_force = !force_kitsu_fallback
-        || cached_eps.values().any(|ep| ep.source == "kitsu");
+    let cached_matches_force =
+        !force_kitsu_fallback || cached_eps.values().any(|ep| ep.source == "kitsu");
     let use_cached_eps = !cached_eps.is_empty() && cached_matches_force;
 
     let episodic_format = !matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA");
-    let should_fetch_jikan = !use_cached_eps && detail.id_mal.is_some() && (episodic_format || ep_count > 1);
+    // Issue #56: airing series whose episode total isn't known yet
+    // (typical for MAL-fed currently-airing entries — Jikan reports
+    // `episodes: null`) need the Jikan episodes endpoint as the *source*
+    // of episode rows, not just titles. Without the `is_airing` arm an
+    // ONA-format airing show like JoJo SBR ends up with `episodic_format
+    // = false` AND `ep_count == 0`, so Jikan is skipped, the main
+    // 1..=ep_count render loop emits nothing, and the page reads as a
+    // zero-episode series even though `/anime/{id}/episodes` would have
+    // returned the aired list.
+    let is_airing_status = matches!(detail.status.as_str(), "RELEASING" | "CURRENTLY_AIRING");
+    let should_fetch_jikan = !use_cached_eps
+        && detail.id_mal.is_some()
+        && (episodic_format || ep_count > 1 || is_airing_status);
     let jikan_eps = if should_fetch_jikan {
         jikan::fetch_episode_titles_for_detail(db, detail).await
     } else {
         HashMap::new()
     };
+
+    // Promote the larger of (fresh Jikan fetch, locally-cached episode
+    // map) into ep_count for airing series whose total wasn't known.
+    // The downstream render loop (`for ep_num in 1..=ep_count`), the
+    // template's `ep_total > 0` section gate, and the monitoring
+    // counters all key off ep_count, so without this the fetched
+    // episodes stay invisible.
+    //
+    // Both arms are needed: `jikan_eps` is only populated when
+    // `should_fetch_jikan` fires, which requires `!use_cached_eps`. On
+    // the cached path Jikan was skipped and `jikan_eps` stays empty, so
+    // the promotion from `jikan_eps.len()` alone would be a no-op —
+    // leaving an airing series rendered empty on every revisit after
+    // the initial sync populated the local episode map.
+    let ep_count = ep_count.max(jikan_eps.len() as i32).max(if use_cached_eps {
+        cached_eps.len() as i32
+    } else {
+        0
+    });
 
     let should_try_kitsu = !use_cached_eps
         && ep_count > 1
@@ -409,10 +469,15 @@ pub(super) async fn build_episodes(
     let kitsu_eps: HashMap<i32, kitsu::EpisodeInfo> = if should_try_kitsu {
         kitsu::fetch_episode_titles_fallback(
             db,
-            &[detail.title_english.clone(), detail.title_romaji.clone(), detail.title_native.clone()],
+            &[
+                detail.title_english.clone(),
+                detail.title_romaji.clone(),
+                detail.title_native.clone(),
+            ],
             detail.season_year,
             detail.episodes,
-        ).await
+        )
+        .await
     } else {
         HashMap::new()
     };
@@ -435,7 +500,12 @@ pub(super) async fn build_episodes(
         });
 
         let (on_disk, quality, size_display, filename) = match disk_match {
-            Some(f) => (true, f.quality.clone(), f.size_display.clone(), f.filename.clone()),
+            Some(f) => (
+                true,
+                f.quality.clone(),
+                f.size_display.clone(),
+                f.filename.clone(),
+            ),
             None => (false, String::new(), String::new(), String::new()),
         };
 
@@ -448,7 +518,11 @@ pub(super) async fn build_episodes(
 
         let use_series_fallback = ep_count <= 1;
         let fallback_title = if use_series_fallback {
-            preferred_title(&detail.title_english, &detail.title_romaji, &detail.title_native)
+            preferred_title(
+                &detail.title_english,
+                &detail.title_romaji,
+                &detail.title_native,
+            )
         } else {
             String::new()
         };
@@ -494,13 +568,7 @@ pub(super) async fn build_episodes(
                     } else {
                         fallback_title.clone()
                     };
-                    (
-                        t.clone(),
-                        t.clone(),
-                        t.clone(),
-                        t,
-                        kitsu_info.aired.clone(),
-                    )
+                    (t.clone(), t.clone(), t.clone(), t, kitsu_info.aired.clone())
                 } else {
                     match jikan_eps.get(&ep_num) {
                         Some(info) if !info.title.trim().is_empty() => (
@@ -550,13 +618,7 @@ pub(super) async fn build_episodes(
                             } else {
                                 fallback_title.clone()
                             };
-                            (
-                                t.clone(),
-                                t.clone(),
-                                t.clone(),
-                                t,
-                                kitsu_info.aired.clone(),
-                            )
+                            (t.clone(), t.clone(), t.clone(), t, kitsu_info.aired.clone())
                         } else {
                             (
                                 fallback_title,
@@ -769,10 +831,16 @@ pub(super) async fn build_episodes(
         }
     }
 
-    episodes.sort_by(|a, b| b.number.cmp(&a.number));
+    episodes.sort_by_key(|e| std::cmp::Reverse(e.number));
 
     let size_display = format_size(total_size);
-    (episodes, on_disk_count, downloaded_count, size_display, monitored_count)
+    (
+        episodes,
+        on_disk_count,
+        downloaded_count,
+        size_display,
+        monitored_count,
+    )
 }
 
 fn relation_identity_key(provider_id: i64, mal_id: Option<i64>) -> String {
@@ -791,48 +859,85 @@ fn relation_identity_key(provider_id: i64, mal_id: Option<i64>) -> String {
 async fn resolve_relation_card_id(db: &SqlitePool, provider_id: i64, mal_id: Option<i64>) -> i64 {
     // Try AniList ID first (positive IDs).
     if provider_id > 0
-        && let Ok(Some(row)) = series::get_by_anilist_id(db, provider_id).await {
-            return row.id;
-        }
+        && let Ok(Some(row)) = series::get_by_anilist_id(db, provider_id).await
+    {
+        return row.id;
+    }
     // Try MAL ID.
     if let Some(mid) = mal_id
-        && let Ok(Some(row)) = series::get_by_mal_id(db, mid).await {
-            return row.id;
-        }
+        && let Ok(Some(row)) = series::get_by_mal_id(db, mid).await
+    {
+        return row.id;
+    }
     // For MAL-sourced entries, the anilist_id column stores -mal_id.
     if provider_id < 0
-        && let Ok(Some(row)) = series::get_by_anilist_id(db, provider_id).await {
-            return row.id;
-        }
+        && let Ok(Some(row)) = series::get_by_anilist_id(db, provider_id).await
+    {
+        return row.id;
+    }
     provider_id
 }
 
 fn relation_richness(rel: &anilist::RelatedEntry) -> i32 {
     let mut score = 0;
-    if !rel.cover_url.trim().is_empty() { score += 4; }
-    if !rel.format.trim().is_empty() && rel.format != "TBA" { score += 2; }
-    if !rel.status.trim().is_empty() && rel.status != "TBA" { score += 2; }
-    if rel.episodes.unwrap_or(0) > 0 { score += 1; }
-    if !preferred_title(&rel.title_english, &rel.title_romaji, &rel.title_native).trim().is_empty() { score += 1; }
+    if !rel.cover_url.trim().is_empty() {
+        score += 4;
+    }
+    if !rel.format.trim().is_empty() && rel.format != "TBA" {
+        score += 2;
+    }
+    if !rel.status.trim().is_empty() && rel.status != "TBA" {
+        score += 2;
+    }
+    if rel.episodes.unwrap_or(0) > 0 {
+        score += 1;
+    }
+    if !preferred_title(&rel.title_english, &rel.title_romaji, &rel.title_native)
+        .trim()
+        .is_empty()
+    {
+        score += 1;
+    }
     score
 }
 
-fn merge_relation_metadata(primary: &anilist::RelatedEntry, fallback: &anilist::RelatedEntry) -> anilist::RelatedEntry {
+fn merge_relation_metadata(
+    primary: &anilist::RelatedEntry,
+    fallback: &anilist::RelatedEntry,
+) -> anilist::RelatedEntry {
     let mut merged = primary.clone();
 
-    if merged.title_romaji.trim().is_empty() { merged.title_romaji = fallback.title_romaji.clone(); }
-    if merged.title_english.trim().is_empty() { merged.title_english = fallback.title_english.clone(); }
-    if merged.title_native.trim().is_empty() { merged.title_native = fallback.title_native.clone(); }
-    if merged.cover_url.trim().is_empty() { merged.cover_url = fallback.cover_url.clone(); }
-    if merged.format.trim().is_empty() || merged.format == "TBA" { merged.format = fallback.format.clone(); }
+    if merged.title_romaji.trim().is_empty() {
+        merged.title_romaji = fallback.title_romaji.clone();
+    }
+    if merged.title_english.trim().is_empty() {
+        merged.title_english = fallback.title_english.clone();
+    }
+    if merged.title_native.trim().is_empty() {
+        merged.title_native = fallback.title_native.clone();
+    }
+    if merged.cover_url.trim().is_empty() {
+        merged.cover_url = fallback.cover_url.clone();
+    }
+    if merged.format.trim().is_empty() || merged.format == "TBA" {
+        merged.format = fallback.format.clone();
+    }
     if merged.status.trim().is_empty() || merged.status == "TBA" {
         merged.status = fallback.status.clone();
         merged.status_display = fallback.status_display.clone();
     }
-    if merged.episodes.is_none() || merged.episodes == Some(0) { merged.episodes = fallback.episodes; }
-    if merged.season_year.is_none() { merged.season_year = fallback.season_year; }
-    if merged.id_mal.is_none() { merged.id_mal = fallback.id_mal; }
-    if merged.media_type.trim().is_empty() { merged.media_type = fallback.media_type.clone(); }
+    if merged.episodes.is_none() || merged.episodes == Some(0) {
+        merged.episodes = fallback.episodes;
+    }
+    if merged.season_year.is_none() {
+        merged.season_year = fallback.season_year;
+    }
+    if merged.id_mal.is_none() {
+        merged.id_mal = fallback.id_mal;
+    }
+    if merged.media_type.trim().is_empty() {
+        merged.media_type = fallback.media_type.clone();
+    }
 
     merged
 }
@@ -844,14 +949,20 @@ async fn build_relation_groups(
     detail: &anilist::AnimeDetail,
 ) -> Vec<RelationGroup> {
     let cached_relations = if let Some(series_id) = db_id {
-        let rows = local_metadata::get_relations_for_series(db, series_id).await.unwrap_or_default();
+        let rows = local_metadata::get_relations_for_series(db, series_id)
+            .await
+            .unwrap_or_default();
         if rows.is_empty() && detail.id != 0 {
-            local_metadata::get_relations_for_provider(db, detail.id).await.unwrap_or_default()
+            local_metadata::get_relations_for_provider(db, detail.id)
+                .await
+                .unwrap_or_default()
         } else {
             rows
         }
     } else if detail.id != 0 {
-        local_metadata::get_relations_for_provider(db, detail.id).await.unwrap_or_default()
+        local_metadata::get_relations_for_provider(db, detail.id)
+            .await
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -893,12 +1004,15 @@ async fn build_relation_groups(
             .filter(|r| matches!(r.media_type.as_str(), "ANIME" | "MUSIC"))
             .map(|r| relation_identity_key(r.id, r.id_mal))
             .collect();
-        let incoming = local_metadata::get_incoming_relations_for_provider(db, detail.id, detail.id_mal)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| !existing_relation_keys.contains(&relation_identity_key(r.id, r.id_mal)))
-            .collect::<Vec<_>>();
+        let incoming =
+            local_metadata::get_incoming_relations_for_provider(db, detail.id, detail.id_mal)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| {
+                    !existing_relation_keys.contains(&relation_identity_key(r.id, r.id_mal))
+                })
+                .collect::<Vec<_>>();
         relations.extend(incoming);
     }
 
@@ -916,7 +1030,8 @@ async fn build_relation_groups(
         if related_key == self_key {
             continue;
         }
-        let normalized_type = local_metadata::normalize_relation_type(&related.relation_type).to_string();
+        let normalized_type =
+            local_metadata::normalize_relation_type(&related.relation_type).to_string();
         let key = (related_key, normalized_type);
         if let Some(idx) = deduped_index.get(&key).copied() {
             if relation_richness(&deduped[idx]) < relation_richness(&related) {
@@ -930,8 +1045,17 @@ async fn build_relation_groups(
     let relations = deduped;
 
     let type_order = [
-        "PREQUEL", "SEQUEL", "SIDE_STORY", "ALTERNATIVE",
-        "SUMMARY", "FULL_STORY", "SPIN_OFF", "OTHER", "CHARACTER", "PARENT", "ADAPTATION",
+        "PREQUEL",
+        "SEQUEL",
+        "SIDE_STORY",
+        "ALTERNATIVE",
+        "SUMMARY",
+        "FULL_STORY",
+        "SPIN_OFF",
+        "OTHER",
+        "CHARACTER",
+        "PARENT",
+        "ADAPTATION",
     ];
 
     // Resolve the per-relation card_id + cover_url concurrently.
@@ -1000,12 +1124,17 @@ async fn build_relation_groups(
             continue;
         };
 
-        let normalized_relation_type = local_metadata::normalize_relation_type(&related.relation_type).to_string();
+        let normalized_relation_type =
+            local_metadata::normalize_relation_type(&related.relation_type).to_string();
         let cards = groups.entry(normalized_relation_type).or_default();
 
         cards.push(RelationCard {
             id: card_id,
-            title: preferred_title(&related.title_english, &related.title_romaji, &related.title_native),
+            title: preferred_title(
+                &related.title_english,
+                &related.title_romaji,
+                &related.title_native,
+            ),
             title_romaji: related.title_romaji.clone(),
             title_english: related.title_english.clone(),
             title_native: related.title_native.clone(),
@@ -1024,15 +1153,28 @@ async fn build_relation_groups(
                 let b_title = b.title.to_ascii_lowercase();
                 a_title
                     .cmp(&b_title)
-                    .then_with(|| a.title_romaji.to_ascii_lowercase().cmp(&b.title_romaji.to_ascii_lowercase()))
+                    .then_with(|| {
+                        a.title_romaji
+                            .to_ascii_lowercase()
+                            .cmp(&b.title_romaji.to_ascii_lowercase())
+                    })
                     .then_with(|| a.id.cmp(&b.id))
             });
             let label = format_relation_label(&rel_type);
-            RelationGroup { relation_type: rel_type, label, entries }
+            RelationGroup {
+                relation_type: rel_type,
+                label,
+                entries,
+            }
         })
         .collect();
 
-    result.sort_by_key(|g| type_order.iter().position(|t| *t == g.relation_type).unwrap_or(99));
+    result.sort_by_key(|g| {
+        type_order
+            .iter()
+            .position(|t| *t == g.relation_type)
+            .unwrap_or(99)
+    });
     result
 }
 
@@ -1103,7 +1245,11 @@ mod tests {
         root
     }
 
-    fn empty_anime_detail(id: i64, title_english: &str, episodes: Option<i32>) -> anilist::AnimeDetail {
+    fn empty_anime_detail(
+        id: i64,
+        title_english: &str,
+        episodes: Option<i32>,
+    ) -> anilist::AnimeDetail {
         anilist::AnimeDetail {
             id,
             id_mal: None,

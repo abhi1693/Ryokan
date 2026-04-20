@@ -150,10 +150,16 @@ fn candidate_titles(candidate: &Candidate) -> Vec<String> {
 }
 
 fn parse_year(date: Option<&str>) -> Option<i32> {
-    date.and_then(|s| s.get(0..4)).and_then(|y| y.parse::<i32>().ok())
+    date.and_then(|s| s.get(0..4))
+        .and_then(|y| y.parse::<i32>().ok())
 }
 
-fn score_candidate(candidate: &Candidate, wanted_titles: &[String], wanted_year: Option<i32>, wanted_eps: Option<i32>) -> i64 {
+fn score_candidate(
+    candidate: &Candidate,
+    wanted_titles: &[String],
+    wanted_year: Option<i32>,
+    wanted_eps: Option<i32>,
+) -> i64 {
     let mut score = 0_i64;
     let cand_titles = candidate_titles(candidate)
         .into_iter()
@@ -201,7 +207,10 @@ fn score_candidate(candidate: &Candidate, wanted_titles: &[String], wanted_year:
     score
 }
 
-async fn fetch_collection<T: for<'de> serde::Deserialize<'de>>(url: &str, params: &[(&str, &str)]) -> Result<CollectionResponse<T>, String> {
+async fn fetch_collection<T: for<'de> serde::Deserialize<'de>>(
+    url: &str,
+    params: &[(&str, &str)],
+) -> Result<CollectionResponse<T>, String> {
     HTTP_CLIENT
         .get(url)
         .query(params)
@@ -239,7 +248,11 @@ fn to_candidate(resource: Resource<AnimeAttributes>) -> Option<Candidate> {
     })
 }
 
-async fn best_candidate(queries: &[String], wanted_year: Option<i32>, wanted_eps: Option<i32>) -> Result<Option<Candidate>, String> {
+async fn best_candidate(
+    queries: &[String],
+    wanted_year: Option<i32>,
+    wanted_eps: Option<i32>,
+) -> Result<Option<Candidate>, String> {
     let queries = nonempty(queries.to_vec());
     if queries.is_empty() {
         return Ok(None);
@@ -300,7 +313,7 @@ fn to_anime_detail(item: Candidate) -> AnimeDetail {
         format: item.subtype.to_ascii_uppercase(),
         status: item.status.to_ascii_uppercase().replace(' ', "_"),
         status_display: item.status.replace('-', " "),
-        episodes: item.episode_count,
+        episodes: item.episode_count.filter(|&n| n > 0),
         duration: item.episode_length,
         season: String::new(),
         season_year: parse_year(item.start_date.as_deref()),
@@ -319,7 +332,11 @@ fn to_anime_detail(item: Candidate) -> AnimeDetail {
     }
 }
 
-pub async fn get_anime_detail_by_titles(titles: &[String], wanted_year: Option<i32>, wanted_eps: Option<i32>) -> Result<AnimeDetail, String> {
+pub async fn get_anime_detail_by_titles(
+    titles: &[String],
+    wanted_year: Option<i32>,
+    wanted_eps: Option<i32>,
+) -> Result<AnimeDetail, String> {
     let candidate = best_candidate(titles, wanted_year, wanted_eps)
         .await?
         .ok_or_else(|| "Kitsu returned no matching anime".to_string())?;
@@ -408,9 +425,16 @@ struct MappingIncludedItem {
     attributes: AnimeAttributes,
 }
 
-async fn fetch_episode_page_via_relationship(kitsu_id: i64, offset: i32) -> Result<CollectionResponse<EpisodeAttributes>, String> {
+async fn fetch_episode_page_via_relationship(
+    kitsu_id: i64,
+    offset: i32,
+) -> Result<CollectionResponse<EpisodeAttributes>, String> {
     let offset_str = offset.to_string();
-    let params = [("page[limit]", "20"), ("page[offset]", offset_str.as_str()), ("sort", "number")];
+    let params = [
+        ("page[limit]", "20"),
+        ("page[offset]", offset_str.as_str()),
+        ("sort", "number"),
+    ];
     fetch_collection::<EpisodeAttributes>(
         &format!("{}/anime/{}/episodes", KITSU_API, kitsu_id),
         &params,
@@ -418,7 +442,10 @@ async fn fetch_episode_page_via_relationship(kitsu_id: i64, offset: i32) -> Resu
     .await
 }
 
-async fn fetch_episode_page_via_filter(kitsu_id: i64, offset: i32) -> Result<CollectionResponse<EpisodeAttributes>, String> {
+async fn fetch_episode_page_via_filter(
+    kitsu_id: i64,
+    offset: i32,
+) -> Result<CollectionResponse<EpisodeAttributes>, String> {
     let kitsu_id_str = kitsu_id.to_string();
     let offset_str = offset.to_string();
     let params = [
@@ -534,7 +561,11 @@ pub async fn fetch_episode_titles_fallback(
         };
 
         let count = response.data.len();
-        let has_next = response.links.as_ref().and_then(|l| l.next.as_ref()).is_some();
+        let has_next = response
+            .links
+            .as_ref()
+            .and_then(|l| l.next.as_ref())
+            .is_some();
 
         for resource in response.data {
             let attrs = resource.attributes;

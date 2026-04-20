@@ -2,15 +2,15 @@ mod handlers;
 mod models;
 mod services;
 
+use axum::http::{HeaderValue, header};
 use axum::{
+    Router,
     extract::{DefaultBodyLimit, FromRef},
     middleware,
     routing::{get, post},
-    Router,
 };
-use axum::http::{header, HeaderValue};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -50,6 +50,7 @@ use services::{
         handlers::library::crud::set_allow_upgrades,
         handlers::library::crud::set_search_overrides,
         handlers::library::crud::set_manual_override,
+        handlers::library::crud::reclassify_episode,
         handlers::library::crud::list_folders,
         handlers::library::search::auto_search_series,
         handlers::library::search::auto_search_episode,
@@ -123,6 +124,7 @@ use services::{
         handlers::library::SetEpisodeMonitoringForm,
         handlers::library::SetAllowUpgradesForm,
         handlers::library::SetManualOverrideForm,
+        handlers::library::ReclassifyEpisodeForm,
         handlers::library::MarkEpisodeFailedForm,
         handlers::library::episodes::EpisodeProgress,
         handlers::search::GrabForm,
@@ -245,11 +247,7 @@ where
         } else {
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
-        tracing::warn!(
-            "supervise '{}': restarting in {:?}",
-            name,
-            backoff
-        );
+        tracing::warn!("supervise '{}': restarting in {:?}", name, backoff);
         tokio::time::sleep(backoff).await;
     }
 }
@@ -258,8 +256,10 @@ where
 async fn main() {
     // Initialize tracing.
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "ryokan=debug,tower_http=debug".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "ryokan=debug,tower_http=debug".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -298,7 +298,9 @@ async fn main() {
         .expect("Failed to connect to database");
 
     // Run migrations.
-    models::migrate(&db).await.expect("Failed to run migrations");
+    models::migrate(&db)
+        .await
+        .expect("Failed to run migrations");
 
     // Password-recovery boot path (#22). When RYOKAN_RESET_AUTH=1 or
     // --reset-auth is passed AND a `data/.reset-auth` sentinel file exists,
@@ -345,8 +347,9 @@ async fn main() {
     // Warm the Custom Formats cache from disk. Parse failures are logged
     // inside `load_compiled_cfs` and skipped — startup never aborts over
     // a bad CF row, so a corrupted import can't take the server down.
-    let cf_cache: CompiledCfCache =
-        Arc::new(RwLock::new(Arc::new(custom_formats::load_compiled_cfs(&db).await)));
+    let cf_cache: CompiledCfCache = Arc::new(RwLock::new(Arc::new(
+        custom_formats::load_compiled_cfs(&db).await,
+    )));
 
     // Warm the SeaDex lookup cache from SQLite so a restart doesn't
     // re-hit releases.moe for every series in the library on the next
@@ -382,10 +385,7 @@ async fn main() {
             *state.qbit.write().await = Some(client);
         }
         if !config.jellyfin_url.is_empty() && !config.jellyfin_api_key.is_empty() {
-            let client = JellyfinClient::new(
-                &config.jellyfin_url,
-                &config.jellyfin_api_key,
-            );
+            let client = JellyfinClient::new(&config.jellyfin_url, &config.jellyfin_api_key);
             *state.jellyfin.write().await = Some(client);
         }
     }
@@ -395,60 +395,187 @@ async fn main() {
     // before touching the handler — the GET paths skip the check because
     // safe methods return Ok(()) from verify_same_origin.
     let public_routes = Router::new()
-        .route("/login", get(handlers::auth::login_page).post(handlers::auth::login_submit))
-        .route("/setup", get(handlers::auth::setup_page).post(handlers::auth::setup_submit))
+        .route(
+            "/login",
+            get(handlers::auth::login_page).post(handlers::auth::login_submit),
+        )
+        .route(
+            "/setup",
+            get(handlers::auth::setup_page).post(handlers::auth::setup_submit),
+        )
         // #39 — Account recovery page. Linked from /login's "Forgot
         // password?" so a locked-out user can read the recipe without
         // needing to authenticate first. Dedicated template so they
         // don't see the authed top-nav / Logout link they can't use.
-        .route("/forgot-password", get(handlers::auth::forgot_password_page))
+        .route(
+            "/forgot-password",
+            get(handlers::auth::forgot_password_page),
+        )
         .layer(middleware::from_fn(handlers::auth::csrf_public));
 
     // Routes that require auth.
     let protected_routes = Router::new()
         .route("/", get(handlers::library::pages::index))
-        .route("/library/review", get(handlers::library::pages::needs_review_page))
-        .route("/series/{anilist_id}", get(handlers::library::pages::series_detail))
-        .route("/search", get(handlers::search::search_page).post(handlers::search::search_submit))
-        .route("/api/anilist/search", get(handlers::library::search::anilist_search))
-        .route("/api/library/add", post(handlers::library::crud::add_series))
-        .route("/api/library/remove", post(handlers::library::crud::remove_series))
-        .route("/api/library/reconcile-fallbacks", post(handlers::library::crud::reconcile_fallbacks))
-        .route("/api/series/{anilist_id}", get(handlers::library::search::api_series_detail))
-        .route("/api/library/folder", post(handlers::library::crud::set_folder))
-        .route("/api/library/monitoring", post(handlers::library::crud::set_monitoring))
-        .route("/api/library/episode-monitoring", post(handlers::library::crud::set_episode_monitoring))
-        .route("/api/library/allow-upgrades", post(handlers::library::crud::set_allow_upgrades))
-        .route("/api/library/search-overrides", post(handlers::library::crud::set_search_overrides))
-        .route("/api/library/manual-override", post(handlers::library::crud::set_manual_override))
-        .route("/api/series/{anilist_id}/auto-search", post(handlers::library::search::auto_search_series))
-        .route("/api/series/{anilist_id}/auto-search/{episode_number}", post(handlers::library::search::auto_search_episode))
-        .route("/api/series/{anilist_id}/search-batch", post(handlers::library::search::search_batch_releases))
-        .route("/api/series/{anilist_id}/interactive-search/{episode_number}", get(handlers::library::search::interactive_search_episode))
-        .route("/api/series/{anilist_id}/interactive-search-batch", get(handlers::library::search::interactive_search_batches))
-        .route("/api/series/{anilist_id}/grab/{episode_number}", post(handlers::library::search::grab_interactive_result))
-        .route("/api/series/{anilist_id}/grab-batch", post(handlers::library::search::grab_batch_result))
-        .route("/api/series/{anilist_id}/delete-file/{episode_number}", post(handlers::library::episodes::delete_episode_file))
-        .route("/api/series/{anilist_id}/cancel-pending/{episode_number}", post(handlers::library::episodes::cancel_pending_episode))
-        .route("/api/series/{anilist_id}/grab-history/{episode_number}", get(handlers::library::episodes::get_episode_grab_history))
-        .route("/api/series/{anilist_id}/mark-failed/{episode_number}", post(handlers::library::episodes::mark_episode_failed))
-        .route("/api/series/{anilist_id}/download-progress", get(handlers::library::episodes::episode_download_progress))
-        .route("/api/series/{anilist_id}/episodes", get(handlers::library::episodes::series_episodes_json))
-        .route("/api/library/folders", get(handlers::library::crud::list_folders))
+        .route(
+            "/library/review",
+            get(handlers::library::pages::needs_review_page),
+        )
+        .route(
+            "/series/{anilist_id}",
+            get(handlers::library::pages::series_detail),
+        )
+        .route(
+            "/search",
+            get(handlers::search::search_page).post(handlers::search::search_submit),
+        )
+        .route(
+            "/api/anilist/search",
+            get(handlers::library::search::anilist_search),
+        )
+        .route(
+            "/api/library/add",
+            post(handlers::library::crud::add_series),
+        )
+        .route(
+            "/api/library/remove",
+            post(handlers::library::crud::remove_series),
+        )
+        .route(
+            "/api/library/reconcile-fallbacks",
+            post(handlers::library::crud::reconcile_fallbacks),
+        )
+        .route(
+            "/api/series/{anilist_id}",
+            get(handlers::library::search::api_series_detail),
+        )
+        .route(
+            "/api/library/folder",
+            post(handlers::library::crud::set_folder),
+        )
+        .route(
+            "/api/library/monitoring",
+            post(handlers::library::crud::set_monitoring),
+        )
+        .route(
+            "/api/library/episode-monitoring",
+            post(handlers::library::crud::set_episode_monitoring),
+        )
+        .route(
+            "/api/library/allow-upgrades",
+            post(handlers::library::crud::set_allow_upgrades),
+        )
+        .route(
+            "/api/library/search-overrides",
+            post(handlers::library::crud::set_search_overrides),
+        )
+        .route(
+            "/api/library/manual-override",
+            post(handlers::library::crud::set_manual_override),
+        )
+        .route(
+            "/api/library/reclassify-episode",
+            post(handlers::library::crud::reclassify_episode),
+        )
+        .route(
+            "/api/series/{anilist_id}/auto-search",
+            post(handlers::library::search::auto_search_series),
+        )
+        .route(
+            "/api/series/{anilist_id}/auto-search/{episode_number}",
+            post(handlers::library::search::auto_search_episode),
+        )
+        .route(
+            "/api/series/{anilist_id}/search-batch",
+            post(handlers::library::search::search_batch_releases),
+        )
+        .route(
+            "/api/series/{anilist_id}/interactive-search/{episode_number}",
+            get(handlers::library::search::interactive_search_episode),
+        )
+        .route(
+            "/api/series/{anilist_id}/interactive-search-batch",
+            get(handlers::library::search::interactive_search_batches),
+        )
+        .route(
+            "/api/series/{anilist_id}/grab/{episode_number}",
+            post(handlers::library::search::grab_interactive_result),
+        )
+        .route(
+            "/api/series/{anilist_id}/grab-batch",
+            post(handlers::library::search::grab_batch_result),
+        )
+        .route(
+            "/api/series/{anilist_id}/delete-file/{episode_number}",
+            post(handlers::library::episodes::delete_episode_file),
+        )
+        .route(
+            "/api/series/{anilist_id}/cancel-pending/{episode_number}",
+            post(handlers::library::episodes::cancel_pending_episode),
+        )
+        .route(
+            "/api/series/{anilist_id}/grab-history/{episode_number}",
+            get(handlers::library::episodes::get_episode_grab_history),
+        )
+        .route(
+            "/api/series/{anilist_id}/mark-failed/{episode_number}",
+            post(handlers::library::episodes::mark_episode_failed),
+        )
+        .route(
+            "/api/series/{anilist_id}/download-progress",
+            get(handlers::library::episodes::episode_download_progress),
+        )
+        .route(
+            "/api/series/{anilist_id}/episodes",
+            get(handlers::library::episodes::series_episodes_json),
+        )
+        .route(
+            "/api/library/folders",
+            get(handlers::library::crud::list_folders),
+        )
         .route("/api/grab", post(handlers::search::grab_release))
         .route("/api/search/page", get(handlers::search::search_page_api))
         .route("/api/torrents", get(handlers::search::get_torrents))
         .route("/downloads", get(handlers::downloads::downloads_page))
-        .route("/api/downloads/pause", post(handlers::downloads::api_pause_torrent))
-        .route("/api/downloads/resume", post(handlers::downloads::api_resume_torrent))
-        .route("/api/downloads/delete", post(handlers::downloads::api_delete_torrent))
-        .route("/api/downloads/blocklist/remove", post(handlers::downloads::api_blocklist_remove))
-        .route("/settings", get(handlers::settings::settings_page).post(handlers::settings::settings_submit))
-        .route("/settings/groups", post(handlers::settings::settings_groups_upsert))
-        .route("/settings/groups/delete", post(handlers::settings::settings_groups_delete))
-        .route("/settings/custom-formats/upsert", post(handlers::settings::custom_formats::settings_custom_formats_upsert))
-        .route("/settings/custom-formats/delete", post(handlers::settings::custom_formats::settings_custom_formats_delete))
-        .route("/settings/custom-formats/minimum-score", post(handlers::settings::custom_formats::settings_custom_formats_minimum_score))
+        .route(
+            "/api/downloads/pause",
+            post(handlers::downloads::api_pause_torrent),
+        )
+        .route(
+            "/api/downloads/resume",
+            post(handlers::downloads::api_resume_torrent),
+        )
+        .route(
+            "/api/downloads/delete",
+            post(handlers::downloads::api_delete_torrent),
+        )
+        .route(
+            "/api/downloads/blocklist/remove",
+            post(handlers::downloads::api_blocklist_remove),
+        )
+        .route(
+            "/settings",
+            get(handlers::settings::settings_page).post(handlers::settings::settings_submit),
+        )
+        .route(
+            "/settings/groups",
+            post(handlers::settings::settings_groups_upsert),
+        )
+        .route(
+            "/settings/groups/delete",
+            post(handlers::settings::settings_groups_delete),
+        )
+        .route(
+            "/settings/custom-formats/upsert",
+            post(handlers::settings::custom_formats::settings_custom_formats_upsert),
+        )
+        .route(
+            "/settings/custom-formats/delete",
+            post(handlers::settings::custom_formats::settings_custom_formats_delete),
+        )
+        .route(
+            "/settings/custom-formats/minimum-score",
+            post(handlers::settings::custom_formats::settings_custom_formats_minimum_score),
+        )
         // 256 KiB is generous for TRaSH-Guides anime CF JSON (the
         // entire vendored set is ~70 KiB) but well below axum's 2 MiB
         // default — keeps the hidden-field re-echo on the collision
@@ -464,28 +591,73 @@ async fn main() {
             post(handlers::settings::custom_formats::settings_custom_formats_import_resolve)
                 .layer(DefaultBodyLimit::max(256 * 1024)),
         )
-        .route("/settings/custom-formats/install-defaults", post(handlers::settings::custom_formats::settings_custom_formats_install_defaults))
-        .route("/settings/custom-formats/reset-defaults", post(handlers::settings::custom_formats::settings_custom_formats_reset_defaults))
-        .route("/settings/custom-formats/export", get(handlers::settings::custom_formats::settings_custom_formats_export))
+        .route(
+            "/settings/custom-formats/install-defaults",
+            post(handlers::settings::custom_formats::settings_custom_formats_install_defaults),
+        )
+        .route(
+            "/settings/custom-formats/reset-defaults",
+            post(handlers::settings::custom_formats::settings_custom_formats_reset_defaults),
+        )
+        .route(
+            "/settings/custom-formats/export",
+            get(handlers::settings::custom_formats::settings_custom_formats_export),
+        )
         .route("/api/qbit/test", post(handlers::settings::qbit_test))
-        .route("/api/jellyfin/test", post(handlers::settings::jellyfin_test))
+        .route(
+            "/api/jellyfin/test",
+            post(handlers::settings::jellyfin_test),
+        )
         .route("/api/health", get(handlers::settings::api_health))
-        .route("/api/jellyfin/refresh", post(handlers::settings::jellyfin_refresh))
-        .route("/system", get(handlers::system::system_page).post(handlers::system::debug_settings_submit))
+        .route(
+            "/api/jellyfin/refresh",
+            post(handlers::settings::jellyfin_refresh),
+        )
+        .route(
+            "/system",
+            get(handlers::system::system_page).post(handlers::system::debug_settings_submit),
+        )
         .route("/api/rss/sync", post(handlers::system::api_rss_sync))
-        .route("/api/rss/clear-history", post(handlers::system::api_rss_clear_history))
-        .route("/api/tasks/metadata-refresh", post(handlers::system::api_force_metadata_refresh))
-        .route("/api/tasks/cleanup", post(handlers::system::api_force_cleanup))
-        .route("/api/tasks/post-processing", post(handlers::system::api_force_post_processing))
-        .route("/api/tasks/library-classify", post(handlers::system::api_force_library_classify))
-        .route("/api/tasks/upgrade-search", post(handlers::system::api_force_upgrade_search))
-        .route("/api/system/rebuild-anilist-cache", post(handlers::system::api_rebuild_cached_metadata))
-        .route("/api/system/reload-anibridge", post(handlers::system::api_anibridge_reload))
+        .route(
+            "/api/rss/clear-history",
+            post(handlers::system::api_rss_clear_history),
+        )
+        .route(
+            "/api/tasks/metadata-refresh",
+            post(handlers::system::api_force_metadata_refresh),
+        )
+        .route(
+            "/api/tasks/cleanup",
+            post(handlers::system::api_force_cleanup),
+        )
+        .route(
+            "/api/tasks/post-processing",
+            post(handlers::system::api_force_post_processing),
+        )
+        .route(
+            "/api/tasks/library-classify",
+            post(handlers::system::api_force_library_classify),
+        )
+        .route(
+            "/api/tasks/upgrade-search",
+            post(handlers::system::api_force_upgrade_search),
+        )
+        .route(
+            "/api/system/rebuild-anilist-cache",
+            post(handlers::system::api_rebuild_cached_metadata),
+        )
+        .route(
+            "/api/system/reload-anibridge",
+            post(handlers::system::api_anibridge_reload),
+        )
         .route("/help", get(handlers::help::help_page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
         .route("/api/logs/client", post(handlers::system::api_logs_client))
-        .route("/api/progress/{job_id}", get(handlers::progress::poll_progress))
+        .route(
+            "/api/progress/{job_id}",
+            get(handlers::progress::poll_progress),
+        )
         .route("/media/art/{cache_key}", get(handlers::media::artwork))
         .route("/logout", get(handlers::auth::logout))
         // SwaggerUI/OpenAPI live behind the auth wall: the OpenAPI doc
@@ -509,7 +681,10 @@ async fn main() {
     // third alias is a string change, not another `.route(...)` line
     // that future-me has to remember to keep in sync with the first.
     let sonarr_routes = Router::new()
-        .route("/api/v3/system/status", get(handlers::sonarr_compat::system_status))
+        .route(
+            "/api/v3/system/status",
+            get(handlers::sonarr_compat::system_status),
+        )
         .merge(aliased(
             &["/api/v3/qualityprofile", "/api/v3/qualityProfile"],
             get(handlers::sonarr_compat::quality_profiles),
@@ -522,11 +697,28 @@ async fn main() {
             &["/api/v3/languageprofile", "/api/v3/languageProfile"],
             get(handlers::sonarr_compat::language_profiles),
         ))
-        .route("/api/v3/tag", get(handlers::sonarr_compat::list_tags).post(handlers::sonarr_compat::create_tag))
-        .route("/api/v3/series", get(handlers::sonarr_compat::list_series).post(handlers::sonarr_compat::add_series).put(handlers::sonarr_compat::update_series))
-        .route("/api/v3/series/{id}", get(handlers::sonarr_compat::get_series))
-        .route("/api/v3/series/lookup", get(handlers::sonarr_compat::series_lookup))
-        .route("/api/v3/command", post(handlers::sonarr_compat::execute_command))
+        .route(
+            "/api/v3/tag",
+            get(handlers::sonarr_compat::list_tags).post(handlers::sonarr_compat::create_tag),
+        )
+        .route(
+            "/api/v3/series",
+            get(handlers::sonarr_compat::list_series)
+                .post(handlers::sonarr_compat::add_series)
+                .put(handlers::sonarr_compat::update_series),
+        )
+        .route(
+            "/api/v3/series/{id}",
+            get(handlers::sonarr_compat::get_series),
+        )
+        .route(
+            "/api/v3/series/lookup",
+            get(handlers::sonarr_compat::series_lookup),
+        )
+        .route(
+            "/api/v3/command",
+            post(handlers::sonarr_compat::execute_command),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             handlers::sonarr_compat::require_api_key,
@@ -535,20 +727,43 @@ async fn main() {
     // Radarr v3 API compatibility layer for Seerr integration (anime movies).
     // Mounted under /radarr/ prefix — Seerr uses URL Base "/radarr" to route here.
     let radarr_routes = Router::new()
-        .route("/radarr/api/v3/system/status", get(handlers::radarr_compat::system_status))
+        .route(
+            "/radarr/api/v3/system/status",
+            get(handlers::radarr_compat::system_status),
+        )
         .merge(aliased(
-            &["/radarr/api/v3/qualityprofile", "/radarr/api/v3/qualityProfile"],
+            &[
+                "/radarr/api/v3/qualityprofile",
+                "/radarr/api/v3/qualityProfile",
+            ],
             get(handlers::radarr_compat::quality_profiles),
         ))
         .merge(aliased(
             &["/radarr/api/v3/rootfolder", "/radarr/api/v3/rootFolder"],
             get(handlers::radarr_compat::root_folders),
         ))
-        .route("/radarr/api/v3/tag", get(handlers::radarr_compat::list_tags).post(handlers::radarr_compat::create_tag))
-        .route("/radarr/api/v3/movie", get(handlers::radarr_compat::list_movies).post(handlers::radarr_compat::add_movie).put(handlers::radarr_compat::update_movie))
-        .route("/radarr/api/v3/movie/{id}", get(handlers::radarr_compat::get_movie))
-        .route("/radarr/api/v3/movie/lookup", get(handlers::radarr_compat::movie_lookup))
-        .route("/radarr/api/v3/command", post(handlers::radarr_compat::execute_command))
+        .route(
+            "/radarr/api/v3/tag",
+            get(handlers::radarr_compat::list_tags).post(handlers::radarr_compat::create_tag),
+        )
+        .route(
+            "/radarr/api/v3/movie",
+            get(handlers::radarr_compat::list_movies)
+                .post(handlers::radarr_compat::add_movie)
+                .put(handlers::radarr_compat::update_movie),
+        )
+        .route(
+            "/radarr/api/v3/movie/{id}",
+            get(handlers::radarr_compat::get_movie),
+        )
+        .route(
+            "/radarr/api/v3/movie/lookup",
+            get(handlers::radarr_compat::movie_lookup),
+        )
+        .route(
+            "/radarr/api/v3/command",
+            post(handlers::radarr_compat::execute_command),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             handlers::radarr_compat::require_api_key,
@@ -597,22 +812,80 @@ async fn main() {
     tracing::info!("Ryokan listening on {}", addr);
 
     // Register background task definitions for the System > Scheduled Tasks tab.
-    let _ = models::scheduled_tasks::touch_definition(&db, "rss_sync", "RSS sync", "Every N minutes", false).await;
-    let _ = models::scheduled_tasks::touch_definition(&db, "metadata_refresh", "Metadata refresh", "Every 12 hours", true).await;
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
+        "rss_sync",
+        "RSS sync",
+        "Every N minutes",
+        false,
+    )
+    .await;
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
+        "metadata_refresh",
+        "Metadata refresh",
+        "Every 12 hours",
+        true,
+    )
+    .await;
     // Manual full rebuild is a distinct operation from the periodic
     // refresh — keep them on separate keys so a manual rebuild doesn't
     // clobber the refresh's audit trail (and vice versa) when the
     // two overlap.
-    let _ = models::scheduled_tasks::touch_definition(&db, "metadata_rebuild", "Metadata cache rebuild", "Manual", false).await;
-    let _ = models::scheduled_tasks::touch_definition(&db, "cleanup", "Cleanup", "Every 1 hour", true).await;
-    let _ = models::scheduled_tasks::touch_definition(&db, "post_processing", "Post-processing", "Every 1 minute (when enabled)", false).await;
-    let upgrade_enabled = models::config::get_config(&db).await.ok().flatten().map(|c| c.upgrade_search_enabled).unwrap_or(false);
-    let _ = models::scheduled_tasks::touch_definition(&db, "upgrade_search", "Quality upgrade search", "Every 24 hours (when enabled)", upgrade_enabled).await;
-    let _ = models::scheduled_tasks::touch_definition(&db, "anibridge_refresh", "Anibridge mappings refresh", "Every 24 hours", true).await;
-    let _ = models::scheduled_tasks::touch_definition(&db, "library_classify", "Library classify sweep", "Every 6 hours", true).await;
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
+        "metadata_rebuild",
+        "Metadata cache rebuild",
+        "Manual",
+        false,
+    )
+    .await;
+    let _ =
+        models::scheduled_tasks::touch_definition(&db, "cleanup", "Cleanup", "Every 1 hour", true)
+            .await;
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
+        "post_processing",
+        "Post-processing",
+        "Every 1 minute (when enabled)",
+        false,
+    )
+    .await;
+    let upgrade_enabled = models::config::get_config(&db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.upgrade_search_enabled)
+        .unwrap_or(false);
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
+        "upgrade_search",
+        "Quality upgrade search",
+        "Every 24 hours (when enabled)",
+        upgrade_enabled,
+    )
+    .await;
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
+        "anibridge_refresh",
+        "Anibridge mappings refresh",
+        "Every 24 hours",
+        true,
+    )
+    .await;
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
+        "library_classify",
+        "Library classify sweep",
+        "Every 6 hours",
+        true,
+    )
+    .await;
 
     // Pre-load anibridge mappings so the first Seerr request doesn't block on download.
-    tokio::spawn(async { services::anibridge::ensure_loaded().await; });
+    tokio::spawn(async {
+        services::anibridge::ensure_loaded().await;
+    });
 
     // Log startup to the database.
     services::logger::info(
@@ -641,12 +914,13 @@ async fn main() {
                     // 7 more minutes, not 0. `None` means "never run" —
                     // fall back to the old 10_000 sentinel so first-time
                     // setups still fire on the first tick.
-                    let mut minutes_since_last: i64 = models::scheduled_tasks::minutes_since_last_finished(
-                        &inner_state.db,
-                        "rss_sync",
-                    )
-                    .await
-                    .unwrap_or(10_000);
+                    let mut minutes_since_last: i64 =
+                        models::scheduled_tasks::minutes_since_last_finished(
+                            &inner_state.db,
+                            "rss_sync",
+                        )
+                        .await
+                        .unwrap_or(10_000);
                     let mut consecutive_errors: i64 = 0;
                     loop {
                         interval.tick().await;
@@ -657,7 +931,14 @@ async fn main() {
                             _ => continue,
                         };
 
-                        let _ = models::scheduled_tasks::touch_definition(&inner_state.db, "rss_sync", "RSS sync", &format!("Every {} minutes", cfg.rss_interval_minutes.clamp(1, 60)), cfg.rss_enabled).await;
+                        let _ = models::scheduled_tasks::touch_definition(
+                            &inner_state.db,
+                            "rss_sync",
+                            "RSS sync",
+                            &format!("Every {} minutes", cfg.rss_interval_minutes.clamp(1, 60)),
+                            cfg.rss_enabled,
+                        )
+                        .await;
                         if !cfg.rss_enabled {
                             continue;
                         }
@@ -674,29 +955,50 @@ async fn main() {
                         }
 
                         minutes_since_last = 0;
-                        let _ = models::scheduled_tasks::mark_started(&inner_state.db, "rss_sync", "Automatic RSS sync started").await;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &inner_state.db,
+                            "rss_sync",
+                            "Automatic RSS sync started",
+                        )
+                        .await;
                         match services::rss::sync_once(&inner_state, "auto").await {
                             Ok(summary) => {
                                 consecutive_errors = 0;
-                                let _ = models::scheduled_tasks::mark_finished(&inner_state.db, "rss_sync", "ok", &summary.detail).await;
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &inner_state.db,
+                                    "rss_sync",
+                                    "ok",
+                                    &summary.detail,
+                                )
+                                .await;
                             }
                             Err(err) => {
                                 consecutive_errors += 1;
-                                let _ = models::scheduled_tasks::mark_finished(&inner_state.db, "rss_sync", "error", &err).await;
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &inner_state.db,
+                                    "rss_sync",
+                                    "error",
+                                    &err,
+                                )
+                                .await;
                                 services::logger::error(
                                     &inner_state.db,
                                     models::log::LogCategory::System,
                                     "Auto RSS sync failed",
-                                    &format!("{} (backoff: {} consecutive errors)", err, consecutive_errors),
-                                ).await;
+                                    &format!(
+                                        "{} (backoff: {} consecutive errors)",
+                                        err, consecutive_errors
+                                    ),
+                                )
+                                .await;
                             }
                         }
                     }
                 }
-            }).await;
+            })
+            .await;
         });
     }
-
 
     // Background task: refresh cached series metadata every 12 hours.
     // The startup delay is computed from `scheduled_task_runs.last_finished_at`
@@ -712,19 +1014,35 @@ async fn main() {
                 async move {
                     let period = std::time::Duration::from_secs(12 * 60 * 60);
                     let delay = models::scheduled_tasks::duration_until_next_run(
-                        &db, "metadata_refresh", period,
-                    ).await;
+                        &db,
+                        "metadata_refresh",
+                        period,
+                    )
+                    .await;
                     tokio::time::sleep(delay).await;
                     loop {
-                        let _ = models::scheduled_tasks::mark_started(&db, "metadata_refresh", "Refreshing tracked series metadata").await;
-                        let (refreshed, failed) = services::metadata_sync::refresh_all_series_metadata(&db).await;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &db,
+                            "metadata_refresh",
+                            "Refreshing tracked series metadata",
+                        )
+                        .await;
+                        let (refreshed, failed) =
+                            services::metadata_sync::refresh_all_series_metadata(&db).await;
                         let status = if failed > 0 { "warn" } else { "ok" };
                         let detail = format!("refreshed={}, failed={}", refreshed, failed);
-                        let _ = models::scheduled_tasks::mark_finished(&db, "metadata_refresh", status, &detail).await;
+                        let _ = models::scheduled_tasks::mark_finished(
+                            &db,
+                            "metadata_refresh",
+                            status,
+                            &detail,
+                        )
+                        .await;
                         tokio::time::sleep(period).await;
                     }
                 }
-            }).await;
+            })
+            .await;
         });
     }
 
@@ -735,115 +1053,145 @@ async fn main() {
             supervise("cleanup", move || {
                 let cleanup_db = cleanup_db.clone();
                 async move {
-            let period = std::time::Duration::from_secs(3600);
-            // Honors persisted last-run so a restart 10 minutes after
-            // the previous sweep waits 50 more, not a fresh hour. Each
-            // pass is cheap (indexed DELETEs) but the consistency with
-            // the other scheduled tasks is worth more than the tiny
-            // CPU savings.
-            let delay = models::scheduled_tasks::duration_until_next_run(
-                &cleanup_db, "cleanup", period,
-            ).await;
-            tokio::time::sleep(delay).await;
-            loop {
-                let _ = models::scheduled_tasks::mark_started(&cleanup_db, "cleanup", "Pruning logs and RSS decision history").await;
-                let mut cleanup_errors = Vec::new();
-                match models::log::cleanup(&cleanup_db, 30).await {
-                    Ok(deleted) if deleted > 0 => {
-                        tracing::debug!("Cleaned up {} old log entries", deleted);
+                    let period = std::time::Duration::from_secs(3600);
+                    // Honors persisted last-run so a restart 10 minutes after
+                    // the previous sweep waits 50 more, not a fresh hour. Each
+                    // pass is cheap (indexed DELETEs) but the consistency with
+                    // the other scheduled tasks is worth more than the tiny
+                    // CPU savings.
+                    let delay = models::scheduled_tasks::duration_until_next_run(
+                        &cleanup_db,
+                        "cleanup",
+                        period,
+                    )
+                    .await;
+                    tokio::time::sleep(delay).await;
+                    loop {
+                        let _ = models::scheduled_tasks::mark_started(
+                            &cleanup_db,
+                            "cleanup",
+                            "Pruning logs and RSS decision history",
+                        )
+                        .await;
+                        let mut cleanup_errors = Vec::new();
+                        match models::log::cleanup(&cleanup_db, 30).await {
+                            Ok(deleted) if deleted > 0 => {
+                                tracing::debug!("Cleaned up {} old log entries", deleted);
+                            }
+                            Err(e) => {
+                                cleanup_errors.push(format!("logs: {}", e));
+                                tracing::error!("Log cleanup failed: {}", e);
+                            }
+                            _ => {}
+                        }
+                        // Prune old RSS decisions (keep grabbed forever, prune skipped/rejected after 30 days).
+                        match models::rss::cleanup_old_decisions(&cleanup_db, 30).await {
+                            Ok(deleted) if deleted > 0 => {
+                                tracing::debug!("Cleaned up {} old RSS decisions", deleted);
+                            }
+                            Err(e) => {
+                                cleanup_errors.push(format!("rss: {}", e));
+                                tracing::error!("RSS decision cleanup failed: {}", e);
+                            }
+                            _ => {}
+                        }
+                        // Prune cold Nyaa description cache rows. `cached_at` is only
+                        // refreshed on cache miss (live fetch), not on cache hits, so
+                        // this evicts rows that haven't triggered a network fetch in
+                        // 90 days. Consequence is a forced re-fetch the next time the
+                        // row is needed, not lost data.
+                        match models::nyaa_description_cache::cleanup(&cleanup_db, 90).await {
+                            Ok(deleted) if deleted > 0 => {
+                                tracing::debug!(
+                                    "Cleaned up {} old nyaa description cache rows",
+                                    deleted
+                                );
+                            }
+                            Err(e) => {
+                                cleanup_errors.push(format!("nyaa_description_cache: {}", e));
+                                tracing::error!("Nyaa description cache cleanup failed: {}", e);
+                            }
+                            _ => {}
+                        }
+                        // Prune stale media probe cache rows. These are keyed by
+                        // filesystem path, so deleted / renamed files leave rows
+                        // that nothing will ever re-touch — the hourly sweep is the
+                        // only eviction path. Consequence for still-live files is a
+                        // single re-probe after the TTL expires.
+                        match models::media_probe_cache::cleanup(&cleanup_db, 90).await {
+                            Ok(deleted) if deleted > 0 => {
+                                tracing::debug!(
+                                    "Cleaned up {} old media probe cache rows",
+                                    deleted
+                                );
+                            }
+                            Err(e) => {
+                                cleanup_errors.push(format!("media_probe_cache: {}", e));
+                                tracing::error!("Media probe cache cleanup failed: {}", e);
+                            }
+                            _ => {}
+                        }
+                        // Prune orphan artwork (image_refs whose parent series
+                        // is gone, and image_blobs/files no ref references after
+                        // 7 days). Without this the cache only ever grows —
+                        // every removed series leaves rows pointing at on-disk
+                        // blob files that nothing will ever touch again.
+                        match models::artwork_cache::cleanup_orphans(&cleanup_db, 7).await {
+                            Ok((refs, blobs)) if refs > 0 || blobs > 0 => {
+                                tracing::debug!(
+                                    "Cleaned up {} orphan artwork refs and {} orphan blobs",
+                                    refs,
+                                    blobs
+                                );
+                            }
+                            Err(e) => {
+                                cleanup_errors.push(format!("artwork_cache: {}", e));
+                                tracing::error!("Artwork cleanup failed: {}", e);
+                            }
+                            _ => {}
+                        }
+                        // Prune expired session rows. `validate_session` already
+                        // rejects rows older than 7 days, but without this sweep
+                        // the sessions table grows unbounded — every login leaves
+                        // a permanent row. 7 days matches the cookie Max-Age.
+                        match models::session::cleanup(&cleanup_db, 7).await {
+                            Ok(deleted) if deleted > 0 => {
+                                tracing::debug!("Cleaned up {} expired session rows", deleted);
+                            }
+                            Err(e) => {
+                                cleanup_errors.push(format!("sessions: {}", e));
+                                tracing::error!("Session cleanup failed: {}", e);
+                            }
+                            _ => {}
+                        }
+                        // Prune idle LOGIN_FAILURES entries. The per-request sweep
+                        // in `login_check` only touches keys actively being hit,
+                        // so IPs / usernames that failed once and then went quiet
+                        // would linger until the process restarts. Hourly global
+                        // sweep keeps the map bounded.
+                        handlers::auth::sweep_login_failures();
+                        let status = if cleanup_errors.is_empty() {
+                            "ok"
+                        } else {
+                            "warn"
+                        };
+                        let detail = if cleanup_errors.is_empty() {
+                            "Cleanup completed".to_string()
+                        } else {
+                            cleanup_errors.join("; ")
+                        };
+                        let _ = models::scheduled_tasks::mark_finished(
+                            &cleanup_db,
+                            "cleanup",
+                            status,
+                            &detail,
+                        )
+                        .await;
+                        tokio::time::sleep(period).await;
                     }
-                    Err(e) => {
-                        cleanup_errors.push(format!("logs: {}", e));
-                        tracing::error!("Log cleanup failed: {}", e);
-                    }
-                    _ => {}
                 }
-                // Prune old RSS decisions (keep grabbed forever, prune skipped/rejected after 30 days).
-                match models::rss::cleanup_old_decisions(&cleanup_db, 30).await {
-                    Ok(deleted) if deleted > 0 => {
-                        tracing::debug!("Cleaned up {} old RSS decisions", deleted);
-                    }
-                    Err(e) => {
-                        cleanup_errors.push(format!("rss: {}", e));
-                        tracing::error!("RSS decision cleanup failed: {}", e);
-                    }
-                    _ => {}
-                }
-                // Prune cold Nyaa description cache rows. `cached_at` is only
-                // refreshed on cache miss (live fetch), not on cache hits, so
-                // this evicts rows that haven't triggered a network fetch in
-                // 90 days. Consequence is a forced re-fetch the next time the
-                // row is needed, not lost data.
-                match models::nyaa_description_cache::cleanup(&cleanup_db, 90).await {
-                    Ok(deleted) if deleted > 0 => {
-                        tracing::debug!("Cleaned up {} old nyaa description cache rows", deleted);
-                    }
-                    Err(e) => {
-                        cleanup_errors.push(format!("nyaa_description_cache: {}", e));
-                        tracing::error!("Nyaa description cache cleanup failed: {}", e);
-                    }
-                    _ => {}
-                }
-                // Prune stale media probe cache rows. These are keyed by
-                // filesystem path, so deleted / renamed files leave rows
-                // that nothing will ever re-touch — the hourly sweep is the
-                // only eviction path. Consequence for still-live files is a
-                // single re-probe after the TTL expires.
-                match models::media_probe_cache::cleanup(&cleanup_db, 90).await {
-                    Ok(deleted) if deleted > 0 => {
-                        tracing::debug!("Cleaned up {} old media probe cache rows", deleted);
-                    }
-                    Err(e) => {
-                        cleanup_errors.push(format!("media_probe_cache: {}", e));
-                        tracing::error!("Media probe cache cleanup failed: {}", e);
-                    }
-                    _ => {}
-                }
-                // Prune orphan artwork (image_refs whose parent series
-                // is gone, and image_blobs/files no ref references after
-                // 7 days). Without this the cache only ever grows —
-                // every removed series leaves rows pointing at on-disk
-                // blob files that nothing will ever touch again.
-                match models::artwork_cache::cleanup_orphans(&cleanup_db, 7).await {
-                    Ok((refs, blobs)) if refs > 0 || blobs > 0 => {
-                        tracing::debug!(
-                            "Cleaned up {} orphan artwork refs and {} orphan blobs",
-                            refs, blobs
-                        );
-                    }
-                    Err(e) => {
-                        cleanup_errors.push(format!("artwork_cache: {}", e));
-                        tracing::error!("Artwork cleanup failed: {}", e);
-                    }
-                    _ => {}
-                }
-                // Prune expired session rows. `validate_session` already
-                // rejects rows older than 7 days, but without this sweep
-                // the sessions table grows unbounded — every login leaves
-                // a permanent row. 7 days matches the cookie Max-Age.
-                match models::session::cleanup(&cleanup_db, 7).await {
-                    Ok(deleted) if deleted > 0 => {
-                        tracing::debug!("Cleaned up {} expired session rows", deleted);
-                    }
-                    Err(e) => {
-                        cleanup_errors.push(format!("sessions: {}", e));
-                        tracing::error!("Session cleanup failed: {}", e);
-                    }
-                    _ => {}
-                }
-                // Prune idle LOGIN_FAILURES entries. The per-request sweep
-                // in `login_check` only touches keys actively being hit,
-                // so IPs / usernames that failed once and then went quiet
-                // would linger until the process restarts. Hourly global
-                // sweep keeps the map bounded.
-                handlers::auth::sweep_login_failures();
-                let status = if cleanup_errors.is_empty() { "ok" } else { "warn" };
-                let detail = if cleanup_errors.is_empty() { "Cleanup completed".to_string() } else { cleanup_errors.join("; ") };
-                let _ = models::scheduled_tasks::mark_finished(&cleanup_db, "cleanup", status, &detail).await;
-                tokio::time::sleep(period).await;
-            }
-                }
-            }).await;
+            })
+            .await;
         });
     }
 
@@ -869,19 +1217,32 @@ async fn main() {
                             "Post-processing",
                             "Every 1 minute (when enabled)",
                             enabled,
-                        ).await;
+                        )
+                        .await;
                         // Call run_once unconditionally so the #14 lightweight
                         // `advance_state_without_import` sweep can fire when
                         // post-processing is disabled. run_once internally
                         // branches on cfg.post_processing_enabled to choose
                         // between the full import flow and the state-only
                         // advance.
-                        let _ = models::scheduled_tasks::mark_started(&pp_state.db, "post_processing", "Checking for completed downloads").await;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &pp_state.db,
+                            "post_processing",
+                            "Checking for completed downloads",
+                        )
+                        .await;
                         services::post_processing::run_once(&pp_state).await;
-                        let _ = models::scheduled_tasks::mark_finished(&pp_state.db, "post_processing", "ok", "").await;
+                        let _ = models::scheduled_tasks::mark_finished(
+                            &pp_state.db,
+                            "post_processing",
+                            "ok",
+                            "",
+                        )
+                        .await;
                     }
                 }
-            }).await;
+            })
+            .await;
         });
     }
 
@@ -910,10 +1271,15 @@ async fn main() {
                     // boot. Five minutes gives the rest of main.rs time
                     // to settle and the user time to see the library
                     // index render before we start hammering the disk.
-                    const MIN_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+                    const MIN_STARTUP_DELAY: std::time::Duration =
+                        std::time::Duration::from_secs(5 * 60);
                     let delay = models::scheduled_tasks::duration_until_next_run(
-                        &classify_state.db, "library_classify", period,
-                    ).await.max(MIN_STARTUP_DELAY);
+                        &classify_state.db,
+                        "library_classify",
+                        period,
+                    )
+                    .await
+                    .max(MIN_STARTUP_DELAY);
                     tokio::time::sleep(delay).await;
                     loop {
                         let _ = models::scheduled_tasks::touch_definition(
@@ -922,13 +1288,18 @@ async fn main() {
                             "Library classify sweep",
                             "Every 6 hours",
                             true,
-                        ).await;
+                        )
+                        .await;
                         let _ = models::scheduled_tasks::mark_started(
                             &classify_state.db,
                             "library_classify",
                             "Re-classifying unknown / unclassified files",
-                        ).await;
-                        let report = services::post_processing::scan_library_for_unclassified(&classify_state).await;
+                        )
+                        .await;
+                        let report = services::post_processing::scan_library_for_unclassified(
+                            &classify_state,
+                        )
+                        .await;
                         let detail = format!(
                             "series={}, files_scanned={}, classified={}, needs_review={}",
                             report.series_scanned,
@@ -941,11 +1312,13 @@ async fn main() {
                             "library_classify",
                             "ok",
                             &detail,
-                        ).await;
+                        )
+                        .await;
                         tokio::time::sleep(period).await;
                     }
                 }
-            }).await;
+            })
+            .await;
         });
     }
 
@@ -960,8 +1333,11 @@ async fn main() {
                 async move {
                     let period = std::time::Duration::from_secs(24 * 60 * 60);
                     let delay = models::scheduled_tasks::duration_until_next_run(
-                        &upgrade_state.db, "upgrade_search", period,
-                    ).await;
+                        &upgrade_state.db,
+                        "upgrade_search",
+                        period,
+                    )
+                    .await;
                     tokio::time::sleep(delay).await;
                     loop {
                         let enabled = models::config::get_config(&upgrade_state.db)
@@ -976,33 +1352,61 @@ async fn main() {
                             "Quality upgrade search",
                             "Every 24 hours (when enabled)",
                             enabled,
-                        ).await;
+                        )
+                        .await;
                         if enabled {
-                            let _ = models::scheduled_tasks::mark_started(&upgrade_state.db, "upgrade_search", "Searching for quality upgrades").await;
+                            let _ = models::scheduled_tasks::mark_started(
+                                &upgrade_state.db,
+                                "upgrade_search",
+                                "Searching for quality upgrades",
+                            )
+                            .await;
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30 * 60),
                                 services::upgrade::run_once(&upgrade_state),
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(Ok(summary)) => {
-                                    let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "ok", &summary.detail).await;
+                                    let _ = models::scheduled_tasks::mark_finished(
+                                        &upgrade_state.db,
+                                        "upgrade_search",
+                                        "ok",
+                                        &summary.detail,
+                                    )
+                                    .await;
                                 }
                                 Ok(Err(err)) => {
-                                    let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", &err).await;
+                                    let _ = models::scheduled_tasks::mark_finished(
+                                        &upgrade_state.db,
+                                        "upgrade_search",
+                                        "error",
+                                        &err,
+                                    )
+                                    .await;
                                     services::logger::error(
                                         &upgrade_state.db,
                                         models::log::LogCategory::System,
                                         "Upgrade search failed",
                                         &err,
-                                    ).await;
+                                    )
+                                    .await;
                                 }
                                 Err(_) => {
-                                    let _ = models::scheduled_tasks::mark_finished(&upgrade_state.db, "upgrade_search", "error", "Timed out after 30 minutes").await;
+                                    let _ = models::scheduled_tasks::mark_finished(
+                                        &upgrade_state.db,
+                                        "upgrade_search",
+                                        "error",
+                                        "Timed out after 30 minutes",
+                                    )
+                                    .await;
                                     services::logger::error(
                                         &upgrade_state.db,
                                         models::log::LogCategory::System,
                                         "Upgrade search timed out",
                                         "Exceeded 30-minute limit",
-                                    ).await;
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -1013,7 +1417,8 @@ async fn main() {
                         tokio::time::sleep(period).await;
                     }
                 }
-            }).await;
+            })
+            .await;
         });
     }
 
@@ -1034,20 +1439,41 @@ async fn main() {
                     // startup freshness check can't drift apart.
                     let period = services::anibridge::REFRESH_INTERVAL;
                     let delay = models::scheduled_tasks::duration_until_next_run(
-                        &anibridge_db, "anibridge_refresh", period,
-                    ).await;
+                        &anibridge_db,
+                        "anibridge_refresh",
+                        period,
+                    )
+                    .await;
                     tokio::time::sleep(delay).await;
                     loop {
-                        let _ = models::scheduled_tasks::mark_started(&anibridge_db, "anibridge_refresh", "Refreshing anibridge mappings").await;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &anibridge_db,
+                            "anibridge_refresh",
+                            "Refreshing anibridge mappings",
+                        )
+                        .await;
                         if services::anibridge::reload().await {
-                            let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "ok", "Mappings refreshed").await;
+                            let _ = models::scheduled_tasks::mark_finished(
+                                &anibridge_db,
+                                "anibridge_refresh",
+                                "ok",
+                                "Mappings refreshed",
+                            )
+                            .await;
                         } else {
-                            let _ = models::scheduled_tasks::mark_finished(&anibridge_db, "anibridge_refresh", "error", "Failed to download mappings").await;
+                            let _ = models::scheduled_tasks::mark_finished(
+                                &anibridge_db,
+                                "anibridge_refresh",
+                                "error",
+                                "Failed to download mappings",
+                            )
+                            .await;
                         }
                         tokio::time::sleep(period).await;
                     }
                 }
-            }).await;
+            })
+            .await;
         });
     }
 
@@ -1068,7 +1494,8 @@ async fn main() {
                         progress.sweep(std::time::Duration::from_secs(60)).await;
                     }
                 }
-            }).await;
+            })
+            .await;
         });
     }
 

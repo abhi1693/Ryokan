@@ -167,15 +167,13 @@ pub async fn insert(
     message: &str,
     detail: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO logs (level, category, message, detail) VALUES (?, ?, ?, ?)",
-    )
-    .bind(level.as_str())
-    .bind(category.as_str())
-    .bind(message)
-    .bind(detail)
-    .execute(db)
-    .await?;
+    sqlx::query("INSERT INTO logs (level, category, message, detail) VALUES (?, ?, ?, ?)")
+        .bind(level.as_str())
+        .bind(category.as_str())
+        .bind(message)
+        .bind(detail)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -193,9 +191,8 @@ enum BindValue {
 
 /// Query log entries with optional filters. Returns newest first.
 pub async fn query(db: &SqlitePool, params: &LogQuery) -> Result<Vec<LogEntry>, sqlx::Error> {
-    let mut sql = String::from(
-        "SELECT id, timestamp, level, category, message, detail FROM logs WHERE 1=1",
-    );
+    let mut sql =
+        String::from("SELECT id, timestamp, level, category, message, detail FROM logs WHERE 1=1");
     let mut binds: Vec<BindValue> = Vec::new();
 
     if let Some(ref level) = params.level {
@@ -237,25 +234,25 @@ pub async fn query(db: &SqlitePool, params: &LogQuery) -> Result<Vec<LogEntry>, 
 
     Ok(rows
         .into_iter()
-        .map(|(id, timestamp, level, category, message, detail)| LogEntry {
-            id,
-            timestamp,
-            level,
-            category,
-            message,
-            detail,
-        })
+        .map(
+            |(id, timestamp, level, category, message, detail)| LogEntry {
+                id,
+                timestamp,
+                level,
+                category,
+                message,
+                detail,
+            },
+        )
         .collect())
 }
 
 /// Delete logs older than `days` days. Returns number of deleted rows.
 pub async fn cleanup(db: &SqlitePool, days: i64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM logs WHERE timestamp < datetime('now', ?)",
-    )
-    .bind(format!("-{} days", days))
-    .execute(db)
-    .await?;
+    let result = sqlx::query("DELETE FROM logs WHERE timestamp < datetime('now', ?)")
+        .bind(format!("-{} days", days))
+        .execute(db)
+        .await?;
     Ok(result.rows_affected())
 }
 
@@ -270,8 +267,9 @@ pub async fn count(db: &SqlitePool) -> Result<i64, sqlx::Error> {
 /// Get the most recent log ID (for polling).
 #[allow(dead_code)]
 pub async fn latest_id(db: &SqlitePool) -> Result<i64, sqlx::Error> {
-    let row: Option<(i64,)> =
-        sqlx::query_as("SELECT MAX(id) FROM logs").fetch_optional(db).await?;
+    let row: Option<(i64,)> = sqlx::query_as("SELECT MAX(id) FROM logs")
+        .fetch_optional(db)
+        .await?;
     Ok(row.map(|r| r.0).unwrap_or(0))
 }
 
@@ -320,20 +318,25 @@ pub async fn entries_after(
 
     Ok(rows
         .into_iter()
-        .map(|(id, timestamp, level, category, message, detail)| LogEntry {
-            id,
-            timestamp,
-            level,
-            category,
-            message,
-            detail,
-        })
+        .map(
+            |(id, timestamp, level, category, message, detail)| LogEntry {
+                id,
+                timestamp,
+                level,
+                category,
+                message,
+                detail,
+            },
+        )
         .collect())
 }
 
 fn levels_at_or_above(level: &str) -> Vec<String> {
     let all = ["trace", "debug", "info", "warn", "error"];
-    let idx = all.iter().position(|l| l.eq_ignore_ascii_case(level)).unwrap_or(0);
+    let idx = all
+        .iter()
+        .position(|l| l.eq_ignore_ascii_case(level))
+        .unwrap_or(0);
     all[idx..].iter().map(|s| s.to_string()).collect()
 }
 

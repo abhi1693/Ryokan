@@ -1,69 +1,62 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
-use tokio::sync::Notify;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 use regex_lite::Regex;
 use sqlx::SqlitePool;
 
 use crate::models::config::Config;
 use crate::models::log::LogCategory;
-use crate::services::custom_formats::{
-    self, CompiledCustomFormat, EvalContext,
-};
+use crate::services::custom_formats::{self, CompiledCustomFormat, EvalContext};
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
 use crate::services::{
-    anilist::{AnimeDetail, RelatedEntry}, logger, media, nyaa::{self, SearchOptions, SearchResult}, quality, seadex,
+    anilist::{AnimeDetail, RelatedEntry},
+    logger, media,
+    nyaa::{self, SearchOptions, SearchResult},
+    quality, seadex,
 };
 
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
-static RE_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
-    // S01E05 style
-    Regex::new(r"s\d{1,2}e(\d{1,4})").unwrap(),
-    // E05 / Ep05 / Ep.05 style
-    Regex::new(r"(?:^|[\s._\-])e(?:p\.?)?(\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)").unwrap(),
-    // " - 05" style (common for fansubs)
-    Regex::new(r"(?:^|\s)-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
-    // "Episode 05"
-    Regex::new(r"episode\s*(\d{1,4})").unwrap(),
-]);
-static RE_RANGE: LazyLock<Regex> = LazyLock::new(||
+static RE_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        // S01E05 style
+        Regex::new(r"s\d{1,2}e(\d{1,4})").unwrap(),
+        // E05 / Ep05 / Ep.05 style
+        Regex::new(r"(?:^|[\s._\-])e(?:p\.?)?(\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)").unwrap(),
+        // " - 05" style (common for fansubs)
+        Regex::new(r"(?:^|\s)-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
+        // "Episode 05"
+        Regex::new(r"episode\s*(\d{1,4})").unwrap(),
+    ]
+});
+static RE_RANGE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[\s._\-])(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap()
-);
+});
 
 // ── Pre-compiled regexes for infer_season_from_title ───────────────────────
-static RE_NTH_SEASON: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap()
-);
-static RE_SEASON_N: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"season\s+(\d+)").unwrap()
-);
-static RE_PART_COUR: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"(?:part|cour)\s+(\d+)").unwrap()
-);
+static RE_NTH_SEASON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap());
+static RE_SEASON_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"season\s+(\d+)").unwrap());
+static RE_PART_COUR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:part|cour)\s+(\d+)").unwrap());
 
 // ── Pre-compiled regexes for parse_release_season ──────────────────────────
-static RE_SXXEXX: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"s(\d{1,2})e\d{1,4}").unwrap()
-);
-static RE_STANDALONE_S: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"(?:^|[\s.\[\(])s(\d{1,2})(?:[\s.\]\)\-]|$)").unwrap()
-);
-static RE_RELEASE_SEASON_N: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"season\s*(\d+)").unwrap()
-);
-static RE_RELEASE_NTH_SEASON: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap()
-);
+static RE_SXXEXX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"s(\d{1,2})e\d{1,4}").unwrap());
+static RE_STANDALONE_S: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|[\s.\[\(])s(\d{1,2})(?:[\s.\]\)\-]|$)").unwrap());
+static RE_RELEASE_SEASON_N: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"season\s*(\d+)").unwrap());
+static RE_RELEASE_NTH_SEASON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap());
 /// #27 additions: release titles also use `Part N` / `Cour N` as season
 /// synonyms (matches the same token `infer_season_from_title` already
 /// accepts on the AL side — the parsers were asymmetric before, which
 /// let a release titled "JJK Part 2" slip past the reject layer as
 /// season 0 because neither regex fired on `parse_release_season`).
-static RE_RELEASE_PART_COUR: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"\b(?:part|cour)\s+(\d+)").unwrap()
-);
+static RE_RELEASE_PART_COUR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:part|cour)\s+(\d+)").unwrap());
 /// Roman numerals II–IX at a word boundary, terminated by space/dot/
 /// punctuation/closing-bracket/comma/end-of-string. Single-letter
 /// Romans (`I`, `V`, `X`) are deliberately excluded — matching bare
@@ -80,9 +73,8 @@ static RE_RELEASE_PART_COUR: LazyLock<Regex> = LazyLock::new(||
 /// whitespace / punctuation so shapes like `[II]`, `(Part II)`, and
 /// `Name, II - 01` reject-match. Prior version only had `: - \s .`
 /// and silently missed these.
-static RE_RELEASE_ROMAN: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-\s\.\]\)\,]|$)").unwrap()
-);
+static RE_RELEASE_ROMAN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-\s\.\]\)\,]|$)").unwrap());
 
 #[derive(Debug, Clone)]
 pub enum SearchTarget {
@@ -290,7 +282,11 @@ pub async fn find_all_for_target(
         absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
         franchise_precompute = SiblingRejectPrecompute::build(&series_ctx.franchise_aliases, &[]);
         let franchise_queries = append_custom_tokens(
-            build_queries_from_aliases(&series_ctx.franchise_aliases, &absolute_target, !series_ctx.restrict_user.is_empty()),
+            build_queries_from_aliases(
+                &series_ctx.franchise_aliases,
+                &absolute_target,
+                !series_ctx.restrict_user.is_empty(),
+            ),
             &series_ctx.custom_tokens,
         );
         let franchise_ctx = InteractiveQueryCtx {
@@ -302,7 +298,13 @@ pub async fn find_all_for_target(
             absolute_offset: 0,
             ..ctx
         };
-        run_queries_interactive(&franchise_queries, franchise_ctx, &mut seen, &mut candidates).await;
+        run_queries_interactive(
+            &franchise_queries,
+            franchise_ctx,
+            &mut seen,
+            &mut candidates,
+        )
+        .await;
     }
 
     // Interactive search is user-driven — we want to *show* the
@@ -371,10 +373,18 @@ pub async fn find_best_for_target(
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Option<SearchResult> {
-    collect_scored_for_target(db, detail, config, target, allow_batch, batch_episode_match, cfs)
-        .await
-        .into_iter()
-        .next()
+    collect_scored_for_target(
+        db,
+        detail,
+        config,
+        target,
+        allow_batch,
+        batch_episode_match,
+        cfs,
+    )
+    .await
+    .into_iter()
+    .next()
 }
 
 /// Same multi-phase auto-search as `find_best_for_target`, but picks the
@@ -504,7 +514,9 @@ pub async fn collect_scored_batches_for_target(
     // has surfaced yet.
     let has_preferred_hit = !preferred_groups.is_empty()
         && candidates.iter().any(|c| {
-            preferred_groups.iter().any(|g| g.eq_ignore_ascii_case(&c.group))
+            preferred_groups
+                .iter()
+                .any(|g| g.eq_ignore_ascii_case(&c.group))
         });
     // #23 follow-up — see the note in `find_all_for_target`. Preferred-
     // group queries are redundant when the `/user/<name>` scope is
@@ -713,7 +725,9 @@ async fn collect_scored_for_target(
     // Phase 2: if no candidate from a preferred group, try group-prefixed queries.
     let has_preferred_hit = !preferred_groups.is_empty()
         && candidates.iter().any(|c| {
-            preferred_groups.iter().any(|g| g.eq_ignore_ascii_case(&c.group))
+            preferred_groups
+                .iter()
+                .any(|g| g.eq_ignore_ascii_case(&c.group))
         });
 
     // #23 follow-up — see the note in `find_all_for_target`. Preferred-
@@ -760,7 +774,11 @@ async fn collect_scored_for_target(
         absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
         franchise_precompute = SiblingRejectPrecompute::build(&series_ctx.franchise_aliases, &[]);
         let franchise_queries = append_custom_tokens(
-            build_queries_from_aliases(&series_ctx.franchise_aliases, &absolute_target, !series_ctx.restrict_user.is_empty()),
+            build_queries_from_aliases(
+                &series_ctx.franchise_aliases,
+                &absolute_target,
+                !series_ctx.restrict_user.is_empty(),
+            ),
             &series_ctx.custom_tokens,
         );
         let franchise_ctx = AutoQueryCtx {
@@ -770,7 +788,13 @@ async fn collect_scored_for_target(
             absolute_offset: 0,
             ..ctx
         };
-        run_queries(&franchise_queries, franchise_ctx, &mut seen, &mut candidates).await;
+        run_queries(
+            &franchise_queries,
+            franchise_ctx,
+            &mut seen,
+            &mut candidates,
+        )
+        .await;
     }
 
     // Classify + filter + rescore in one pass. Each candidate is classified
@@ -1082,14 +1106,15 @@ async fn run_queries_interactive(
                 // "Jujutsu Kaisen - 56" with offset 47). When offset is 0 this
                 // collapses to the legacy strict-relative behavior.
                 if let SearchTarget::Episode(target_ep) = ctx.target
-                    && !result.is_batch {
-                        let parsed = parse_release_numbers(&result.title);
-                        if !parsed.is_empty()
-                            && !episode_match(&parsed, *target_ep, ctx.absolute_offset)
-                        {
-                            continue;
-                        }
+                    && !result.is_batch
+                {
+                    let parsed = parse_release_numbers(&result.title);
+                    if !parsed.is_empty()
+                        && !episode_match(&parsed, *target_ep, ctx.absolute_offset)
+                    {
+                        continue;
                     }
+                }
                 candidates.push(result);
             }
         }
@@ -1159,9 +1184,14 @@ pub fn build_missing_targets(detail: &AnimeDetail, existing_episodes: &[i32]) ->
     targets
 }
 
-
-pub fn build_monitored_targets(detail: &AnimeDetail, existing_episodes: &[i32], monitored_episodes: &[i32]) -> Vec<SearchTarget> {
-    if detail.episodes.unwrap_or(0) <= 1 || matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA") {
+pub fn build_monitored_targets(
+    detail: &AnimeDetail,
+    existing_episodes: &[i32],
+    monitored_episodes: &[i32],
+) -> Vec<SearchTarget> {
+    if detail.episodes.unwrap_or(0) <= 1
+        || matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA")
+    {
         if monitored_episodes.is_empty() || monitored_episodes.contains(&1) {
             return vec![SearchTarget::Single];
         }
@@ -1225,7 +1255,8 @@ pub fn build_upgrade_targets(
         {
             continue;
         }
-        let existing = resolve_existing_classification(file, quality_tags.get(&file.episode_number));
+        let existing =
+            resolve_existing_classification(file, quality_tags.get(&file.episode_number));
         // Skip completely unclassified episodes — we have no way to know
         // whether an incoming release would actually be an upgrade.
         if existing.source == Source::Unknown && existing.resolution == Resolution::Unknown {
@@ -1374,7 +1405,6 @@ fn resolve_search_overrides_from_row(
         franchise_aliases: Vec::new(),
     }
 }
-
 
 /// #23 — Append user-supplied custom query tokens to every query in
 /// the list. Empty tokens is a no-op so the common path stays
@@ -1565,7 +1595,6 @@ impl SiblingRejectPrecompute {
             siblings,
         }
     }
-
 }
 
 /// Reject a release when it looks MORE like one of our siblings than
@@ -1674,7 +1703,7 @@ pub fn collect_extended_aliases(detail: &AnimeDetail) -> Vec<String> {
 fn split_title_segments(title: &str) -> Vec<String> {
     // Normalize various dash types to a common delimiter for splitting.
     let normalized = title
-        .replace(['–', '—'], "|")  // en dash and em dash
+        .replace(['–', '—'], "|") // en dash and em dash
         .replace(": ", "|") // colon+space (keep "Re:Zero" intact)
         .replace(" - ", "|");
 
@@ -1940,9 +1969,7 @@ async fn seadex_persist_to_db(db: &SqlitePool, anilist_id: i64, payload: &SeaDex
     .execute(db)
     .await;
     if let Err(e) = res {
-        tracing::warn!(
-            "seadex: failed to persist cache row for anilist_id={anilist_id}: {e}"
-        );
+        tracing::warn!("seadex: failed to persist cache row for anilist_id={anilist_id}: {e}");
     }
 }
 
@@ -2188,16 +2215,12 @@ async fn fetch_seadex_payload(
                 tokio::pin!(waiter);
                 waiter.as_mut().enable();
                 if let Some(cached) = seadex_cache_get(anilist_id) {
-                    tracing::debug!(
-                        "seadex: coalesced wait hit for anilist_id={anilist_id}"
-                    );
+                    tracing::debug!("seadex: coalesced wait hit for anilist_id={anilist_id}");
                     return cached;
                 }
                 waiter.await;
                 if let Some(cached) = seadex_cache_get(anilist_id) {
-                    tracing::debug!(
-                        "seadex: coalesced wait hit for anilist_id={anilist_id}"
-                    );
+                    tracing::debug!("seadex: coalesced wait hit for anilist_id={anilist_id}");
                     return cached;
                 }
                 // Leader didn't populate; loop and try to lead ourselves.
@@ -2266,11 +2289,7 @@ async fn fetch_seadex_payload(
                         candidates.push(result);
                     }
                     Ok((view_url, Err(e))) => {
-                        tracing::warn!(
-                            "seadex: failed to fetch view page for {}: {}",
-                            view_url,
-                            e
-                        );
+                        tracing::warn!("seadex: failed to fetch view page for {}: {}", view_url, e);
                         logger::warn(
                             db,
                             LogCategory::AutoSearch,
@@ -2280,9 +2299,7 @@ async fn fetch_seadex_payload(
                         .await;
                     }
                     Err(join_err) => {
-                        tracing::warn!(
-                            "seadex: view-page task failed to join: {join_err}"
-                        );
+                        tracing::warn!("seadex: view-page task failed to join: {join_err}");
                     }
                 }
             }
@@ -2292,9 +2309,7 @@ async fn fetch_seadex_payload(
             payload
         }
         Ok(None) => {
-            tracing::debug!(
-                "seadex: releases.moe has no entry for anilist_id={anilist_id}"
-            );
+            tracing::debug!("seadex: releases.moe has no entry for anilist_id={anilist_id}");
             logger::debug(
                 db,
                 LogCategory::AutoSearch,
@@ -2310,9 +2325,7 @@ async fn fetch_seadex_payload(
             payload
         }
         Err(e) => {
-            tracing::warn!(
-                "seadex: releases.moe lookup failed for anilist_id={anilist_id}: {e}"
-            );
+            tracing::warn!("seadex: releases.moe lookup failed for anilist_id={anilist_id}: {e}");
             logger::warn(
                 db,
                 LogCategory::AutoSearch,
@@ -2430,7 +2443,8 @@ fn apply_cf_seadex_overlay(
     // candidate below minimum_score.
     let final_score = base.saturating_add(cf).saturating_add(seadex_bonus);
 
-    let detail = format_scoring_detail(base, cf, &breakdown, seadex_bonus, final_score, below_floor);
+    let detail =
+        format_scoring_detail(base, cf, &breakdown, seadex_bonus, final_score, below_floor);
     // tracing::debug! instead of logger::debug — 50-200 candidates per
     // search × one debug row each meant a sustained INSERT stream into
     // the `logs` table on every auto-search. Terminal/container logs
@@ -2443,11 +2457,7 @@ fn apply_cf_seadex_overlay(
         detail
     );
 
-    if below_floor {
-        None
-    } else {
-        Some(final_score)
-    }
+    if below_floor { None } else { Some(final_score) }
 }
 
 /// Build the structured scoring detail string that lands in the
@@ -2479,9 +2489,7 @@ fn format_scoring_detail(
             .collect();
         format!("cf={:+} [{}]", cf, parts.join(", "))
     };
-    let mut out = format!(
-        "base={base}, {cf_section}, seadex={seadex_bonus}, final={final_score}"
-    );
+    let mut out = format!("base={base}, {cf_section}, seadex={seadex_bonus}, final={final_score}");
     if below_floor {
         out.push_str(" DROPPED(below minimum_score floor)");
     }
@@ -2509,14 +2517,17 @@ fn rescore_for_auto_search(
     let normalized_title = normalize_title(&result.title);
     let title_tokens = token_set(&normalized_title);
 
-    let best_overlap = aliases.iter().map(|alias| {
-        let normalized_alias = normalize_title(alias);
-        if normalized_title.contains(&normalized_alias) {
-            1.0
-        } else {
-            token_overlap_ratio(&title_tokens, &token_set(&normalized_alias))
-        }
-    }).fold(0.0f32, f32::max);
+    let best_overlap = aliases
+        .iter()
+        .map(|alias| {
+            let normalized_alias = normalize_title(alias);
+            if normalized_title.contains(&normalized_alias) {
+                1.0
+            } else {
+                token_overlap_ratio(&title_tokens, &token_set(&normalized_alias))
+            }
+        })
+        .fold(0.0f32, f32::max);
     score += (best_overlap * 40.0) as i32;
 
     // Season mismatch penalty (explicit season markers like S03, "3rd Season")
@@ -2541,8 +2552,8 @@ fn rescore_for_auto_search(
             }
             let parsed = parse_release_numbers(&result.title);
             let relative_match = parsed.contains(ep);
-            let absolute_match = absolute_offset > 0
-                && parsed.contains(&ep.saturating_add(absolute_offset));
+            let absolute_match =
+                absolute_offset > 0 && parsed.contains(&ep.saturating_add(absolute_offset));
             if relative_match || absolute_match {
                 score += 40;
             } else if absolute_offset > 0 && !parsed.is_empty() {
@@ -2567,7 +2578,10 @@ fn rescore_for_auto_search(
         }
     }
 
-    score += quality::preferred_group_bonus(&result.group, &quality::parse_group_list(&config.preferred_groups));
+    score += quality::preferred_group_bonus(
+        &result.group,
+        &quality::parse_group_list(&config.preferred_groups),
+    );
 
     // Classification-aware quality scoring.
     score += source::score_classification(
@@ -2604,8 +2618,7 @@ fn preferred_resolution_search_value(config: &Config) -> String {
 
 /// Numbers that look like episode numbers but are actually technical metadata.
 fn is_noise_number(n: i32) -> bool {
-    matches!(n, 480 | 576 | 720 | 1080 | 2160 | 264 | 265)
-        || (1900..=2100).contains(&n)
+    matches!(n, 480 | 576 | 720 | 1080 | 2160 | 264 | 265) || (1900..=2100).contains(&n)
 }
 
 pub fn parse_release_numbers(title: &str) -> HashSet<i32> {
@@ -2630,18 +2643,30 @@ pub fn parse_release_numbers(title: &str) -> HashSet<i32> {
     for re in RE_EPISODE_PATTERNS.iter() {
         for caps in re.captures_iter(&stripped) {
             if let Some(value) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-                && !is_noise_number(value) {
-                    numbers.insert(value);
-                }
+                && !is_noise_number(value)
+            {
+                numbers.insert(value);
+            }
         }
     }
 
     // Range pattern for batch detection (e.g. "01-12", "01~24")
     // Only add range numbers, not used as the sole episode match.
     if let Some(caps) = RE_RANGE.captures(&stripped) {
-        let start = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
-        let end = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
-        if start > 0 && end >= start && end - start <= 200 && !is_noise_number(start) && !is_noise_number(end) {
+        let start = caps
+            .get(1)
+            .and_then(|m| m.as_str().parse::<i32>().ok())
+            .unwrap_or(0);
+        let end = caps
+            .get(2)
+            .and_then(|m| m.as_str().parse::<i32>().ok())
+            .unwrap_or(0);
+        if start > 0
+            && end >= start
+            && end - start <= 200
+            && !is_noise_number(start)
+            && !is_noise_number(end)
+        {
             for value in start..=end {
                 numbers.insert(value);
             }
@@ -2668,7 +2693,24 @@ pub fn normalize_title(input: &str) -> String {
 
     cleaned
         .split_whitespace()
-        .filter(|token| !matches!(*token, "1080p" | "720p" | "2160p" | "webrip" | "web" | "bluray" | "aac" | "hevc" | "x265" | "x264" | "dual" | "audio" | "multisub"))
+        .filter(|token| {
+            !matches!(
+                *token,
+                "1080p"
+                    | "720p"
+                    | "2160p"
+                    | "webrip"
+                    | "web"
+                    | "bluray"
+                    | "aac"
+                    | "hevc"
+                    | "x265"
+                    | "x264"
+                    | "dual"
+                    | "audio"
+                    | "multisub"
+            )
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -2715,22 +2757,25 @@ fn infer_season_from_title(title: &str) -> i32 {
 
     // "2nd Season", "3rd Season", etc.
     if let Some(caps) = RE_NTH_SEASON.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            return n;
-        }
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+    {
+        return n;
+    }
 
     // "Season 2", "Season 3", etc.
     if let Some(caps) = RE_SEASON_N.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            return n;
-        }
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+    {
+        return n;
+    }
 
     // " Part 2", " Cour 2" — sometimes used as season aliases
     if let Some(caps) = RE_PART_COUR.captures(&lower)
         && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-            && n >= 2 {
-                return n;
-            }
+        && n >= 2
+    {
+        return n;
+    }
 
     // #27 — Roman numeral II–IX at word boundary. Keeps AL-side inference
     // in sync with the release-side parser so e.g. an AL entry titled
@@ -2738,12 +2783,13 @@ fn infer_season_from_title(title: &str) -> i32 {
     // "Made in Abyss III" (season 3, Roman numeral) disambiguate against
     // each other's releases instead of both reporting 0.
     if let Some(caps) = RE_RELEASE_ROMAN.captures(&lower)
-        && let Some(m) = caps.get(1) {
-            let n = roman_to_i32(m.as_str());
-            if n >= 2 {
-                return n;
-            }
+        && let Some(m) = caps.get(1)
+    {
+        let n = roman_to_i32(m.as_str());
+        if n >= 2 {
+            return n;
         }
+    }
 
     0
 }
@@ -2765,44 +2811,51 @@ pub fn parse_release_season(title: &str) -> i32 {
 
     // S01E05, S02E03, etc.
     if let Some(caps) = RE_SXXEXX.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            return n;
-        }
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+    {
+        return n;
+    }
 
     // Standalone "S2", "S3" (not part of resolution like "S01E01")
     if let Some(caps) = RE_STANDALONE_S.captures(&lower)
         && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-            && n > 0 && n <= 30 {
-                return n;
-            }
+        && n > 0
+        && n <= 30
+    {
+        return n;
+    }
 
     // "Season 2", "Season 3"
     if let Some(caps) = RE_RELEASE_SEASON_N.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            return n;
-        }
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+    {
+        return n;
+    }
 
     // "2nd Season", "3rd Season"
     if let Some(caps) = RE_RELEASE_NTH_SEASON.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-            return n;
-        }
+        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+    {
+        return n;
+    }
 
     // "Part 2", "Cour 2"
     if let Some(caps) = RE_RELEASE_PART_COUR.captures(&lower)
         && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-            && n >= 2 {
-                return n;
-            }
+        && n >= 2
+    {
+        return n;
+    }
 
     // Roman numeral II–IX.
     if let Some(caps) = RE_RELEASE_ROMAN.captures(&lower)
-        && let Some(m) = caps.get(1) {
-            let n = roman_to_i32(m.as_str());
-            if n >= 2 {
-                return n;
-            }
+        && let Some(m) = caps.get(1)
+    {
+        let n = roman_to_i32(m.as_str());
+        if n >= 2 {
+            return n;
         }
+    }
 
     0
 }
@@ -2831,9 +2884,8 @@ fn roman_to_i32(s: &str) -> i32 {
 // from `infer_season_from_detail`, which is about season/cour indexing
 // for the *query* sweep. A movie trilogy like Kizumonogatari I/II/III
 // has no season at all, just parts.
-static RE_PART_N: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"(?i)\b(?:part|chapter|movie|film)\s*(\d{1,2})\b").unwrap()
-);
+static RE_PART_N: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:part|chapter|movie|film)\s*(\d{1,2})\b").unwrap());
 
 /// Roman numeral at a word boundary, II–IX only. Matches at end of
 /// string or before common separators (`:` for subtitle, space, `-`)
@@ -2851,9 +2903,8 @@ static RE_PART_N: LazyLock<Regex> = LazyLock::new(||
 /// fine because users rarely grab a trilogy's opening chapter in
 /// isolation. Explicit markers like "Part 1" / "Chapter 1" still
 /// work via [`RE_PART_N`].
-static RE_ROMAN_PART: LazyLock<Regex> = LazyLock::new(||
-    Regex::new(r"(?i)\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-]|$|\s)").unwrap()
-);
+static RE_ROMAN_PART: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-]|$|\s)").unwrap());
 
 /// Extract the "part number" from an AniList detail's titles. Returns
 /// `None` when the title carries no such marker — the common case for
@@ -2879,16 +2930,18 @@ pub fn extract_part_number(detail: &AnimeDetail) -> Option<i32> {
     for title in titles.iter().filter(|t| !t.is_empty()) {
         if let Some(caps) = RE_PART_N.captures(title)
             && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-                && (1..=20).contains(&n) {
-                    return Some(n);
-                }
+            && (1..=20).contains(&n)
+        {
+            return Some(n);
+        }
         if let Some(caps) = RE_ROMAN_PART.captures(title)
-            && let Some(m) = caps.get(1) {
-                let n = roman_to_int(m.as_str());
-                if (1..=10).contains(&n) {
-                    return Some(n);
-                }
+            && let Some(m) = caps.get(1)
+        {
+            let n = roman_to_int(m.as_str());
+            if (1..=10).contains(&n) {
+                return Some(n);
             }
+        }
     }
     None
 }
@@ -2946,18 +2999,17 @@ fn roman_to_int(s: &str) -> i32 {
 /// entries to the library instead — a cleaner answer than
 /// filename-based negative matching, which is prone to partial
 /// coverage when AniList relations don't include every sibling.
-pub fn pick_wanted_file_indices(
-    filenames: &[String],
-    detail: &AnimeDetail,
-) -> Option<Vec<usize>> {
+pub fn pick_wanted_file_indices(filenames: &[String], detail: &AnimeDetail) -> Option<Vec<usize>> {
     if let Some(part) = extract_part_number(detail)
-        && let Some(ids) = pick_by_part_number(filenames, part, detail) {
-            return Some(ids);
-        }
+        && let Some(ids) = pick_by_part_number(filenames, part, detail)
+    {
+        return Some(ids);
+    }
     if let Some(subtitle) = extract_season_subtitle(detail)
-        && let Some(ids) = pick_by_subtitle_include(filenames, &subtitle, detail) {
-            return Some(ids);
-        }
+        && let Some(ids) = pick_by_subtitle_include(filenames, &subtitle, detail)
+    {
+        return Some(ids);
+    }
     None
 }
 
@@ -3081,10 +3133,7 @@ fn within_episode_slack(matches_len: usize, expected: i32) -> bool {
 /// matching on them yields zero hits and forces the full-pack fallback
 /// anyway.
 pub fn extract_season_subtitle(detail: &AnimeDetail) -> Option<String> {
-    let titles = [
-        detail.title_english.as_str(),
-        detail.title_romaji.as_str(),
-    ];
+    let titles = [detail.title_english.as_str(), detail.title_romaji.as_str()];
     for title in titles.iter().filter(|t| !t.is_empty()) {
         if let Some(sub) = trailing_subtitle_of(title) {
             return Some(sub);
@@ -3435,14 +3484,16 @@ pub fn detect_sibling_entries_in_pack(
         if !rel.media_type.eq_ignore_ascii_case("ANIME") {
             tracing::debug!(
                 "auto-expand: subtitle skip rel='{}' reason=media_type={}",
-                rel_label, rel.media_type
+                rel_label,
+                rel.media_type
             );
             continue;
         }
         if !is_pack_candidate_relation(&rel.relation_type) {
             tracing::debug!(
                 "auto-expand: subtitle skip rel='{}' reason=relation_type={}",
-                rel_label, rel.relation_type
+                rel_label,
+                rel.relation_type
             );
             continue;
         }
@@ -3453,14 +3504,16 @@ pub fn detect_sibling_entries_in_pack(
         } else {
             tracing::debug!(
                 "auto-expand: subtitle skip rel_idx={} reason=no-title relation_type={}",
-                rel_idx, rel.relation_type
+                rel_idx,
+                rel.relation_type
             );
             continue;
         };
         let Some(subtitle) = trailing_subtitle_of(sibling_title) else {
             tracing::debug!(
                 "auto-expand: subtitle skip rel='{}' reason=no-trailing-subtitle relation_type={}",
-                sibling_title, rel.relation_type
+                sibling_title,
+                rel.relation_type
             );
             continue;
         };
@@ -3468,13 +3521,17 @@ pub fn detect_sibling_entries_in_pack(
         if needle.is_empty() {
             tracing::debug!(
                 "auto-expand: subtitle skip rel='{}' reason=empty-needle subtitle='{}'",
-                sibling_title, subtitle
+                sibling_title,
+                subtitle
             );
             continue;
         }
         tracing::debug!(
             "auto-expand: subtitle candidate rel='{}' relation_type={} subtitle='{}' needle='{}'",
-            sibling_title, rel.relation_type, subtitle, needle
+            sibling_title,
+            rel.relation_type,
+            subtitle,
+            needle
         );
         candidates.push((rel_idx, subtitle, needle));
     }
@@ -3581,11 +3638,8 @@ pub fn detect_sibling_entries_in_pack(
     let parent_cap = parent_detail.episodes.unwrap_or(0);
     if parent_cap > 0 {
         for m in out.iter_mut() {
-            m.episode_offset = compute_sibling_episode_offset(
-                &m.file_indices,
-                filenames,
-                parent_cap,
-            );
+            m.episode_offset =
+                compute_sibling_episode_offset(&m.file_indices, filenames, parent_cap);
         }
     }
 
@@ -3670,7 +3724,9 @@ fn detect_sibling_via_episode_range(
         parent_detail.relations.len()
     );
     if parent_cap <= 0 {
-        tracing::debug!("auto-expand: fallback bail reason=parent_cap<=0 (parent has no episode count)");
+        tracing::debug!(
+            "auto-expand: fallback bail reason=parent_cap<=0 (parent has no episode count)"
+        );
         return Vec::new();
     }
 
@@ -3693,10 +3749,15 @@ fn detect_sibling_via_episode_range(
     }
     tracing::debug!(
         "auto-expand: fallback overflow scan media_files={} parsed={} overflow_files={} parent_cap={}",
-        media_count, parsed_count, overflow.len(), parent_cap
+        media_count,
+        parsed_count,
+        overflow.len(),
+        parent_cap
     );
     if overflow.is_empty() {
-        tracing::debug!("auto-expand: fallback bail reason=no-overflow-files (no parsed ep > parent_cap)");
+        tracing::debug!(
+            "auto-expand: fallback bail reason=no-overflow-files (no parsed ep > parent_cap)"
+        );
         return Vec::new();
     }
     let overflow_min = overflow.iter().map(|(_, e)| *e).min().unwrap();
@@ -3704,7 +3765,9 @@ fn detect_sibling_via_episode_range(
     let overflow_count = overflow.len();
     tracing::debug!(
         "auto-expand: fallback overflow range [{}..={}] count={}",
-        overflow_min, overflow_max, overflow_count
+        overflow_min,
+        overflow_max,
+        overflow_count
     );
 
     // Parent title prefixes for continuation matching. Both english
@@ -3718,7 +3781,8 @@ fn detect_sibling_via_episode_range(
         .collect();
     tracing::debug!(
         "auto-expand: fallback parent prefixes en='{}' ro='{}'",
-        parent_en, parent_ro
+        parent_en,
+        parent_ro
     );
 
     // Collect viable candidates ONCE (type/media/episode-count +
@@ -3739,14 +3803,16 @@ fn detect_sibling_via_episode_range(
         if !rel.media_type.eq_ignore_ascii_case("ANIME") {
             tracing::debug!(
                 "auto-expand: fallback skip rel='{}' reason=media_type={}",
-                rel_label, rel.media_type
+                rel_label,
+                rel.media_type
             );
             continue;
         }
         if !is_pack_candidate_relation(&rel.relation_type) {
             tracing::debug!(
                 "auto-expand: fallback skip rel='{}' reason=relation_type={}",
-                rel_label, rel.relation_type
+                rel_label,
+                rel.relation_type
             );
             continue;
         }
@@ -3755,7 +3821,9 @@ fn detect_sibling_via_episode_range(
             _ => {
                 tracing::debug!(
                     "auto-expand: fallback skip rel='{}' reason=no-episode-count episodes={:?} relation_type={}",
-                    rel_label, rel.episodes, rel.relation_type
+                    rel_label,
+                    rel.episodes,
+                    rel.relation_type
                 );
                 continue;
             }
@@ -3776,14 +3844,20 @@ fn detect_sibling_via_episode_range(
         if !title_prefix_matched && !is_sequel {
             tracing::debug!(
                 "auto-expand: fallback skip rel='{}' reason=neither-sequel-nor-title-prefix relation_type={} rel_en='{}' rel_ro='{}'",
-                rel_label, rel.relation_type, rel_en, rel_ro
+                rel_label,
+                rel.relation_type,
+                rel_en,
+                rel_ro
             );
             continue;
         }
 
         tracing::debug!(
             "auto-expand: fallback candidate rel='{}' sib_cap={} title_prefix_matched={} is_sequel={}",
-            rel_label, sib_cap, title_prefix_matched, is_sequel
+            rel_label,
+            sib_cap,
+            title_prefix_matched,
+            is_sequel
         );
         candidates.push(RangeCandidate {
             rel_idx,
@@ -3807,7 +3881,8 @@ fn detect_sibling_via_episode_range(
     if !within_episode_slack(overflow_count, total_candidate_capacity) {
         tracing::debug!(
             "auto-expand: fallback bail reason=overflow-exceeds-total-capacity overflow_count={} total_capacity={}",
-            overflow_count, total_candidate_capacity
+            overflow_count,
+            total_candidate_capacity
         );
         return Vec::new();
     }
@@ -3816,10 +3891,8 @@ fn detect_sibling_via_episode_range(
     // numeric packing loop below. Filename claims go in first and
     // the loop naturally skips anything they've already consumed.
     let mut results: Vec<SiblingMatch> = Vec::new();
-    let mut claimed_rel_idxs: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
-    let mut claimed_file_idxs: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
+    let mut claimed_rel_idxs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut claimed_file_idxs: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     // ── Filename-subtitle pre-pass ────────────────────────────────
     //
@@ -3870,9 +3943,7 @@ fn detect_sibling_via_episode_range(
     const MIN_FILENAME_NEEDLE_LEN: usize = 8;
     let mut needles: Vec<(NeedleSource, String)> = Vec::new();
     for p in [parent_en.as_str(), parent_ro.as_str()] {
-        if p.len() >= MIN_FILENAME_NEEDLE_LEN
-            && !needles.iter().any(|(_, n)| n == p)
-        {
+        if p.len() >= MIN_FILENAME_NEEDLE_LEN && !needles.iter().any(|(_, n)| n == p) {
             needles.push((NeedleSource::Parent, p.to_string()));
         }
     }
@@ -3881,9 +3952,7 @@ fn detect_sibling_via_episode_range(
         let en = normalize_subtitle(&rel.title_english);
         let ro = normalize_subtitle(&rel.title_romaji);
         for n in [en, ro] {
-            if n.len() >= MIN_FILENAME_NEEDLE_LEN
-                && !needles.iter().any(|(_, x)| x == &n)
-            {
+            if n.len() >= MIN_FILENAME_NEEDLE_LEN && !needles.iter().any(|(_, x)| x == &n) {
                 needles.push((NeedleSource::Candidate(cand_idx), n));
             }
         }
@@ -3919,7 +3988,9 @@ fn detect_sibling_via_episode_range(
                 filename_claimed_parent.push(*f_idx);
                 tracing::debug!(
                     "auto-expand: fallback filename-subtitle file_idx={} ep={} → parent (needle_len={})",
-                    f_idx, ep, len
+                    f_idx,
+                    ep,
+                    len
                 );
             }
             Some((NeedleSource::Candidate(cand_idx), len)) => {
@@ -3929,7 +4000,10 @@ fn detect_sibling_via_episode_range(
                     .push(*f_idx);
                 tracing::debug!(
                     "auto-expand: fallback filename-subtitle file_idx={} ep={} → candidate[{}] (needle_len={})",
-                    f_idx, ep, cand_idx, len
+                    f_idx,
+                    ep,
+                    cand_idx,
+                    len
                 );
             }
             None => {}
@@ -3958,7 +4032,9 @@ fn detect_sibling_via_episode_range(
         if !within_episode_slack(file_indices.len(), cand.sib_cap) {
             tracing::debug!(
                 "auto-expand: fallback filename-subtitle skip cand[{}] reason=slack-cap files={} sib_cap={}",
-                cand_idx, file_indices.len(), cand.sib_cap
+                cand_idx,
+                file_indices.len(),
+                cand.sib_cap
             );
             continue;
         }
@@ -3974,7 +4050,9 @@ fn detect_sibling_via_episode_range(
         };
         tracing::debug!(
             "auto-expand: fallback filename-subtitle emitted sibling rel='{}' id={} files={}",
-            label, rel.id, file_indices.len()
+            label,
+            rel.id,
+            file_indices.len()
         );
         results.push(SiblingMatch {
             anilist_id: rel.id,
@@ -4070,7 +4148,8 @@ fn detect_sibling_via_episode_range(
             {
                 tracing::debug!(
                     "auto-expand: fallback packing stop reason=round-ambiguous base={} candidates_tied={}",
-                    base, scored.len()
+                    base,
+                    scored.len()
                 );
                 break;
             }
@@ -4175,7 +4254,11 @@ fn season_mismatch(release_title: &str, expected_season: i32) -> bool {
         // No season indicator in release — allow it (could be absolute numbering)
         return false;
     }
-    let effective_expected = if expected_season > 0 { expected_season } else { 1 };
+    let effective_expected = if expected_season > 0 {
+        expected_season
+    } else {
+        1
+    };
     release_season != effective_expected
 }
 
@@ -4222,19 +4305,28 @@ mod tests {
     #[test]
     fn for_episode_collapses_movie_to_single() {
         let d = detail_with("MOVIE", Some(1));
-        assert!(matches!(SearchTarget::for_episode(&d, 1), SearchTarget::Single));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 1),
+            SearchTarget::Single
+        ));
     }
 
     #[test]
     fn for_episode_collapses_special_to_single() {
         let d = detail_with("SPECIAL", Some(1));
-        assert!(matches!(SearchTarget::for_episode(&d, 1), SearchTarget::Single));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 1),
+            SearchTarget::Single
+        ));
     }
 
     #[test]
     fn for_episode_collapses_ova_to_single() {
         let d = detail_with("OVA", Some(1));
-        assert!(matches!(SearchTarget::for_episode(&d, 1), SearchTarget::Single));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 1),
+            SearchTarget::Single
+        ));
     }
 
     #[test]
@@ -4275,7 +4367,10 @@ mod tests {
         // MOVIE always collapses regardless of AniList's episode count — a
         // film is single-entry even if AniList has weird/missing data.
         let d = detail_with("MOVIE", None);
-        assert!(matches!(SearchTarget::for_episode(&d, 1), SearchTarget::Single));
+        assert!(matches!(
+            SearchTarget::for_episode(&d, 1),
+            SearchTarget::Single
+        ));
     }
 
     #[test]
@@ -4411,7 +4506,10 @@ mod tests {
                 &aliases,
                 &no_siblings,
                 &SearchTarget::Episode(1),
-                0, false, 0),
+                0,
+                false,
+                0
+            ),
             "unrelated release should not match via token overlap alone"
         );
     }
@@ -4426,7 +4524,10 @@ mod tests {
             &aliases,
             &no_siblings,
             &SearchTarget::Single,
-            0, false, 0));
+            0,
+            false,
+            0
+        ));
     }
 
     #[test]
@@ -4449,7 +4550,10 @@ mod tests {
                 &own,
                 &precompute,
                 &SearchTarget::Episode(6),
-                1, false, 0),
+                1,
+                false,
+                0
+            ),
             "sibling arc release must not match the base-franchise target"
         );
     }
@@ -4469,7 +4573,10 @@ mod tests {
             &own,
             &precompute,
             &SearchTarget::Episode(6),
-            1, false, 0));
+            1,
+            false,
+            0
+        ));
     }
 
     #[test]
@@ -4488,7 +4595,10 @@ mod tests {
             &own,
             &precompute,
             &SearchTarget::Episode(6),
-            0, false, 0));
+            0,
+            false,
+            0
+        ));
     }
 
     // ── #30 — absolute-vs-relative Nyaa episode numbering ──────────────
@@ -4666,13 +4776,19 @@ mod tests {
 
     #[test]
     fn extract_part_number_parses_roman_ii() {
-        let d = detail_with_titles("Kizumonogatari II: Nekketsu-hen", "Kizumonogatari II: Nekketsu-hen");
+        let d = detail_with_titles(
+            "Kizumonogatari II: Nekketsu-hen",
+            "Kizumonogatari II: Nekketsu-hen",
+        );
         assert_eq!(extract_part_number(&d), Some(2));
     }
 
     #[test]
     fn extract_part_number_parses_roman_iii() {
-        let d = detail_with_titles("Kizumonogatari III: Reiketsu-hen", "Kizumonogatari III: Reiketsu-hen");
+        let d = detail_with_titles(
+            "Kizumonogatari III: Reiketsu-hen",
+            "Kizumonogatari III: Reiketsu-hen",
+        );
         assert_eq!(extract_part_number(&d), Some(3));
     }
 
@@ -4698,7 +4814,10 @@ mod tests {
         // "I". Users who want Kizu I specifically still get the whole
         // smol pack (no selective narrowing), which is the acceptable
         // fallback for this edge case.
-        let d = detail_with_titles("Kizumonogatari I: Tekketsu-hen", "Kizumonogatari I: Tekketsu-hen");
+        let d = detail_with_titles(
+            "Kizumonogatari I: Tekketsu-hen",
+            "Kizumonogatari I: Tekketsu-hen",
+        );
         assert_eq!(extract_part_number(&d), None);
     }
 
@@ -4710,10 +4829,7 @@ mod tests {
         // would narrow to "files containing episode 1" for an
         // unrelated film. The same concern motivates dropping bare V
         // ("V for Vendetta") and bare X ("X/1999").
-        let d = detail_with_titles(
-            "I Want to Eat Your Pancreas",
-            "Kimi no Suizou wo Tabetai",
-        );
+        let d = detail_with_titles("I Want to Eat Your Pancreas", "Kimi no Suizou wo Tabetai");
         assert_eq!(extract_part_number(&d), None);
     }
 
@@ -4790,10 +4906,7 @@ mod tests {
         // apart from "CF scoring pushed this above everything else."
         let breakdown = vec![("x265".to_string(), 300)];
         let s = format_scoring_detail(60, 300, &breakdown, 10000, 10360, false);
-        assert_eq!(
-            s,
-            "base=60, cf=+300 [x265 +300], seadex=10000, final=10360"
-        );
+        assert_eq!(s, "base=60, cf=+300 [x265 +300], seadex=10000, final=10360");
     }
 
     // ── extract_season_subtitle / positive subtitle match ────────────────
@@ -4812,14 +4925,20 @@ mod tests {
             "JoJo's Bizarre Adventure: Stardust Crusaders",
             "JoJo no Kimyou na Bouken: Stardust Crusaders",
         );
-        assert_eq!(extract_season_subtitle(&d).as_deref(), Some("Stardust Crusaders"));
+        assert_eq!(
+            extract_season_subtitle(&d).as_deref(),
+            Some("Stardust Crusaders")
+        );
     }
 
     #[test]
     fn extract_season_subtitle_pulls_from_dash_delimited_title() {
         // En-dash / hyphen-space delimiter also produces a subtitle.
         let d = detail_with_titles("Fate/stay night - Unlimited Blade Works", "");
-        assert_eq!(extract_season_subtitle(&d).as_deref(), Some("Unlimited Blade Works"));
+        assert_eq!(
+            extract_season_subtitle(&d).as_deref(),
+            Some("Unlimited Blade Works")
+        );
     }
 
     #[test]
@@ -5010,7 +5129,10 @@ mod tests {
             .expect("stardust sibling present");
         assert_eq!(stardust.file_indices, vec![2, 3, 4]);
         assert!(
-            stardust.matched_subtitle.to_lowercase().contains("stardust"),
+            stardust
+                .matched_subtitle
+                .to_lowercase()
+                .contains("stardust"),
             "matched_subtitle should reference Stardust, got {:?}",
             stardust.matched_subtitle
         );
@@ -5037,9 +5159,8 @@ mod tests {
             "SEQUEL",
             Some(24),
         )];
-        let files: Vec<String> = vec![
-            "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 01.mkv".to_string(),
-        ];
+        let files: Vec<String> =
+            vec!["[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 01.mkv".to_string()];
         assert!(detect_sibling_entries_in_pack(&files, &parent).is_empty());
     }
 
@@ -5087,7 +5208,13 @@ mod tests {
         // rather than emitting a wildly-wrong routing.
         let mut parent = detail_with_titles("Franchise", "Franchise");
         parent.id = 100;
-        parent.relations = vec![related(201, "Franchise: Alpha Beta", "", "SEQUEL", Some(12))];
+        parent.relations = vec![related(
+            201,
+            "Franchise: Alpha Beta",
+            "",
+            "SEQUEL",
+            Some(12),
+        )];
         let files: Vec<String> = (1..=50)
             .map(|i| format!("[Group] Franchise - Alpha Beta - {:02}.mkv", i))
             .collect();
@@ -5110,9 +5237,7 @@ mod tests {
             "SOURCE",
             Some(1),
         )];
-        let files: Vec<String> = vec![
-            "[Group] JoJo - Stardust Crusaders - 01.mkv".to_string(),
-        ];
+        let files: Vec<String> = vec!["[Group] JoJo - Stardust Crusaders - 01.mkv".to_string()];
         assert!(detect_sibling_entries_in_pack(&files, &parent).is_empty());
     }
 
@@ -5122,13 +5247,7 @@ mod tests {
         // media_type="MANGA". Never an anime torrent candidate.
         let mut parent = detail_with_titles("Show", "");
         parent.id = 10;
-        let mut manga_rel = related(
-            5,
-            "Show: Spinoff Arc",
-            "",
-            "SIDE_STORY",
-            Some(10),
-        );
+        let mut manga_rel = related(5, "Show: Spinoff Arc", "", "SIDE_STORY", Some(10));
         manga_rel.media_type = "MANGA".to_string();
         parent.relations = vec![manga_rel];
         let files: Vec<String> = vec!["[Group] Show - Spinoff Arc - 01.mkv".to_string()];
@@ -5216,7 +5335,10 @@ mod tests {
 
         let mut files: Vec<String> = Vec::new();
         for n in 1..=48 {
-            files.push(format!("fixture-parent-show {:02} (bd-1080p) [hash].mkv", n));
+            files.push(format!(
+                "fixture-parent-show {:02} (bd-1080p) [hash].mkv",
+                n
+            ));
         }
 
         let siblings = detect_sibling_entries_in_pack(&files, &parent);
@@ -5288,15 +5410,24 @@ mod tests {
         ];
         let mut files: Vec<String> = Vec::new();
         for n in 1..=20 {
-            files.push(format!("[smol] Monogatari - S07E{:02} - Owarimonogatari.mkv", n));
+            files.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari.mkv",
+                n
+            ));
         }
 
         let siblings = detect_sibling_entries_in_pack(&files, &parent);
         assert_eq!(siblings.len(), 1);
         let s = &siblings[0];
-        assert_eq!(s.anilist_id, 21860, "must pick Owari S2, not Tsukimonogatari");
+        assert_eq!(
+            s.anilist_id, 21860,
+            "must pick Owari S2, not Tsukimonogatari"
+        );
         assert_eq!(s.file_indices.len(), 7);
-        assert_eq!(s.episode_offset, 13, "absolute numbering → offset = parent cap");
+        assert_eq!(
+            s.episode_offset, 13,
+            "absolute numbering → offset = parent cap"
+        );
     }
 
     #[test]
@@ -5306,7 +5437,13 @@ mod tests {
         let mut parent = detail_with_titles("Parent Show", "");
         parent.id = 1;
         parent.episodes = Some(12);
-        parent.relations = vec![related(2, "Parent Show Second Season", "", "SEQUEL", Some(12))];
+        parent.relations = vec![related(
+            2,
+            "Parent Show Second Season",
+            "",
+            "SEQUEL",
+            Some(12),
+        )];
         let mut files: Vec<String> = Vec::new();
         for n in 1..=12 {
             files.push(format!("[Group] Parent Show - {:02}.mkv", n));
@@ -5322,7 +5459,13 @@ mod tests {
         let mut parent = detail_with_titles("Parent Show", "");
         parent.id = 1;
         parent.episodes = None;
-        parent.relations = vec![related(2, "Parent Show Second Season", "", "SEQUEL", Some(12))];
+        parent.relations = vec![related(
+            2,
+            "Parent Show Second Season",
+            "",
+            "SEQUEL",
+            Some(12),
+        )];
         let files: Vec<String> = (1..=12)
             .map(|n| format!("[Group] Parent Show - {:02}.mkv", n))
             .collect();
@@ -5403,7 +5546,10 @@ mod tests {
         assert_eq!(*s.file_indices.first().unwrap(), 13);
         assert_eq!(*s.file_indices.last().unwrap(), 19);
         assert!(s.matched_subtitle.starts_with("episode-range fallback"));
-        assert_eq!(s.episode_offset, 13, "absolute numbering → offset = parent cap");
+        assert_eq!(
+            s.episode_offset, 13,
+            "absolute numbering → offset = parent cap"
+        );
     }
 
     #[test]
@@ -5459,9 +5605,7 @@ mod tests {
                 n
             ));
         }
-        files.push(
-            "fixture-monogatari-s07e20-zoku-owarimonogatari-bd-1080p.mkv".to_string(),
-        );
+        files.push("fixture-monogatari-s07e20-zoku-owarimonogatari-bd-1080p.mkv".to_string());
 
         let siblings = detect_sibling_entries_in_pack(&files, &parent);
         assert_eq!(siblings.len(), 1, "must emit Owari S2 as partial fit");
@@ -5480,7 +5624,10 @@ mod tests {
             !s.file_indices.contains(&19),
             "ep 20 Zoku file must remain unattributed"
         );
-        assert_eq!(s.episode_offset, 12, "absolute numbering → offset = parent cap");
+        assert_eq!(
+            s.episode_offset, 12,
+            "absolute numbering → offset = parent cap"
+        );
     }
 
     #[test]
@@ -5511,7 +5658,13 @@ mod tests {
         parent.id = 21262;
         parent.episodes = Some(12); // AL undercount — BD has 13 files for parent
         parent.relations = vec![
-            related(20787, "Tsukimonogatari", "Tsukimonogatari", "SEQUEL", Some(4)),
+            related(
+                20787,
+                "Tsukimonogatari",
+                "Tsukimonogatari",
+                "SEQUEL",
+                Some(4),
+            ),
             related(
                 21745,
                 "Owarimonogatari Second Season",
@@ -5656,7 +5809,13 @@ mod tests {
             "Manga",
             "Manga",
             None,
-            vec![related(3, "Something Else", "Something Else", "SEQUEL", Some(13))],
+            vec![related(
+                3,
+                "Something Else",
+                "Something Else",
+                "SEQUEL",
+                Some(13),
+            )],
         );
         let mut neighbors = std::collections::HashMap::new();
         neighbors.insert(2, neighbor);
@@ -5772,8 +5931,20 @@ mod tests {
             "Parent",
             Some(12),
             vec![
-                related(2, "Fetched Neighbor", "Fetched Neighbor", "PREQUEL", Some(26)),
-                related(7, "Unfetched Neighbor", "Unfetched Neighbor", "SEQUEL", Some(26)),
+                related(
+                    2,
+                    "Fetched Neighbor",
+                    "Fetched Neighbor",
+                    "PREQUEL",
+                    Some(26),
+                ),
+                related(
+                    7,
+                    "Unfetched Neighbor",
+                    "Unfetched Neighbor",
+                    "SEQUEL",
+                    Some(26),
+                ),
             ],
         );
         let neighbor_2 = detail_with_relations(
@@ -5879,7 +6050,12 @@ mod tests {
         // trailing subtitle. Use synthetic tokens — no real group or
         // real release title formatting claimed here.
         let files: Vec<String> = (1..=7)
-            .map(|n| format!("fixture-parent-show continuation arc - {:02} (bd 1080p) [hash].mkv", n))
+            .map(|n| {
+                format!(
+                    "fixture-parent-show continuation arc - {:02} (bd 1080p) [hash].mkv",
+                    n
+                )
+            })
             .collect();
 
         let siblings = detect_sibling_entries_in_pack(&files, &expanded);
@@ -5921,10 +6097,16 @@ mod tests {
         // min_ep = 1 ≤ parent_cap=24 → offset = 0.
         assert_eq!(siblings[0].episode_offset, 0);
         // And the match came from the subtitle path, not the fallback.
-        assert!(!siblings[0].matched_subtitle.starts_with("episode-range fallback"));
+        assert!(
+            !siblings[0]
+                .matched_subtitle
+                .starts_with("episode-range fallback")
+        );
     }
 
-    fn pinned_720p_web_tag(manual_override: bool) -> crate::models::episode_tags::EpisodeQualityTag {
+    fn pinned_720p_web_tag(
+        manual_override: bool,
+    ) -> crate::models::episode_tags::EpisodeQualityTag {
         crate::models::episode_tags::EpisodeQualityTag {
             episode_number: 1,
             quality_tag: "WEB-720p".to_string(),
@@ -5940,6 +6122,7 @@ mod tests {
             needs_review: false,
             manual_override,
             classification_evidence: String::new(),
+            classification_attempted_at: None,
         }
     }
 
@@ -6014,7 +6197,10 @@ mod tests {
 
     #[test]
     fn parse_release_season_catches_part_n() {
-        assert_eq!(parse_release_season("Jujutsu Kaisen Part 2 - 01 (1080p).mkv"), 2);
+        assert_eq!(
+            parse_release_season("Jujutsu Kaisen Part 2 - 01 (1080p).mkv"),
+            2
+        );
         assert_eq!(parse_release_season("Chainsaw Man Part 3 - 07.mkv"), 3);
     }
 
@@ -6086,7 +6272,10 @@ mod tests {
             2,
         ));
         // Roman numeral match.
-        assert!(!season_mismatch("[Group] Monogatari II - 01 (1080p).mkv", 2));
+        assert!(!season_mismatch(
+            "[Group] Monogatari II - 01 (1080p).mkv",
+            2
+        ));
         // Part N match.
         assert!(!season_mismatch("[Group] Show Part 3 - 01.mkv", 3));
     }
@@ -6118,10 +6307,11 @@ mod tests {
     }
 
     fn cfg_with_defaults(tokens: &str, user: &str) -> Config {
-        let mut c = Config::default();
-        c.default_custom_query_tokens = tokens.to_string();
-        c.default_restrict_to_uploader = user.to_string();
-        c
+        Config {
+            default_custom_query_tokens: tokens.to_string(),
+            default_restrict_to_uploader: user.to_string(),
+            ..Config::default()
+        }
     }
 
     #[test]
@@ -6148,8 +6338,14 @@ mod tests {
         let series = series_with_overrides("", "SubsPlease");
         let cfg = cfg_with_defaults("web 720p", "Erai-raws");
         let ctx = resolve_search_overrides_from_row(&series, &cfg);
-        assert_eq!(ctx.custom_tokens, "web 720p", "blank field should inherit global");
-        assert_eq!(ctx.restrict_user, "SubsPlease", "set field should beat global");
+        assert_eq!(
+            ctx.custom_tokens, "web 720p",
+            "blank field should inherit global"
+        );
+        assert_eq!(
+            ctx.restrict_user, "SubsPlease",
+            "set field should beat global"
+        );
     }
 
     #[test]
@@ -6186,10 +6382,13 @@ mod tests {
     fn append_tokens_adds_to_each_query() {
         let qs = vec!["Frieren 01".to_string(), "Frieren - 01".to_string()];
         let out = append_custom_tokens(qs, "bd 1080p");
-        assert_eq!(out, vec![
-            "Frieren 01 bd 1080p".to_string(),
-            "Frieren - 01 bd 1080p".to_string(),
-        ]);
+        assert_eq!(
+            out,
+            vec![
+                "Frieren 01 bd 1080p".to_string(),
+                "Frieren - 01 bd 1080p".to_string(),
+            ]
+        );
     }
 
     // ── #23 follow-up — collapsed query variants when ?u= is active ────
@@ -6202,7 +6401,11 @@ mod tests {
         // use a specific separator, etc.
         let aliases = vec!["Frieren".to_string()];
         let out = build_queries_from_aliases(&aliases, &SearchTarget::Episode(9), false);
-        assert_eq!(out.len(), 4, "full-sweep episode target should emit 4 per alias, got {out:?}");
+        assert_eq!(
+            out.len(),
+            4,
+            "full-sweep episode target should emit 4 per alias, got {out:?}"
+        );
         assert!(out.contains(&"Frieren 9".to_string()));
         assert!(out.contains(&"Frieren - 09".to_string()));
         assert!(out.contains(&"Frieren 09".to_string()));
@@ -6267,7 +6470,11 @@ mod tests {
 
         let cached = seadex_cache_get(anilist_id).expect("warmed entry should be present");
         assert_eq!(cached.hashes.len(), 1);
-        assert!(cached.hashes.contains("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"));
+        assert!(
+            cached
+                .hashes
+                .contains("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        );
     }
 
     #[tokio::test]

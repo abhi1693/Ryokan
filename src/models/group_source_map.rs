@@ -52,7 +52,15 @@ pub struct GroupSourceEntry {
 /// detection still fires in `source_filename.rs`; this slice is just
 /// for groups whose filenames omit the token but whose sub-tier is
 /// known. Currently empty — add WebRip-only groups here if needed.
-pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[];
+pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[
+    // EMBER almost exclusively ships re-encoded WebRips, so when the group
+    // prior fires we should resolve to the WebRip sub-tier rather than
+    // leaving it as plain WEB. Confirmed from EMBER's Wajutsushi batch
+    // (released 2024-12-20, four days after the show finished airing on
+    // 2024-12-16) where ffprobe observed E-AC-3 audio (a WEB fingerprint)
+    // on every episode.
+    ("EMBER", WebKind::WebRip),
+];
 
 // ─────────────────────────────────────────────────────────────────────────
 // Seed data
@@ -86,15 +94,18 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     // ── Legacy BD encoders ────────────────────────────────────────────────
     // Well-known BD-only encoders that predate or sit outside the current
     // TRaSH custom formats but are still widely seeded.
-    ("VCB-Studio", Source::BluRay, 0.95, "legacy BD encode specialist"),
+    (
+        "VCB-Studio",
+        Source::BluRay,
+        0.95,
+        "legacy BD encode specialist",
+    ),
     ("Coalgirls", Source::BluRay, 0.95, "legacy BD encoder"),
-
     // ── TRaSH BD Tier 01 ──────────────────────────────────────────────────
     ("DemiHuman", Source::BluRay, 0.95, "TRaSH BD tier 01"),
     ("Flugel", Source::BluRay, 0.95, "TRaSH BD tier 01"),
     ("Moxie", Source::BluRay, 0.95, "TRaSH BD tier 01"),
     ("NAN0", Source::BluRay, 0.95, "TRaSH BD tier 01"),
-
     // ── TRaSH BD Tier 02 ──────────────────────────────────────────────────
     ("Aergia", Source::BluRay, 0.95, "TRaSH BD tier 02"),
     ("FateSucks", Source::BluRay, 0.95, "TRaSH BD tier 02"),
@@ -110,7 +121,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("PMR", Source::BluRay, 0.95, "TRaSH BD tier 02"),
     ("WAP", Source::BluRay, 0.95, "TRaSH BD tier 02"),
     ("YURI", Source::BluRay, 0.95, "TRaSH BD tier 02"),
-
     // ── TRaSH BD Tier 03 ──────────────────────────────────────────────────
     ("ARC", Source::BluRay, 0.95, "TRaSH BD tier 03"),
     ("BBT-RMX", Source::BluRay, 0.95, "TRaSH BD tier 03"),
@@ -141,7 +151,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     // so treat it as source-ambiguous and let other evidence decide.
     ("SubsMix", Source::BluRay, 0.95, "TRaSH BD tier 03"),
     ("uba", Source::BluRay, 0.95, "TRaSH BD tier 03"),
-
     // ── TRaSH BD Tier 04 ──────────────────────────────────────────────────
     ("ABdex", Source::BluRay, 0.95, "TRaSH BD tier 04"),
     ("Afro", Source::BluRay, 0.95, "TRaSH BD tier 04"),
@@ -175,7 +184,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Vanilla", Source::BluRay, 0.95, "TRaSH BD tier 04"),
     ("Virtuality", Source::BluRay, 0.95, "TRaSH BD tier 04"),
     ("VULCAN", Source::BluRay, 0.95, "TRaSH BD tier 04"),
-
     // ── TRaSH BD Tier 05 ──────────────────────────────────────────────────
     ("Animorphs", Source::BluRay, 0.95, "TRaSH BD tier 05"),
     ("AOmundson", Source::BluRay, 0.95, "TRaSH BD tier 05"),
@@ -206,7 +214,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("WBDP", Source::BluRay, 0.95, "TRaSH BD tier 05"),
     ("WSE", Source::BluRay, 0.95, "TRaSH BD tier 05"),
     ("Yuki", Source::BluRay, 0.95, "TRaSH BD tier 05"),
-
     // ── TRaSH BD Tier 06 ──────────────────────────────────────────────────
     ("ANE", Source::BluRay, 0.95, "TRaSH BD tier 06"),
     ("Bunny-Apocalypse", Source::BluRay, 0.95, "TRaSH BD tier 06"),
@@ -221,7 +228,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Starbez", Source::BluRay, 0.95, "TRaSH BD tier 06"),
     ("Yoghurt", Source::BluRay, 0.95, "TRaSH BD tier 06"),
     ("YURASUKA", Source::BluRay, 0.95, "TRaSH BD tier 06"),
-
     // ── TRaSH BD Tier 07 ──────────────────────────────────────────────────
     ("AC", Source::BluRay, 0.95, "TRaSH BD tier 07"),
     ("Almighty", Source::BluRay, 0.95, "TRaSH BD tier 07"),
@@ -251,12 +257,33 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("SEV", Source::BluRay, 0.95, "TRaSH BD tier 07"),
     ("THORA", Source::BluRay, 0.95, "TRaSH BD tier 07"),
     ("Vivid", Source::BluRay, 0.95, "TRaSH BD tier 07"),
-
     // ── TRaSH BD Tier 08 ──────────────────────────────────────────────────
     ("AkihitoSubs", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Arukoru", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("EDGE", Source::BluRay, 0.95, "TRaSH BD tier 08"),
-    ("EMBER", Source::BluRay, 0.95, "TRaSH BD tier 08"),
+    // EMBER was previously seeded as TRaSH BD tier 08, but empirically they
+    // almost exclusively ship re-encoded WebRips. EMBER's Wajutsushi batch
+    // (released 2024-12-20, after the show finished airing on 2024-12-16)
+    // was the trigger — every episode came back from ffprobe as Web
+    // (E-AC-3 audio). Reclassified to WEB and matched into SEED_WEB_KIND
+    // with WebRip above so the prior produces `Web (WebRip)` instead of
+    // `BluRay`. `reconcile_episode_seed_drift` resets existing user rows
+    // that had been stamped under the old BD prior.
+    //
+    // Confidence sits at 0.85 rather than the 0.95 we use for
+    // single-source groups: EMBER has shipped occasional BD rips in the
+    // past (most recent 2025-11-14), so a high-confidence BD fingerprint
+    // from ffprobe — FLAC / PGS subs / native DVD dimensions, all 0.90
+    // in source_ffprobe.rs — should out-rank the WEB prior. 0.85 still
+    // comfortably beats the 0.80 WEB ffprobe fingerprint (same verdict
+    // anyway) and a filename-layer Web hint, which is what we want for
+    // the common case.
+    (
+        "EMBER",
+        Source::Web,
+        0.85,
+        "WebRip re-encoder (occasional BD)",
+    ),
     ("GHOST", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     // Judas is TRaSH BD tier 08 but also ships weekly WEB rips during airing,
     // so per the mixed-source rule in the module docs above we leave them out
@@ -265,7 +292,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Nep_Blanc", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Prof", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Shiro", Source::BluRay, 0.95, "TRaSH BD tier 08"),
-
     // ── TRaSH anime-raws (Japanese BD raw encoders) ───────────────────────
     // BD-only raw encoding specialists from the `anime-raws` CF. Confidence
     // is 0.95 because these groups exclusively work from Blu-ray sources.
@@ -289,11 +315,9 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Scryous-Raws", Source::BluRay, 0.95, "TRaSH anime raws"),
     ("Seicher-Raws", Source::BluRay, 0.95, "TRaSH anime raws"),
     ("Shiniori-Raws", Source::BluRay, 0.95, "TRaSH anime raws"),
-
     // ── TRaSH WEB Tier 01 ─────────────────────────────────────────────────
     ("Setsugen", Source::Web, 0.95, "TRaSH WEB tier 01"),
     ("Z4ST1N", Source::Web, 0.95, "TRaSH WEB tier 01"),
-
     // ── TRaSH WEB Tier 02 ─────────────────────────────────────────────────
     ("0x539", Source::Web, 0.95, "TRaSH WEB tier 02"),
     ("Cyan", Source::Web, 0.95, "TRaSH WEB tier 02"),
@@ -306,18 +330,15 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Slyfox", Source::Web, 0.95, "TRaSH WEB tier 02"),
     ("SoLCE", Source::Web, 0.95, "TRaSH WEB tier 02"),
     ("tenshi", Source::Web, 0.95, "TRaSH WEB tier 02"),
-
     // ── TRaSH WEB Tier 03 ─────────────────────────────────────────────────
     ("AnoZu", Source::Web, 0.95, "TRaSH WEB tier 03"),
     ("Dooky", Source::Web, 0.95, "TRaSH WEB tier 03"),
     ("Kitsune", Source::Web, 0.95, "TRaSH WEB tier 03"),
     ("SubsPlus+", Source::Web, 0.95, "TRaSH WEB tier 03"),
-
     // ── TRaSH WEB Tier 04 ─────────────────────────────────────────────────
     ("Erai-raws", Source::Web, 0.95, "TRaSH WEB tier 04"),
     ("ToonsHub", Source::Web, 0.95, "TRaSH WEB tier 04"),
     ("VARYG", Source::Web, 0.95, "TRaSH WEB tier 04"),
-
     // ── TRaSH WEB Tier 05 ─────────────────────────────────────────────────
     ("BlueLobster", Source::Web, 0.95, "TRaSH WEB tier 05"),
     ("GST", Source::Web, 0.95, "TRaSH WEB tier 05"),
@@ -333,7 +354,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("SubsPlease", Source::Web, 0.95, "TRaSH WEB tier 05"),
     ("URANIME", Source::Web, 0.95, "TRaSH WEB tier 05"),
     ("ZigZag", Source::Web, 0.95, "TRaSH WEB tier 05"),
-
     // ── TRaSH WEB Tier 06 ─────────────────────────────────────────────────
     ("DameDesuYo", Source::Web, 0.95, "TRaSH WEB tier 06"),
     ("Doki", Source::Web, 0.95, "TRaSH WEB tier 06"),
@@ -430,6 +450,28 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Episode rows to wipe back to "unknown" so the next library_classify
+/// sweep re-runs the full pipeline against them. Used when `SEED_DEFAULTS`
+/// flips a group's source classification (the group_source_map row gets
+/// realigned by [`reconcile_seed_drift`], but `episode_quality_tags` rows
+/// already stamped under the old prior would otherwise stay wrong forever
+/// — `manual_override = 0` rows aren't user-pinned but our #53 sweep skip
+/// rule never re-attempts a non-empty source).
+///
+/// Format: `(group_name, prior_source_to_match)`. A row matches when its
+/// `release_group` equals the group (case-insensitive), its `source`
+/// equals the listed prior, and `manual_override = 0`. Manual overrides
+/// are always preserved.
+const SEED_DRIFT_EPISODE_RESETS: &[(&str, &str)] = &[
+    // EMBER was seeded as BD tier 08 in earlier releases; reclassified
+    // 2026-04-20 to WEB / WebRip after empirical confirmation that they
+    // ship WebRip re-encodes (their Wajutsushi batch released 2024-12-20,
+    // four days after the show finished airing on 2024-12-16). Reset
+    // BluRay-stamped EMBER rows so the next sweep re-runs them under the
+    // corrected prior.
+    ("EMBER", "BluRay"),
+];
+
 /// One-shot corrections for seed rows whose built-in value has changed
 /// since an earlier release. `seed_defaults` uses `INSERT OR IGNORE`, so
 /// an existing row keeps whatever value it was first seeded with — which
@@ -437,9 +479,19 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
 /// confidence before we corrected it) never self-corrects on upgrade.
 ///
 /// This pass realigns non-user-edited rows (`is_user_edit = 0`) to the
-/// current `SEED_DEFAULTS` values. User edits are preserved: anyone who
-/// deliberately set their own confidence for a group keeps it. The
-/// update is idempotent — rows that already match the seed are a no-op.
+/// current `SEED_DEFAULTS` and `SEED_WEB_KIND` values. User edits are
+/// preserved: anyone who deliberately set their own confidence for a
+/// group keeps it. The update is idempotent — rows that already match
+/// the seed are a no-op.
+///
+/// `episode_quality_tags` rows affected by a seed flip are reset later
+/// in `models::mod::migrate` via [`reconcile_episode_seed_drift`], which
+/// runs *after* the Phase 1b `ALTER TABLE` passes that add the `source`
+/// / `resolution` / etc. columns this crate references. Keeping the
+/// episode reset out of this function means [`reconcile_seed_drift`]
+/// stays callable from inside `group_source_map::migrate` (where those
+/// columns may not exist yet on a fresh database) without tripping a
+/// "no such column: source" error on boot.
 pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // See seed_defaults — same fsync-coalesce reason for the tx wrap.
     let mut tx = db.begin().await?;
@@ -456,6 +508,133 @@ pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(&mut *tx)
         .await?;
     }
+    // web_kind isn't part of SEED_DEFAULTS — sync it from SEED_WEB_KIND
+    // so a group that flipped from `BluRay` to `Web` (e.g. EMBER) lands
+    // with the right WebRip / WebDl sub-tier instead of an empty string.
+    for (name, web_kind) in SEED_WEB_KIND {
+        sqlx::query(
+            "UPDATE group_source_map
+             SET web_kind = ?
+             WHERE group_name = ? AND is_user_edit = 0",
+        )
+        .bind(web_kind.as_str())
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Schema-migration ledger: one row per one-shot migration that we
+/// need to run exactly once across the installed base. `id` is a
+/// stable string key (e.g. `"seed_drift_episode_v1"`); `applied_at`
+/// records the first successful run. Idempotent by virtue of
+/// `INSERT OR IGNORE` on the primary key — existing rows aren't
+/// touched, and the lookup gate returns `true` as soon as the row
+/// exists.
+///
+/// Kept deliberately minimal (no tooling around it, no CLI) because
+/// one-shot migrations are rare in Ryokan — the usual pattern is
+/// idempotent `ALTER TABLE ADD COLUMN ... .ok()`. This exists solely
+/// so a repeat-on-every-boot migration can guard itself without each
+/// one inventing its own config flag.
+async fn ensure_schema_migrations_table(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+             id TEXT PRIMARY KEY,
+             applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+         )",
+    )
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+async fn migration_already_applied(db: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations WHERE id = ?")
+        .bind(id)
+        .fetch_one(db)
+        .await?;
+    Ok(row > 0)
+}
+
+async fn mark_migration_applied(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Stable ID for the EMBER BluRay→Web seed-drift episode reset. If a
+/// future EMBER recalibration wants to reset rows again, bump the
+/// version suffix (`_v2`) so the new reset runs once.
+const SEED_DRIFT_EPISODE_V1_MIGRATION_ID: &str = "seed_drift_episode_v1";
+
+/// Companion to [`reconcile_seed_drift`]: wipe `episode_quality_tags`
+/// rows whose group was reclassified by a seed flip so the next library
+/// sweep re-runs the full pipeline against them under the corrected
+/// prior. The #53 sweep skip rule normally leaves a row alone once
+/// `classification_attempted_at` is set, so this reset must clear that
+/// timestamp as well.
+///
+/// Split from `reconcile_seed_drift` because it touches columns added
+/// later in `models::mod::migrate` (`source`, `resolution`,
+/// `classification_attempted_at`, etc.). Call this once, after the
+/// Phase 1b `ALTER TABLE episode_quality_tags ADD COLUMN ...` block
+/// has run. User-edited group_source_map entries and `manual_override`
+/// episode rows are both preserved.
+///
+/// **Gated on a one-shot migration ID.** This matters because the
+/// reset targets `release_group = X AND source = Y AND
+/// manual_override = 0` — which is *also* the shape of legitimate
+/// ffprobe-stamped rows for groups that ship occasional releases in
+/// their non-default source (e.g. EMBER's rare BD rips, classified
+/// correctly at 0.90 ffprobe confidence out-ranking the 0.85 group
+/// prior). Without a migration gate, every boot would re-wipe those
+/// legit rows and only the next library sweep (≤6h later) would
+/// restore them; a one-shot guard makes the reset fire exactly once
+/// per (install, seed change) pair.
+pub async fn reconcile_episode_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    ensure_schema_migrations_table(db).await?;
+    if migration_already_applied(db, SEED_DRIFT_EPISODE_V1_MIGRATION_ID).await? {
+        return Ok(());
+    }
+
+    let mut tx = db.begin().await?;
+    for (group, prior_source) in SEED_DRIFT_EPISODE_RESETS {
+        sqlx::query(
+            // Clear `quality_tag` too — it's the legacy label string
+            // (e.g. "BluRay-1080p") that the UI renders alongside the
+            // structured columns. Without this, a reset row briefly
+            // shows the old BD tag against an empty internal source
+            // until the next library_classify sweep re-stamps it, which
+            // can be up to 6h after boot.
+            "UPDATE episode_quality_tags
+             SET source = '',
+                 resolution = '',
+                 is_remux = 0,
+                 is_bdmv = 0,
+                 web_kind = '',
+                 quality_tag = '',
+                 classification_confidence = 0,
+                 needs_review = 0,
+                 classification_evidence = '',
+                 classification_attempted_at = NULL
+             WHERE release_group = ? COLLATE NOCASE
+               AND source = ?
+               AND COALESCE(manual_override, 0) = 0",
+        )
+        .bind(group)
+        .bind(prior_source)
+        .execute(&mut *tx)
+        .await?;
+    }
+    mark_migration_applied(&mut tx, SEED_DRIFT_EPISODE_V1_MIGRATION_ID).await?;
     tx.commit().await?;
     Ok(())
 }

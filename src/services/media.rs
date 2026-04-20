@@ -10,9 +10,8 @@ use std::sync::LazyLock;
 // RSS loop was paying four Regex::new compiles per call and blowing
 // through the CPU budget of the hot path for no reason.
 
-static RE_SXEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"s(\d{1,2})e(\d{1,4})").expect("RE_SXEX compiles")
-});
+static RE_SXEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"s(\d{1,2})e(\d{1,4})").expect("RE_SXEX compiles"));
 static RE_DASH_EP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r" - (\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)").expect("RE_DASH_EP compiles")
 });
@@ -20,9 +19,8 @@ static RE_E_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[\s._\-])e(?:p\.?)?(\d{1,4})(?:v\d)?(?:\s|\.|\[|\(|$)")
         .expect("RE_E_PREFIX compiles")
 });
-static RE_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"episode\s*(\d{1,4})").expect("RE_EPISODE compiles")
-});
+static RE_EPISODE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"episode\s*(\d{1,4})").expect("RE_EPISODE compiles"));
 static RE_BARE_NUM_DASH: LazyLock<Regex> = LazyLock::new(|| {
     // Bare 1-3 digit episode number followed by ` - <subtitle>`. Used
     // by no-group-prefix releases shaped like
@@ -157,9 +155,10 @@ pub fn list_media_folders(media_root: &str) -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
             if entry.path().is_dir()
-                && let Some(name) = entry.file_name().to_str() {
-                    folders.push(name.to_string());
-                }
+                && let Some(name) = entry.file_name().to_str()
+            {
+                folders.push(name.to_string());
+            }
         }
     }
     folders.sort_by_key(|a| a.to_lowercase());
@@ -177,9 +176,10 @@ fn scan_dir_recursive(dir: &Path, series_root: &Path, files: &mut Vec<EpisodeFil
         if path.is_dir() {
             scan_dir_recursive(&path, series_root, files);
         } else if is_video_file(&path)
-            && let Some(ep) = parse_episode_file(&path, series_root) {
-                files.push(ep);
-            }
+            && let Some(ep) = parse_episode_file(&path, series_root)
+        {
+            files.push(ep);
+        }
     }
 }
 
@@ -304,32 +304,34 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // contain its own ` <n> - ` run that should NOT shadow the real
     // episode marker).
     if let Some(caps) = RE_BARE_NUM_DASH.captures(lower)
-        && let Some(m) = caps.get(1) {
-            if let Some(full) = caps.get(0) {
-                // If what follows the ` - ` is a non-episodic marker
-                // (e.g. `Chihayafuru 2 - OVA - Waga Miyo…`), the
-                // captured `2` is a season/title number, not an
-                // episode. Bail with `None` rather than fall through
-                // to further patterns — the subsequent bare-number
-                // branch would re-capture the same false digit.
-                let rest = &lower[full.end()..];
-                if starts_with_non_episode_marker(rest) {
-                    return None;
-                }
-            }
-            if let Ok(e) = m.as_str().parse::<i32>() {
-                return Some((None, e));
+        && let Some(m) = caps.get(1)
+    {
+        if let Some(full) = caps.get(0) {
+            // If what follows the ` - ` is a non-episodic marker
+            // (e.g. `Chihayafuru 2 - OVA - Waga Miyo…`), the
+            // captured `2` is a season/title number, not an
+            // episode. Bail with `None` rather than fall through
+            // to further patterns — the subsequent bare-number
+            // branch would re-capture the same false digit.
+            let rest = &lower[full.end()..];
+            if starts_with_non_episode_marker(rest) {
+                return None;
             }
         }
+        if let Ok(e) = m.as_str().parse::<i32>() {
+            return Some((None, e));
+        }
+    }
 
     // Bare-number-before-bracket fallback for space-delimited packs.
     // Use the rightmost match so an earlier title token like
     // `Show 99 (extra) 01` doesn't shadow the actual episode number.
     if let Some(caps) = RE_BARE_NUM_BRACKET.captures_iter(lower).last()
         && let Some(m) = caps.get(1)
-            && let Ok(e) = m.as_str().parse::<i32>() {
-                return Some((None, e));
-            }
+        && let Ok(e) = m.as_str().parse::<i32>()
+    {
+        return Some((None, e));
+    }
 
     None
 }
@@ -343,11 +345,20 @@ fn parse_quality(lower: &str) -> String {
     // alone; the classifier handles those through the structured
     // columns so the quality shown for a properly-classified episode
     // comes from `tag.quality_tag`, not from here.
-    let source = if lower.contains("bluray") || lower.contains("blu-ray") || lower.contains("bdrip") || lower.contains("[bd") || lower.contains("(bd") {
+    let source = if lower.contains("bluray")
+        || lower.contains("blu-ray")
+        || lower.contains("bdrip")
+        || lower.contains("[bd")
+        || lower.contains("(bd")
+    {
         "BD"
     } else if lower.contains("webrip") || lower.contains("web-rip") {
         "WEBRip"
-    } else if lower.contains("webdl") || lower.contains("web-dl") || lower.contains("web dl") || lower.contains("web") {
+    } else if lower.contains("webdl")
+        || lower.contains("web-dl")
+        || lower.contains("web dl")
+        || lower.contains("web")
+    {
         // Unified WEB label — matches `ClassificationResult::label()`
         // which collapses WebDl and bare Web into the same output
         // (issue #48). WebRip stays distinct above because it's the
@@ -430,7 +441,10 @@ mod tests {
     fn sxxexx_with_v2_suffix_after_episode() {
         // S02E10v2 — the v2 must not corrupt the episode capture.
         assert_eq!(parse("[Judas] Frieren - S02E10v2.mkv"), Some((Some(2), 10)));
-        assert_eq!(parse("[Judas] Fire Force - S03E18v2.mkv"), Some((Some(3), 18)));
+        assert_eq!(
+            parse("[Judas] Fire Force - S03E18v2.mkv"),
+            Some((Some(3), 18))
+        );
         assert_eq!(
             parse("JUJUTSU.KAISEN.S03E03.v2.1080p.CR.WEBRip.DUAL.AUDIO.AV1-Sokudo.mkv"),
             Some((Some(3), 3))
@@ -549,11 +563,15 @@ mod tests {
         // Regression guard: RE_SXEX must win before the bare-number
         // branches fire on the " - <subtitle>" portion.
         assert_eq!(
-            parse("[smol] Monogatari - S07E05 - Owarimonogatari (BD 1080p HEVC Opus) [A89E97DA].mkv"),
+            parse(
+                "[smol] Monogatari - S07E05 - Owarimonogatari (BD 1080p HEVC Opus) [A89E97DA].mkv"
+            ),
             Some((Some(7), 5))
         );
         assert_eq!(
-            parse("[smol] Monogatari - S07E14 - Owarimonogatari Second Season (Ge) (BD 1080p HEVC Opus) [EBAB5DDD].mkv"),
+            parse(
+                "[smol] Monogatari - S07E14 - Owarimonogatari Second Season (Ge) (BD 1080p HEVC Opus) [EBAB5DDD].mkv"
+            ),
             Some((Some(7), 14))
         );
     }
@@ -595,7 +613,9 @@ mod tests {
         // None because no pattern matches, and that's the correct
         // outcome — there's nothing to parse.
         assert_eq!(
-            parse("[WBDP] Yahari Ore no Seishun Love Comedy wa Machigatteiru Zoku OVA [BD][1080p-AAC] [93937CE2].mkv"),
+            parse(
+                "[WBDP] Yahari Ore no Seishun Love Comedy wa Machigatteiru Zoku OVA [BD][1080p-AAC] [93937CE2].mkv"
+            ),
             None
         );
     }

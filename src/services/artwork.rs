@@ -1,4 +1,8 @@
-use std::{path::{Path, PathBuf}, sync::LazyLock, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    path::{Path, PathBuf},
+    sync::LazyLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -20,16 +24,27 @@ use crate::models::artwork_cache;
 
 fn sanitize_key(key: &str) -> String {
     key.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
 fn extension_for(content_type: &str, url: &str) -> &'static str {
     let ct = content_type.to_ascii_lowercase();
-    if ct.contains("png") || url.ends_with(".png") { "png" }
-    else if ct.contains("webp") || url.ends_with(".webp") { "webp" }
-    else if ct.contains("gif") || url.ends_with(".gif") { "gif" }
-    else { "jpg" }
+    if ct.contains("png") || url.ends_with(".png") {
+        "png"
+    } else if ct.contains("webp") || url.ends_with(".webp") {
+        "webp"
+    } else if ct.contains("gif") || url.ends_with(".gif") {
+        "gif"
+    } else {
+        "jpg"
+    }
 }
 
 fn blob_filename(blob_hash: &str, content_type: &str, source_url: &str) -> String {
@@ -64,20 +79,42 @@ pub fn canonical_identity_key(provider_id: i64, mal_id: Option<i64>) -> String {
     }
 }
 
-pub fn series_relation_cover_key(series_id: i64, related_provider_id: i64, related_mal_id: Option<i64>) -> String {
-    format!("series-{}-relation-{}-cover", series_id, canonical_identity_key(related_provider_id, related_mal_id))
+pub fn series_relation_cover_key(
+    series_id: i64,
+    related_provider_id: i64,
+    related_mal_id: Option<i64>,
+) -> String {
+    format!(
+        "series-{}-relation-{}-cover",
+        series_id,
+        canonical_identity_key(related_provider_id, related_mal_id)
+    )
 }
 
 pub fn provider_cover_key(provider_id: i64, mal_id: Option<i64>) -> String {
-    format!("provider-{}-cover", canonical_identity_key(provider_id, mal_id))
+    format!(
+        "provider-{}-cover",
+        canonical_identity_key(provider_id, mal_id)
+    )
 }
 
 pub fn provider_banner_key(provider_id: i64, mal_id: Option<i64>) -> String {
-    format!("provider-{}-banner", canonical_identity_key(provider_id, mal_id))
+    format!(
+        "provider-{}-banner",
+        canonical_identity_key(provider_id, mal_id)
+    )
 }
 
-pub fn provider_relation_cover_key(provider_id: i64, related_provider_id: i64, related_mal_id: Option<i64>) -> String {
-    format!("provider-{}-relation-{}-cover", canonical_identity_key(provider_id, None), canonical_identity_key(related_provider_id, related_mal_id))
+pub fn provider_relation_cover_key(
+    provider_id: i64,
+    related_provider_id: i64,
+    related_mal_id: Option<i64>,
+) -> String {
+    format!(
+        "provider-{}-relation-{}-cover",
+        canonical_identity_key(provider_id, None),
+        canonical_identity_key(related_provider_id, related_mal_id)
+    )
 }
 
 pub async fn first_cached_url(db: &SqlitePool, cache_keys: &[String], source_url: &str) -> String {
@@ -110,7 +147,10 @@ pub async fn cache_image(
         .map_err(|e| format!("artwork request failed: {}", e))?;
 
     if !resp.status().is_success() {
-        return Err(format!("artwork request failed with HTTP {}", resp.status()));
+        return Err(format!(
+            "artwork request failed with HTTP {}",
+            resp.status()
+        ));
     }
 
     let headers = resp.headers().clone();
@@ -119,7 +159,10 @@ pub async fn cache_image(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("image/jpeg")
         .to_string();
-    let bytes = resp.bytes().await.map_err(|e| format!("artwork body failed: {}", e))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("artwork body failed: {}", e))?;
 
     let blob_hash = hex::encode(Sha256::digest(&bytes));
     let dir = media_cache_dir().join("blobs");
@@ -159,7 +202,10 @@ pub async fn cache_image(
         .map_err(|e| e.to_string())?;
     }
 
-    let last_write = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let last_write = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     artwork_cache::upsert_ref(
         db,
         artwork_cache::RefUpsert {
@@ -171,7 +217,9 @@ pub async fn cache_image(
             blob_hash: &blob_hash,
             last_write,
         },
-    ).await.map_err(|e| e.to_string())?;
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(Some(local_url(&safe_key, last_write)))
 }
@@ -181,8 +229,24 @@ pub async fn cache_series_detail_artwork(
     series_id: i64,
     detail: &crate::services::anilist::AnimeDetail,
 ) {
-    let _ = cache_image(db, &format!("series-{}-cover", series_id), "series", Some(series_id), "cover", &detail.cover_url).await;
-    let _ = cache_image(db, &format!("series-{}-banner", series_id), "series", Some(series_id), "banner", &detail.banner_url).await;
+    let _ = cache_image(
+        db,
+        &format!("series-{}-cover", series_id),
+        "series",
+        Some(series_id),
+        "cover",
+        &detail.cover_url,
+    )
+    .await;
+    let _ = cache_image(
+        db,
+        &format!("series-{}-banner", series_id),
+        "series",
+        Some(series_id),
+        "banner",
+        &detail.banner_url,
+    )
+    .await;
 }
 
 pub async fn cache_relation_artwork(
@@ -192,7 +256,15 @@ pub async fn cache_relation_artwork(
     related_mal_id: Option<i64>,
     source_url: &str,
 ) {
-    let _ = cache_image(db, &series_relation_cover_key(series_id, related_provider_id, related_mal_id), "series_relation", Some(series_id), "cover", source_url).await;
+    let _ = cache_image(
+        db,
+        &series_relation_cover_key(series_id, related_provider_id, related_mal_id),
+        "series_relation",
+        Some(series_id),
+        "cover",
+        source_url,
+    )
+    .await;
 }
 
 pub async fn cache_provider_detail_artwork(
@@ -201,8 +273,24 @@ pub async fn cache_provider_detail_artwork(
     mal_id: Option<i64>,
     detail: &crate::services::anilist::AnimeDetail,
 ) {
-    let _ = cache_image(db, &provider_cover_key(provider_id, mal_id), "provider", Some(provider_id), "cover", &detail.cover_url).await;
-    let _ = cache_image(db, &provider_banner_key(provider_id, mal_id), "provider", Some(provider_id), "banner", &detail.banner_url).await;
+    let _ = cache_image(
+        db,
+        &provider_cover_key(provider_id, mal_id),
+        "provider",
+        Some(provider_id),
+        "cover",
+        &detail.cover_url,
+    )
+    .await;
+    let _ = cache_image(
+        db,
+        &provider_banner_key(provider_id, mal_id),
+        "provider",
+        Some(provider_id),
+        "banner",
+        &detail.banner_url,
+    )
+    .await;
 }
 
 pub async fn cache_provider_relation_artwork(
@@ -212,7 +300,15 @@ pub async fn cache_provider_relation_artwork(
     related_mal_id: Option<i64>,
     source_url: &str,
 ) {
-    let _ = cache_image(db, &provider_relation_cover_key(provider_id, related_provider_id, related_mal_id), "provider_relation", Some(provider_id), "cover", source_url).await;
+    let _ = cache_image(
+        db,
+        &provider_relation_cover_key(provider_id, related_provider_id, related_mal_id),
+        "provider_relation",
+        Some(provider_id),
+        "cover",
+        source_url,
+    )
+    .await;
 }
 
 pub async fn cached_or_source_url(db: &SqlitePool, cache_key: &str, source_url: &str) -> String {

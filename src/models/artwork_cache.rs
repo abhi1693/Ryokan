@@ -41,7 +41,10 @@ pub async fn upsert_blob(
 /// builds wrote relative paths to this column, which break when the
 /// runtime CWD changes. See `services::artwork::cache_image` for the
 /// self-heal path.
-pub async fn get_blob_path(db: &SqlitePool, blob_hash: &str) -> Result<Option<String>, sqlx::Error> {
+pub async fn get_blob_path(
+    db: &SqlitePool,
+    blob_hash: &str,
+) -> Result<Option<String>, sqlx::Error> {
     let row = sqlx::query(r#"SELECT local_path FROM image_blobs WHERE blob_hash = ?"#)
         .bind(blob_hash)
         .fetch_optional(db)
@@ -66,10 +69,7 @@ pub struct RefUpsert<'a> {
     pub last_write: i64,
 }
 
-pub async fn upsert_ref(
-    db: &SqlitePool,
-    r: RefUpsert<'_>,
-) -> Result<(), sqlx::Error> {
+pub async fn upsert_ref(db: &SqlitePool, r: RefUpsert<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO image_refs (
@@ -120,7 +120,10 @@ pub async fn get(db: &SqlitePool, cache_key: &str) -> Result<Option<ArtworkEntry
     }))
 }
 
-pub async fn get_local_url(db: &SqlitePool, cache_key: &str) -> Result<Option<String>, sqlx::Error> {
+pub async fn get_local_url(
+    db: &SqlitePool,
+    cache_key: &str,
+) -> Result<Option<String>, sqlx::Error> {
     Ok(get(db, cache_key)
         .await?
         .map(|e| format!("/media/art/{}?v={}", e.cache_key, e.last_write)))

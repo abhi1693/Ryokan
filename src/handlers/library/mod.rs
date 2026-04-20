@@ -106,7 +106,7 @@ pub struct Episode {
     /// is independent of the library-side `HasFile`.
     pub downloaded: bool,
     pub quality: String,
-    pub quality_state: String,  // "disk", "grabbed", "failed", or ""
+    pub quality_state: String, // "disk", "grabbed", "failed", or ""
     pub size_display: String,
     pub filename: String,
     pub can_auto_search: bool,
@@ -146,7 +146,16 @@ pub struct RelationCard {
 
 #[derive(Deserialize, utoipa::IntoParams)]
 pub struct AnilistSearchQuery {
-    q: String,
+    pub q: String,
+    /// Per-search provider override. `"al"` forces AniList (with the
+    /// usual MAL fallback if AL is unreachable), `"mal"` skips AniList
+    /// and goes straight to Jikan/MAL. Anything else (or omitted) falls
+    /// back to the global `force_mal_fallback` flag in `config`. This
+    /// is the human-facing toggle for the Add Series modal; it does NOT
+    /// affect the Sonarr/Radarr shim lookup endpoints, which always do
+    /// AL-first with MAL only on AL failure.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -234,9 +243,14 @@ pub struct SetManualOverrideForm {
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
+pub struct ReclassifyEpisodeForm {
+    pub series_id: i64,
+    pub episode_number: i32,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct MarkEpisodeFailedForm {
     history_id: i64,
     #[serde(default)]
     blocklist: bool,
 }
-

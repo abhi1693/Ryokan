@@ -1,18 +1,18 @@
 use askama::Template;
 use axum::{
+    Form, Json,
     extract::{Query, State},
     response::{Html, Redirect},
-    Form, Json,
 };
 use serde::Deserialize;
 
-use crate::models::{config, custom_formats as cf_model, group_source_map};
+use crate::AppState;
 use crate::models::log::LogCategory;
+use crate::models::{config, custom_formats as cf_model, group_source_map};
 use crate::services::{
     custom_formats as cf_service, jellyfin::JellyfinClient, logger, qbit::QbitClient,
     source::Source,
 };
-use crate::AppState;
 
 pub mod custom_formats;
 use custom_formats::ImportReviewView;
@@ -67,10 +67,7 @@ fn extract_spec_labels(json: &str) -> Vec<SpecLabelView> {
                 .unwrap_or("")
                 .to_string();
             let negate = s.get("negate").and_then(|v| v.as_bool()).unwrap_or(false);
-            let required = s
-                .get("required")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let required = s.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
             SpecLabelView {
                 name,
                 implementation,
@@ -199,7 +196,6 @@ pub struct JellyfinTestForm {
     jellyfin_api_key: String,
 }
 
-
 fn normalize_settings_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
         Some("quality") => "quality".to_string(),
@@ -235,9 +231,7 @@ async fn load_custom_formats_view(db: &sqlx::SqlitePool) -> Vec<CustomFormatView
         .collect()
 }
 
-async fn load_groups(
-    db: &sqlx::SqlitePool,
-) -> Vec<group_source_map::GroupSourceEntry> {
+async fn load_groups(db: &sqlx::SqlitePool) -> Vec<group_source_map::GroupSourceEntry> {
     group_source_map::list_all(db).await.unwrap_or_default()
 }
 
@@ -245,10 +239,10 @@ async fn load_groups(
 /// Threshold of 2 matches `compute_suggestions`' docstring rationale: a
 /// single override is noise, two matching overrides is the smallest
 /// pattern worth surfacing.
-async fn load_suggestions(
-    db: &sqlx::SqlitePool,
-) -> Vec<group_source_map::GroupSuggestion> {
-    group_source_map::compute_suggestions(db, 2).await.unwrap_or_default()
+async fn load_suggestions(db: &sqlx::SqlitePool) -> Vec<group_source_map::GroupSuggestion> {
+    group_source_map::compute_suggestions(db, 2)
+        .await
+        .unwrap_or_default()
 }
 
 /// Validate a form-submitted source string by round-tripping through
@@ -379,20 +373,27 @@ pub async fn settings_submit(
     // every settings save. `existing_cfg` feeds `force_mal_fallback`,
     // `force_kitsu_fallback`, the legacy quality tier columns, and
     // `auto_grab_on_add` / `allow_non_english` below.
-    let existing_cfg = config::get_config(&state.db)
-        .await
-        .ok()
-        .flatten();
+    let existing_cfg = config::get_config(&state.db).await.ok().flatten();
 
-    let current_force_mal_fallback = existing_cfg.as_ref().map(|cfg| cfg.force_mal_fallback).unwrap_or(false);
-    let current_force_kitsu_fallback = existing_cfg.as_ref().map(|cfg| cfg.force_kitsu_fallback).unwrap_or(false);
+    let current_force_mal_fallback = existing_cfg
+        .as_ref()
+        .map(|cfg| cfg.force_mal_fallback)
+        .unwrap_or(false);
+    let current_force_kitsu_fallback = existing_cfg
+        .as_ref()
+        .map(|cfg| cfg.force_kitsu_fallback)
+        .unwrap_or(false);
 
     let cfg = config::Config {
         qbit_url: form.qbit_url.trim().to_string(),
         qbit_user: form.qbit_user.trim().to_string(),
         qbit_pass: form.qbit_pass,
         qbit_category: form.qbit_category.trim().to_string(),
-        qbit_download_path: form.qbit_download_path.trim().trim_end_matches('/').to_string(),
+        qbit_download_path: form
+            .qbit_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
         jellyfin_url: form.jellyfin_url.trim().trim_end_matches('/').to_string(),
         jellyfin_api_key: form.jellyfin_api_key.trim().to_string(),
         preferred_groups: form.preferred_groups.trim().to_string(),
@@ -429,33 +430,54 @@ pub async fn settings_submit(
             "move" | "copy" | "hardlink" => form.post_processing_mode,
             _ => "hardlink".to_string(),
         },
-        auto_grab_on_add: existing_cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true),
+        auto_grab_on_add: existing_cfg
+            .as_ref()
+            .map(|c| c.auto_grab_on_add)
+            .unwrap_or(true),
         prefer_subs: form.prefer_subs == "1",
-        allow_non_english: existing_cfg.as_ref().map(|c| c.allow_non_english).unwrap_or(false),
+        allow_non_english: existing_cfg
+            .as_ref()
+            .map(|c| c.allow_non_english)
+            .unwrap_or(false),
         sonarr_enabled: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
             form.sonarr_enabled.is_some()
         } else {
-            existing_cfg.as_ref().map(|c| c.sonarr_enabled).unwrap_or(false)
+            existing_cfg
+                .as_ref()
+                .map(|c| c.sonarr_enabled)
+                .unwrap_or(false)
         },
         sonarr_api_key: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
             form.sonarr_api_key.unwrap_or_default().trim().to_string()
         } else {
-            existing_cfg.as_ref().map(|c| c.sonarr_api_key.clone()).unwrap_or_default()
+            existing_cfg
+                .as_ref()
+                .map(|c| c.sonarr_api_key.clone())
+                .unwrap_or_default()
         },
         radarr_enabled: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
             form.radarr_enabled.is_some()
         } else {
-            existing_cfg.as_ref().map(|c| c.radarr_enabled).unwrap_or(false)
+            existing_cfg
+                .as_ref()
+                .map(|c| c.radarr_enabled)
+                .unwrap_or(false)
         },
         radarr_api_key: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
             form.radarr_api_key.unwrap_or_default().trim().to_string()
         } else {
-            existing_cfg.as_ref().map(|c| c.radarr_api_key.clone()).unwrap_or_default()
+            existing_cfg
+                .as_ref()
+                .map(|c| c.radarr_api_key.clone())
+                .unwrap_or_default()
         },
         upgrade_search_enabled: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
             form.upgrade_search_enabled.is_some()
         } else {
-            existing_cfg.as_ref().map(|c| c.upgrade_search_enabled).unwrap_or(false)
+            existing_cfg
+                .as_ref()
+                .map(|c| c.upgrade_search_enabled)
+                .unwrap_or(false)
         },
         // Carried forward from the existing row — edited via the
         // dedicated Custom Formats tab's minimum-score form, not here.
@@ -466,26 +488,50 @@ pub async fn settings_submit(
         seadex_enabled: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
             form.seadex_enabled.is_some()
         } else {
-            existing_cfg.as_ref().map(|c| c.seadex_enabled).unwrap_or(false)
+            existing_cfg
+                .as_ref()
+                .map(|c| c.seadex_enabled)
+                .unwrap_or(false)
         },
         // #23 — Search defaults live on the Quality tab alongside the
         // other search-scoped knobs. Preserve on other-tab saves.
-        default_custom_query_tokens: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
-            form.default_custom_query_tokens.unwrap_or_default().trim().to_string()
+        default_custom_query_tokens: if form.tab.as_deref() == Some("quality") || form.tab.is_none()
+        {
+            form.default_custom_query_tokens
+                .unwrap_or_default()
+                .trim()
+                .to_string()
         } else {
-            existing_cfg.as_ref().map(|c| c.default_custom_query_tokens.clone()).unwrap_or_default()
+            existing_cfg
+                .as_ref()
+                .map(|c| c.default_custom_query_tokens.clone())
+                .unwrap_or_default()
         },
-        default_restrict_to_uploader: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
-            form.default_restrict_to_uploader.unwrap_or_default().trim().to_string()
+        default_restrict_to_uploader: if form.tab.as_deref() == Some("quality")
+            || form.tab.is_none()
+        {
+            form.default_restrict_to_uploader
+                .unwrap_or_default()
+                .trim()
+                .to_string()
         } else {
-            existing_cfg.as_ref().map(|c| c.default_restrict_to_uploader.clone()).unwrap_or_default()
+            existing_cfg
+                .as_ref()
+                .map(|c| c.default_restrict_to_uploader.clone())
+                .unwrap_or_default()
         },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());
 
     if let Err(e) = config::save_config(&state.db, &cfg).await {
-        logger::error(&state.db, LogCategory::System, "Failed to save settings", &e.to_string()).await;
+        logger::error(
+            &state.db,
+            LogCategory::System,
+            "Failed to save settings",
+            &e.to_string(),
+        )
+        .await;
         let groups = load_groups(&state.db).await;
         let suggestions = load_suggestions(&state.db).await;
         let custom_formats = load_custom_formats_view(&state.db).await;
@@ -511,10 +557,21 @@ pub async fn settings_submit(
 
     if active_tab == "integrations" {
         if !cfg.qbit_url.is_empty() {
-            let client = QbitClient::new(&cfg.qbit_url, &cfg.qbit_user, &cfg.qbit_pass, &cfg.qbit_category);
+            let client = QbitClient::new(
+                &cfg.qbit_url,
+                &cfg.qbit_user,
+                &cfg.qbit_pass,
+                &cfg.qbit_category,
+            );
             match client.test_connection().await {
                 Ok(version) => {
-                    logger::info(&state.db, LogCategory::QBit, &format!("Connected to qBittorrent {}", version), &cfg.qbit_url).await;
+                    logger::info(
+                        &state.db,
+                        LogCategory::QBit,
+                        &format!("Connected to qBittorrent {}", version),
+                        &cfg.qbit_url,
+                    )
+                    .await;
                     notices.push(format!("qBittorrent connected ({}).", version));
                     *state.qbit.write().await = Some(client);
                 }
@@ -529,18 +586,24 @@ pub async fn settings_submit(
         }
 
         if !cfg.jellyfin_url.is_empty() && !cfg.jellyfin_api_key.is_empty() {
-            let client = JellyfinClient::new(
-                &cfg.jellyfin_url,
-                &cfg.jellyfin_api_key,
-            );
+            let client = JellyfinClient::new(&cfg.jellyfin_url, &cfg.jellyfin_api_key);
             match client.test_connection().await {
                 Ok(info) => {
                     let label = if info.server_name.trim().is_empty() {
                         format!("Jellyfin ({})", info.version)
                     } else {
-                        format!("Jellyfin {} ({}) connected.", info.server_name, info.version)
+                        format!(
+                            "Jellyfin {} ({}) connected.",
+                            info.server_name, info.version
+                        )
                     };
-                    logger::info(&state.db, LogCategory::Jellyfin, &format!("{} connected", label), &cfg.jellyfin_url).await;
+                    logger::info(
+                        &state.db,
+                        LogCategory::Jellyfin,
+                        &format!("{} connected", label),
+                        &cfg.jellyfin_url,
+                    )
+                    .await;
                     notices.push(label);
                     *state.jellyfin.write().await = Some(client);
                 }
@@ -555,7 +618,10 @@ pub async fn settings_submit(
         }
 
         if !cfg.media_root.is_empty() && !std::path::Path::new(&cfg.media_root).is_dir() {
-            notices.push(format!("Warning: media root '{}' is not accessible.", cfg.media_root));
+            notices.push(format!(
+                "Warning: media root '{}' is not accessible.",
+                cfg.media_root
+            ));
         }
     }
 
@@ -678,7 +744,6 @@ pub async fn settings_groups_delete(
     Redirect::to("/settings?tab=groups")
 }
 
-
 #[utoipa::path(
     post,
     path = "/api/qbit/test",
@@ -702,8 +767,13 @@ pub async fn qbit_test(
     );
 
     match client.test_connection().await {
-        Ok(version) => Ok(Json(serde_json::json!({"ok": true, "message": format!("Connected to qBittorrent {}", version)}))),
-        Err(err) => Err((axum::http::StatusCode::BAD_GATEWAY, serde_json::json!({"ok": false, "message": err}).to_string())),
+        Ok(version) => Ok(Json(
+            serde_json::json!({"ok": true, "message": format!("Connected to qBittorrent {}", version)}),
+        )),
+        Err(err) => Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            serde_json::json!({"ok": false, "message": err}).to_string(),
+        )),
     }
 }
 
@@ -722,10 +792,7 @@ pub async fn qbit_test(
 pub async fn jellyfin_test(
     Json(form): Json<JellyfinTestForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = JellyfinClient::new(
-        form.jellyfin_url.trim(),
-        &form.jellyfin_api_key,
-    );
+    let client = JellyfinClient::new(form.jellyfin_url.trim(), &form.jellyfin_api_key);
 
     match client.test_connection().await {
         Ok(info) => Ok(Json(serde_json::json!({
@@ -736,7 +803,10 @@ pub async fn jellyfin_test(
                 format!("Connected to Jellyfin {} ({})", info.server_name, info.version)
             }
         }))),
-        Err(err) => Err((axum::http::StatusCode::BAD_GATEWAY, serde_json::json!({"ok": false, "message": err}).to_string())),
+        Err(err) => Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            serde_json::json!({"ok": false, "message": err}).to_string(),
+        )),
     }
 }
 
@@ -750,14 +820,14 @@ pub async fn jellyfin_test(
         (status = 200, description = "Health status", body = serde_json::Value),
     ),
 )]
-pub async fn api_health(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let qbit_status = {
         let client = state.qbit.read().await.clone();
         match client {
             Some(c) => match c.test_connection().await {
-                Ok(version) => serde_json::json!({"ok": true, "message": format!("qBittorrent {}", version)}),
+                Ok(version) => {
+                    serde_json::json!({"ok": true, "message": format!("qBittorrent {}", version)})
+                }
                 Err(e) => serde_json::json!({"ok": false, "message": e}),
             },
             None => serde_json::json!({"ok": false, "message": "Not configured"}),
@@ -807,7 +877,10 @@ pub async fn jellyfin_refresh(
         let jellyfin = state.jellyfin.read().await;
         jellyfin
             .as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "Jellyfin not configured".to_string()))?
+            .ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "Jellyfin not configured".to_string(),
+            ))?
             .clone()
     };
 
@@ -816,13 +889,14 @@ pub async fn jellyfin_refresh(
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
-    Ok(Json(serde_json::json!({"ok": true, "message": "Jellyfin library refresh queued"})))
+    Ok(Json(
+        serde_json::json!({"ok": true, "message": "Jellyfin library refresh queued"}),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     /// A Sonarr/Trash Guides CF that carries a `trash_description`
     /// should be surfaced verbatim so the edit drawer can render it.

@@ -25,9 +25,9 @@ use sqlx::SqlitePool;
 
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, grabbed_torrents, series};
-use crate::services::{anilist, auto_search, logger, media, metadata_sync};
 use crate::services::anilist::AnimeDetail;
 use crate::services::source::ClassificationResult;
+use crate::services::{anilist, auto_search, logger, media, metadata_sync};
 
 /// Grab-time context threaded through the auto-expand path so each
 /// detected sibling gets its own `episode_quality_tags` +
@@ -67,7 +67,10 @@ pub async fn expand_from_files(
             db,
             LogCategory::Library,
             "Auto-expand: skipping sibling detection, parent has no AniList id",
-            &format!("parent_series_id={}, torrent='{}'", parent_series_id, torrent_title),
+            &format!(
+                "parent_series_id={}, torrent='{}'",
+                parent_series_id, torrent_title
+            ),
         )
         .await;
         return 0;
@@ -118,44 +121,40 @@ pub async fn expand_from_files(
         walk_ids.push(rel.id);
         walk_id_to_type.insert(rel.id, rel.relation_type.clone());
     }
-    let neighbor_details: std::collections::HashMap<i64, anilist::AnimeDetail> = if walk_ids
-        .is_empty()
-    {
-        std::collections::HashMap::new()
-    } else {
-        match anilist::get_anime_details_batch(&walk_ids).await {
-            Ok(map) => map,
-            Err(e) => {
-                tracing::debug!(
-                    "auto-expand: transitive neighbor batch fetch failed err={}",
-                    e
-                );
-                // Recover partial results from DETAIL_CACHE: chunks
-                // that completed before the failure already wrote
-                // their entries (the batch helper aborts on Err but
-                // the writes survive).
-                let mut partial = std::collections::HashMap::new();
-                for rel_id in &walk_ids {
-                    if let Some(detail) = anilist::cached_anime_detail(*rel_id).await {
-                        partial.insert(*rel_id, detail);
-                    }
-                }
-                if !partial.is_empty() {
+    let neighbor_details: std::collections::HashMap<i64, anilist::AnimeDetail> =
+        if walk_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            match anilist::get_anime_details_batch(&walk_ids).await {
+                Ok(map) => map,
+                Err(e) => {
                     tracing::debug!(
-                        "auto-expand: recovered {} partial neighbor(s) from DETAIL_CACHE",
-                        partial.len()
+                        "auto-expand: transitive neighbor batch fetch failed err={}",
+                        e
                     );
+                    // Recover partial results from DETAIL_CACHE: chunks
+                    // that completed before the failure already wrote
+                    // their entries (the batch helper aborts on Err but
+                    // the writes survive).
+                    let mut partial = std::collections::HashMap::new();
+                    for rel_id in &walk_ids {
+                        if let Some(detail) = anilist::cached_anime_detail(*rel_id).await {
+                            partial.insert(*rel_id, detail);
+                        }
+                    }
+                    if !partial.is_empty() {
+                        tracing::debug!(
+                            "auto-expand: recovered {} partial neighbor(s) from DETAIL_CACHE",
+                            partial.len()
+                        );
+                    }
+                    partial
                 }
-                partial
             }
-        }
-    };
+        };
     for rel_id in &walk_ids {
         if !neighbor_details.contains_key(rel_id) {
-            let rel_type = walk_id_to_type
-                .get(rel_id)
-                .cloned()
-                .unwrap_or_default();
+            let rel_type = walk_id_to_type.get(rel_id).cloned().unwrap_or_default();
             tracing::debug!(
                 "auto-expand: transitive neighbor missing from batch rel_id={} rel_type={}",
                 rel_id,
@@ -265,12 +264,9 @@ pub async fn expand_from_files(
                         .flatten()
                         .map(|c| c.force_mal_fallback)
                         .unwrap_or(false);
-                    let _ = metadata_sync::refresh_series_metadata(
-                        &db_clone,
-                        &tracked,
-                        force_fallback,
-                    )
-                    .await;
+                    let _ =
+                        metadata_sync::refresh_series_metadata(&db_clone, &tracked, force_fallback)
+                            .await;
                 }
             });
         }
@@ -285,12 +281,13 @@ pub async fn expand_from_files(
         let mut ep_nums: Vec<i32> = Vec::new();
         for &file_idx in &sibling.file_indices {
             if let Some(name) = filenames.get(file_idx)
-                && let Some((_, raw)) = media::parse_episode_number(&name.to_lowercase()) {
-                    let effective = raw - sibling.episode_offset;
-                    if effective > 0 {
-                        ep_nums.push(effective);
-                    }
+                && let Some((_, raw)) = media::parse_episode_number(&name.to_lowercase())
+            {
+                let effective = raw - sibling.episode_offset;
+                if effective > 0 {
+                    ep_nums.push(effective);
                 }
+            }
         }
         ep_nums.sort_unstable();
         ep_nums.dedup();
@@ -429,18 +426,19 @@ pub async fn expand_from_files(
     }
 
     if !routes.is_empty()
-        && let Err(e) = grabbed_torrents::record_grab_series_routes(db, &routes).await {
-            logger::warn(
-                db,
-                LogCategory::Library,
-                &format!(
-                    "auto-expand: failed to write route rows for '{}'",
-                    torrent_title
-                ),
-                &e.to_string(),
-            )
-            .await;
-        }
+        && let Err(e) = grabbed_torrents::record_grab_series_routes(db, &routes).await
+    {
+        logger::warn(
+            db,
+            LogCategory::Library,
+            &format!(
+                "auto-expand: failed to write route rows for '{}'",
+                torrent_title
+            ),
+            &e.to_string(),
+        )
+        .await;
+    }
 
     logger::info(
         db,
@@ -684,9 +682,11 @@ mod tests {
         .expect("grab inserted");
 
         let mut parent_detail = empty_anime_detail(21262, "Owarimonogatari", Some(12));
-        parent_detail
-            .relations
-            .push(related_entry(21745, "Owarimonogatari Second Season", Some(7)));
+        parent_detail.relations.push(related_entry(
+            21745,
+            "Owarimonogatari Second Season",
+            Some(7),
+        ));
 
         // 13 parent files + 7 sibling files. Parent caller passes
         // 1..=12 (AL's count), so E13 is the overflow case we want to

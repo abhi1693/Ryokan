@@ -186,5 +186,4 @@ mod tests {
         assert_eq!(cls.evidence.source, Source::Web);
         assert!((cls.evidence.confidence - 0.80).abs() < f32::EPSILON);
     }
-
 }

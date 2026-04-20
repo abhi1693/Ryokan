@@ -7,21 +7,19 @@
 //! same request flow shape: form-extract → validate → DB write → log → JSON
 //! response.
 
-use axum::{
-    extract::State,
-    response::Json,
-};
+use axum::{extract::State, response::Json};
 
+use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, grabbed_torrents, monitoring, series};
 use crate::services::{logger, media, metadata_sync, monitoring as monitoring_service};
-use crate::AppState;
 
 use super::reconcile::reconcile_all_fallback_entries;
-use super::search::{auto_search_series, AutoSearchQuery};
+use super::search::{AutoSearchQuery, auto_search_series};
 use super::{
-    AddSeriesForm, RemoveSeriesForm, SetAllowUpgradesForm, SetEpisodeMonitoringForm,
-    SetFolderForm, SetManualOverrideForm, SetMonitoringForm, SetSearchOverridesForm,
+    AddSeriesForm, ReclassifyEpisodeForm, RemoveSeriesForm, SetAllowUpgradesForm,
+    SetEpisodeMonitoringForm, SetFolderForm, SetManualOverrideForm, SetMonitoringForm,
+    SetSearchOverridesForm,
 };
 
 #[utoipa::path(
@@ -67,9 +65,17 @@ pub async fn add_series(
     logger::info(
         &state.db,
         LogCategory::Library,
-        &format!("{} library entry: {}", if created { "Added" } else { "Updated" }, form.title),
-        &format!("id={}, anilist_id={}, mal_id={:?}, format={}, episodes={:?}", id, form.anilist_id, form.mal_id, form.format, form.episodes),
-    ).await;
+        &format!(
+            "{} library entry: {}",
+            if created { "Added" } else { "Updated" },
+            form.title
+        ),
+        &format!(
+            "id={}, anilist_id={}, mal_id={:?}, format={}, episodes={:?}",
+            id, form.anilist_id, form.mal_id, form.format, form.episodes
+        ),
+    )
+    .await;
 
     if let Ok(Some(tracked)) = series::get_by_id(&state.db, id).await {
         let db_clone = state.db.clone();
@@ -81,28 +87,75 @@ pub async fn add_series(
                 .flatten()
                 .map(|c| c.force_mal_fallback)
                 .unwrap_or(false);
-            match metadata_sync::refresh_series_metadata(&db_clone, &tracked_clone, force_fallback).await {
+            match metadata_sync::refresh_series_metadata(&db_clone, &tracked_clone, force_fallback)
+                .await
+            {
                 Ok(detail) => {
                     logger::info(
                         &db_clone,
                         LogCategory::AniList,
                         &format!("Hydrated local metadata for {}", tracked_clone.title),
-                        &format!("provider_id={}, mal_id={:?}, episodes={:?}", detail.id, detail.id_mal, detail.episodes),
-                    ).await;
+                        &format!(
+                            "provider_id={}, mal_id={:?}, episodes={:?}",
+                            detail.id, detail.id_mal, detail.episodes
+                        ),
+                    )
+                    .await;
                 }
                 Err(err) => {
                     logger::warn(
                         &db_clone,
                         LogCategory::AniList,
-                        &format!("Failed to hydrate local metadata for {}", tracked_clone.title),
+                        &format!(
+                            "Failed to hydrate local metadata for {}",
+                            tracked_clone.title
+                        ),
                         &err,
-                    ).await;
+                    )
+                    .await;
                 }
+            }
+        });
+
+        // Issue #53: kick off a one-shot classification scan for just
+        // this series. If the user's media root already has files for
+        // this show (pre-existing rip, manual drop, migration from
+        // another PVR), they otherwise sit as UNKNOWN until the next
+        // 6-hour `library_classify` sweep. The per-series scan reuses
+        // the same enumeration + classify pipeline as the periodic
+        // task, just scoped to the new id, and `stamp_classification_attempted`
+        // ensures a row that classifies as UNKNOWN doesn't get
+        // re-attempted on every future sweep.
+        let scan_state = state.clone();
+        let scan_title = tracked.title.clone();
+        let scan_id = id;
+        tokio::spawn(async move {
+            let report = crate::services::post_processing::scan_series_for_unclassified(
+                &scan_state,
+                scan_id,
+            )
+            .await;
+            // Only log when the scan actually did work — a typical add
+            // (no pre-existing files) returns zeros and would just spam
+            // the log with "Scanned 0 files for X" on every import.
+            if report.files_scanned > 0 {
+                logger::info(
+                    &scan_state.db,
+                    LogCategory::Library,
+                    &format!("Initial classify scan for {}", scan_title),
+                    &format!(
+                        "files_scanned={}, classified={}, needs_review={}",
+                        report.files_scanned, report.files_classified, report.files_needing_review,
+                    ),
+                )
+                .await;
             }
         });
     }
 
-    let monitor = monitoring_service::recompute_series_monitoring(&state.db, id).await.ok();
+    let monitor = monitoring_service::recompute_series_monitoring(&state.db, id)
+        .await
+        .ok();
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -133,8 +186,12 @@ pub async fn reconcile_fallbacks(
         &state.db,
         LogCategory::AniList,
         "Fallback reconciliation complete",
-        &format!("checked={}, upgraded={}, failed={}", report.checked, report.upgraded, report.failed),
-    ).await;
+        &format!(
+            "checked={}, upgraded={}, failed={}",
+            report.checked, report.upgraded, report.failed
+        ),
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "checked": report.checked,
@@ -212,87 +269,92 @@ pub async fn remove_series(
     let mut folder_status: &'static str = "skipped";
     let mut folder_detail: String = String::new();
 
-    if delete_files
-        && let Some(ref tracked) = tracked {
-            // 1. Tell qBittorrent to drop every torrent (with files) we ever
-            //    grabbed for this series.
-            let hashes = match grabbed_torrents::get_all_for_series(&state.db, series_id).await {
-                Ok(h) => h,
-                Err(e) => {
-                    return Err(fail_with(&state.db, series_id, "list_grabbed_torrents", e.to_string()).await);
-                }
-            };
+    if delete_files && let Some(ref tracked) = tracked {
+        // 1. Tell qBittorrent to drop every torrent (with files) we ever
+        //    grabbed for this series.
+        let hashes = match grabbed_torrents::get_all_for_series(&state.db, series_id).await {
+            Ok(h) => h,
+            Err(e) => {
+                return Err(fail_with(
+                    &state.db,
+                    series_id,
+                    "list_grabbed_torrents",
+                    e.to_string(),
+                )
+                .await);
+            }
+        };
 
-            if !hashes.is_empty() {
-                let qbit_opt = state.qbit.read().await.clone();
-                if let Some(qbit) = qbit_opt {
-                    for (_id, hash) in &hashes {
-                        if hash.is_empty() {
-                            continue;
-                        }
-                        match qbit.delete_torrent(hash, true).await {
-                            Ok(()) => torrents_removed += 1,
-                            Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
-                        }
+        if !hashes.is_empty() {
+            let qbit_opt = state.qbit.read().await.clone();
+            if let Some(qbit) = qbit_opt {
+                for (_id, hash) in &hashes {
+                    if hash.is_empty() {
+                        continue;
                     }
-                } else {
-                    torrent_failures.push("qBittorrent client not configured".to_string());
+                    match qbit.delete_torrent(hash, true).await {
+                        Ok(()) => torrents_removed += 1,
+                        Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
+                    }
                 }
+            } else {
+                torrent_failures.push("qBittorrent client not configured".to_string());
             }
+        }
 
-            // 2. Drop the grabbed_torrents rows for this series so the table
-            //    doesn't accumulate stale references to hashes qBit just
-            //    forgot about.
-            if let Err(err) = grabbed_torrents::delete_all_for_series(&state.db, series_id).await {
-                torrent_failures.push(format!("clear grabbed_torrents: {}", err));
-            }
+        // 2. Drop the grabbed_torrents rows for this series so the table
+        //    doesn't accumulate stale references to hashes qBit just
+        //    forgot about.
+        if let Err(err) = grabbed_torrents::delete_all_for_series(&state.db, series_id).await {
+            torrent_failures.push(format!("clear grabbed_torrents: {}", err));
+        }
 
-            // 3. Delete the series media folder. Canonicalize + assert under
-            //    the configured media root before recursing.
-            let cfg_opt = config::get_config(&state.db).await.ok().flatten();
-            if let Some(cfg) = cfg_opt
-                && !tracked.folder_name.trim().is_empty() && !cfg.media_root.trim().is_empty() {
-                    let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
-                    match tokio::fs::canonicalize(&cfg.media_root).await {
-                        Ok(media_root_canon) => {
-                            match tokio::fs::canonicalize(&series_dir).await {
-                                Ok(series_canon) if series_canon.starts_with(&media_root_canon) => {
-                                    match tokio::fs::remove_dir_all(&series_canon).await {
-                                        Ok(()) => {
-                                            folder_status = "removed";
-                                            folder_detail = series_canon.display().to_string();
-                                        }
-                                        Err(err) => {
-                                            folder_status = "error";
-                                            folder_detail = format!("{}: {}", series_canon.display(), err);
-                                        }
-                                    }
-                                }
-                                Ok(other) => {
-                                    folder_status = "refused";
-                                    folder_detail = format!(
-                                        "resolves outside media root: {} -> {}",
-                                        series_dir.display(),
-                                        other.display()
-                                    );
-                                }
-                                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                                    folder_status = "missing";
-                                    folder_detail = series_dir.display().to_string();
-                                }
-                                Err(err) => {
-                                    folder_status = "error";
-                                    folder_detail = format!("{}: {}", series_dir.display(), err);
-                                }
+        // 3. Delete the series media folder. Canonicalize + assert under
+        //    the configured media root before recursing.
+        let cfg_opt = config::get_config(&state.db).await.ok().flatten();
+        if let Some(cfg) = cfg_opt
+            && !tracked.folder_name.trim().is_empty()
+            && !cfg.media_root.trim().is_empty()
+        {
+            let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
+            match tokio::fs::canonicalize(&cfg.media_root).await {
+                Ok(media_root_canon) => match tokio::fs::canonicalize(&series_dir).await {
+                    Ok(series_canon) if series_canon.starts_with(&media_root_canon) => {
+                        match tokio::fs::remove_dir_all(&series_canon).await {
+                            Ok(()) => {
+                                folder_status = "removed";
+                                folder_detail = series_canon.display().to_string();
+                            }
+                            Err(err) => {
+                                folder_status = "error";
+                                folder_detail = format!("{}: {}", series_canon.display(), err);
                             }
                         }
-                        Err(err) => {
-                            folder_status = "error";
-                            folder_detail = format!("media_root canonicalize: {}", err);
-                        }
                     }
+                    Ok(other) => {
+                        folder_status = "refused";
+                        folder_detail = format!(
+                            "resolves outside media root: {} -> {}",
+                            series_dir.display(),
+                            other.display()
+                        );
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        folder_status = "missing";
+                        folder_detail = series_dir.display().to_string();
+                    }
+                    Err(err) => {
+                        folder_status = "error";
+                        folder_detail = format!("{}: {}", series_dir.display(), err);
+                    }
+                },
+                Err(err) => {
+                    folder_status = "error";
+                    folder_detail = format!("media_root canonicalize: {}", err);
                 }
+            }
         }
+    }
 
     // 4. Remove the DB tracking rows. This is the irreversible step, so
     //    do it last — if filesystem cleanup blew up the operator can
@@ -333,7 +395,11 @@ pub async fn remove_series(
             delete_files,
             torrents_removed,
             folder_status,
-            if safe_folder_detail.is_empty() { String::new() } else { format!(" ({})", safe_folder_detail) },
+            if safe_folder_detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", safe_folder_detail)
+            },
             if safe_torrent_failures.is_empty() {
                 String::new()
             } else {
@@ -411,8 +477,14 @@ pub async fn set_monitoring(
         &state.db,
         LogCategory::Library,
         &format!("Updated monitoring for series {}", series_id),
-        &format!("mode={}, monitored={}/{}", summary.mode.as_str(), summary.monitored_count, summary.total_count),
-    ).await;
+        &format!(
+            "mode={}, monitored={}/{}",
+            summary.mode.as_str(),
+            summary.monitored_count,
+            summary.total_count
+        ),
+    )
+    .await;
 
     // Auto-grab monitored episodes if requested (e.g. after initial add).
     if form.auto_grab.unwrap_or(false)
@@ -436,7 +508,8 @@ pub async fn set_monitoring(
                     axum::extract::State(state_clone),
                     axum::extract::Path(series_id),
                     axum::extract::Query(AutoSearchQuery::default()),
-                ).await;
+                )
+                .await;
             });
         }
     }
@@ -466,9 +539,14 @@ pub async fn set_episode_monitoring(
     State(state): State<AppState>,
     Json(form): Json<SetEpisodeMonitoringForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    monitoring::set_episode_monitored(&state.db, form.series_id, form.episode_number, form.monitored)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    monitoring::set_episode_monitored(
+        &state.db,
+        form.series_id,
+        form.episode_number,
+        form.monitored,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "episode_number": form.episode_number,
@@ -500,9 +578,13 @@ pub async fn set_allow_upgrades(
     logger::info(
         &state.db,
         LogCategory::Library,
-        &format!("Upgrade opt-in for series {} set to {}", form.series_id, form.allow),
+        &format!(
+            "Upgrade opt-in for series {} set to {}",
+            form.series_id, form.allow
+        ),
         "",
-    ).await;
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
@@ -546,7 +628,8 @@ pub async fn set_search_overrides(
             form.custom_query_tokens.trim(),
             form.restrict_to_uploader.trim(),
         ),
-    ).await;
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
@@ -624,9 +707,13 @@ pub async fn set_manual_override(
     logger::info(
         &state.db,
         LogCategory::Library,
-        &format!("Manual override {} for series {} ep {}", action, form.series_id, form.episode_number),
+        &format!(
+            "Manual override {} for series {} ep {}",
+            action, form.series_id, form.episode_number
+        ),
         "",
-    ).await;
+    )
+    .await;
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -635,6 +722,232 @@ pub async fn set_manual_override(
         "source": source_str,
         "resolution": resolution_str,
         "is_remux": form.is_remux,
+    })))
+}
+
+/// Re-run the full-pipeline classifier against a single episode on demand.
+///
+/// Useful when the user has just edited `group_source_map` or changed a
+/// custom format and wants to see the new verdict without waiting up to
+/// 6 hours for the next `library_classify` sweep. Runs the same
+/// `classify_post_download` + persist path as the sweep, but scoped to
+/// one (series, episode) pair. Respects `manual_override` — returns
+/// 409 if the row is pinned so the caller can decide whether to clear
+/// the override first.
+#[utoipa::path(
+    post,
+    path = "/api/library/reclassify-episode",
+    tag = "Library",
+    summary = "Re-classify a single episode",
+    description = "Run the full-pipeline classifier against the on-disk file for one episode, bypassing the six-hour sweep cadence and the #53 attempted-at skip rule. Will not overwrite a manually-pinned row — clear the override first if you want to force a re-classify.",
+    request_body = ReclassifyEpisodeForm,
+    responses(
+        (status = 200, description = "Classification applied", body = serde_json::Value),
+        (status = 404, description = "Series or on-disk file not found"),
+        (status = 409, description = "Episode is pinned via manual_override"),
+        (status = 500, description = "Database or classifier error"),
+    ),
+)]
+pub async fn reclassify_episode(
+    State(state): State<AppState>,
+    Json(form): Json<ReclassifyEpisodeForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use crate::services::source::{self, SeriesContext};
+    use std::path::Path;
+
+    let series_row = series::get_by_id(&state.db, form.series_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("series {} not found", form.series_id),
+        ))?;
+
+    // Honor user-pinned rows — a re-classify would silently be a no-op
+    // against `manual_override = 1` thanks to the COALESCE guard in
+    // `update_classification`, and that's more confusing than a hard
+    // 409. Caller clears the override first if they want to reclassify.
+    let existing_tags = episode_tags::get_for_series(&state.db, form.series_id)
+        .await
+        .unwrap_or_default();
+    if existing_tags
+        .get(&form.episode_number)
+        .map(|t| t.manual_override)
+        .unwrap_or(false)
+    {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "episode is pinned via manual override — clear the override first to re-classify"
+                .to_string(),
+        ));
+    }
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "config not initialized".to_string(),
+        ))?;
+
+    if series_row.folder_name.is_empty() || cfg.media_root.is_empty() {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "series has no on-disk folder yet".to_string(),
+        ));
+    }
+
+    let disk_files = media::scan_series_folder(&cfg.media_root, &series_row.folder_name);
+    let file = disk_files
+        .iter()
+        .find(|f| {
+            // Same season filter as `build_episodes`'s main pass —
+            // season 1 or unseasoned only.
+            let season_ok = match f.season_number {
+                Some(s) => s == 1,
+                None => true,
+            };
+            season_ok && f.episode_number == form.episode_number
+        })
+        .ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            format!(
+                "no file on disk for episode {} — import or download it first",
+                form.episode_number
+            ),
+        ))?;
+
+    let series_root = Path::new(&cfg.media_root).join(&series_row.folder_name);
+    let file_path = series_root.join(&file.filename);
+    if !file_path.exists() {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("file disappeared before classify: {}", file_path.display()),
+        ));
+    }
+
+    // Same L1-title precedence as `scan_library_for_unclassified`:
+    // prefer the original torrent name so release tags stripped from
+    // the post-import filename still feed the filename layer, fall
+    // back to the on-disk name for externally-imported files.
+    let imported_grabs = grabbed_torrents::imported_grabs_for_series(&state.db, form.series_id)
+        .await
+        .unwrap_or_default();
+    let classify_title = imported_grabs
+        .iter()
+        .find(|(_, eps)| eps.contains(&form.episode_number))
+        .map(|(name, _)| name.clone())
+        .or_else(|| imported_grabs.first().map(|(n, _)| n.clone()))
+        .unwrap_or_else(|| file.filename.clone());
+
+    let is_batch =
+        grabbed_torrents::get_is_batch_by_name(&state.db, form.series_id, &classify_title)
+            .await
+            .unwrap_or(false);
+
+    let result = source::classify_post_download(
+        &state.db,
+        &file_path,
+        Some(&series_root),
+        &classify_title,
+        Some(SeriesContext {
+            status: &series_row.status,
+            season_year: series_row.season_year,
+            end_year: series_row.end_year,
+        }),
+        is_batch,
+    )
+    .await;
+
+    // Persist via the same branching as the post-download / scan paths:
+    // UPDATE when a row exists, UPSERT via record_grab otherwise.
+    let row_exists = existing_tags.contains_key(&form.episode_number);
+    if row_exists {
+        episode_tags::update_classification(
+            &state.db,
+            form.series_id,
+            form.episode_number,
+            &result,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        let file_size = tokio::fs::metadata(&file_path)
+            .await
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+        episode_tags::record_grab(
+            &state.db,
+            form.series_id,
+            form.episode_number,
+            &result,
+            &classify_title,
+            "",
+            file_size,
+            is_batch,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        episode_tags::stamp_classification_attempted(
+            &state.db,
+            form.series_id,
+            form.episode_number,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // `record_grab` hardcodes state='grabbed' for both the tag and
+        // history rows. The file is already on disk (checked above), so
+        // flip both rows to 'completed' the same way the scan path does
+        // in `services/post_processing.rs::scan_for_unclassified`.
+        // Without this the UI renders a freshly-reclassified
+        // externally-imported episode as download-in-progress until
+        // the next 6h sweep corrects the state.
+        episode_tags::mark_completed(&state.db, form.series_id, &[form.episode_number])
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let imported_basename = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&classify_title)
+            .to_string();
+        episode_tags::mark_grab_history_completed(
+            &state.db,
+            form.series_id,
+            form.episode_number,
+            &imported_basename,
+            file_size,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    let label = result.label();
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!(
+            "Manual re-classify for series {} ep {}: {}",
+            form.series_id, form.episode_number, label
+        ),
+        &format!(
+            "confidence={:.2}, needs_review={}",
+            result.confidence, result.needs_review
+        ),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "series_id": form.series_id,
+        "episode_number": form.episode_number,
+        "quality_tag": label,
+        "source": result.source.as_str(),
+        "resolution": result.resolution.as_str(),
+        "is_remux": result.is_remux,
+        "is_bdmv": result.is_bdmv,
+        "web_kind": result.web_kind.as_str(),
+        "confidence": result.confidence,
+        "needs_review": result.needs_review,
     })))
 }
 

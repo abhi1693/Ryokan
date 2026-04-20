@@ -48,14 +48,12 @@ pub async fn get(db: &SqlitePool, path: &str, mtime: i64, size: i64) -> Option<S
     if path.is_empty() {
         return None;
     }
-    let row = sqlx::query(
-        "SELECT mtime, size, probe_json FROM media_probe_cache WHERE path = ?",
-    )
-    .bind(path)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten()?;
+    let row = sqlx::query("SELECT mtime, size, probe_json FROM media_probe_cache WHERE path = ?")
+        .bind(path)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()?;
 
     let cached_mtime: i64 = row.get("mtime");
     let cached_size: i64 = row.get("size");
@@ -103,11 +101,9 @@ pub async fn upsert(db: &SqlitePool, path: &str, mtime: i64, size: i64, probe_js
 /// common case is still a cache hit.
 pub async fn cleanup(db: &SqlitePool, max_age_days: i32) -> Result<u64, sqlx::Error> {
     let cutoff = format!("-{} days", max_age_days);
-    let res = sqlx::query(
-        "DELETE FROM media_probe_cache WHERE cached_at < datetime('now', ?)",
-    )
-    .bind(cutoff)
-    .execute(db)
-    .await?;
+    let res = sqlx::query("DELETE FROM media_probe_cache WHERE cached_at < datetime('now', ?)")
+        .bind(cutoff)
+        .execute(db)
+        .await?;
     Ok(res.rows_affected())
 }

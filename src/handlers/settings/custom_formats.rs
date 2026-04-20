@@ -9,16 +9,16 @@ use std::collections::{HashMap, HashSet};
 
 use askama::Template;
 use axum::{
+    Form,
     extract::{Query, State},
     response::{Html, IntoResponse, Redirect, Response},
-    Form,
 };
 use serde::Deserialize;
 
-use crate::models::{config, custom_formats as cf_model};
-use crate::models::log::LogCategory;
-use crate::services::{custom_formats as cf_service, logger};
 use crate::AppState;
+use crate::models::log::LogCategory;
+use crate::models::{config, custom_formats as cf_model};
+use crate::services::{custom_formats as cf_service, logger};
 
 use super::build_settings_template;
 
@@ -190,11 +190,19 @@ pub async fn settings_custom_formats_upsert(
             Some("Custom Format name cannot be blank."),
         ));
     }
-    let trash_id = form.trash_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let trash_id = form
+        .trash_id
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
     let json_trimmed = form.json.trim();
 
     if let Err(e) = cf_service::compile_from_json(json_trimmed, form.score, form.id.unwrap_or(0)) {
-        return Redirect::to(&cf_redirect(form.id, None, Some(&format!("Parse error: {e}"))));
+        return Redirect::to(&cf_redirect(
+            form.id,
+            None,
+            Some(&format!("Parse error: {e}")),
+        ));
     }
 
     let save_result = if let Some(id) = form.id {
@@ -396,9 +404,7 @@ async fn apply_import_entries(
                 if trimmed.is_empty() {
                     failed += 1;
                     if first_error.is_none() {
-                        first_error = Some(format!(
-                            "'{original_name}': rename target is empty"
-                        ));
+                        first_error = Some(format!("'{original_name}': rename target is empty"));
                     }
                     continue;
                 }
@@ -554,10 +560,8 @@ pub async fn settings_custom_formats_import(
             .into_response();
         }
     };
-    let existing_by_name: HashMap<String, i64> = existing_rows
-        .into_iter()
-        .map(|r| (r.name, r.id))
-        .collect();
+    let existing_by_name: HashMap<String, i64> =
+        existing_rows.into_iter().map(|r| (r.name, r.id)).collect();
 
     let mut collisions: Vec<ImportCollision> = Vec::new();
     let mut preview: Vec<ImportPreviewEntry> = Vec::with_capacity(entries.len());
@@ -568,10 +572,7 @@ pub async fn settings_custom_formats_import(
             .unwrap_or("")
             .trim()
             .to_string();
-        let score = entry
-            .get("score")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
+        let score = entry.get("score").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let specs_count = entry
             .get("specifications")
             .and_then(|v| v.as_array())
@@ -647,10 +648,7 @@ pub async fn settings_custom_formats_import(
 /// Parse the newline-delimited decisions string into a HashMap keyed
 /// by entry index. Unknown actions are mapped to `Skip` (the safest
 /// default) and unknown indices are silently dropped.
-fn parse_collision_decisions(
-    decisions: &str,
-    renames: &str,
-) -> HashMap<usize, CollisionDecision> {
+fn parse_collision_decisions(decisions: &str, renames: &str) -> HashMap<usize, CollisionDecision> {
     let mut rename_map: HashMap<usize, String> = HashMap::new();
     for line in renames.lines() {
         let line = line.trim();
@@ -658,9 +656,10 @@ fn parse_collision_decisions(
             continue;
         }
         if let Some((idx_str, new_name)) = line.split_once(':')
-            && let Ok(idx) = idx_str.trim().parse::<usize>() {
-                rename_map.insert(idx, new_name.trim().to_string());
-            }
+            && let Ok(idx) = idx_str.trim().parse::<usize>()
+        {
+            rename_map.insert(idx, new_name.trim().to_string());
+        }
     }
 
     let mut out: HashMap<usize, CollisionDecision> = HashMap::new();
@@ -678,10 +677,7 @@ fn parse_collision_decisions(
         let decision = match action.trim() {
             "overwrite" => CollisionDecision::Overwrite,
             "rename" => {
-                let new_name = rename_map
-                    .get(&idx)
-                    .cloned()
-                    .unwrap_or_default();
+                let new_name = rename_map.get(&idx).cloned().unwrap_or_default();
                 CollisionDecision::Rename(new_name)
             }
             _ => CollisionDecision::Skip,
@@ -745,10 +741,8 @@ pub async fn settings_custom_formats_import_resolve(
             ));
         }
     };
-    let existing_by_name: HashMap<String, i64> = existing_rows
-        .into_iter()
-        .map(|r| (r.name, r.id))
-        .collect();
+    let existing_by_name: HashMap<String, i64> =
+        existing_rows.into_iter().map(|r| (r.name, r.id)).collect();
 
     let decisions_map = parse_collision_decisions(&form.decisions, &form.renames);
 
@@ -822,10 +816,7 @@ async fn install_defaults_entries_tx(
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let score = entry
-            .get("score")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
+        let score = entry.get("score").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
         let raw_json = entry.to_string();
         if let Err(e) = cf_service::compile_from_json(&raw_json, score, 0) {
@@ -887,9 +878,7 @@ async fn install_default_cfs_core(state: &AppState) -> Result<InstallDefaultsRep
 /// Drop every `defaults`-origin row and reinstall the bundled set in
 /// the SAME transaction, so a mid-loop sqlx error rolls the delete
 /// back too.
-async fn reset_defaults_core(
-    state: &AppState,
-) -> Result<(u64, InstallDefaultsReport), String> {
+async fn reset_defaults_core(state: &AppState) -> Result<(u64, InstallDefaultsReport), String> {
     let entries = parse_default_cf_entries()?;
 
     let mut report = InstallDefaultsReport {
@@ -939,9 +928,7 @@ async fn reset_defaults_core(
         (status = 303, description = "Redirect back to the Custom Formats settings tab"),
     ),
 )]
-pub async fn settings_custom_formats_install_defaults(
-    State(state): State<AppState>,
-) -> Redirect {
+pub async fn settings_custom_formats_install_defaults(State(state): State<AppState>) -> Redirect {
     let report = match install_default_cfs_core(&state).await {
         Ok(r) => r,
         Err(msg) => return Redirect::to(&cf_redirect(None, None, Some(&msg))),
@@ -990,9 +977,7 @@ pub async fn settings_custom_formats_install_defaults(
         (status = 303, description = "Redirect back to the Custom Formats settings tab"),
     ),
 )]
-pub async fn settings_custom_formats_reset_defaults(
-    State(state): State<AppState>,
-) -> Redirect {
+pub async fn settings_custom_formats_reset_defaults(State(state): State<AppState>) -> Redirect {
     let (deleted, report) = match reset_defaults_core(&state).await {
         Ok(pair) => pair,
         Err(msg) => return Redirect::to(&cf_redirect(None, None, Some(&msg))),
@@ -1035,9 +1020,7 @@ pub async fn settings_custom_formats_reset_defaults(
 /// Normalize a parsed CF import payload into a flat list of per-CF
 /// entries. Plan §6.2 requires that every shape Sonarr v4 might emit
 /// imports cleanly.
-fn normalize_cf_import_entries(
-    value: serde_json::Value,
-) -> Result<Vec<serde_json::Value>, String> {
+fn normalize_cf_import_entries(value: serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
     match value {
         serde_json::Value::Array(items) => Ok(items),
         serde_json::Value::Object(ref map) => {
@@ -1046,8 +1029,7 @@ fn normalize_cf_import_entries(
                     serde_json::Value::Array(items) => Ok(items.clone()),
                     serde_json::Value::Object(_) => Ok(vec![inner.clone()]),
                     _ => Err(
-                        "Import failed: `custom_formats` must be an object or array."
-                            .to_string(),
+                        "Import failed: `custom_formats` must be an object or array.".to_string(),
                     ),
                 }
             } else {
@@ -1366,7 +1348,10 @@ mod tests {
     #[test]
     fn import_summary_shapes_by_counter_combinations() {
         assert_eq!(import_summary(0, 0, 0, None), "Nothing to import.");
-        assert_eq!(import_summary(3, 0, 0, None), "Imported 3 Custom Format(s).");
+        assert_eq!(
+            import_summary(3, 0, 0, None),
+            "Imported 3 Custom Format(s)."
+        );
         assert_eq!(
             import_summary(2, 1, 0, None),
             "Imported 2, skipped 1 on collision."

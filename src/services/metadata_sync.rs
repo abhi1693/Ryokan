@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use sqlx::SqlitePool;
 
-use crate::models::{config, local_metadata, metadata_cache, series};
 use crate::models::log::LogCategory;
+use crate::models::{config, local_metadata, metadata_cache, series};
 use crate::services::{anilist, artwork, jikan, kitsu, logger};
 
 const MAX_RELATION_TREE_NODES: usize = 64;
@@ -131,7 +131,6 @@ async fn fetch_live_detail_for_ids(
     anilist::get_anime_detail_with_options(provider_id, mal_id, force_mal_fallback).await
 }
 
-
 fn episode_needs_kitsu_backfill<F>(ep_count: i32, mut has_jikan_title: F) -> bool
 where
     F: FnMut(i32) -> bool,
@@ -169,15 +168,17 @@ async fn build_episode_cache(
         detail.title_native.clone(),
     ];
     let should_try_kitsu = ep_count > 1
-        && (force_kitsu_fallback || episode_needs_kitsu_backfill(ep_count, |ep_num| {
-            jikan_eps
-                .get(&ep_num)
-                .map(|info| !info.title.trim().is_empty())
-                .unwrap_or(false)
-        }));
+        && (force_kitsu_fallback
+            || episode_needs_kitsu_backfill(ep_count, |ep_num| {
+                jikan_eps
+                    .get(&ep_num)
+                    .map(|info| !info.title.trim().is_empty())
+                    .unwrap_or(false)
+            }));
 
     let kitsu_eps = if should_try_kitsu {
-        kitsu::fetch_episode_titles_fallback(db, &kitsu_titles, detail.season_year, Some(ep_count)).await
+        kitsu::fetch_episode_titles_fallback(db, &kitsu_titles, detail.season_year, Some(ep_count))
+            .await
     } else {
         HashMap::new()
     };
@@ -291,7 +292,14 @@ async fn cache_provider_detail(
 
     artwork::cache_provider_detail_artwork(db, cache_provider_id, detail.id_mal, detail).await;
     for related in &detail.relations {
-        artwork::cache_provider_relation_artwork(db, cache_provider_id, related.id, related.id_mal, &related.cover_url).await;
+        artwork::cache_provider_relation_artwork(
+            db,
+            cache_provider_id,
+            related.id,
+            related.id_mal,
+            &related.cover_url,
+        )
+        .await;
     }
     Ok(())
 }
@@ -475,7 +483,11 @@ async fn refresh_series_metadata_inner(
         .map(|cfg| cfg.force_kitsu_fallback)
         .unwrap_or(false);
 
-    let stored_anilist_id = if authoritative_detail { detail.id } else { tracked.anilist_id };
+    let stored_anilist_id = if authoritative_detail {
+        detail.id
+    } else {
+        tracked.anilist_id
+    };
 
     if authoritative_detail || allow_degraded_cache_rebuild {
         let primary_title = if !detail.title_english.trim().is_empty() {
@@ -509,8 +521,19 @@ async fn refresh_series_metadata_inner(
             .map_err(|e| e.to_string())?;
 
         artwork::cache_series_detail_artwork(db, tracked.id, &detail).await;
-        for related in detail.relations.iter().filter(|r| matches!(r.media_type.as_str(), "ANIME" | "MUSIC")) {
-            artwork::cache_relation_artwork(db, tracked.id, related.id, related.id_mal, &related.cover_url).await;
+        for related in detail
+            .relations
+            .iter()
+            .filter(|r| matches!(r.media_type.as_str(), "ANIME" | "MUSIC"))
+        {
+            artwork::cache_relation_artwork(
+                db,
+                tracked.id,
+                related.id,
+                related.id_mal,
+                &related.cover_url,
+            )
+            .await;
         }
 
         local_metadata::replace_relations_for_series(db, tracked.id, &detail)
@@ -518,7 +541,14 @@ async fn refresh_series_metadata_inner(
             .map_err(|e| e.to_string())?;
 
         cache_provider_detail(db, stored_anilist_id, &detail, force_kitsu_fallback).await?;
-        hydrate_relation_tree(db, stored_anilist_id, &detail, force_mal_fallback, force_kitsu_fallback).await;
+        hydrate_relation_tree(
+            db,
+            stored_anilist_id,
+            &detail,
+            force_mal_fallback,
+            force_kitsu_fallback,
+        )
+        .await;
 
         // #30 — With the franchise graph freshly cached, walk the PREQUEL
         // chain and store the cumulative prior-cour episode count on
@@ -526,8 +556,10 @@ async fn refresh_series_metadata_inner(
         // absolute-numbered Nyaa titles against relative-numbered AL
         // episodes. Must run AFTER hydrate_relation_tree so the cache
         // covers the whole chain, not just the immediate neighbors.
-        let cumulative = local_metadata::compute_cumulative_prior_episodes(db, stored_anilist_id).await;
-        if let Err(err) = series::update_cumulative_prior_episodes(db, tracked.id, cumulative).await {
+        let cumulative =
+            local_metadata::compute_cumulative_prior_episodes(db, stored_anilist_id).await;
+        if let Err(err) = series::update_cumulative_prior_episodes(db, tracked.id, cumulative).await
+        {
             tracing::warn!(
                 target: "ryokan::metadata_sync",
                 series_id = tracked.id,
@@ -539,8 +571,14 @@ async fn refresh_series_metadata_inner(
             logger::info(
                 db,
                 LogCategory::AniList,
-                &format!("Rebuilt cached metadata from fallback source for {}", tracked.title),
-                &format!("provider_detail_id={}, preserved_anilist_id={}, mal_id={:?}", detail.id, tracked.anilist_id, detail.id_mal),
+                &format!(
+                    "Rebuilt cached metadata from fallback source for {}",
+                    tracked.title
+                ),
+                &format!(
+                    "provider_detail_id={}, preserved_anilist_id={}, mal_id={:?}",
+                    detail.id, tracked.anilist_id, detail.id_mal
+                ),
             )
             .await;
         }
@@ -549,7 +587,10 @@ async fn refresh_series_metadata_inner(
             db,
             LogCategory::AniList,
             &format!("Preserving cached AniList relations for {}", tracked.title),
-            &format!("degraded provider detail id={} anilist_id={}", detail.id, tracked.anilist_id),
+            &format!(
+                "degraded provider detail id={} anilist_id={}",
+                detail.id, tracked.anilist_id
+            ),
         )
         .await;
     }
@@ -652,7 +693,9 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
             continue;
         }
 
-        match refresh_series_metadata_inner(db, &tracked, force_mal_fallback, rebuild_artifacts).await {
+        match refresh_series_metadata_inner(db, &tracked, force_mal_fallback, rebuild_artifacts)
+            .await
+        {
             Ok(detail) => {
                 succeeded += 1;
                 if rebuild_artifacts {
@@ -715,7 +758,9 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
         let to_retry = std::mem::take(&mut deferred);
         let total = to_retry.len();
         for (idx, tracked) in to_retry.into_iter().enumerate() {
-            match refresh_series_metadata_inner(db, &tracked, force_mal_fallback, rebuild_artifacts).await {
+            match refresh_series_metadata_inner(db, &tracked, force_mal_fallback, rebuild_artifacts)
+                .await
+            {
                 Ok(detail) => {
                     succeeded += 1;
                     if rebuild_artifacts {

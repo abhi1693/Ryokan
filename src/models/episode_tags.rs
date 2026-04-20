@@ -18,6 +18,18 @@ pub struct NeedsReviewEntry {
     pub release_group: String,
     pub source: String,
     pub resolution: String,
+    /// Sonarr-parity BD variant flags. Surfaced on Needs Review so the
+    /// inline-override dropdown can pre-fill `bluray_remux` / `bluray_bdmv`
+    /// when the original verdict was the more specific variant — without
+    /// these the pre-fill collapsed to plain `bluray` and the user lost
+    /// the variant on every re-pick.
+    pub is_remux: bool,
+    pub is_bdmv: bool,
+    /// Web sub-tier (`WEBDL` / `WEBRip`, or empty for Unknown). Same role
+    /// as `is_remux` / `is_bdmv`: lets the inline pre-fill resolve
+    /// `webrip` instead of plain `web` when that's what the classifier
+    /// actually produced.
+    pub web_kind: String,
     pub classification_confidence: f32,
     /// Serialized `Vec<SourceEvidence>` captured at classification time.
     /// Rendered inline by the Needs-Review UI so the user can see *why*
@@ -31,12 +43,14 @@ pub struct NeedsReviewEntry {
 /// "Needs review" list view. Excludes rows the user has already manually
 /// overridden (manual_override = 1 clears `needs_review` too, but we
 /// filter defensively in case an older row has both set).
-pub async fn get_needs_review(
-    db: &SqlitePool,
-) -> Result<Vec<NeedsReviewEntry>, sqlx::Error> {
+pub async fn get_needs_review(db: &SqlitePool) -> Result<Vec<NeedsReviewEntry>, sqlx::Error> {
     sqlx::query_as::<_, NeedsReviewEntry>(
         "SELECT t.series_id, t.episode_number, t.quality_tag, t.release_title, t.release_group,
-                t.source, t.resolution, t.classification_confidence,
+                t.source, t.resolution,
+                t.is_remux,
+                COALESCE(t.is_bdmv, 0) AS is_bdmv,
+                COALESCE(t.web_kind, '') AS web_kind,
+                t.classification_confidence,
                 COALESCE(t.classification_evidence, '') AS classification_evidence,
                 s.anilist_id AS series_anilist_id,
                 COALESCE(NULLIF(s.title_english, ''), NULLIF(s.title_romaji, ''), s.title) AS series_title,
@@ -125,6 +139,15 @@ pub struct EpisodeQualityTag {
     /// Empty string for legacy rows and for manually-overridden rows.
     /// Consumers (the Needs-Review UI) `serde_json::from_str` to rehydrate.
     pub classification_evidence: String,
+    /// ISO 8601 timestamp of the most recent post-download (full-pipeline)
+    /// classification attempt. Set by `update_classification` and by the
+    /// post-classify `record_grab` paths (post-processing import + the
+    /// library scan), left NULL by grab-time `record_grab` writes.
+    /// Issue #53: the library sweep uses `is_some()` here on
+    /// empty/"unknown" source rows as the "already tried, leave alone"
+    /// guard, so a file the classifier can't decide on doesn't get
+    /// re-ffprobed every six hours forever.
+    pub classification_attempted_at: Option<String>,
 }
 
 /// Record a new grab for an episode — inserts into history and upserts the
@@ -150,17 +173,24 @@ pub async fn record_grab(
     let quality_tag = classification.label();
     let source_str = classification.source.as_str();
     let resolution_str = classification.resolution.as_str();
-    let is_remux = if classification.is_remux { 1_i64 } else { 0_i64 };
+    let is_remux = if classification.is_remux {
+        1_i64
+    } else {
+        0_i64
+    };
     let is_bdmv = if classification.is_bdmv { 1_i64 } else { 0_i64 };
     let web_kind_str = classification.web_kind.as_str();
     let confidence = classification.confidence as f64;
-    let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
+    let needs_review = if classification.needs_review {
+        1_i64
+    } else {
+        0_i64
+    };
     // Serialize the full evidence trail so the Needs-Review UI can audit
     // *why* the row was flagged without re-running classification. Empty
     // string on serialize failure — the row is still valid, we just lose
     // the trail on that particular write.
-    let evidence_json =
-        serde_json::to_string(&classification.evidence).unwrap_or_default();
+    let evidence_json = serde_json::to_string(&classification.evidence).unwrap_or_default();
 
     // Seed `file_name` with the Nyaa release title. For non-batch grabs
     // post-processing later overwrites it with the Sonarr-style renamed
@@ -250,7 +280,8 @@ pub async fn get_for_series(
                 COALESCE(web_kind, '') AS web_kind,
                 classification_confidence, needs_review,
                 COALESCE(manual_override, 0) AS manual_override,
-                COALESCE(classification_evidence, '') AS classification_evidence
+                COALESCE(classification_evidence, '') AS classification_evidence,
+                classification_attempted_at
          FROM episode_quality_tags WHERE series_id = ?",
     )
     .bind(series_id)
@@ -315,13 +346,20 @@ pub async fn update_classification(
     let quality_tag = classification.label();
     let source_str = classification.source.as_str();
     let resolution_str = classification.resolution.as_str();
-    let is_remux = if classification.is_remux { 1_i64 } else { 0_i64 };
+    let is_remux = if classification.is_remux {
+        1_i64
+    } else {
+        0_i64
+    };
     let is_bdmv = if classification.is_bdmv { 1_i64 } else { 0_i64 };
     let web_kind_str = classification.web_kind.as_str();
     let confidence = classification.confidence as f64;
-    let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
-    let evidence_json =
-        serde_json::to_string(&classification.evidence).unwrap_or_default();
+    let needs_review = if classification.needs_review {
+        1_i64
+    } else {
+        0_i64
+    };
+    let evidence_json = serde_json::to_string(&classification.evidence).unwrap_or_default();
 
     sqlx::query(
         "UPDATE episode_quality_tags SET
@@ -334,6 +372,7 @@ pub async fn update_classification(
              classification_confidence = ?,
              needs_review = ?,
              classification_evidence = ?,
+             classification_attempted_at = CURRENT_TIMESTAMP,
              updated_at = CURRENT_TIMESTAMP
          WHERE series_id = ?
            AND episode_number = ?
@@ -353,6 +392,33 @@ pub async fn update_classification(
     .execute(db)
     .await?;
 
+    Ok(())
+}
+
+/// Stamp `classification_attempted_at = CURRENT_TIMESTAMP` on a row.
+/// Issue #53: called from the post-classify `record_grab` paths in
+/// `services/post_processing.rs` so the library scan can tell "the
+/// full-pipeline classifier saw this file" apart from "we've never
+/// tried with the file in hand."
+///
+/// Skipped on `manual_override = 1` rows for symmetry with the rest of
+/// the classification helpers — a user-pinned row's "attempt" timestamp
+/// would just be misleading.
+pub async fn stamp_classification_attempted(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE episode_quality_tags SET classification_attempted_at = CURRENT_TIMESTAMP
+         WHERE series_id = ?
+           AND episode_number = ?
+           AND COALESCE(manual_override, 0) = 0",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -421,8 +487,7 @@ pub async fn set_manual_override(
             }
             Some(row) => {
                 let release_title: String = row.get("release_title");
-                let fallback =
-                    crate::services::source::classify_release_sync(&release_title, None);
+                let fallback = crate::services::source::classify_release_sync(&release_title, None);
                 let derived_tag = fallback.label();
                 let src_str = fallback.source.as_str();
                 let res_str = fallback.resolution.as_str();
@@ -837,7 +902,9 @@ mod tests {
         )
         .await
         .expect("record grab");
-        mark_completed(&db, sid, &[1]).await.expect("mark completed");
+        mark_completed(&db, sid, &[1])
+            .await
+            .expect("mark completed");
         set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
             .await
             .expect("pin override");
@@ -961,7 +1028,13 @@ mod tests {
         let tags = get_for_series(&db, sid).await.expect("get for series");
         let tag = tags.get(&1).expect("tag row");
         assert!(tag.manual_override, "override must survive re-grab");
-        assert_eq!(tag.source, "BluRay", "pinned source must not be overwritten");
-        assert_eq!(tag.resolution, "1080p", "pinned resolution must not be overwritten");
+        assert_eq!(
+            tag.source, "BluRay",
+            "pinned source must not be overwritten"
+        );
+        assert_eq!(
+            tag.resolution, "1080p",
+            "pinned resolution must not be overwritten"
+        );
     }
 }

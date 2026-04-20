@@ -560,7 +560,10 @@ Episodes: 12
         // Multiple mentions of the same keyword → single evidence record.
         let text = "A BDRip. Also a BDRip. Still a BDRip. BDRip BDRip BDRip.";
         let evidence = scan_description_for_signals(text);
-        let bd_count = evidence.iter().filter(|e| e.source == Source::BluRay).count();
+        let bd_count = evidence
+            .iter()
+            .filter(|e| e.source == Source::BluRay)
+            .count();
         assert_eq!(bd_count, 1);
     }
 

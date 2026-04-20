@@ -90,11 +90,10 @@ pub(super) async fn maybe_hydrate_cumulative_offset(
     if t.cumulative_prior_episodes != 0 {
         return Some(t);
     }
-    let has_tv_prequel = detail.relations.iter().any(|r| {
-        r.relation_type == "PREQUEL"
-            && r.media_type == "ANIME"
-            && r.format == "TV"
-    });
+    let has_tv_prequel = detail
+        .relations
+        .iter()
+        .any(|r| r.relation_type == "PREQUEL" && r.media_type == "ANIME" && r.format == "TV");
     if !has_tv_prequel {
         return Some(t);
     }
@@ -131,7 +130,8 @@ pub(super) async fn maybe_hydrate_cumulative_offset(
                 "series_id={}, anilist_id={}, prior={}",
                 r.id, r.anilist_id, t.cumulative_prior_episodes
             ),
-        ).await;
+        )
+        .await;
     }
     refreshed.or(Some(t))
 }
@@ -214,7 +214,10 @@ async fn maybe_reconcile_mal_entry(
             season_year: detail.season_year,
             end_year: detail.end_year,
         },
-    ).await.is_err() {
+    )
+    .await
+    .is_err()
+    {
         return None;
     }
 
@@ -268,37 +271,55 @@ pub(super) async fn resolve_series_context(
                         .flatten()
                         .map(|c| c.force_mal_fallback)
                         .unwrap_or(false);
-                    let _ = metadata_sync::refresh_series_metadata(&db_clone, &tracked_clone, force_fallback).await;
+                    let _ = metadata_sync::refresh_series_metadata(
+                        &db_clone,
+                        &tracked_clone,
+                        force_fallback,
+                    )
+                    .await;
                 });
             }
             return Ok((db_series, cached.provider_id, cached.detail));
         }
         if tracked.anilist_id > 0 {
-            if let Ok(Some(cached)) = metadata_cache::get_by_provider_id(db, tracked.anilist_id).await {
+            if let Ok(Some(cached)) =
+                metadata_cache::get_by_provider_id(db, tracked.anilist_id).await
+            {
                 return Ok((db_series, cached.provider_id, cached.detail));
             }
         } else if tracked.anilist_id < 0 {
             // MAL-sourced entry: check provider cache with the negative ID.
-            if let Ok(Some(cached)) = metadata_cache::get_by_provider_id(db, tracked.anilist_id).await {
+            if let Ok(Some(cached)) =
+                metadata_cache::get_by_provider_id(db, tracked.anilist_id).await
+            {
                 return Ok((db_series, cached.provider_id, cached.detail));
             }
         }
     } else if provider_id != 0
-        && let Ok(Some(cached)) = metadata_cache::get_by_provider_id(db, provider_id).await {
-            return Ok((db_series, cached.provider_id, cached.detail));
-        }
+        && let Ok(Some(cached)) = metadata_cache::get_by_provider_id(db, provider_id).await
+    {
+        return Ok((db_series, cached.provider_id, cached.detail));
+    }
 
     let mal_hint = db_series.as_ref().and_then(|s| s.mal_id);
-    let mut detail = match anilist::get_anime_detail_with_options(provider_id, mal_hint, force_fallback).await {
+    let mut detail = match anilist::get_anime_detail_with_options(
+        provider_id,
+        mal_hint,
+        force_fallback,
+    )
+    .await
+    {
         Ok(d) => d,
         Err(e) => {
-            if let Some((reconciled, upgraded_detail)) = maybe_reconcile_mal_entry(db, db_series.clone()).await {
+            if let Some((reconciled, upgraded_detail)) =
+                maybe_reconcile_mal_entry(db, db_series.clone()).await
+            {
                 provider_id = reconciled.anilist_id;
                 db_series = Some(reconciled);
                 upgraded_detail
             } else {
-                let fallback_mal_id = mal_hint
-                    .or_else(|| db_series.as_ref().and_then(|s| s.mal_id));
+                let fallback_mal_id =
+                    mal_hint.or_else(|| db_series.as_ref().and_then(|s| s.mal_id));
                 if let Some(mid) = fallback_mal_id {
                     let fallback_msg = format!(
                         "AniList detail failed for id={}; falling back to Jikan (mal_id={})",
@@ -306,15 +327,18 @@ pub(super) async fn resolve_series_context(
                     );
                     logger::warn(db, LogCategory::AniList, &fallback_msg, &e).await;
                     if let Some(ref tracked) = db_series
-                        && let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
-                            logger::info(
-                                db,
-                                LogCategory::AniList,
-                                &format!("Using cached metadata for {}", tracked.title),
-                                &format!("cached_at={}", cached.cached_at),
-                            ).await;
-                            return Ok((db_series, cached.provider_id, cached.detail));
-                        }
+                        && let Ok(Some(cached)) =
+                            metadata_cache::get_by_series_id(db, tracked.id).await
+                    {
+                        logger::info(
+                            db,
+                            LogCategory::AniList,
+                            &format!("Using cached metadata for {}", tracked.title),
+                            &format!("cached_at={}", cached.cached_at),
+                        )
+                        .await;
+                        return Ok((db_series, cached.provider_id, cached.detail));
+                    }
                     match jikan::get_anime_detail_cached(mid).await {
                         Ok(detail) => detail,
                         Err(je) => {
@@ -322,7 +346,9 @@ pub(super) async fn resolve_series_context(
                                 // Try Kitsu's MAL-mapping filter first (1 exact-match
                                 // request) before falling back to the title-fuzz path
                                 // (1–4 fuzzy requests).
-                                if let Ok(Some(kitsu_detail)) = kitsu::get_anime_detail_by_mal_id(mid).await {
+                                if let Ok(Some(kitsu_detail)) =
+                                    kitsu::get_anime_detail_by_mal_id(mid).await
+                                {
                                     logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (mapping)", &tracked.title).await;
                                     return Ok((db_series, kitsu_detail.id, kitsu_detail));
                                 }
@@ -332,7 +358,13 @@ pub(super) async fn resolve_series_context(
                                     tracked.title_english.clone(),
                                     tracked.title_native.clone(),
                                 ];
-                                if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes).await {
+                                if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(
+                                    &kitsu_titles,
+                                    None,
+                                    tracked.episodes,
+                                )
+                                .await
+                                {
                                     logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (titles)", &tracked.title).await;
                                     return Ok((db_series, kitsu_detail.id, kitsu_detail));
                                 }
@@ -342,22 +374,32 @@ pub(super) async fn resolve_series_context(
                     }
                 } else {
                     if let Some(ref tracked) = db_series {
-                        if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
+                        if let Ok(Some(cached)) =
+                            metadata_cache::get_by_series_id(db, tracked.id).await
+                        {
                             logger::info(
                                 db,
                                 LogCategory::AniList,
                                 &format!("Using cached metadata for {}", tracked.title),
                                 &format!("cached_at={}", cached.cached_at),
-                            ).await;
+                            )
+                            .await;
                             return Ok((db_series, cached.provider_id, cached.detail));
                         }
                         // Prefer Kitsu's MAL-mapping filter when a MAL id is
                         // available — single exact-match request rather than the
                         // 1–4 fuzzy queries the title path issues.
                         if let Some(mid) = tracked.mal_id
-                            && let Ok(Some(kitsu_detail)) = kitsu::get_anime_detail_by_mal_id(mid).await
+                            && let Ok(Some(kitsu_detail)) =
+                                kitsu::get_anime_detail_by_mal_id(mid).await
                         {
-                            logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (mapping)", &tracked.title).await;
+                            logger::warn(
+                                db,
+                                LogCategory::AniList,
+                                "AniList and MAL detail failed; using Kitsu fallback (mapping)",
+                                &tracked.title,
+                            )
+                            .await;
                             return Ok((db_series, kitsu_detail.id, kitsu_detail));
                         }
                         let kitsu_titles = vec![
@@ -366,8 +408,17 @@ pub(super) async fn resolve_series_context(
                             tracked.title_english.clone(),
                             tracked.title_native.clone(),
                         ];
-                        if let Ok(kitsu_detail) = kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes).await {
-                            logger::warn(db, LogCategory::AniList, "AniList and MAL detail failed; using Kitsu fallback (titles)", &tracked.title).await;
+                        if let Ok(kitsu_detail) =
+                            kitsu::get_anime_detail_by_titles(&kitsu_titles, None, tracked.episodes)
+                                .await
+                        {
+                            logger::warn(
+                                db,
+                                LogCategory::AniList,
+                                "AniList and MAL detail failed; using Kitsu fallback (titles)",
+                                &tracked.title,
+                            )
+                            .await;
                             return Ok((db_series, kitsu_detail.id, kitsu_detail));
                         }
                     }
@@ -378,17 +429,22 @@ pub(super) async fn resolve_series_context(
     };
 
     if !force_fallback
-        && let Some((reconciled, upgraded_detail)) = maybe_reconcile_mal_entry(db, db_series.clone()).await {
-            provider_id = reconciled.anilist_id;
-            db_series = Some(reconciled);
-            detail = upgraded_detail;
-        }
+        && let Some((reconciled, upgraded_detail)) =
+            maybe_reconcile_mal_entry(db, db_series.clone()).await
+    {
+        provider_id = reconciled.anilist_id;
+        db_series = Some(reconciled);
+        detail = upgraded_detail;
+    }
 
     if db_series.is_none() {
         db_series = if let Some(mid) = detail.id_mal {
             series::get_by_mal_id(db, mid).await.ok().flatten()
         } else {
-            series::get_by_anilist_id(db, detail.id).await.ok().flatten()
+            series::get_by_anilist_id(db, detail.id)
+                .await
+                .ok()
+                .flatten()
         };
     }
 
@@ -396,13 +452,14 @@ pub(super) async fn resolve_series_context(
         let _ = metadata_cache::upsert_provider(db, detail.id, detail.id_mal, &detail).await;
     }
     if let Some(ref tracked) = db_series
-        && should_persist_detail_cache(tracked, &detail) {
-            let _ = metadata_cache::upsert(db, tracked.id, detail.id, detail.id_mal, &detail).await;
-        }
-        // NOTE: we intentionally do NOT pre-warm the Jikan episode cache here.
-        // `build_episodes` calls `jikan::fetch_episode_titles_for_detail` itself
-        // with the same (db, detail) arguments; calling it here too would double
-        // the work on every page load (cache lookup + decode) for zero benefit.
+        && should_persist_detail_cache(tracked, &detail)
+    {
+        let _ = metadata_cache::upsert(db, tracked.id, detail.id, detail.id_mal, &detail).await;
+    }
+    // NOTE: we intentionally do NOT pre-warm the Jikan episode cache here.
+    // `build_episodes` calls `jikan::fetch_episode_titles_for_detail` itself
+    // with the same (db, detail) arguments; calling it here too would double
+    // the work on every page load (cache lookup + decode) for zero benefit.
 
     Ok((db_series, provider_id, detail))
 }
@@ -418,11 +475,19 @@ pub(super) async fn reconcile_all_fallback_entries(db: &SqlitePool) -> Reconcile
     let rows = match series::get_unreconciled_fallbacks(db).await {
         Ok(rows) => rows,
         Err(_) => {
-            return ReconcileReport { checked: 0, upgraded: 0, failed: 1 };
+            return ReconcileReport {
+                checked: 0,
+                upgraded: 0,
+                failed: 1,
+            };
         }
     };
 
-    let mut report = ReconcileReport { checked: rows.len(), upgraded: 0, failed: 0 };
+    let mut report = ReconcileReport {
+        checked: rows.len(),
+        upgraded: 0,
+        failed: 0,
+    };
     for row in rows {
         if maybe_reconcile_mal_entry(db, Some(row)).await.is_some() {
             report.upgraded += 1;
@@ -456,8 +521,7 @@ pub(super) async fn populate_series_cover_urls<T, S, M>(
         .iter()
         .map(|item| format!("series-{}-cover", series_id_of(item)))
         .collect();
-    let Ok(url_map) =
-        crate::models::artwork_cache::get_local_urls_batch(db, &cache_keys).await
+    let Ok(url_map) = crate::models::artwork_cache::get_local_urls_batch(db, &cache_keys).await
     else {
         return;
     };

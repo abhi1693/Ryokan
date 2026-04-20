@@ -1,20 +1,20 @@
+pub mod artwork_cache;
 pub mod config;
+pub mod custom_formats;
+pub mod episode_tags;
+pub mod grabbed_torrents;
+pub mod group_source_map;
+pub mod local_metadata;
 pub mod log;
-pub mod series;
-pub mod rss;
+pub mod media_probe_cache;
+pub mod metadata_cache;
 pub mod monitoring;
+pub mod nyaa_description_cache;
+pub mod rss;
+pub mod scheduled_tasks;
+pub mod series;
 pub mod session;
 pub mod user;
-pub mod metadata_cache;
-pub mod local_metadata;
-pub mod scheduled_tasks;
-pub mod artwork_cache;
-pub mod grabbed_torrents;
-pub mod episode_tags;
-pub mod group_source_map;
-pub mod nyaa_description_cache;
-pub mod media_probe_cache;
-pub mod custom_formats;
 
 use sqlx::{Row, SqlitePool};
 
@@ -58,12 +58,7 @@ async fn column_exists(db: &SqlitePool, table: &str, column: &str) -> bool {
 /// `legacy` / `new` are hardcoded column-name string literals from
 /// the callers in `migrate()`, so inline interpolation into the SQL
 /// is safe (no user input reaches PRAGMA or ALTER TABLE here).
-async fn reconcile_restrict_to_group_rename(
-    db: &SqlitePool,
-    table: &str,
-    legacy: &str,
-    new: &str,
-) {
+async fn reconcile_restrict_to_group_rename(db: &SqlitePool, table: &str, legacy: &str, new: &str) {
     let legacy_exists = column_exists(db, table, legacy).await;
     let new_exists = column_exists(db, table, new).await;
 
@@ -197,16 +192,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    sqlx::query("ALTER TABLE config ADD COLUMN finished_series_quality TEXT NOT NULL DEFAULT 'prefer_bd'")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN finished_series_quality TEXT NOT NULL DEFAULT 'prefer_bd'",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     sqlx::query("ALTER TABLE config ADD COLUMN force_mal_fallback INTEGER NOT NULL DEFAULT 0")
         .execute(db)
         .await
         .ok();
-
 
     sqlx::query("ALTER TABLE config ADD COLUMN blocked_groups TEXT NOT NULL DEFAULT ''")
         .execute(db)
@@ -315,7 +311,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-
     sqlx::query("ALTER TABLE series ADD COLUMN monitor_mode TEXT NOT NULL DEFAULT 'future'")
         .execute(db)
         .await
@@ -411,7 +406,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_relations_cache (
@@ -456,7 +450,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await?;
-
 
     sqlx::query(
         r#"
@@ -530,17 +523,13 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
 
     // Index for efficient log queries.
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp DESC)"
-    )
-    .execute(db)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp DESC)")
+        .execute(db)
+        .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_logs_level_cat ON logs (level, category)"
-    )
-    .execute(db)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_logs_level_cat ON logs (level, category)")
+        .execute(db)
+        .await?;
 
     // ── Legacy migrations (kept for existing DB compat) ────────────────
     // tmdb_api_key and plex_mappings_* are no longer used but columns
@@ -581,20 +570,24 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    sqlx::query("ALTER TABLE config ADD COLUMN plex_mappings_auto_refresh INTEGER NOT NULL DEFAULT 0")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN plex_mappings_auto_refresh INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     sqlx::query("ALTER TABLE config ADD COLUMN post_processing_enabled INTEGER NOT NULL DEFAULT 0")
         .execute(db)
         .await
         .ok();
 
-    sqlx::query("ALTER TABLE config ADD COLUMN post_processing_mode TEXT NOT NULL DEFAULT 'hardlink'")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN post_processing_mode TEXT NOT NULL DEFAULT 'hardlink'",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     // The path where qBittorrent downloads live, as seen by Ryokan.
     // When qBit runs in Docker its internal save_path (e.g. /downloads/) differs
@@ -622,9 +615,11 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_state ON grabbed_torrents (state)")
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_state ON grabbed_torrents (state)",
+    )
+    .execute(db)
+    .await?;
 
     // Many hot-path queries filter on series_id (find_imported_for_episode,
     // get_all_for_series, mark_failed_by_name, etc.) and the prior schema
@@ -712,10 +707,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // Non-offset siblings (filenames numbered arc-local from 1) get
     // offset 0, matching the legacy default for rows written before
     // this column existed.
-    sqlx::query("ALTER TABLE grabbed_torrent_series ADD COLUMN episode_offset INTEGER NOT NULL DEFAULT 0")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE grabbed_torrent_series ADD COLUMN episode_offset INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.
@@ -887,9 +884,11 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
                 .execute(db)
                 .await?;
         } else {
-            sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
-                .execute(db)
-                .await?;
+            sqlx::query(
+                "ALTER TABLE episode_grab_history ADD COLUMN file_name TEXT NOT NULL DEFAULT ''",
+            )
+            .execute(db)
+            .await?;
         }
     }
 
@@ -899,10 +898,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // episode detail modal surfaces that as "this episode came from an
     // X GiB batch". The CASE guard in `mark_grab_history_completed`
     // enforces this asymmetry.
-    sqlx::query("ALTER TABLE episode_grab_history ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE episode_grab_history ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     // is_batch marker — needed at read time so the UI can decide whether
     // to surface `size_bytes` as "whole batch" or "single file". It's
@@ -1033,14 +1034,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
-    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
-        .execute(db)
-        .await
-        .ok();
-    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE episode_quality_tags ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+    sqlx::query(
+        "ALTER TABLE episode_quality_tags ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     // Sonarr-parity sub-classification columns:
     //  - is_bdmv: distinguishes BD-RAW / BDMV (full disc structure) from
@@ -1071,10 +1076,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // path so the operator can see both locations when a torrent
     // finishes (matters with post-proc off, or when hardlinking keeps
     // both paths valid simultaneously).
-    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN qbit_content_path TEXT NOT NULL DEFAULT ''")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE grabbed_torrents ADD COLUMN qbit_content_path TEXT NOT NULL DEFAULT ''",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN web_kind TEXT NOT NULL DEFAULT ''")
         .execute(db)
@@ -1091,6 +1098,42 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await
     .ok();
+
+    // ── Issue #53: stamp post-classify attempts so the library scan
+    //                doesn't loop-retry rows whose source layer can't
+    //                produce a confident verdict ──────────────────────
+    // NULL = "the full-pipeline classifier (ffprobe + dir + group +
+    // temporal + filename) has never been run against this row's file".
+    // CURRENT_TIMESTAMP after every `update_classification` write and
+    // after every `record_grab` write that came from
+    // `scan_library_for_unclassified` or post-processing's
+    // `classify_post_download`. Grab-time `record_grab` writes leave it
+    // NULL on the INSERT path — they're filename-only and aren't a
+    // "real" attempt. On the ON CONFLICT UPDATE path, grab-time
+    // `record_grab` preserves whatever value was already there (no
+    // SET line for the column), so a re-grab after a prior classify
+    // keeps the attempt stamp intact — which is what we want; a
+    // re-grab of a file we already probed shouldn't reopen it to
+    // another sweep retry.
+    //
+    // The 6h library sweep skips rows where the source is empty or
+    // "unknown" AND this column IS NOT NULL: the classifier already
+    // tried with the file in hand and couldn't decide, so re-running
+    // ffprobe on the same bytes won't change the verdict and just
+    // wastes CPU and IO every six hours.
+    sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN classification_attempted_at TEXT")
+        .execute(db)
+        .await
+        .ok();
+
+    // Run the seed-drift episode reset *after* the Phase 1b ALTER TABLE
+    // block above. The companion `reconcile_seed_drift` runs earlier
+    // inside `group_source_map::migrate` (where it only touches the
+    // group_source_map table, which is fully migrated by that point),
+    // but the episode reset references columns added immediately above
+    // (`source`, `classification_attempted_at`, etc.) so it must wait
+    // until those exist on a fresh database boot.
+    group_source_map::reconcile_episode_seed_drift(db).await?;
 
     // ── Phase 1b: split quality_profile/quality_cutoff into explicit source
     //             and resolution fields ──────────────────────────────────
@@ -1399,10 +1442,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // and the nyaa query builder appends it verbatim after the title.
     // Empty string means "no override / no tokens", which is the
     // existing behavior.
-    sqlx::query("ALTER TABLE config ADD COLUMN default_custom_query_tokens TEXT NOT NULL DEFAULT ''")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN default_custom_query_tokens TEXT NOT NULL DEFAULT ''",
+    )
+    .execute(db)
+    .await
+    .ok();
     sqlx::query("ALTER TABLE series ADD COLUMN custom_query_tokens TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
@@ -1418,8 +1463,15 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // `reconcile_restrict_to_group_rename` handles the four possible
     // states — legacy-only, new-only, both, neither — in the order
     // that makes each a one-shot forward move without data loss.
-    reconcile_restrict_to_group_rename(db, "config", "default_restrict_to_group", "default_restrict_to_uploader").await;
-    reconcile_restrict_to_group_rename(db, "series", "restrict_to_group", "restrict_to_uploader").await;
+    reconcile_restrict_to_group_rename(
+        db,
+        "config",
+        "default_restrict_to_group",
+        "default_restrict_to_uploader",
+    )
+    .await;
+    reconcile_restrict_to_group_rename(db, "series", "restrict_to_group", "restrict_to_uploader")
+        .await;
 
     // #30 — Cumulative episode count of the shortest TV-format PREQUEL
     // chain. Used at search time to accept absolute-numbered Nyaa
@@ -1429,10 +1481,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // `metadata_sync::refresh_series_metadata` after the relation graph
     // has been cached, and again at library-add time so first-searches
     // don't wait for the next refresh sweep.
-    sqlx::query("ALTER TABLE series ADD COLUMN cumulative_prior_episodes INTEGER NOT NULL DEFAULT 0")
-        .execute(db)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE series ADD COLUMN cumulative_prior_episodes INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
 
     // SeaDex lookup cache, persisted across restarts. The in-memory cache
     // in `services::auto_search` already de-duplicates within a process,
@@ -1524,12 +1578,11 @@ mod tests {
         // After migrate, the data that lived in `torrent_name` must now be
         // in `file_name`. If the rename failed and the defensive ADD
         // branch ran instead, this value would be empty (the default).
-        let file_name: String = sqlx::query_scalar(
-            "SELECT file_name FROM episode_grab_history WHERE id = 1",
-        )
-        .fetch_one(&db)
-        .await
-        .expect("row 1 must still exist");
+        let file_name: String =
+            sqlx::query_scalar("SELECT file_name FROM episode_grab_history WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .expect("row 1 must still exist");
         assert_eq!(file_name, "[Group] Show - 01 [WEB-DL 1080p].mkv");
 
         // And the old column should no longer be there (RENAME moved it,
@@ -1578,12 +1631,11 @@ mod tests {
         )
         .await;
 
-        let uploader: String = sqlx::query_scalar(
-            "SELECT default_restrict_to_uploader FROM config WHERE id = 1",
-        )
-        .fetch_one(&db)
-        .await
-        .expect("fetch uploader");
+        let uploader: String =
+            sqlx::query_scalar("SELECT default_restrict_to_uploader FROM config WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .expect("fetch uploader");
         assert_eq!(
             uploader, "SubsPlease",
             "user's uploader value must be copied forward into the new column"
@@ -1613,12 +1665,10 @@ mod tests {
         .execute(&db)
         .await
         .expect("create legacy config");
-        sqlx::query(
-            "INSERT INTO config (id, default_restrict_to_group) VALUES (1, 'SubsPlease')",
-        )
-        .execute(&db)
-        .await
-        .expect("seed legacy row");
+        sqlx::query("INSERT INTO config (id, default_restrict_to_group) VALUES (1, 'SubsPlease')")
+            .execute(&db)
+            .await
+            .expect("seed legacy row");
 
         reconcile_restrict_to_group_rename(
             &db,
@@ -1628,12 +1678,11 @@ mod tests {
         )
         .await;
 
-        let uploader: String = sqlx::query_scalar(
-            "SELECT default_restrict_to_uploader FROM config WHERE id = 1",
-        )
-        .fetch_one(&db)
-        .await
-        .expect("fetch uploader");
+        let uploader: String =
+            sqlx::query_scalar("SELECT default_restrict_to_uploader FROM config WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .expect("fetch uploader");
         assert_eq!(uploader, "SubsPlease");
         assert!(!column_exists(&db, "config", "default_restrict_to_group").await);
     }
@@ -1674,12 +1723,11 @@ mod tests {
         )
         .await;
 
-        let uploader: String = sqlx::query_scalar(
-            "SELECT default_restrict_to_uploader FROM config WHERE id = 1",
-        )
-        .fetch_one(&db)
-        .await
-        .expect("fetch uploader");
+        let uploader: String =
+            sqlx::query_scalar("SELECT default_restrict_to_uploader FROM config WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .expect("fetch uploader");
         assert_eq!(
             uploader, "LiveNew",
             "non-empty new column must not be overwritten by stale legacy"
@@ -1716,12 +1764,11 @@ mod tests {
         .await;
 
         assert!(column_exists(&db, "config", "default_restrict_to_uploader").await);
-        let uploader: String = sqlx::query_scalar(
-            "SELECT default_restrict_to_uploader FROM config WHERE id = 1",
-        )
-        .fetch_one(&db)
-        .await
-        .expect("fetch uploader");
+        let uploader: String =
+            sqlx::query_scalar("SELECT default_restrict_to_uploader FROM config WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .expect("fetch uploader");
         assert_eq!(uploader, "", "fresh install starts with the default empty");
     }
 }

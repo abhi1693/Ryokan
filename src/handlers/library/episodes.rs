@@ -8,15 +8,15 @@
 use std::collections::HashMap;
 
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use serde::Serialize;
 
+use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, grabbed_torrents};
 use crate::services::{auto_search, logger, media};
-use crate::AppState;
 
 use super::pages::build_episodes;
 use super::reconcile::{resolve_series_context, resolve_tracked_series};
@@ -44,7 +44,10 @@ pub async fn delete_episode_file(
     Path((request_id, episode_number)): Path<(i64, i32)>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     let json_err = |status: axum::http::StatusCode, msg: &str| {
-        (status, Json(serde_json::json!({"ok": false, "message": msg})))
+        (
+            status,
+            Json(serde_json::json!({"ok": false, "message": msg})),
+        )
     };
 
     let (tracked_row, _, _detail) = match resolve_series_context(&state.db, request_id).await {
@@ -66,7 +69,10 @@ pub async fn delete_episode_file(
     let target = files.iter().find(|f| f.episode_number == episode_number);
 
     match target {
-        None => json_err(axum::http::StatusCode::NOT_FOUND, "Episode file not found on disk"),
+        None => json_err(
+            axum::http::StatusCode::NOT_FOUND,
+            "Episode file not found on disk",
+        ),
         Some(file) => {
             let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
             let full_path = series_dir.join(&file.filename);
@@ -75,17 +81,21 @@ pub async fn delete_episode_file(
             // the configured media root.
             let media_root_canon = match tokio::fs::canonicalize(&cfg.media_root).await {
                 Ok(p) => p,
-                Err(e) => return json_err(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to resolve media root: {}", e),
-                ),
+                Err(e) => {
+                    return json_err(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to resolve media root: {}", e),
+                    );
+                }
             };
             let full_path_canon = match tokio::fs::canonicalize(&full_path).await {
                 Ok(p) => p,
-                Err(e) => return json_err(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to resolve file: {}", e),
-                ),
+                Err(e) => {
+                    return json_err(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to resolve file: {}", e),
+                    );
+                }
             };
             if !full_path_canon.starts_with(&media_root_canon) {
                 logger::warn(
@@ -99,7 +109,8 @@ pub async fn delete_episode_file(
                         full_path_canon.display(),
                         media_root_canon.display()
                     ),
-                ).await;
+                )
+                .await;
                 return json_err(
                     axum::http::StatusCode::BAD_REQUEST,
                     "File resolves outside media root",
@@ -115,19 +126,17 @@ pub async fn delete_episode_file(
 
             let nfo_path = full_path_canon.with_extension("nfo");
             if let Ok(nfo_canon) = tokio::fs::canonicalize(&nfo_path).await
-                && nfo_canon.starts_with(&media_root_canon) {
-                    let _ = tokio::fs::remove_file(&nfo_canon).await;
-                }
+                && nfo_canon.starts_with(&media_root_canon)
+            {
+                let _ = tokio::fs::remove_file(&nfo_canon).await;
+            }
 
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
 
-            let imported_grabs = grabbed_torrents::find_imported_for_episode(
-                &state.db,
-                tracked.id,
-                episode_number,
-            )
-            .await
-            .unwrap_or_default();
+            let imported_grabs =
+                grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
+                    .await
+                    .unwrap_or_default();
             let mut qbit_removed: Vec<String> = Vec::new();
             if !imported_grabs.is_empty() {
                 let qbit = state.qbit.read().await.as_ref().cloned();
@@ -171,7 +180,8 @@ pub async fn delete_episode_file(
                     full_path_canon.display(),
                     qbit_removed.len()
                 ),
-            ).await;
+            )
+            .await;
 
             (
                 axum::http::StatusCode::OK,
@@ -210,37 +220,35 @@ pub async fn cancel_pending_episode(
     Path((request_id, episode_number)): Path<(i64, i32)>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     let json_err = |status: axum::http::StatusCode, msg: &str| {
-        (status, Json(serde_json::json!({"ok": false, "message": msg})))
+        (
+            status,
+            Json(serde_json::json!({"ok": false, "message": msg})),
+        )
     };
 
     let tracked = match resolve_tracked_series(&state.db, request_id).await {
         Ok(Some(t)) => t,
-        Ok(None) => {
-            return json_err(axum::http::StatusCode::BAD_REQUEST, "Series not in library")
-        }
+        Ok(None) => return json_err(axum::http::StatusCode::BAD_REQUEST, "Series not in library"),
         Err(e) => {
             return json_err(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 &e.to_string(),
-            )
+            );
         }
     };
 
-    let mut pending = match grabbed_torrents::find_pending_for_episode(
-        &state.db,
-        tracked.id,
-        episode_number,
-    )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            return json_err(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &e.to_string(),
-            )
-        }
-    };
+    let mut pending =
+        match grabbed_torrents::find_pending_for_episode(&state.db, tracked.id, episode_number)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                return json_err(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &e.to_string(),
+                );
+            }
+        };
 
     // Drift case: `grabbed_torrents.state = 'imported'` but the
     // `episode_quality_tags` row for this episode is still 'grabbed'.
@@ -258,8 +266,7 @@ pub async fn cancel_pending_episode(
     let tag_is_grabbed = matches!(tag_state.as_deref(), Some("grabbed"));
     if tag_is_grabbed
         && let Ok(stuck) =
-            grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
-                .await
+            grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number).await
     {
         let tag_state_recheck: Option<String> = sqlx::query_scalar(
             "SELECT state FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
@@ -271,8 +278,7 @@ pub async fn cancel_pending_episode(
         .ok()
         .flatten();
         if matches!(tag_state_recheck.as_deref(), Some("grabbed")) {
-            let seen: std::collections::HashSet<i64> =
-                pending.iter().map(|g| g.id).collect();
+            let seen: std::collections::HashSet<i64> = pending.iter().map(|g| g.id).collect();
             for g in stuck {
                 if !seen.contains(&g.id) {
                     pending.push(g);
@@ -291,12 +297,8 @@ pub async fn cancel_pending_episode(
 
     if pending.is_empty() {
         if tag_is_grabbed {
-            let _ = episode_tags::clear_tags_for_removal(
-                &state.db,
-                tracked.id,
-                &[episode_number],
-            )
-            .await;
+            let _ = episode_tags::clear_tags_for_removal(&state.db, tracked.id, &[episode_number])
+                .await;
             return (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({
@@ -363,12 +365,7 @@ pub async fn cancel_pending_episode(
         }
     }
 
-    let _ = episode_tags::clear_tags_for_removal(
-        &state.db,
-        tracked.id,
-        &[episode_number],
-    )
-    .await;
+    let _ = episode_tags::clear_tags_for_removal(&state.db, tracked.id, &[episode_number]).await;
 
     logger::info(
         &state.db,
@@ -416,7 +413,10 @@ pub async fn get_episode_grab_history(
     let series_id = resolve_tracked_series(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?
+        .ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Series not in library".to_string(),
+        ))?
         .id;
 
     let history = episode_tags::get_grab_history(&state.db, series_id, episode_number)
@@ -453,7 +453,10 @@ pub async fn mark_episode_failed(
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
     let series_id = tracked_row
-        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?
+        .ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Series not in library".to_string(),
+        ))?
         .id;
 
     let (_sid, _ep, release_title) = episode_tags::mark_grab_failed(&state.db, form.history_id)
@@ -466,26 +469,28 @@ pub async fn mark_episode_failed(
 
     if let Ok(old_grabs) =
         grabbed_torrents::find_imported_for_episode(&state.db, series_id, episode_number).await
-        && !old_grabs.is_empty() {
-            let qbit = { state.qbit.read().await.as_ref().cloned() };
-            if let Some(qbit) = qbit {
-                for old in &old_grabs {
-                    if !old.hash.is_empty()
-                        && let Err(e) = qbit.delete_torrent(&old.hash, true).await {
-                            crate::services::logger::warn(
-                                &state.db,
-                                crate::models::log::LogCategory::QBit,
-                                &format!(
-                                    "Failed to remove old torrent for S?E{:02} replacement: '{}'",
-                                    episode_number, old.torrent_name
-                                ),
-                                &e,
-                            )
-                            .await;
-                        }
+        && !old_grabs.is_empty()
+    {
+        let qbit = { state.qbit.read().await.as_ref().cloned() };
+        if let Some(qbit) = qbit {
+            for old in &old_grabs {
+                if !old.hash.is_empty()
+                    && let Err(e) = qbit.delete_torrent(&old.hash, true).await
+                {
+                    crate::services::logger::warn(
+                        &state.db,
+                        crate::models::log::LogCategory::QBit,
+                        &format!(
+                            "Failed to remove old torrent for S?E{:02} replacement: '{}'",
+                            episode_number, old.torrent_name
+                        ),
+                        &e,
+                    )
+                    .await;
                 }
             }
         }
+    }
 
     let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
     let state_clone = state.clone();
@@ -496,10 +501,15 @@ pub async fn mark_episode_failed(
             vec![target],
             false,
             Some(series_id),
-        ).await
+        )
+        .await
     });
-    let report = handle.await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Search task failed: {}", e)))??;
+    let report = handle.await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Search task failed: {}", e),
+        )
+    })??;
 
     Ok(Json(report))
 }
@@ -526,7 +536,10 @@ pub async fn episode_download_progress(
     let tracked = resolve_tracked_series(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((axum::http::StatusCode::BAD_REQUEST, "Series not in library".to_string()))?;
+        .ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Series not in library".to_string(),
+        ))?;
 
     let pending = crate::models::grabbed_torrents::get_all_pending(&state.db)
         .await
@@ -556,7 +569,7 @@ pub async fn episode_download_progress(
             return Err((
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 format!("qBittorrent unavailable: {err}"),
-            ))
+            ));
         }
     };
     let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
@@ -601,10 +614,7 @@ pub async fn episode_download_progress(
                     ),
                 )
                 .await;
-                let _ = crate::models::grabbed_torrents::mark_removed(
-                    &state.db, grab.id,
-                )
-                .await;
+                let _ = crate::models::grabbed_torrents::mark_removed(&state.db, grab.id).await;
                 let _ = crate::models::episode_tags::clear_tags_for_removal(
                     &state.db,
                     grab.series_id,
@@ -666,10 +676,16 @@ pub async fn series_episodes_json(
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
     let db_id = db_series.as_ref().map(|s| s.id);
-    let folder_name = db_series.as_ref().map(|s| s.folder_name.clone()).unwrap_or_default();
+    let folder_name = db_series
+        .as_ref()
+        .map(|s| s.folder_name.clone())
+        .unwrap_or_default();
 
     let cfg = config::get_config(&state.db).await.ok().flatten();
-    let media_root = cfg.as_ref().map(|c| c.media_root.clone()).unwrap_or_default();
+    let media_root = cfg
+        .as_ref()
+        .map(|c| c.media_root.clone())
+        .unwrap_or_default();
 
     let (episodes, _, _, _, _) =
         build_episodes(&state.db, &detail, db_id, &folder_name, &media_root).await;

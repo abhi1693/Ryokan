@@ -34,8 +34,7 @@ static RSS_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
 const NYAA_RSS_BASE: &str = "https://nyaa.si/?page=rss&f=0";
 
-static RE_ITEM: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<item>(.*?)</item>").unwrap());
+static RE_ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<item>(.*?)</item>").unwrap());
 static RE_BATCH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:e?\d{1,4}|s\d{1,2}e\d{1,4})\s*[-~]\s*(?:e?\d{1,4}|\d{1,4})\b").unwrap()
 });
@@ -80,8 +79,12 @@ pub(super) async fn fetch_feeds(
         vec!["1_2"]
     };
     if has_music_series {
-        if !categories.contains(&"1_1") { categories.push("1_1"); }
-        if !categories.contains(&"2_0") { categories.push("2_0"); }
+        if !categories.contains(&"1_1") {
+            categories.push("1_1");
+        }
+        if !categories.contains(&"2_0") {
+            categories.push("2_0");
+        }
     }
 
     let mut all_items = Vec::new();
@@ -114,9 +117,15 @@ fn parse_feed(xml: &str) -> Vec<RssItem> {
 
         let link = decode_xml(&extract_tag(block, "link")).trim().to_string();
         let guid = decode_xml(&extract_tag(block, "guid")).trim().to_string();
-        let torrent = decode_xml(&extract_tag(block, "nyaa:downloadurl")).trim().to_string();
-        let magnet = decode_xml(&extract_tag(block, "nyaa:magneturi")).trim().to_string();
-        let info_hash = decode_xml(&extract_tag(block, "nyaa:infohash")).trim().to_lowercase();
+        let torrent = decode_xml(&extract_tag(block, "nyaa:downloadurl"))
+            .trim()
+            .to_string();
+        let magnet = decode_xml(&extract_tag(block, "nyaa:magneturi"))
+            .trim()
+            .to_string();
+        let info_hash = decode_xml(&extract_tag(block, "nyaa:infohash"))
+            .trim()
+            .to_lowercase();
         let group = extract_group(&title);
         let resolution = extract_resolution(&title);
         let is_batch = detect_batch(&title);
@@ -154,7 +163,10 @@ static RE_EXTRACT_TAGS: LazyLock<HashMap<&'static str, Regex>> = LazyLock::new(|
         "nyaa:infohash",
     ] {
         let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>", tag = tag);
-        m.insert(tag, Regex::new(&pattern).expect("extract_tag pattern compiles"));
+        m.insert(
+            tag,
+            Regex::new(&pattern).expect("extract_tag pattern compiles"),
+        );
     }
     m
 });
@@ -173,7 +185,7 @@ fn strip_cdata(value: &str) -> String {
     value
         .trim()
         .strip_prefix("<![CDATA[")
-        .and_then(|s| s.strip_suffix("]]>") )
+        .and_then(|s| s.strip_suffix("]]>"))
         .unwrap_or(value)
         .to_string()
 }
@@ -222,7 +234,9 @@ fn decode_xml(value: &str) -> String {
             "apos" => Some('\''),
             _ => {
                 if let Some(num) = entity.strip_prefix('#') {
-                    let code = if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
+                    let code = if let Some(hex) =
+                        num.strip_prefix('x').or_else(|| num.strip_prefix('X'))
+                    {
                         u32::from_str_radix(hex, 16).ok()
                     } else {
                         num.parse::<u32>().ok()
@@ -249,9 +263,10 @@ fn decode_xml(value: &str) -> String {
 
 pub(super) fn extract_group(title: &str) -> String {
     if let Some(start) = title.find('[')
-        && let Some(end) = title[start..].find(']') {
-            return title[start + 1..start + end].to_string();
-        }
+        && let Some(end) = title[start..].find(']')
+    {
+        return title[start + 1..start + end].to_string();
+    }
     String::new()
 }
 

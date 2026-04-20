@@ -165,7 +165,7 @@
         <div class="monitoring-divider"></div>
         <details class="monitoring-row" id="advanced-search-panel">
             <summary class="folder-label" style="cursor:pointer">Advanced search overrides</summary>
-            <div class="monitoring-controls" style="flex-direction:column;align-items:stretch;gap:12px;margin-top:10px">
+            <div class="monitoring-controls" style="display:flex;flex-direction:column;align-items:stretch;gap:14px;margin-top:10px">
                 <div class="form-group" style="margin:0">
                     <label for="series-restrict-to-group">Restrict to Nyaa uploader</label>
                     <input type="text" id="series-restrict-to-group" value="{{ restrict_to_uploader }}"
@@ -443,7 +443,12 @@
                         <option value="dvd">DVD</option>
                         <option value="hdtv">HDTV</option>
                         <option value="tv">TV</option>
-                        <option value="unknown">Unknown</option>
+                        {# Unknown deliberately not offered — the handler rejects
+                           Source::Unknown with 400 (pinning "I don't know" has no
+                           useful meaning), so advertising the option was both
+                           misleading (silent BluRay coercion on pre-fill) and
+                           unusable (400 on explicit Apply). Clear override to
+                           un-pin; re-classify to ask the classifier again. #}
                     </select>
                 </label>
                 <label class="form-row">
@@ -454,13 +459,17 @@
                         <option value="720p">720p</option>
                         <option value="576p">576p</option>
                         <option value="480p">480p</option>
-                        <option value="Unknown">Unknown</option>
+                        {# Same rationale as the Unknown source option —
+                           set_manual_override rejects Resolution::Unknown
+                           with 400, so the dropdown shouldn't advertise
+                           it. Unknown-resolution rows pre-fill to 1080p. #}
                     </select>
                 </label>
                 <div id="override-status" class="form-hint"></div>
             </div>
         </div>
-        <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
+        <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end;flex-wrap:wrap">
+            <button class="btn btn-secondary" type="button" onclick="reclassifyEpisode(this)" title="Re-run the full-pipeline classifier against this episode's on-disk file. Useful after editing Release Groups or Custom Formats — skip the 6-hour sweep. Pinned rows are rejected; clear the override first.">Re-classify</button>
             <button class="btn btn-secondary" type="button" onclick="clearManualOverride()">Clear override</button>
             <button class="btn btn-primary" type="button" onclick="applyManualOverride()">Apply</button>
         </div>
@@ -1449,7 +1458,11 @@ const OVERRIDE_SOURCE_MAP = {
     dvd:         { source: 'DVD',    is_remux: false, is_bdmv: false, web_kind: '' },
     hdtv:        { source: 'HDTV',   is_remux: false, is_bdmv: false, web_kind: '' },
     tv:          { source: 'TV',     is_remux: false, is_bdmv: false, web_kind: '' },
-    unknown:     { source: 'Unknown',is_remux: false, is_bdmv: false, web_kind: '' },
+    // Note: no `unknown` entry. The <select> no longer offers Unknown
+    // (the handler rejects Source::Unknown with 400), so a map entry
+    // for it would be dead state — and worse, a footgun for any
+    // `map[key] || map.unknown` fallback that outlives the dropdown
+    // change. Fallbacks elsewhere now route to `map.bluray`.
 };
 
 // Reverse lookup: given the current classification quartet on the episode,
@@ -1473,7 +1486,14 @@ function overrideKeyFromClassification(source, isRemux, isBdmv, webKind) {
     if (src === 'dvd') return 'dvd';
     if (src === 'hdtv') return 'hdtv';
     if (src === 'tv') return 'tv';
-    return 'unknown';
+    // Unknown-verdict rows fall back to 'bluray' as the pre-fill
+    // default, matching reviewKeyFromClassification in
+    // needs_review.html. Don't return 'unknown' — the dropdown no
+    // longer offers that option (the handler rejects Source::Unknown
+    // with 400), so `srcSelect.value = 'unknown'` would silently fail
+    // and the <select> would render its first option (BD-RAW) as the
+    // effective pre-fill for every Unknown-verdict episode.
+    return 'bluray';
 }
 
 function openManualOverride(epNumber, currentSource, currentResolution, isRemux, isBdmv, webKind) {
@@ -1488,7 +1508,14 @@ function openManualOverride(epNumber, currentSource, currentResolution, isRemux,
         const key = overrideKeyFromClassification(currentSource, isRemux, isBdmv, webKind);
         srcSelect.value = OVERRIDE_SOURCE_MAP[key] ? key : 'bluray';
     }
-    if (resSelect) resSelect.value = currentResolution || '1080p';
+    // Guard against currentResolution='Unknown': the dropdown no longer
+    // offers that option, so a direct `.value = 'Unknown'` would fail
+    // silently and the <select> would render its first option (2160p).
+    // Fall through to 1080p, matching the default we use elsewhere.
+    if (resSelect) {
+        const resCandidate = currentResolution || '1080p';
+        resSelect.value = resCandidate.toLowerCase() === 'unknown' ? '1080p' : resCandidate;
+    }
     if (status) status.textContent = '';
     if (modal) modal.style.display = 'flex';
 }
@@ -1504,7 +1531,12 @@ function applyManualOverride() {
     const dbId = parseInt(SD.dbId);
     if (!dbId) return;
     const key = document.getElementById('override-source').value;
-    const mapped = OVERRIDE_SOURCE_MAP[key] || OVERRIDE_SOURCE_MAP.unknown;
+    // Defensive fallback: the dropdown can only produce keys that
+    // exist in OVERRIDE_SOURCE_MAP, but a future refactor could pass
+    // a stale/garbage key through. Use `bluray` (matches the dropdown
+    // default that actually exists) instead of `unknown` — the latter
+    // would build `{source: 'Unknown'}` which the handler 400s on.
+    const mapped = OVERRIDE_SOURCE_MAP[key] || OVERRIDE_SOURCE_MAP.bluray;
     const resolution = document.getElementById('override-resolution').value;
     const status = document.getElementById('override-status');
     if (status) status.textContent = 'Saving…';
@@ -1558,6 +1590,50 @@ function clearManualOverride() {
     })
     .then(_ => { location.reload(); })
     .catch(err => { if (status) status.textContent = err.message || 'Failed to clear override'; });
+}
+
+// Ad-hoc trigger for the per-episode full-pipeline classifier.
+// Targets the same episode the modal is currently editing. Useful
+// after the user edits Release Groups or a custom format and wants
+// to see the new verdict without waiting up to 6h for the next
+// library-classify sweep.
+function reclassifyEpisode(btn) {
+    if (overrideTargetEpisode == null) return;
+    const dbId = parseInt(SD.dbId);
+    if (!dbId) return;
+    const status = document.getElementById('override-status');
+    if (status) status.textContent = 'Re-classifying…';
+    if (btn) btn.disabled = true;
+    fetch('/api/library/reclassify-episode', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            series_id: dbId,
+            episode_number: overrideTargetEpisode,
+        })
+    })
+    .then(async r => {
+        let text = await r.text();
+        // The endpoint returns plain-text error bodies from Axum's
+        // `Err((StatusCode, String))` shape, so surface the body
+        // verbatim rather than trying to JSON-parse a 409.
+        let data = {};
+        try { data = JSON.parse(text); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || text || `Re-classify failed (HTTP ${r.status})`);
+        return data;
+    })
+    .then(data => {
+        if (status) {
+            status.textContent = `→ ${data.quality_tag || 'unknown'} (conf ${Number(data.confidence || 0).toFixed(2)}${data.needs_review ? ', needs review' : ''})`;
+        }
+        // Reload so the episode row picks up the new tag everywhere it
+        // renders (quality badge, override modal pre-selection, etc.).
+        setTimeout(() => { location.reload(); }, 600);
+    })
+    .catch(err => {
+        if (status) status.textContent = err.message || 'Re-classify failed';
+        if (btn) btn.disabled = false;
+    });
 }
 
 function setAllowUpgrades(allow) {

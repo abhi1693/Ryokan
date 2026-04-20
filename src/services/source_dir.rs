@@ -31,7 +31,7 @@
 
 use std::path::Path;
 
-use crate::services::source::{contains_word, Origin, Source, SourceEvidence};
+use crate::services::source::{Origin, Source, SourceEvidence, contains_word};
 
 const ORIGIN: Origin = Origin::Dir;
 
@@ -115,13 +115,7 @@ fn is_skipped_subdir(name: &str) -> bool {
     }
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "scans"
-            | "specials"
-            | "extras"
-            | "bonus"
-            | "@eadir"
-            | "lost+found"
-            | "__macosx"
+        "scans" | "specials" | "extras" | "bonus" | "@eadir" | "lost+found" | "__macosx"
     )
 }
 
@@ -143,7 +137,11 @@ fn read_dir_items(dir: &Path) -> std::io::Result<Vec<DirItem>> {
         if is_dir {
             top_dirs.push((name.clone(), entry.path()));
         }
-        out.push(DirItem { name, is_dir, depth: 0 });
+        out.push(DirItem {
+            name,
+            is_dir,
+            depth: 0,
+        });
     }
 
     // Second pass: walk one level into each top-level subdirectory.
@@ -167,7 +165,11 @@ fn read_dir_items(dir: &Path) -> std::io::Result<Vec<DirItem>> {
                 continue;
             };
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            out.push(DirItem { name, is_dir, depth: 1 });
+            out.push(DirItem {
+                name,
+                is_dir,
+                depth: 1,
+            });
         }
     }
 
@@ -456,18 +458,21 @@ mod tests {
             DirItem::nested_dir("CERTIFICATE"),
         ];
         let evs = scan_entries(&items);
-        assert!(evs.iter().any(|e| e.source == Source::BluRay && e.detail.contains("BDMV")));
+        assert!(
+            evs.iter()
+                .any(|e| e.source == Source::BluRay && e.detail.contains("BDMV"))
+        );
     }
 
     #[test]
     fn nested_iso_fires_disc_rule() {
         // `Series/Vol 1/disc.iso` layout.
-        let items = vec![
-            DirItem::dir("Vol 1"),
-            DirItem::nested_file("disc.iso"),
-        ];
+        let items = vec![DirItem::dir("Vol 1"), DirItem::nested_file("disc.iso")];
         let evs = scan_entries(&items);
-        assert!(evs.iter().any(|e| e.source == Source::BluRay && e.detail.contains("iso")));
+        assert!(
+            evs.iter()
+                .any(|e| e.source == Source::BluRay && e.detail.contains("iso"))
+        );
     }
 
     #[test]

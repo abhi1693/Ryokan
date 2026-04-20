@@ -69,10 +69,15 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
         season_year: row.try_get("season_year").ok().flatten(),
         end_year: row.try_get("end_year").ok().flatten(),
         folder_name: row.get("folder_name"),
-        monitor_mode: row.try_get("monitor_mode").unwrap_or_else(|_| "future".to_string()),
+        monitor_mode: row
+            .try_get("monitor_mode")
+            .unwrap_or_else(|_| "future".to_string()),
         // Default to true so series from before the column existed (migration
         // backfills via ADD COLUMN DEFAULT 1) opt *in* to upgrades.
-        allow_upgrades: row.try_get::<i64, _>("allow_upgrades").map(|v| v != 0).unwrap_or(true),
+        allow_upgrades: row
+            .try_get::<i64, _>("allow_upgrades")
+            .map(|v| v != 0)
+            .unwrap_or(true),
         custom_query_tokens: row.try_get("custom_query_tokens").unwrap_or_default(),
         restrict_to_uploader: row.try_get("restrict_to_uploader").unwrap_or_default(),
         cumulative_prior_episodes: row
@@ -103,7 +108,10 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx:
     Ok(row.map(map_series_row))
 }
 
-pub async fn get_by_anilist_id(db: &SqlitePool, anilist_id: i64) -> Result<Option<Series>, sqlx::Error> {
+pub async fn get_by_anilist_id(
+    db: &SqlitePool,
+    anilist_id: i64,
+) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE anilist_id = ?",
     )
@@ -157,14 +165,12 @@ pub struct SeriesCore<'a> {
 }
 
 /// Insert or update a series based on AniList/MAL provider identity.
-pub async fn upsert(
-    db: &SqlitePool,
-    core: SeriesCore<'_>,
-) -> Result<(i64, bool), sqlx::Error> {
+pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool), sqlx::Error> {
     if let Some(mid) = core.mal_id
-        && let Some(existing) = get_by_mal_id(db, mid).await? {
-            sqlx::query(
-                r#"
+        && let Some(existing) = get_by_mal_id(db, mid).await?
+    {
+        sqlx::query(
+            r#"
                 UPDATE series
                 SET anilist_id = ?,
                     mal_id = ?,
@@ -181,25 +187,25 @@ pub async fn upsert(
                     monitor_mode = COALESCE(NULLIF(monitor_mode, ''), ?)
                 WHERE id = ?
                 "#,
-            )
-            .bind(core.anilist_id)
-            .bind(mid)
-            .bind(core.title)
-            .bind(core.title_romaji)
-            .bind(core.title_english)
-            .bind(core.title_native)
-            .bind(core.cover_url)
-            .bind(core.format)
-            .bind(core.status)
-            .bind(core.episodes)
-            .bind(core.season_year)
-            .bind(core.end_year)
-            .bind(default_monitor_mode(core.status).as_str())
-            .bind(existing.id)
-            .execute(db)
-            .await?;
-            return Ok((existing.id, false));
-        }
+        )
+        .bind(core.anilist_id)
+        .bind(mid)
+        .bind(core.title)
+        .bind(core.title_romaji)
+        .bind(core.title_english)
+        .bind(core.title_native)
+        .bind(core.cover_url)
+        .bind(core.format)
+        .bind(core.status)
+        .bind(core.episodes)
+        .bind(core.season_year)
+        .bind(core.end_year)
+        .bind(default_monitor_mode(core.status).as_str())
+        .bind(existing.id)
+        .execute(db)
+        .await?;
+        return Ok((existing.id, false));
+    }
 
     if let Some(existing) = get_by_anilist_id(db, core.anilist_id).await? {
         sqlx::query(
@@ -284,8 +290,16 @@ pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    sqlx::query("DELETE FROM series_relations_cache WHERE series_id = ?").bind(id).execute(db).await.ok();
-    sqlx::query("DELETE FROM series_episode_metadata WHERE series_id = ?").bind(id).execute(db).await.ok();
+    sqlx::query("DELETE FROM series_relations_cache WHERE series_id = ?")
+        .bind(id)
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM series_episode_metadata WHERE series_id = ?")
+        .bind(id)
+        .execute(db)
+        .await
+        .ok();
 
     // Detach the rss_seen audit trail from this series before the
     // DELETE below, or the final series delete will fail with
@@ -326,8 +340,6 @@ pub async fn update_folder(db: &SqlitePool, id: i64, folder_name: &str) -> Resul
         .await?;
     Ok(())
 }
-
-
 
 pub async fn refresh_core_metadata(
     db: &SqlitePool,
@@ -380,7 +392,11 @@ pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, 
     Ok(rows.into_iter().map(map_series_row).collect())
 }
 
-pub async fn update_monitor_mode(db: &SqlitePool, id: i64, monitor_mode: &str) -> Result<(), sqlx::Error> {
+pub async fn update_monitor_mode(
+    db: &SqlitePool,
+    id: i64,
+    monitor_mode: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE series SET monitor_mode = ? WHERE id = ?")
         .bind(monitor_mode)
         .bind(id)
@@ -391,7 +407,11 @@ pub async fn update_monitor_mode(db: &SqlitePool, id: i64, monitor_mode: &str) -
 
 /// Toggle the per-series upgrade opt-in. When false the upgrade scanner
 /// in `services::upgrade` skips this series entirely.
-pub async fn update_allow_upgrades(db: &SqlitePool, id: i64, allow: bool) -> Result<(), sqlx::Error> {
+pub async fn update_allow_upgrades(
+    db: &SqlitePool,
+    id: i64,
+    allow: bool,
+) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE series SET allow_upgrades = ? WHERE id = ?")
         .bind(if allow { 1_i64 } else { 0_i64 })
         .bind(id)
@@ -427,14 +447,12 @@ pub async fn update_search_overrides(
     custom_query_tokens: &str,
     restrict_to_uploader: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE series SET custom_query_tokens = ?, restrict_to_uploader = ? WHERE id = ?",
-    )
-    .bind(custom_query_tokens.trim())
-    .bind(restrict_to_uploader.trim())
-    .bind(id)
-    .execute(db)
-    .await?;
+    sqlx::query("UPDATE series SET custom_query_tokens = ?, restrict_to_uploader = ? WHERE id = ?")
+        .bind(custom_query_tokens.trim())
+        .bind(restrict_to_uploader.trim())
+        .bind(id)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -473,14 +491,13 @@ mod tests {
 
         // Seed a minimal series row. Only `anilist_id` and `title` are
         // NOT NULL; everything else takes its column default.
-        let series_id: i64 = sqlx::query_scalar(
-            "INSERT INTO series (anilist_id, title) VALUES (?, ?) RETURNING id",
-        )
-        .bind(188388_i64)
-        .bind("DIGIMON BEATBREAK")
-        .fetch_one(&db)
-        .await
-        .expect("insert series");
+        let series_id: i64 =
+            sqlx::query_scalar("INSERT INTO series (anilist_id, title) VALUES (?, ?) RETURNING id")
+                .bind(188388_i64)
+                .bind("DIGIMON BEATBREAK")
+                .fetch_one(&db)
+                .await
+                .expect("insert series");
 
         // Seed a couple of rss_seen rows that reference it — one
         // "grabbed", one "skipped" — so the audit trail has meaningful
@@ -508,7 +525,9 @@ mod tests {
         // CASCADE to clear them. After the fix: the UPDATE inside
         // series::remove NULL-es those rows first, then the parent
         // DELETE succeeds cleanly.
-        remove(&db, series_id).await.expect("series::remove should succeed");
+        remove(&db, series_id)
+            .await
+            .expect("series::remove should succeed");
 
         // The series row is gone.
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE id = ?")
@@ -522,12 +541,11 @@ mod tests {
         // purpose — but their series_id is now NULL, and series_title
         // still carries the human-readable label for after-the-fact
         // inspection.
-        let rss_rows: Vec<(Option<i64>, String, String)> = sqlx::query_as(
-            "SELECT series_id, series_title, decision FROM rss_seen ORDER BY id",
-        )
-        .fetch_all(&db)
-        .await
-        .expect("fetch rss_seen");
+        let rss_rows: Vec<(Option<i64>, String, String)> =
+            sqlx::query_as("SELECT series_id, series_title, decision FROM rss_seen ORDER BY id")
+                .fetch_all(&db)
+                .await
+                .expect("fetch rss_seen");
         assert_eq!(rss_rows.len(), 2, "rss_seen rows should survive removal");
         for (id, title, _decision) in &rss_rows {
             assert!(id.is_none(), "series_id should be NULL after removal");

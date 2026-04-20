@@ -208,10 +208,7 @@ impl From<PbFile> for SeaDexFile {
 /// persistence with in-flight coalescing); this function just owns the
 /// network round-trip + parse.
 pub async fn lookup(anilist_id: i64) -> Result<Option<SeaDexEntry>, String> {
-    let url = format!(
-        "{}?filter=alID%3D{}&expand=trs",
-        SEADEX_API, anilist_id,
-    );
+    let url = format!("{}?filter=alID%3D{}&expand=trs", SEADEX_API, anilist_id,);
 
     let response = HTTP_CLIENT
         .get(&url)
@@ -363,8 +360,8 @@ const SEADEX_BATCH_PARALLELISM: usize = 2;
 /// Internal parser — split out so unit tests can feed it a fixture
 /// without touching the network.
 fn parse_list_response(body: &str) -> Result<Option<SeaDexEntry>, String> {
-    let parsed: PbListResponse = serde_json::from_str(body)
-        .map_err(|e| format!("SeaDex parse failed: {e}"))?;
+    let parsed: PbListResponse =
+        serde_json::from_str(body).map_err(|e| format!("SeaDex parse failed: {e}"))?;
 
     Ok(parsed.items.into_iter().next().map(Into::into))
 }
@@ -372,8 +369,8 @@ fn parse_list_response(body: &str) -> Result<Option<SeaDexEntry>, String> {
 /// Multi-item variant of [`parse_list_response`] for the batched-OR
 /// query. Returns every entry in the page rather than just the first.
 fn parse_list_response_multi(body: &str) -> Result<Vec<SeaDexEntry>, String> {
-    let parsed: PbListResponse = serde_json::from_str(body)
-        .map_err(|e| format!("SeaDex batch parse failed: {e}"))?;
+    let parsed: PbListResponse =
+        serde_json::from_str(body).map_err(|e| format!("SeaDex batch parse failed: {e}"))?;
     Ok(parsed.items.into_iter().map(Into::into).collect())
 }
 
@@ -721,7 +718,10 @@ mod tests {
     #[test]
     fn unmuxed_notes_keyword() {
         let t = nyaa_torrent("Headpatter", "a".repeat(40).as_str(), false, 12);
-        assert!(is_unmuxed(&t, "Headpatter is the unmuxed best but needs hand-muxing"));
+        assert!(is_unmuxed(
+            &t,
+            "Headpatter is the unmuxed best but needs hand-muxing"
+        ));
         assert!(is_unmuxed(&t, "notes mention UNMUXED in caps"));
         assert!(is_unmuxed(&t, "unmux sidecars"));
         assert!(is_unmuxed(&t, "needs mux per E.N.D notes"));
@@ -743,7 +743,15 @@ mod tests {
             let name = Box::leak(format!("ep_{i}.mka").into_boxed_str());
             files.push((name, 1));
         }
-        let t = torrent("JySzE", "Nyaa", "https://nyaa.si/view/1", "h", true, false, files);
+        let t = torrent(
+            "JySzE",
+            "Nyaa",
+            "https://nyaa.si/view/1",
+            "h",
+            true,
+            false,
+            files,
+        );
         assert!(is_unmuxed(&t, ""));
     }
 
@@ -771,12 +779,16 @@ mod tests {
     #[test]
     fn muxed_release_has_no_sidecars() {
         // MTBB Monogatari: pure .mkv, no sidecars. Not unmuxed.
-        let files = vec![
-            ("mono_01.mkv", 1),
-            ("mono_02.mkv", 1),
-            ("mono_03.mkv", 1),
-        ];
-        let t = torrent("MTBB", "Nyaa", "https://nyaa.si/view/3", "h", true, false, files);
+        let files = vec![("mono_01.mkv", 1), ("mono_02.mkv", 1), ("mono_03.mkv", 1)];
+        let t = torrent(
+            "MTBB",
+            "Nyaa",
+            "https://nyaa.si/view/3",
+            "h",
+            true,
+            false,
+            files,
+        );
         assert!(!is_unmuxed(&t, ""));
     }
 
@@ -790,14 +802,30 @@ mod tests {
             ("ep01.mka", 1), // triggers audio sidecar rule
             ("ep01.ass", 1),
         ];
-        let t = torrent("X", "Nyaa", "https://nyaa.si/view/4", "h", true, false, files);
+        let t = torrent(
+            "X",
+            "Nyaa",
+            "https://nyaa.si/view/4",
+            "h",
+            true,
+            false,
+            files,
+        );
         assert!(is_unmuxed(&t, ""));
     }
 
     #[test]
     fn zero_video_files_is_not_unmuxed() {
         let files = vec![("cover.jpg", 1), ("readme.txt", 1)];
-        let t = torrent("X", "Nyaa", "https://nyaa.si/view/5", "h", true, false, files);
+        let t = torrent(
+            "X",
+            "Nyaa",
+            "https://nyaa.si/view/5",
+            "h",
+            true,
+            false,
+            files,
+        );
         assert!(!is_unmuxed(&t, ""));
     }
 
@@ -1050,7 +1078,15 @@ mod tests {
 
     #[test]
     fn magnet_empty_group_is_omitted() {
-        let t = torrent("", "Nyaa", "https://nyaa.si/view/1", "aa", true, false, vec![]);
+        let t = torrent(
+            "",
+            "Nyaa",
+            "https://nyaa.si/view/1",
+            "aa",
+            true,
+            false,
+            vec![],
+        );
         let uri = to_magnet_uri(&t);
         assert!(!uri.contains("&dn="));
     }

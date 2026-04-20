@@ -182,8 +182,8 @@ pub async fn record_grab_series_routes(
         let file_idx_i64: Vec<i64> = route.file_indices.iter().map(|i| *i as i64).collect();
         let file_indices_json =
             serde_json::to_string(&file_idx_i64).unwrap_or_else(|_| "[]".to_string());
-        let eps_json = serde_json::to_string(&route.episode_numbers)
-            .unwrap_or_else(|_| "[]".to_string());
+        let eps_json =
+            serde_json::to_string(&route.episode_numbers).unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
             r#"INSERT OR REPLACE INTO grabbed_torrent_series
                (grab_id, series_id, file_indices, episode_numbers, matched_subtitle, episode_offset)
@@ -225,11 +225,9 @@ pub async fn get_series_routes(
         .iter()
         .map(|row| {
             let file_idx_json: String = row.get("file_indices");
-            let file_idx: Vec<i64> =
-                serde_json::from_str(&file_idx_json).unwrap_or_default();
+            let file_idx: Vec<i64> = serde_json::from_str(&file_idx_json).unwrap_or_default();
             let eps_json: String = row.get("episode_numbers");
-            let episode_numbers: Vec<i32> =
-                serde_json::from_str(&eps_json).unwrap_or_default();
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
             GrabSeriesRoute {
                 grab_id: row.get("grab_id"),
                 series_id: row.get("series_id"),
@@ -280,11 +278,9 @@ pub async fn get_series_routes_for_grabs(
         std::collections::HashMap::new();
     for row in rows {
         let file_idx_json: String = row.get("file_indices");
-        let file_idx: Vec<i64> =
-            serde_json::from_str(&file_idx_json).unwrap_or_default();
+        let file_idx: Vec<i64> = serde_json::from_str(&file_idx_json).unwrap_or_default();
         let eps_json: String = row.get("episode_numbers");
-        let episode_numbers: Vec<i32> =
-            serde_json::from_str(&eps_json).unwrap_or_default();
+        let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
         let route = GrabSeriesRoute {
             grab_id: row.get("grab_id"),
             series_id: row.get("series_id"),
@@ -335,8 +331,7 @@ pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sql
         .iter()
         .map(|row| {
             let eps_json: String = row.get("episode_numbers");
-            let episode_numbers: Vec<i32> =
-                serde_json::from_str(&eps_json).unwrap_or_default();
+            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
             let is_batch_i: i64 = row.get("is_batch");
             GrabbedTorrent {
                 id: row.get("id"),
@@ -371,12 +366,10 @@ pub async fn mark_imported(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> 
 /// on `imported_at IS NOT NULL` will correctly see this grab as "not
 /// imported by us."
 pub async fn mark_completed_no_import(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE grabbed_torrents SET state = 'imported' WHERE id = ?",
-    )
-    .bind(id)
-    .execute(db)
-    .await?;
+    sqlx::query("UPDATE grabbed_torrents SET state = 'imported' WHERE id = ?")
+        .bind(id)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -424,7 +417,10 @@ pub async fn mark_removed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 }
 
 /// Get all grabbed torrents with series title, ordered by most recent first.
-pub async fn get_all_with_series(db: &SqlitePool, limit: i64) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
+pub async fn get_all_with_series(
+    db: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
     let rows = sqlx::query(
         r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
                   COALESCE(s.title_english, s.title_romaji, s.title, '') AS series_title,
@@ -495,7 +491,11 @@ pub async fn get_blocked(db: &SqlitePool) -> Result<Vec<GrabbedTorrentWithSeries
 }
 
 /// Mark a grabbed torrent as failed (blocklisted) by matching torrent name and series.
-pub async fn mark_failed_by_name(db: &SqlitePool, series_id: i64, torrent_name: &str) -> Result<u64, sqlx::Error> {
+pub async fn mark_failed_by_name(
+    db: &SqlitePool,
+    series_id: i64,
+    torrent_name: &str,
+) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE grabbed_torrents SET state = 'failed' WHERE series_id = ? AND torrent_name = ? AND state IN ('pending', 'imported')",
     )
@@ -1023,7 +1023,10 @@ mod tests {
         .await
         .expect("fetch row");
         assert_eq!(row.0, "release a", "pending row's fields must be untouched");
-        assert_eq!(row.1, "[1]", "pending row's episode_numbers must be untouched");
+        assert_eq!(
+            row.1, "[1]",
+            "pending row's episode_numbers must be untouched"
+        );
         assert_eq!(row.2, "pending", "pending row stays pending");
 
         // The original drift case: mark the row 'imported' (as
@@ -1031,13 +1034,12 @@ mod tests {
         // Reactivation must flip it back to 'pending' and null out
         // imported_at so the next post-processing tick picks it up.
         mark_imported(&db, id1).await.expect("mark imported");
-        let imported_at_before: Option<String> = sqlx::query_scalar(
-            "SELECT imported_at FROM grabbed_torrents WHERE id = ?",
-        )
-        .bind(id1)
-        .fetch_one(&db)
-        .await
-        .expect("imported_at before");
+        let imported_at_before: Option<String> =
+            sqlx::query_scalar("SELECT imported_at FROM grabbed_torrents WHERE id = ?")
+                .bind(id1)
+                .fetch_one(&db)
+                .await
+                .expect("imported_at before");
         assert!(
             imported_at_before.is_some(),
             "mark_imported stamps imported_at"
@@ -1049,13 +1051,12 @@ mod tests {
             .expect("re-grab of imported hash must yield an id");
         assert_eq!(id3, id1, "reactivation preserves the row id");
 
-        let (state_after, imported_at_after): (String, Option<String>) = sqlx::query_as(
-            "SELECT state, imported_at FROM grabbed_torrents WHERE id = ?",
-        )
-        .bind(id1)
-        .fetch_one(&db)
-        .await
-        .expect("state after");
+        let (state_after, imported_at_after): (String, Option<String>) =
+            sqlx::query_as("SELECT state, imported_at FROM grabbed_torrents WHERE id = ?")
+                .bind(id1)
+                .fetch_one(&db)
+                .await
+                .expect("state after");
         assert_eq!(state_after, "pending", "imported→pending flip on re-grab");
         assert!(
             imported_at_after.is_none(),
@@ -1143,20 +1144,35 @@ mod tests {
         .await
         .expect("imported grab")
         .expect("id");
-        mark_imported(&db, imported_id).await.expect("mark imported");
+        mark_imported(&db, imported_id)
+            .await
+            .expect("mark imported");
 
-        let hits_ep5 = find_pending_for_episode(&db, series_id, 5).await.expect("query");
-        assert_eq!(hits_ep5.len(), 1, "should find the one pending grab for ep 5");
+        let hits_ep5 = find_pending_for_episode(&db, series_id, 5)
+            .await
+            .expect("query");
+        assert_eq!(
+            hits_ep5.len(),
+            1,
+            "should find the one pending grab for ep 5"
+        );
         assert_eq!(hits_ep5[0].id, pending_id);
         assert_eq!(hits_ep5[0].state, "pending");
 
-        let hits_ep6 = find_pending_for_episode(&db, series_id, 6).await.expect("query");
-        assert!(hits_ep6.is_empty(), "imported grabs must not leak into pending lookup");
+        let hits_ep6 = find_pending_for_episode(&db, series_id, 6)
+            .await
+            .expect("query");
+        assert!(
+            hits_ep6.is_empty(),
+            "imported grabs must not leak into pending lookup"
+        );
 
         // Cancel path: mark_removed flips the state; a second lookup
         // should no longer return the row.
         mark_removed(&db, pending_id).await.expect("mark removed");
-        let hits_after_remove = find_pending_for_episode(&db, series_id, 5).await.expect("query");
+        let hits_after_remove = find_pending_for_episode(&db, series_id, 5)
+            .await
+            .expect("query");
         assert!(
             hits_after_remove.is_empty(),
             "removed grabs must not reappear in pending lookup"
