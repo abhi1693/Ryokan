@@ -51,7 +51,7 @@ Ryokan's post-processor reads completed torrents from qBittorrent and imports th
 
 ## Running locally
 
-Requires Rust 1.95+, a C linker, and OpenSSL dev headers.
+Requires Rust 1.95+, a C/C++ toolchain, and `cmake`. No OpenSSL headers needed — TLS is pure-Rust rustls.
 
 ```bash
 cargo run
@@ -67,7 +67,7 @@ Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 | `DATABASE_URL` | `sqlite://data/ryokan.db?mode=rwc` (local), `sqlite:///data/ryokan.db?mode=rwc` (Docker) | SQLite connection string |
 | `RUST_LOG` | `ryokan=info` | Log filter (see [`tracing-subscriber`](https://github.com/tokio-rs/tracing) docs) |
 | `RYOKAN_MEDIA_CACHE_DIR` | `data/cache/artwork` (local), `/data/cache/artwork` (Docker) | On-disk directory for the artwork blob cache |
-| `JIKAN_API_BASE` | `https://api.jikan.moe/v4` | Override for a self-hosted Jikan instance |
+| `JIKAN_API_BASE` | `https://api.jikan.moe/v4` | Override for a self-hosted Jikan instance. If it's HTTPS behind a private CA, install the CA into the system trust store (e.g. `/usr/local/share/ca-certificates/` + `update-ca-certificates` on Debian); reqwest's rustls backend does not read `SSL_CERT_FILE` / `SSL_CERT_DIR`. |
 | `RYOKAN_RESET_AUTH` | *(unset)* | Set to `1` alongside a `data/.reset-auth` sentinel file to wipe `users` / `sessions` on next boot. See [Password recovery](#password-recovery) |
 | `PUID` | `1000` | *Docker only.* UID Ryokan runs as inside the container. Set to match host file ownership |
 | `PGID` | `1000` | *Docker only.* GID Ryokan runs as inside the container |
