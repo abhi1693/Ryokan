@@ -58,9 +58,14 @@
             </button>
         </div>
         <div class="modal-body">
-            <div class="search-bar" style="margin-bottom:16px">
+            <div class="search-bar" style="margin-bottom:8px">
                 <input type="text" id="anilist-query" placeholder="Search AniList / MAL..." onkeydown="if(event.key==='Enter'){event.preventDefault();searchAnilist()}" autofocus>
                 <button class="btn btn-primary" onclick="searchAnilist()">Search</button>
+            </div>
+            <div class="search-source-toggle" role="group" aria-label="Search source" style="display:flex;gap:6px;margin-bottom:16px;font-size:12px;align-items:center">
+                <span style="color:var(--text-dim)">Source:</span>
+                <button type="button" class="btn btn-pill active" data-source="al" onclick="setSearchSource(this)">AniList</button>
+                <button type="button" class="btn btn-pill" data-source="mal" onclick="setSearchSource(this)">MAL</button>
             </div>
             <div id="anilist-results" class="anilist-results"></div>
         </div>
@@ -126,6 +131,19 @@ function getTitleByLang(entry, lang) {
 // pre-paint. `getTitleByLang` above is still used for search results and
 // modal titles that render via innerHTML rather than title-switcher spans.
 
+// Per-search provider override. Defaults to AniList; the user can flip
+// to MAL via the toggle in the Add Series modal. The selection is
+// remembered across modal opens within the page session, but resets on
+// a hard reload (no localStorage — explicit-each-session by design).
+let currentSearchSource = 'al';
+
+function setSearchSource(btn) {
+    currentSearchSource = btn.dataset.source;
+    document.querySelectorAll('.search-source-toggle .btn-pill').forEach(b => {
+        b.classList.toggle('active', b === btn);
+    });
+}
+
 function searchAnilist() {
     const q = document.getElementById('anilist-query').value.trim();
     if (!q) return;
@@ -133,7 +151,7 @@ function searchAnilist() {
     const container = document.getElementById('anilist-results');
     container.innerHTML = '<p class="loading-text">Searching titles...</p>';
 
-    fetch(`/api/anilist/search?q=${encodeURIComponent(q)}`)
+    fetch(`/api/anilist/search?q=${encodeURIComponent(q)}&source=${currentSearchSource}`)
         .then(r => {
             if (!r.ok) {
                 return r.text().then(msg => {

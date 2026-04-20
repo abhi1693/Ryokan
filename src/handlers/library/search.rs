@@ -41,7 +41,15 @@ pub async fn anilist_search(
     State(state): State<AppState>,
     Query(params): Query<AnilistSearchQuery>,
 ) -> Result<Json<Vec<anilist::AnimeEntry>>, (axum::http::StatusCode, String)> {
-    let force_fallback = force_mal_fallback_enabled(&state.db).await;
+    // Per-search override (?source=al|mal) takes precedence over the
+    // ambient config flag. Anything else falls back to the config so
+    // existing users with `force_mal_fallback = true` still see MAL by
+    // default when they don't pick a source.
+    let force_fallback = match params.source.as_deref() {
+        Some("mal") => true,
+        Some("al") => false,
+        _ => force_mal_fallback_enabled(&state.db).await,
+    };
     let results = anilist::search_anime_with_options(&params.q, force_fallback)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -55,7 +63,13 @@ pub async fn anilist_search(
         &state.db,
         LogCategory::AniList,
         &format!("Title search: '{}'", params.q),
-        &format!("results={}, source={}, forced_fallback={}", results.len(), source, force_fallback),
+        &format!(
+            "results={}, source={}, forced_fallback={}, requested={}",
+            results.len(),
+            source,
+            force_fallback,
+            params.source.as_deref().unwrap_or("(config default)"),
+        ),
     ).await;
 
     Ok(Json(results))
