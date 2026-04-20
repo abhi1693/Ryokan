@@ -353,6 +353,52 @@ pub async fn expand_from_files(
         })
         .collect();
 
+    // Backfill grab-tag rows for parent files whose parsed episode
+    // number exceeds what the caller's `parent_episode_numbers` covered.
+    // Motivating case: the [smol] Owarimonogatari BD splits the 48-min
+    // aired ep 1 into two files, so S1 has files for eps 1..=13 on
+    // disk even though AL reports 12 eps. `batch_episode_numbers` only
+    // produced 1..=12 at grab time; without this pass the S1 ep 13
+    // row never renders in the UI until post-processing imports the
+    // file. Write the overflow tag rows now so the user sees a
+    // "downloading" row for ep 13 the moment the pack is queued.
+    let parent_eps_covered: std::collections::HashSet<i32> =
+        parent_episode_numbers.iter().copied().collect();
+    for &file_idx in &parent_file_indices {
+        let Some(name) = filenames.get(file_idx) else {
+            continue;
+        };
+        let Some((_, raw_ep)) = media::parse_episode_number(&name.to_ascii_lowercase()) else {
+            continue;
+        };
+        if raw_ep <= 0 || parent_eps_covered.contains(&raw_ep) {
+            continue;
+        }
+        if let Err(e) = episode_tags::record_grab(
+            db,
+            parent_series_id,
+            raw_ep,
+            &grab_ctx.classification,
+            torrent_title,
+            &grab_ctx.release_group,
+            grab_ctx.size_bytes,
+            true,
+        )
+        .await
+        {
+            logger::warn(
+                db,
+                LogCategory::Library,
+                &format!(
+                    "Auto-expand: failed to backfill grab history for parent {} ep {} (AL-overflow)",
+                    parent_series_id, raw_ep,
+                ),
+                &format!("{}: {}", torrent_title, e),
+            )
+            .await;
+        }
+    }
+
     if !routes.is_empty() && !parent_file_indices.is_empty() {
         logger::warn(
             db,
@@ -591,5 +637,109 @@ mod tests {
             .expect("parent route present");
         assert_eq!(parent_route.file_indices, (0..=23).collect::<Vec<_>>());
         assert_eq!(parent_route.episode_offset, 0);
+    }
+
+    /// Issue #45 follow-up: auto-expand must backfill a grab-tag row
+    /// for parent-side episodes whose parsed number exceeds the
+    /// caller's `parent_episode_numbers` set (AL-overflow case). Without
+    /// this, the [smol] Owari BD's E13 never renders in the UI until
+    /// post-processing imports it — the user sees 12 rows during the
+    /// download with no indication that a 13th is coming.
+    #[tokio::test]
+    async fn expand_writes_grab_tag_for_parent_al_overflow_episodes() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21262,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "owarialoverflowbackfill00000000000000000000",
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        let mut parent_detail = empty_anime_detail(21262, "Owarimonogatari", Some(12));
+        parent_detail
+            .relations
+            .push(related_entry(21745, "Owarimonogatari Second Season", Some(7)));
+
+        // 13 parent files + 7 sibling files. Parent caller passes
+        // 1..=12 (AL's count), so E13 is the overflow case we want to
+        // backfill.
+        let mut filenames: Vec<String> = Vec::new();
+        for n in 1..=13 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p).mkv",
+                n
+            ));
+        }
+        for n in 14..=20 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p).mkv",
+                n
+            ));
+        }
+        let parent_episode_numbers: Vec<i32> = (1..=12).collect();
+
+        let ctx = AutoExpandGrabContext {
+            classification: ClassificationResult::unknown(),
+            release_group: String::new(),
+            size_bytes: 0,
+        };
+
+        expand_from_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &parent_episode_numbers,
+            grab_id,
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            &ctx,
+        )
+        .await;
+
+        // The parent should now have a quality_tag row for E13 even
+        // though it wasn't in parent_episode_numbers. The caller's
+        // grab handler writes 1..=12; expand_from_files fills the gap.
+        let tags = episode_tags::get_for_series(&db, parent_id)
+            .await
+            .expect("get_for_series");
+        assert!(
+            tags.contains_key(&13),
+            "auto-expand must backfill a grab tag for AL-overflow ep 13 so the UI renders it during the download; got tags for {:?}",
+            tags.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            tags.get(&13).unwrap().state,
+            "grabbed",
+            "ep 13 tag should start in 'grabbed' state (post-processing will flip to 'completed')"
+        );
     }
 }

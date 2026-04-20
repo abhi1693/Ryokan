@@ -622,21 +622,28 @@ pub(super) async fn build_episodes(
         });
     }
 
-    // Surface on-disk files the main 1..=ep_count loop didn't render.
-    // Two cases:
+    // Surface episodes the main 1..=ep_count loop didn't render. Two
+    // cases:
     //   1. ep_count == 0 — movies or airing shows with no episodes yet;
     //      the main loop emits no rows, so every disk file lands here.
     //   2. ep_count > 0 but a release partitioned the series into more
     //      files than AniList's reported episode count. Canonical case:
     //      the [smol] Owarimonogatari BD splits the 48-min aired ep 1
     //      back into two ~24-min files, so S1 has 13 files on disk vs
-    //      AL's 12 eps. Auto-expand routes the extra file to the parent
-    //      folder at post-process time, but without this branch the UI
-    //      loop only iterated 1..=12 and the 13th file was orphaned
-    //      (on disk, tracked in `grabbed_torrents`, but invisible in
-    //      the episode list). See issue #45.
-    let rendered_eps: std::collections::HashSet<i32> =
+    //      AL's 12 eps. Auto-expand backfills a grab-tag row for the
+    //      overflow ep at grab time AND routes the file to the parent
+    //      folder at post-process time. Both pre-import ("downloading"
+    //      row from the grab tag) and post-import ("imported" row from
+    //      the disk file) need to render — without this pass, the main
+    //      loop only iterated 1..=ep_count and the overflow was
+    //      orphaned in either state. See issue #45.
+    let mut rendered_eps: std::collections::HashSet<i32> =
         episodes.iter().map(|e| e.number).collect();
+
+    // Pass 1: on-disk files past ep_count. Takes precedence — a file
+    // on disk carries size/filename/quality that a bare grab tag
+    // doesn't, and we want the "imported" state to win over any stale
+    // "grabbed" tag if the user somehow hits this for both sources.
     for f in &disk_files {
         // Match the main loop's season filter on the ep_count > 0 path:
         // only render season 1 / unseasoned files. Specials/ or S02
@@ -679,6 +686,7 @@ pub(super) async fn build_episodes(
         let class_web_kind = tag.map(|t| t.web_kind.clone()).unwrap_or_default();
         let needs_review = tag.map(|t| t.needs_review).unwrap_or(false);
         let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
+        rendered_eps.insert(f.episode_number);
         episodes.push(Episode {
             number: f.episode_number,
             title: String::new(),
@@ -705,6 +713,60 @@ pub(super) async fn build_episodes(
             manual_override,
             needs_review,
         });
+    }
+
+    // Pass 2: grab-tag rows past ep_count with no matching disk file
+    // yet. This is what makes the overflow row render as "downloading"
+    // immediately after the batch is queued — auto-expand writes the
+    // grab tag, the torrent is still downloading so nothing is on disk,
+    // and without this pass the row would be invisible until post-
+    // processing imports it.
+    if ep_count > 0 {
+        for (&ep_num, tag) in quality_tags.iter() {
+            if ep_num <= ep_count {
+                continue;
+            }
+            if rendered_eps.contains(&ep_num) {
+                continue;
+            }
+
+            let monitored = monitored_lookup.contains(&ep_num);
+            if monitored {
+                monitored_count += 1;
+            }
+            // `downloaded` tracks completed-state episodes; an overflow
+            // tag in 'grabbed' state is mid-download so it counts only
+            // when the tag has already been flipped to 'completed' by
+            // post-processing. Mirrors the main loop's treatment.
+            let downloaded = tag.state == "completed";
+            if downloaded {
+                downloaded_count += 1;
+            }
+            rendered_eps.insert(ep_num);
+            episodes.push(Episode {
+                number: ep_num,
+                title: String::new(),
+                title_romaji: String::new(),
+                title_english: String::new(),
+                title_native: String::new(),
+                aired: String::new(),
+                on_disk: false,
+                downloaded,
+                quality: tag.quality_tag.clone(),
+                quality_state: tag.state.clone(),
+                size_display: String::new(),
+                filename: String::new(),
+                can_auto_search: is_tracked,
+                monitored,
+                class_source: tag.source.clone(),
+                class_resolution: tag.resolution.clone(),
+                class_is_remux: tag.is_remux,
+                class_is_bdmv: tag.is_bdmv,
+                class_web_kind: tag.web_kind.clone(),
+                manual_override: tag.manual_override,
+                needs_review: tag.needs_review,
+            });
+        }
     }
 
     episodes.sort_by(|a, b| b.number.cmp(&a.number));
@@ -1196,6 +1258,92 @@ mod tests {
         .await;
 
         assert_eq!(episodes.len(), 12, "no duplicates: exactly 12 rows");
+
+        std::fs::remove_dir_all(&media_root).ok();
+    }
+
+    /// Issue #45 follow-up: during the download the overflow file isn't
+    /// on disk yet, but auto-expand has already written a grab-tag row
+    /// for it. `build_episodes` must surface that tag as a row (in
+    /// 'grabbed' state) so the user sees the extra episode's download
+    /// progress immediately — not just after post-processing runs.
+    #[tokio::test]
+    async fn build_episodes_surfaces_grab_tags_beyond_ep_count_without_disk_file() {
+        use crate::services::source::ClassificationResult;
+
+        let db = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21262,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        // Write a grab tag for ep 13 (AL-overflow) — simulates what
+        // auto_expand::expand_from_files does when it backfills a tag
+        // for a parent file whose parsed ep exceeds AL's count.
+        crate::models::episode_tags::record_grab(
+            &db,
+            series_id,
+            13,
+            &ClassificationResult::unknown(),
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            "smol",
+            0,
+            true,
+        )
+        .await
+        .expect("record_grab for ep 13");
+
+        // Empty media root — torrent is still downloading, nothing
+        // has landed in the library folder yet.
+        let media_root = unique_media_root("surfaces_grab_tag_no_disk");
+        let series_folder = media_root.join("Owarimonogatari");
+        std::fs::create_dir_all(&series_folder).expect("create series dir");
+
+        let detail = empty_anime_detail(21262, "Owarimonogatari", Some(12));
+
+        let (episodes, on_disk_count, downloaded_count, _size, _monitored) = build_episodes(
+            &db,
+            &detail,
+            Some(series_id),
+            "Owarimonogatari",
+            media_root.to_str().expect("media root str"),
+        )
+        .await;
+
+        assert_eq!(
+            episodes.len(),
+            13,
+            "expected 13 rows (1..=12 from AL + overflow E13 from grab tag), got {}",
+            episodes.len()
+        );
+        let ep13 = episodes
+            .iter()
+            .find(|e| e.number == 13)
+            .expect("ep 13 row present from grab tag");
+        assert!(!ep13.on_disk, "no disk file yet, so on_disk must be false");
+        assert!(!ep13.downloaded, "tag state is 'grabbed', not 'completed'");
+        assert_eq!(ep13.quality_state, "grabbed");
+        assert_eq!(on_disk_count, 0, "nothing on disk yet");
+        assert_eq!(downloaded_count, 0, "nothing completed yet");
 
         std::fs::remove_dir_all(&media_root).ok();
     }
