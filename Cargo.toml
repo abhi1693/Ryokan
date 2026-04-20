@@ -32,7 +32,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 reqwest = { version = "0.12", features = ["json", "cookies"] }
 
 # HTML scraping
-scraper = "0.22"
+scraper = "0.26"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
