@@ -1891,6 +1891,13 @@ fieldset legend {
     border-radius: 0;
 }
 
+/* When a row is itself a <details>, the summary should sit on the row
+   line and the disclosed content should stack below it (not flex inline
+   beside the summary as a sibling flex item). */
+.monitoring-card details.monitoring-row {
+    display: block;
+}
+
 .monitoring-divider {
     height: 1px;
     background: var(--border);
