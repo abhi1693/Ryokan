@@ -87,7 +87,9 @@
                             <option value="720p">720p</option>
                             <option value="576p">576p</option>
                             <option value="480p">480p</option>
-                            <option value="Unknown">Unknown</option>
+                            {# Resolution Unknown dropped for the same
+                               reason as the source Unknown — handler
+                               rejects it with 400. See series.html. #}
                         </select>
                         <button class="btn btn-grab" type="button" onclick="applyReviewOverride(this)">Apply</button>
                         <a class="btn btn-grab" href="/series/{{ entry.series_id }}">Open</a>
@@ -114,7 +116,7 @@ const REVIEW_OVERRIDE_SOURCE_MAP = {
     dvd:         { source: 'DVD',    is_remux: false, is_bdmv: false, web_kind: '' },
     hdtv:        { source: 'HDTV',   is_remux: false, is_bdmv: false, web_kind: '' },
     tv:          { source: 'TV',     is_remux: false, is_bdmv: false, web_kind: '' },
-    unknown:     { source: 'Unknown',is_remux: false, is_bdmv: false, web_kind: '' },
+    // See series.html: no `unknown` entry; fallbacks use `bluray`.
 };
 
 // Resolve the right dropdown key for the current verdict, honoring the
@@ -175,7 +177,11 @@ function applyReviewOverride(btn) {
     const seriesId = parseInt(row.dataset.seriesId, 10);
     const episodeNumber = parseInt(row.dataset.episode, 10);
     const key = row.querySelector('.review-source').value;
-    const mapped = REVIEW_OVERRIDE_SOURCE_MAP[key] || REVIEW_OVERRIDE_SOURCE_MAP.unknown;
+    // Defensive fallback to `bluray` instead of `unknown` — the dropdown
+    // no longer offers Unknown (the handler 400s on Source::Unknown), so
+    // falling back to the now-gone `unknown` map entry would have
+    // produced `undefined.source` at runtime. Mirror series.html.
+    const mapped = REVIEW_OVERRIDE_SOURCE_MAP[key] || REVIEW_OVERRIDE_SOURCE_MAP.bluray;
     const resolution = row.querySelector('.review-resolution').value;
     const status = row.querySelector('.review-status');
     if (status) {

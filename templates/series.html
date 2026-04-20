@@ -459,7 +459,10 @@
                         <option value="720p">720p</option>
                         <option value="576p">576p</option>
                         <option value="480p">480p</option>
-                        <option value="Unknown">Unknown</option>
+                        {# Same rationale as the Unknown source option —
+                           set_manual_override rejects Resolution::Unknown
+                           with 400, so the dropdown shouldn't advertise
+                           it. Unknown-resolution rows pre-fill to 1080p. #}
                     </select>
                 </label>
                 <div id="override-status" class="form-hint"></div>
@@ -1455,7 +1458,11 @@ const OVERRIDE_SOURCE_MAP = {
     dvd:         { source: 'DVD',    is_remux: false, is_bdmv: false, web_kind: '' },
     hdtv:        { source: 'HDTV',   is_remux: false, is_bdmv: false, web_kind: '' },
     tv:          { source: 'TV',     is_remux: false, is_bdmv: false, web_kind: '' },
-    unknown:     { source: 'Unknown',is_remux: false, is_bdmv: false, web_kind: '' },
+    // Note: no `unknown` entry. The <select> no longer offers Unknown
+    // (the handler rejects Source::Unknown with 400), so a map entry
+    // for it would be dead state — and worse, a footgun for any
+    // `map[key] || map.unknown` fallback that outlives the dropdown
+    // change. Fallbacks elsewhere now route to `map.bluray`.
 };
 
 // Reverse lookup: given the current classification quartet on the episode,
@@ -1479,7 +1486,14 @@ function overrideKeyFromClassification(source, isRemux, isBdmv, webKind) {
     if (src === 'dvd') return 'dvd';
     if (src === 'hdtv') return 'hdtv';
     if (src === 'tv') return 'tv';
-    return 'unknown';
+    // Unknown-verdict rows fall back to 'bluray' as the pre-fill
+    // default, matching reviewKeyFromClassification in
+    // needs_review.html. Don't return 'unknown' — the dropdown no
+    // longer offers that option (the handler rejects Source::Unknown
+    // with 400), so `srcSelect.value = 'unknown'` would silently fail
+    // and the <select> would render its first option (BD-RAW) as the
+    // effective pre-fill for every Unknown-verdict episode.
+    return 'bluray';
 }
 
 function openManualOverride(epNumber, currentSource, currentResolution, isRemux, isBdmv, webKind) {
@@ -1494,7 +1508,14 @@ function openManualOverride(epNumber, currentSource, currentResolution, isRemux,
         const key = overrideKeyFromClassification(currentSource, isRemux, isBdmv, webKind);
         srcSelect.value = OVERRIDE_SOURCE_MAP[key] ? key : 'bluray';
     }
-    if (resSelect) resSelect.value = currentResolution || '1080p';
+    // Guard against currentResolution='Unknown': the dropdown no longer
+    // offers that option, so a direct `.value = 'Unknown'` would fail
+    // silently and the <select> would render its first option (2160p).
+    // Fall through to 1080p, matching the default we use elsewhere.
+    if (resSelect) {
+        const resCandidate = currentResolution || '1080p';
+        resSelect.value = resCandidate.toLowerCase() === 'unknown' ? '1080p' : resCandidate;
+    }
     if (status) status.textContent = '';
     if (modal) modal.style.display = 'flex';
 }
@@ -1510,7 +1531,12 @@ function applyManualOverride() {
     const dbId = parseInt(SD.dbId);
     if (!dbId) return;
     const key = document.getElementById('override-source').value;
-    const mapped = OVERRIDE_SOURCE_MAP[key] || OVERRIDE_SOURCE_MAP.unknown;
+    // Defensive fallback: the dropdown can only produce keys that
+    // exist in OVERRIDE_SOURCE_MAP, but a future refactor could pass
+    // a stale/garbage key through. Use `bluray` (matches the dropdown
+    // default that actually exists) instead of `unknown` — the latter
+    // would build `{source: 'Unknown'}` which the handler 400s on.
+    const mapped = OVERRIDE_SOURCE_MAP[key] || OVERRIDE_SOURCE_MAP.bluray;
     const resolution = document.getElementById('override-resolution').value;
     const status = document.getElementById('override-status');
     if (status) status.textContent = 'Saving…';
