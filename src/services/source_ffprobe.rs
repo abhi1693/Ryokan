@@ -255,6 +255,29 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
 
         match codec_type.as_str() {
             "video" => {
+                // Skip attached-picture streams (cover art, album thumbnails,
+                // poster frames). ffprobe labels them `codec_type = "video"`
+                // but their dimensions are the cover image (often small and
+                // portrait — 600x900 posters, 300x400 thumbnails) rather
+                // than the actual video track. Without this guard they'd
+                // overwrite the real video stream's width/height when they
+                // sit later in the streams array, which is how an EMBER
+                // Wajutsushi release came back with the 1080p main track
+                // silently replaced by a ~150-tall thumbnail — the height
+                // dropped below the `from_dimensions` 460-pixel floor so
+                // every affected episode rendered with no resolution tag
+                // at all. Check `disposition.attached_pic` (ffprobe sets it
+                // to 1 for these streams) and treat it as "not a real video
+                // stream" — skip it entirely.
+                let attached_pic = s
+                    .get("disposition")
+                    .and_then(|d| d.get("attached_pic"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    != 0;
+                if attached_pic {
+                    continue;
+                }
                 facts.has_video = true;
                 facts.video_codec = codec_name.clone();
                 facts.width = s.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
@@ -499,6 +522,21 @@ mod tests {
         })
     }
 
+    /// Cover-art / attached-picture stream — what ffprobe emits for the
+    /// embedded poster/thumbnail many MKV releases carry. ffprobe tags
+    /// these with `codec_type = "video"` but marks them via
+    /// `disposition.attached_pic = 1`. Used to pin down the attached-pic
+    /// regression where these streams overwrote the real video track.
+    fn attached_pic_stream(codec: &str, width: u32, height: u32) -> Value {
+        serde_json::json!({
+            "codec_type": "video",
+            "codec_name": codec,
+            "width": width,
+            "height": height,
+            "disposition": { "attached_pic": 1 },
+        })
+    }
+
     fn audio_stream_with_title(codec: &str, title: &str) -> Value {
         serde_json::json!({
             "codec_type": "audio",
@@ -533,6 +571,36 @@ mod tests {
         let out = scan_ffprobe_json(&probe_json(vec![video_stream(
             "h264", 1920, 1080, "yuv420p",
         )]));
+        assert_eq!(out.resolution, Some(Resolution::R1080p));
+    }
+
+    /// Attached-picture streams (MKV cover art) must not clobber the main
+    /// video's width/height. Regression guard for an EMBER Wajutsushi
+    /// release where a ~150-tall thumbnail sat after the real 1080p
+    /// track and dropped the reported height below
+    /// `Resolution::from_dimensions`'s 460-pixel floor — classification
+    /// for 11 of 12 episodes came back with no resolution tag at all.
+    #[test]
+    fn attached_pic_after_main_video_does_not_overwrite_resolution() {
+        let out = scan_ffprobe_json(&probe_json(vec![
+            video_stream("h264", 1920, 1080, "yuv420p"),
+            attached_pic_stream("mjpeg", 500, 150),
+            audio_stream("eac3"),
+        ]));
+        assert_eq!(out.resolution, Some(Resolution::R1080p));
+    }
+
+    /// Same bug, reversed stream order — attached_pic first (as some
+    /// containers emit), then the real video. Without the disposition
+    /// check the real video's dims would overwrite the thumbnail's and
+    /// the test would coincidentally pass, so we keep both orderings.
+    #[test]
+    fn attached_pic_before_main_video_does_not_overwrite_resolution() {
+        let out = scan_ffprobe_json(&probe_json(vec![
+            attached_pic_stream("mjpeg", 500, 150),
+            video_stream("h264", 1920, 1080, "yuv420p"),
+            audio_stream("eac3"),
+        ]));
         assert_eq!(out.resolution, Some(Resolution::R1080p));
     }
 
