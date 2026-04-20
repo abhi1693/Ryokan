@@ -1108,7 +1108,13 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // after every `record_grab` write that came from
     // `scan_library_for_unclassified` or post-processing's
     // `classify_post_download`. Grab-time `record_grab` writes leave it
-    // NULL — they're filename-only and aren't a "real" attempt.
+    // NULL on the INSERT path — they're filename-only and aren't a
+    // "real" attempt. On the ON CONFLICT UPDATE path, grab-time
+    // `record_grab` preserves whatever value was already there (no
+    // SET line for the column), so a re-grab after a prior classify
+    // keeps the attempt stamp intact — which is what we want; a
+    // re-grab of a file we already probed shouldn't reopen it to
+    // another sweep retry.
     //
     // The 6h library sweep skips rows where the source is empty or
     // "unknown" AND this column IS NOT NULL: the classifier already

@@ -20,7 +20,7 @@ cargo clippy             # lint
 docker compose up -d --build  # build and run in Docker
 ```
 
-Requires Rust 1.88+ (enforced via `package.rust-version` in Cargo.toml), a C linker, and OpenSSL dev headers for local builds.
+Requires Rust 1.95+ (enforced via `package.rust-version` in Cargo.toml), a C linker, and OpenSSL dev headers for local builds.
 
 ## Environment Variables
 

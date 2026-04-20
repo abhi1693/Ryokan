@@ -543,12 +543,19 @@ pub async fn reconcile_episode_seed_drift(db: &SqlitePool) -> Result<(), sqlx::E
     let mut tx = db.begin().await?;
     for (group, prior_source) in SEED_DRIFT_EPISODE_RESETS {
         sqlx::query(
+            // Clear `quality_tag` too — it's the legacy label string
+            // (e.g. "BluRay-1080p") that the UI renders alongside the
+            // structured columns. Without this, a reset row briefly
+            // shows the old BD tag against an empty internal source
+            // until the next library_classify sweep re-stamps it, which
+            // can be up to 6h after boot.
             "UPDATE episode_quality_tags
              SET source = '',
                  resolution = '',
                  is_remux = 0,
                  is_bdmv = 0,
                  web_kind = '',
+                 quality_tag = '',
                  classification_confidence = 0,
                  needs_review = 0,
                  classification_evidence = '',

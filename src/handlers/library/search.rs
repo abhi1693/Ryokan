@@ -42,13 +42,24 @@ pub async fn anilist_search(
     Query(params): Query<AnilistSearchQuery>,
 ) -> Result<Json<Vec<anilist::AnimeEntry>>, (axum::http::StatusCode, String)> {
     // Per-search override (?source=al|mal) takes precedence over the
-    // ambient config flag. Anything else falls back to the config so
-    // existing users with `force_mal_fallback = true` still see MAL by
-    // default when they don't pick a source.
+    // ambient config flag. Only `al`, `mal`, or omitted are valid —
+    // surface a 400 on anything else so a client with a typo in its
+    // query param doesn't silently drop into the config default and
+    // look like the toggle is broken.
     let force_fallback = match params.source.as_deref() {
         Some("mal") => true,
         Some("al") => false,
-        _ => force_mal_fallback_enabled(&state.db).await,
+        None => force_mal_fallback_enabled(&state.db).await,
+        Some("") => force_mal_fallback_enabled(&state.db).await,
+        Some(other) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!(
+                    "invalid source override: {:?} (expected \"al\", \"mal\", or omit)",
+                    other
+                ),
+            ));
+        }
     };
     let results = anilist::search_anime_with_options(&params.q, force_fallback)
         .await

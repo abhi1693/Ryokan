@@ -18,6 +18,18 @@ pub struct NeedsReviewEntry {
     pub release_group: String,
     pub source: String,
     pub resolution: String,
+    /// Sonarr-parity BD variant flags. Surfaced on Needs Review so the
+    /// inline-override dropdown can pre-fill `bluray_remux` / `bluray_bdmv`
+    /// when the original verdict was the more specific variant — without
+    /// these the pre-fill collapsed to plain `bluray` and the user lost
+    /// the variant on every re-pick.
+    pub is_remux: bool,
+    pub is_bdmv: bool,
+    /// Web sub-tier (`WEBDL` / `WEBRip`, or empty for Unknown). Same role
+    /// as `is_remux` / `is_bdmv`: lets the inline pre-fill resolve
+    /// `webrip` instead of plain `web` when that's what the classifier
+    /// actually produced.
+    pub web_kind: String,
     pub classification_confidence: f32,
     /// Serialized `Vec<SourceEvidence>` captured at classification time.
     /// Rendered inline by the Needs-Review UI so the user can see *why*
@@ -34,7 +46,11 @@ pub struct NeedsReviewEntry {
 pub async fn get_needs_review(db: &SqlitePool) -> Result<Vec<NeedsReviewEntry>, sqlx::Error> {
     sqlx::query_as::<_, NeedsReviewEntry>(
         "SELECT t.series_id, t.episode_number, t.quality_tag, t.release_title, t.release_group,
-                t.source, t.resolution, t.classification_confidence,
+                t.source, t.resolution,
+                t.is_remux,
+                COALESCE(t.is_bdmv, 0) AS is_bdmv,
+                COALESCE(t.web_kind, '') AS web_kind,
+                t.classification_confidence,
                 COALESCE(t.classification_evidence, '') AS classification_evidence,
                 s.anilist_id AS series_anilist_id,
                 COALESCE(NULLIF(s.title_english, ''), NULLIF(s.title_romaji, ''), s.title) AS series_title,

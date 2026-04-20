@@ -44,7 +44,9 @@
         <tbody>
             {% for entry in entries %}
             <tr data-series-id="{{ entry.series_id }}" data-episode="{{ entry.episode_number }}"
-                data-current-source="{{ entry.source }}" data-current-resolution="{{ entry.resolution }}">
+                data-current-source="{{ entry.source }}" data-current-resolution="{{ entry.resolution }}"
+                data-current-is-remux="{{ entry.is_remux }}" data-current-is-bdmv="{{ entry.is_bdmv }}"
+                data-current-web-kind="{{ entry.web_kind }}">
                 <td style="padding:8px 12px;border-bottom:1px solid var(--border)">
                     <a href="/series/{{ entry.series_id }}" class="review-series-link" style="display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit">
                         {% if !entry.cover_url.is_empty() %}
@@ -115,14 +117,33 @@ const REVIEW_OVERRIDE_SOURCE_MAP = {
     unknown:     { source: 'Unknown',is_remux: false, is_bdmv: false, web_kind: '' },
 };
 
-function reviewKeyFromClassification(source, resolution) {
+// Resolve the right dropdown key for the current verdict, honoring the
+// Sonarr-parity BD variant flags and the Web sub-tier so a row that was
+// originally classified as BD-Remux / BD-RAW / WEBRip pre-fills the
+// specific variant instead of collapsing to plain `bluray` / `web`. The
+// quintet (source + is_remux + is_bdmv + web_kind) is the same space
+// OVERRIDE_SOURCE_MAP in series.html canonicalizes.
+function reviewKeyFromClassification(source, isRemux, isBdmv, webKind) {
     const src = (source || '').toLowerCase();
-    if (src === 'bluray' || src === 'blu-ray') return 'bluray';
-    if (src === 'web') return 'web';
+    if (src === 'bluray' || src === 'blu-ray') {
+        if (isBdmv) return 'bluray_bdmv';
+        if (isRemux) return 'bluray_remux';
+        return 'bluray';
+    }
+    if (src === 'web') {
+        return ((webKind || '').toLowerCase() === 'webrip') ? 'webrip' : 'web';
+    }
     if (src === 'dvd') return 'dvd';
     if (src === 'hdtv') return 'hdtv';
     if (src === 'tv') return 'tv';
     return 'bluray'; // sensible default for an uncertain row
+}
+
+// `data-*` attributes come out as strings; a missing flag renders as
+// the literal string "false" (askama's Display on bool), so parse with
+// a strict true-only check to avoid treating "false" as truthy.
+function boolAttr(value) {
+    return String(value || '').toLowerCase() === 'true';
 }
 
 // Pre-fill the dropdowns with the current (uncertain) verdict so the
@@ -132,10 +153,13 @@ document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('tr[data-series-id]').forEach(function(row) {
         const src = row.dataset.currentSource || '';
         const res = row.dataset.currentResolution || '';
+        const isRemux = boolAttr(row.dataset.currentIsRemux);
+        const isBdmv = boolAttr(row.dataset.currentIsBdmv);
+        const webKind = row.dataset.currentWebKind || '';
         const srcSel = row.querySelector('.review-source');
         const resSel = row.querySelector('.review-resolution');
         if (srcSel) {
-            const key = reviewKeyFromClassification(src, res);
+            const key = reviewKeyFromClassification(src, isRemux, isBdmv, webKind);
             srcSel.value = REVIEW_OVERRIDE_SOURCE_MAP[key] ? key : 'bluray';
         }
         if (resSel && res) {
