@@ -8,6 +8,7 @@ pub mod kitsu;
 
 pub mod jellyfin;
 
+pub mod auto_expand;
 pub mod auto_search;
 pub mod logger;
 pub mod progress;

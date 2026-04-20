@@ -315,15 +315,108 @@ async fn import_torrent(
     torrent_hash: &str,
     torrent_save_path: &str,
 ) -> Result<bool, String> {
+    let qbit = state
+        .qbit
+        .read()
+        .await
+        .clone()
+        .ok_or("qBittorrent not configured")?;
+
+    let files = qbit
+        .get_torrent_files(torrent_hash)
+        .await
+        .map_err(|e| format!("get torrent files: {}", e))?;
+
     // Phase 2: look up per-file routing rows written by the auto-expand
     // path. A non-empty result means this grab was an auto-expanded
     // batch and each file is tagged with the sibling series_id it
     // belongs to; an empty result is the legacy path where every file
     // routes to `grab.series_id` (pre-Phase-2 grabs, or Phase-2 grabs
     // where sibling detection returned nothing).
-    let routes = grabbed_torrents::get_series_routes(&state.db, grab.id)
+    let mut routes = grabbed_torrents::get_series_routes(&state.db, grab.id)
         .await
         .unwrap_or_default();
+
+    // Grab-time auto-expand can fail when qBit's metadata wait times
+    // out on a slow tracker (see the 180s wait in
+    // `handlers::library::search::auto_expand_library_from_pack`). By
+    // import time the file list is always available — if the grab was
+    // a batch and no routes were written, retry sibling detection now
+    // so siblings still land in their own folders instead of every
+    // file falling back to the parent. Motivating case (#45): the
+    // HorribleSubs JoJo P3 48-ep pack, where the grab-time wait timed
+    // out and Egypt-hen never got auto-added.
+    if routes.is_empty() && grab.is_batch && grab.series_id > 0 {
+        match metadata_cache::get_by_series_id(&state.db, grab.series_id).await {
+            Ok(Some(cached)) => {
+                let filenames: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                let parent_eps: Vec<i32> = cached
+                    .detail
+                    .episodes
+                    .filter(|n| *n > 0 && *n <= 1000)
+                    .map(|n| (1..=n).collect())
+                    .unwrap_or_default();
+                // Synthetic grab context. The per-episode tag rows
+                // `expand_from_files` writes for new siblings get
+                // their classifications overwritten by
+                // `classify_post_download` further down, so
+                // `ClassificationResult::unknown()` is fine here.
+                // Release group and size are recoverable via post-
+                // download paths too.
+                let ctx = crate::services::auto_expand::AutoExpandGrabContext {
+                    classification: crate::services::source::ClassificationResult::unknown(),
+                    release_group: String::new(),
+                    size_bytes: 0,
+                };
+                let _ = crate::services::auto_expand::expand_from_files(
+                    &state.db,
+                    &filenames,
+                    &cached.detail,
+                    grab.series_id,
+                    &parent_eps,
+                    grab.id,
+                    &grab.torrent_name,
+                    &ctx,
+                )
+                .await;
+                // Reload regardless of return value: `expand_from_files`
+                // writes routes when it detects siblings even if those
+                // siblings were already tracked (added=0 but routes
+                // written).
+                routes = grabbed_torrents::get_series_routes(&state.db, grab.id)
+                    .await
+                    .unwrap_or_default();
+            }
+            Ok(None) => {
+                // Rare but possible: a grab landed before the metadata
+                // sync populated the cache for this series. Log so
+                // operators can trace "batch imported but siblings
+                // never added" without reading the code.
+                logger::debug(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Auto-expand retry skipped for '{}' — no cached AniList detail for parent series_id={}",
+                        grab.torrent_name, grab.series_id,
+                    ),
+                    "",
+                )
+                .await;
+            }
+            Err(e) => {
+                logger::debug(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Auto-expand retry skipped for '{}' — metadata_cache lookup failed for parent series_id={}",
+                        grab.torrent_name, grab.series_id,
+                    ),
+                    &e.to_string(),
+                )
+                .await;
+            }
+        }
+    }
 
     // file_idx → (target series_id, episode_offset), flattened from
     // the routes table. `episode_offset` is subtracted from each
@@ -343,18 +436,6 @@ async fn import_torrent(
                 .map(move |i| (*i, (series_id, offset)))
         })
         .collect();
-
-    let qbit = state
-        .qbit
-        .read()
-        .await
-        .clone()
-        .ok_or("qBittorrent not configured")?;
-
-    let files = qbit
-        .get_torrent_files(torrent_hash)
-        .await
-        .map_err(|e| format!("get torrent files: {}", e))?;
 
     // Preserve the canonical qBit file index alongside each entry so
     // completed files can be correlated back to their route row. qBit

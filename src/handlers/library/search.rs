@@ -16,10 +16,8 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 
 use crate::models::log::LogCategory;
-use crate::models::{config, episode_tags, grabbed_torrents, monitoring, series};
-use crate::services::{
-    anilist, auto_search, logger, media, metadata_sync, progress,
-};
+use crate::models::{config, episode_tags, monitoring, series};
+use crate::services::{anilist, auto_search, logger, media, progress};
 use crate::AppState;
 
 use super::reconcile::{
@@ -144,24 +142,25 @@ fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32>
     ep_nums
 }
 
-/// Grab-time context threaded through the auto-expand path so each
-/// detected sibling series gets its own `episode_quality_tags` +
-/// `episode_grab_history` rows alongside its route record. Without
-/// this, the sibling series page shows UNKNOWN with no progress bar
-/// until post-processing runs — the parent series records the grab
-/// for its own episodes synchronously, but the siblings are detected
-/// asynchronously inside `auto_expand_library_from_pack` and were
-/// previously only getting route rows written. Owned-fields so the
-/// struct can be cloned into the spawned task.
-#[derive(Clone)]
-struct AutoExpandGrabContext {
-    classification: crate::services::source::ClassificationResult,
-    release_group: String,
-    size_bytes: i64,
-}
+// AutoExpandGrabContext + the core expansion logic live in
+// `services::auto_expand` so `services::post_processing` can call the
+// same routine as a fallback when the grab-time metadata wait here
+// timed out. Re-export locally so call sites in this file stay terse.
+use crate::services::auto_expand::{expand_from_files, AutoExpandGrabContext};
 
-/// Returns the number of siblings *newly added* to the library
-/// (upserts that hit an existing row don't count).
+/// Grab-time outer orchestrator: wait for qBit metadata, then delegate
+/// to [`services::auto_expand::expand_from_files`]. Failure here
+/// (timeout, qBit error) is no longer load-bearing — post-processing
+/// retries the same expansion at import time via
+/// [`services::auto_expand::expand_from_files`], so a slow tracker that
+/// can't deliver metadata in 3 minutes will still get sibling detection
+/// once the torrent completes.
+///
+/// 180s ceiling (vs the 10s used by the interactive selective-narrowing
+/// path) because this runs inside a `tokio::spawn` — blocking a few
+/// minutes in the background is fine, the HTTP handler already
+/// returned. A slow-DHT magnet or a public tracker under load can take
+/// that long to fetch metadata.
 #[allow(clippy::too_many_arguments)]
 async fn auto_expand_library_from_pack(
     db: &SqlitePool,
@@ -178,25 +177,18 @@ async fn auto_expand_library_from_pack(
         return 0;
     }
 
-    // Wait for qBit metadata before asking for the file list. Fresh
-    // grabs via `add_torrent` don't block on metadata discovery, so
-    // a naive `get_torrent_files` right after add returns empty.
-    // We use a generous 60s ceiling here (rather than the 10s used
-    // by the interactive selective-narrowing path) because this runs
-    // inside a `tokio::spawn` — blocking up to a minute in the
-    // background is fine, the HTTP handler has already returned.
     let files = match qbit
-        .wait_for_metadata(info_hash, std::time::Duration::from_secs(60))
+        .wait_for_metadata(info_hash, std::time::Duration::from_secs(180))
         .await
     {
         Ok(files) => files,
         Err(e) => {
-            logger::warn(
+            logger::info(
                 db,
                 LogCategory::Library,
                 &format!(
-                    "auto-expand: metadata wait failed for '{}', skipping sibling detection (fallback: all files will route to parent series_id={})",
-                    torrent_title, parent_series_id
+                    "auto-expand: grab-time metadata wait failed for '{}', post-processing will retry at import time",
+                    torrent_title
                 ),
                 &e,
             )
@@ -206,7 +198,7 @@ async fn auto_expand_library_from_pack(
     };
     let filenames: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
 
-    auto_expand_library_from_pack_with_files(
+    expand_from_files(
         db,
         &filenames,
         parent_detail,
@@ -217,405 +209,6 @@ async fn auto_expand_library_from_pack(
         grab_ctx,
     )
     .await
-}
-
-/// Pure inner fn — takes a pre-fetched file list instead of a qBit
-/// client so the test suite can exercise the sibling detection, series
-/// upsert, and route-writing logic without spinning up qBittorrent.
-/// The outer [`auto_expand_library_from_pack`] handles the metadata-
-/// wait dance; everything else lives here.
-#[allow(clippy::too_many_arguments)]
-async fn auto_expand_library_from_pack_with_files(
-    db: &SqlitePool,
-    filenames: &[String],
-    parent_detail: &anilist::AnimeDetail,
-    parent_series_id: i64,
-    parent_episode_numbers: &[i32],
-    grab_id: i64,
-    torrent_title: &str,
-    grab_ctx: &AutoExpandGrabContext,
-) -> usize {
-    let parent_title = if !parent_detail.title_english.is_empty() {
-        parent_detail.title_english.as_str()
-    } else {
-        parent_detail.title_romaji.as_str()
-    };
-
-    if parent_detail.id <= 0 {
-        logger::debug(
-            db,
-            LogCategory::Library,
-            "Auto-expand: skipping sibling detection, parent has no AniList id",
-            &format!("parent_series_id={}, torrent='{}'", parent_series_id, torrent_title),
-        )
-        .await;
-        return 0;
-    }
-
-    logger::debug(
-        db,
-        LogCategory::Library,
-        &format!(
-            "Auto-expand: scanning {} file(s) for siblings of '{}'",
-            filenames.len(),
-            parent_title
-        ),
-        &format!(
-            "parent_anilist_id={}, torrent='{}'",
-            parent_detail.id, torrent_title
-        ),
-    )
-    .await;
-
-    // Depth-1 transitive relation walk: AniList's relation graph
-    // has missing direct edges across split sagas (Monogatari is
-    // the motivating case — Owarimonogatari 21262 does not list
-    // Owarimonogatari 2nd Season 99423 as a direct neighbor, but
-    // reaches it via the shared saga graph). Before running sibling
-    // detection we fetch each walkable direct neighbor's AL detail,
-    // then graft its OWN relations onto the parent so
-    // `detect_sibling_entries_in_pack` sees a broader candidate
-    // pool. Fetches are capped by
-    // `auto_search::TRANSITIVE_WALK_MAX_FETCHES`. Failures are soft
-    // — any neighbor we can't fetch is silently skipped and detection
-    // falls back to the parent's direct relations.
-    //
-    // Single batched `Page(media(id_in:[]))` request via
-    // `anilist::get_anime_details_batch` replaces the previous
-    // per-id JoinSet that fan-out N concurrent single-id queries.
-    // The single throttle gate had been serializing those concurrent
-    // requests anyway, so the JoinSet was paying coordination cost
-    // for no parallelism — one batched call does it in one round-trip.
-    let mut walk_ids: Vec<i64> = Vec::new();
-    let mut walk_id_to_type: std::collections::HashMap<i64, String> =
-        std::collections::HashMap::new();
-    for rel in &parent_detail.relations {
-        if walk_ids.len() >= auto_search::TRANSITIVE_WALK_MAX_FETCHES {
-            break;
-        }
-        if !auto_search::is_transitive_walk_source(&rel.relation_type) {
-            continue;
-        }
-        if !rel.media_type.eq_ignore_ascii_case("ANIME") {
-            continue;
-        }
-        if rel.id <= 0 {
-            continue;
-        }
-        walk_ids.push(rel.id);
-        walk_id_to_type.insert(rel.id, rel.relation_type.clone());
-    }
-    let neighbor_details: std::collections::HashMap<i64, anilist::AnimeDetail> = if walk_ids
-        .is_empty()
-    {
-        std::collections::HashMap::new()
-    } else {
-        match anilist::get_anime_details_batch(&walk_ids).await {
-            Ok(map) => map,
-            Err(e) => {
-                tracing::debug!(
-                    "auto-expand: transitive neighbor batch fetch failed err={}",
-                    e
-                );
-                // Recover partial results from DETAIL_CACHE: chunks that
-                // completed before the failure already wrote their entries
-                // (the batch helper aborts on Err but the writes survive),
-                // and the `Result` shape can't return them directly.
-                // Without this probe a 429 on chunk 2 would silently
-                // discard chunk 1's 25 successful sibling fetches.
-                let mut partial = std::collections::HashMap::new();
-                for rel_id in &walk_ids {
-                    if let Some(detail) = anilist::cached_anime_detail(*rel_id).await {
-                        partial.insert(*rel_id, detail);
-                    }
-                }
-                if !partial.is_empty() {
-                    tracing::debug!(
-                        "auto-expand: recovered {} partial neighbor(s) from DETAIL_CACHE",
-                        partial.len()
-                    );
-                }
-                partial
-            }
-        }
-    };
-    // Log any ids the batch didn't return — typically AniList simply
-    // has no Media for that id (deleted entry, NSFW filter, etc.).
-    for rel_id in &walk_ids {
-        if !neighbor_details.contains_key(rel_id) {
-            let rel_type = walk_id_to_type
-                .get(rel_id)
-                .cloned()
-                .unwrap_or_default();
-            tracing::debug!(
-                "auto-expand: transitive neighbor missing from batch rel_id={} rel_type={}",
-                rel_id,
-                rel_type
-            );
-        }
-    }
-    let expanded_parent =
-        auto_search::expand_parent_with_transitive_relations(parent_detail, &neighbor_details);
-    let siblings = auto_search::detect_sibling_entries_in_pack(filenames, &expanded_parent);
-    if siblings.is_empty() {
-        logger::info(
-            db,
-            LogCategory::Library,
-            &format!(
-                "Auto-expand: no siblings detected in pack '{}'",
-                torrent_title
-            ),
-            &format!(
-                "parent='{}', parent_anilist_id={}, files={}",
-                parent_title,
-                parent_detail.id,
-                filenames.len()
-            ),
-        )
-        .await;
-        return 0;
-    }
-
-    let siblings_considered = siblings.len();
-    let mut added = 0_usize;
-    let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut routes: Vec<grabbed_torrents::GrabSeriesRoute> = Vec::new();
-
-    for sibling in siblings {
-        let primary_title = if !sibling.title_english.is_empty() {
-            sibling.title_english.clone()
-        } else {
-            sibling.title_romaji.clone()
-        };
-
-        // Upsert dedups by mal_id then anilist_id, so reconciled
-        // entries that already have both IDs populated update
-        // in place instead of duplicating.
-        let upsert_result = series::upsert(
-            db,
-            series::SeriesCore {
-                anilist_id: sibling.anilist_id,
-                mal_id: sibling.mal_id,
-                title: &primary_title,
-                title_romaji: &sibling.title_romaji,
-                title_english: &sibling.title_english,
-                title_native: &sibling.title_native,
-                cover_url: &sibling.cover_url,
-                format: &sibling.format,
-                status: &sibling.status,
-                episodes: sibling.episodes,
-                season_year: sibling.season_year,
-                // Relation cards don't carry end_year — the
-                // background metadata refresh populates it.
-                end_year: None,
-            },
-        )
-        .await;
-        let (sibling_id, created) = match upsert_result {
-            Ok(pair) => pair,
-            Err(e) => {
-                logger::warn(
-                    db,
-                    LogCategory::Library,
-                    &format!("auto-expand: failed to upsert sibling '{}'", primary_title),
-                    &e.to_string(),
-                )
-                .await;
-                continue;
-            }
-        };
-
-        if created {
-            added += 1;
-            logger::info(
-                db,
-                LogCategory::Library,
-                &format!(
-                    "Auto-expand: added sibling '{}' from batch '{}'",
-                    primary_title, torrent_title
-                ),
-                &format!(
-                    "anilist_id={}, matched_subtitle={:?}, files={}",
-                    sibling.anilist_id,
-                    sibling.matched_subtitle,
-                    sibling.file_indices.len()
-                ),
-            )
-            .await;
-
-            // Kick off a background metadata refresh so the full
-            // detail (description, artwork, end_year, etc.) gets
-            // hydrated for the UI. Fire-and-forget — the route is
-            // already recorded below either way.
-            let db_clone = db.clone();
-            tokio::spawn(async move {
-                if let Ok(Some(tracked)) = series::get_by_id(&db_clone, sibling_id).await {
-                    let force_fallback = config::get_config(&db_clone)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|c| c.force_mal_fallback)
-                        .unwrap_or(false);
-                    let _ = metadata_sync::refresh_series_metadata(
-                        &db_clone,
-                        &tracked,
-                        force_fallback,
-                    )
-                    .await;
-                }
-            });
-        }
-
-        // Derive episode numbers per sibling so
-        // find_imported_for_episode can locate this route when
-        // an upgrade later targets one of the sibling's episodes.
-        //
-        // The stored ep_nums are *effective* (post-offset) numbers so
-        // an upgrade searching by episode 1 of Owari S2 finds a route
-        // whose files were originally numbered E14 on disk. Skip
-        // rows that would resolve to a non-positive effective number
-        // (shouldn't happen — detection sets offset conservatively —
-        // but guards against a bad route/file pairing).
-        let mut ep_nums: Vec<i32> = Vec::new();
-        for &file_idx in &sibling.file_indices {
-            if let Some(name) = filenames.get(file_idx)
-                && let Some((_, raw)) = media::parse_episode_number(&name.to_lowercase()) {
-                    let effective = raw - sibling.episode_offset;
-                    if effective > 0 {
-                        ep_nums.push(effective);
-                    }
-                }
-        }
-        ep_nums.sort_unstable();
-        ep_nums.dedup();
-
-        for &i in &sibling.file_indices {
-            claimed.insert(i);
-        }
-
-        // Write per-episode grab history + quality tag rows for this
-        // sibling so its episode list shows `state=grabbed` in the UI
-        // (progress bar + "came from X GB batch" tooltip). The parent
-        // path records its own rows synchronously at grab time; siblings
-        // were previously only getting route rows written here, which
-        // meant their series pages rendered UNKNOWN with no progress bar
-        // until post-processing finished and backfilled the tags. Every
-        // auto-expand firing is a batch by definition (the outer
-        // selectors only call in on `result.is_batch && !selective_narrowed`),
-        // so `is_batch=true` is always correct here.
-        for &local_ep in &ep_nums {
-            if let Err(e) = episode_tags::record_grab(
-                db,
-                sibling_id,
-                local_ep,
-                &grab_ctx.classification,
-                torrent_title,
-                &grab_ctx.release_group,
-                grab_ctx.size_bytes,
-                true,
-            )
-            .await
-            {
-                logger::warn(
-                    db,
-                    LogCategory::Library,
-                    &format!(
-                        "Auto-expand: failed to backfill grab history for sibling {} ep {}",
-                        sibling_id, local_ep,
-                    ),
-                    &format!("{}: {}", torrent_title, e),
-                )
-                .await;
-            }
-        }
-
-        routes.push(grabbed_torrents::GrabSeriesRoute {
-            grab_id,
-            series_id: sibling_id,
-            file_indices: sibling.file_indices,
-            episode_numbers: ep_nums,
-            matched_subtitle: sibling.matched_subtitle,
-            episode_offset: sibling.episode_offset,
-        });
-    }
-
-    // Parent route: every media file not claimed by a sibling
-    // routes to the parent series. Unclaimed files are expected for
-    // franchise-root grabs (JoJo S1 in a S1-S5 pack won't match any
-    // sibling subtitle) but can also indicate extras or a missed
-    // sibling — log a warn either way so the operator can spot
-    // regressions.
-    let parent_file_indices: Vec<usize> = (0..filenames.len())
-        .filter(|i| {
-            filenames
-                .get(*i)
-                .map(|n| auto_search::is_media_filename(n))
-                .unwrap_or(false)
-                && !claimed.contains(i)
-        })
-        .collect();
-
-    if !routes.is_empty() && !parent_file_indices.is_empty() {
-        logger::warn(
-            db,
-            LogCategory::Library,
-            &format!(
-                "Auto-expand: {} unclaimed file(s) in batch '{}' routed to parent series",
-                parent_file_indices.len(),
-                torrent_title,
-            ),
-            &format!(
-                "parent_id={}, siblings_added={}, unclaimed_count={}",
-                parent_series_id,
-                added,
-                parent_file_indices.len()
-            ),
-        )
-        .await;
-
-        routes.push(grabbed_torrents::GrabSeriesRoute {
-            grab_id,
-            series_id: parent_series_id,
-            file_indices: parent_file_indices,
-            episode_numbers: parent_episode_numbers.to_vec(),
-            matched_subtitle: String::new(),
-            // Parent-route files always use their own arc-local
-            // numbering — no offset ever needed here.
-            episode_offset: 0,
-        });
-    }
-
-    if !routes.is_empty()
-        && let Err(e) = grabbed_torrents::record_grab_series_routes(db, &routes).await {
-            logger::warn(
-                db,
-                LogCategory::Library,
-                &format!(
-                    "auto-expand: failed to write route rows for '{}'",
-                    torrent_title
-                ),
-                &e.to_string(),
-            )
-            .await;
-        }
-
-    logger::info(
-        db,
-        LogCategory::Library,
-        &format!(
-            "Auto-expand: finished batch '{}' — {} sibling(s) added",
-            torrent_title, added
-        ),
-        &format!(
-            "parent='{}', siblings_considered={}, routes_written={}",
-            parent_title,
-            siblings_considered,
-            routes.len()
-        ),
-    )
-    .await;
-
-    added
 }
 
 pub(super) async fn run_auto_search_targets(
@@ -1908,6 +1501,7 @@ pub async fn grab_interactive_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::grabbed_torrents;
 
     fn empty_anime_detail(id: i64, title_english: &str) -> anilist::AnimeDetail {
         anilist::AnimeDetail {
@@ -2046,7 +1640,7 @@ mod tests {
         ];
 
         let grab_ctx = test_grab_ctx();
-        let added = auto_expand_library_from_pack_with_files(
+        let added = expand_from_files(
             &db,
             &filenames,
             &parent_detail,
@@ -2164,7 +1758,7 @@ mod tests {
         let parent_episode_numbers: Vec<i32> = (1..=13).collect();
 
         let grab_ctx = test_grab_ctx();
-        let added = auto_expand_library_from_pack_with_files(
+        let added = expand_from_files(
             &db,
             &filenames,
             &parent_detail,
@@ -2295,7 +1889,7 @@ mod tests {
         ];
 
         let grab_ctx = test_grab_ctx();
-        let added = auto_expand_library_from_pack_with_files(
+        let added = expand_from_files(
             &db,
             &filenames,
             &parent_detail,
@@ -2427,5 +2021,283 @@ mod tests {
             after.cumulative_prior_episodes, 24,
             "populated cumulative short-circuits the gate"
         );
+    }
+
+    /// Issue #45: full-scale JoJo Part 3 case. 48-episode BD megapack
+    /// with absolute continuous numbering (no per-cour arc markers in
+    /// the filenames) and Egypt-hen as a sibling of Stardust Crusaders
+    /// on AniList. Egypt-hen's trailing "subtitle" is a single token
+    /// ("Egypt-hen") so the subtitle path can't match — the
+    /// episode-range fallback picks it up via title-prefix matching.
+    ///
+    /// Verifies that:
+    ///   1. detection fires once (Egypt-hen sibling).
+    ///   2. the sibling route carries files 24..=47 (0-based) = E25..E48.
+    ///   3. episode_offset = 24 (parent_cap) so those map to local 1..=24.
+    ///   4. the sibling gets 24 quality-tag + grab-history rows (not 0).
+    ///   5. the parent route carries files 0..=23 = E01..=E24, offset 0.
+    #[tokio::test]
+    async fn auto_expand_jojo_part3_48ep_pack_maps_all_episodes() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        // Parent: JoJo Stardust Crusaders (24 eps).
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 20899,
+                mal_id: None,
+                title: "JoJo's Bizarre Adventure: Stardust Crusaders",
+                title_romaji: "JoJo no Kimyou na Bouken: Stardust Crusaders",
+                title_english: "JoJo's Bizarre Adventure: Stardust Crusaders",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(24),
+                season_year: Some(2014),
+                end_year: Some(2014),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "jojop3hash00000000000000000000000000000000",
+            "[Group] JoJo's Bizarre Adventure Part 3 - Stardust Crusaders (BD 1080p 48 ep)",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        // Parent AnimeDetail with Egypt-hen as a sibling relation. Use
+        // the real AL title form "... Stardust Crusaders - Egypt-hen";
+        // the trailing single-token subtitle can't be extracted, so
+        // detection falls through to the episode-range + title-prefix
+        // path.
+        let mut parent_detail = empty_anime_detail(
+            20899,
+            "JoJo's Bizarre Adventure: Stardust Crusaders",
+        );
+        parent_detail.episodes = Some(24);
+        parent_detail.relations.push(related_entry(
+            22663,
+            "JoJo's Bizarre Adventure: Stardust Crusaders - Egypt-hen",
+            Some(24),
+        ));
+
+        // 48 absolute-numbered files (E01..E48).
+        let filenames: Vec<String> = (1..=48)
+            .map(|n| {
+                format!(
+                    "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - {:02} [BD 1080p].mkv",
+                    n
+                )
+            })
+            .collect();
+
+        let grab_ctx = test_grab_ctx();
+        let added = expand_from_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &(1..=48).collect::<Vec<_>>(),
+            grab_id,
+            "[Group] JoJo P3 BD 48ep",
+            &grab_ctx,
+        )
+        .await;
+
+        assert_eq!(added, 1, "one new sibling (Egypt-hen) expected");
+
+        let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(routes.len(), 2, "sibling + parent route expected");
+
+        let sibling_route = routes
+            .iter()
+            .find(|r| r.series_id != parent_id)
+            .expect("sibling route present");
+        let expected_sibling_files: Vec<usize> = (24..=47).collect();
+        assert_eq!(
+            sibling_route.file_indices, expected_sibling_files,
+            "sibling owns files 24..=47 (E25..E48)"
+        );
+        assert_eq!(
+            sibling_route.episode_offset, 24,
+            "absolute numbering → offset = parent_cap = 24"
+        );
+        assert_eq!(
+            sibling_route.episode_numbers,
+            (1..=24).collect::<Vec<_>>(),
+            "sibling's stored ep_nums are effective (post-offset) 1..=24"
+        );
+
+        let parent_route = routes
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route present");
+        let expected_parent_files: Vec<usize> = (0..=23).collect();
+        assert_eq!(parent_route.file_indices, expected_parent_files);
+        assert_eq!(parent_route.episode_offset, 0);
+
+        // Sibling quality-tag + history rows exist for local 1..=24.
+        let sibling_id = sibling_route.series_id;
+        let sibling_tags = episode_tags::get_for_series(&db, sibling_id)
+            .await
+            .expect("sibling quality tags");
+        assert_eq!(
+            sibling_tags.len(),
+            24,
+            "sibling should have 24 quality-tag rows"
+        );
+        for local_ep in 1..=24 {
+            let tag = sibling_tags
+                .get(&local_ep)
+                .unwrap_or_else(|| panic!("sibling tag for local ep {} missing", local_ep));
+            assert_eq!(tag.state, "grabbed");
+        }
+    }
+
+    /// Issue #45: Owarimonogatari BD with an AL/BD episode-count
+    /// disagreement. AL reports S1 = 12 eps (the aired ep 1 was a
+    /// 48-min merged episode) but the [smol] BD splits that back into
+    /// two ~24-min files, so the pack has 13 Owari S1 files + 7 Owari
+    /// S2 files.
+    ///
+    /// This is the case the user flagged as "frustrating" in issue #45.
+    /// Verifies that:
+    ///   1. the sibling side is unaffected by the mismatch — Owari S2
+    ///      gets 7 files mapped to local 1..=7 via offset 13.
+    ///   2. the parent side gets all 13 files (including the "extra"
+    ///      ep 13 that AL doesn't know about), routed with offset 0.
+    ///
+    /// The complementary UI fix lives in `pages::build_episodes` — see
+    /// `build_episodes_surfaces_on_disk_files_beyond_anilist_episode_count`.
+    #[tokio::test]
+    async fn auto_expand_owari_bd_split_with_anilist_count_mismatch() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        // Parent: Owarimonogatari. Use AL's reported count (12), NOT
+        // the BD's file count (13). This is the whole point of the test.
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21860,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "owarialmismatch000000000000000000000000000",
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        let mut parent_detail = empty_anime_detail(21860, "Owarimonogatari");
+        parent_detail.episodes = Some(12); // AL's count, NOT the BD's.
+        parent_detail.relations.push(related_entry(
+            99423,
+            "Owarimonogatari Second Season",
+            Some(7),
+        ));
+
+        // 13 parent files (S07E01..E13) + 7 sibling files (S07E14..E20).
+        // The parent's file 12 (E13) exists despite AL saying S1 has
+        // only 12 episodes — this is the mismatch we're testing.
+        let mut filenames: Vec<String> = Vec::new();
+        for n in 1..=13 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p).mkv",
+                n
+            ));
+        }
+        for n in 14..=20 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p).mkv",
+                n
+            ));
+        }
+
+        let grab_ctx = test_grab_ctx();
+        let added = expand_from_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &(1..=12).collect::<Vec<_>>(),
+            grab_id,
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            &grab_ctx,
+        )
+        .await;
+
+        assert_eq!(added, 1, "one new sibling (Owari S2) expected");
+
+        let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(routes.len(), 2, "sibling + parent route expected");
+
+        // Sibling route: 7 files (S07E14..E20) mapped to local 1..=7.
+        // `min_ep = 14`, parent_cap = 12 → offset = min_ep - 1 = 13.
+        // Local = raw - offset: 14→1, 15→2, ..., 20→7.
+        let sibling_route = routes
+            .iter()
+            .find(|r| r.series_id != parent_id)
+            .expect("sibling route present");
+        assert_eq!(
+            sibling_route.file_indices,
+            vec![13, 14, 15, 16, 17, 18, 19],
+            "sibling owns E14..=E20 (0-based 13..=19)"
+        );
+        assert_eq!(
+            sibling_route.episode_offset, 13,
+            "min_ep(14) - 1 = 13, correctly larger than parent_cap(12)"
+        );
+        assert_eq!(sibling_route.episode_numbers, vec![1, 2, 3, 4, 5, 6, 7]);
+
+        // Parent route: all 13 files including the "extra" E13 that
+        // AL doesn't know about. Offset stays 0 — parent files use
+        // their own local numbering.
+        let parent_route = routes
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route present");
+        assert_eq!(
+            parent_route.file_indices,
+            (0..=12).collect::<Vec<_>>(),
+            "parent owns all 13 files (E01..=E13), including the AL-overflow E13"
+        );
+        assert_eq!(parent_route.episode_offset, 0);
     }
 }
