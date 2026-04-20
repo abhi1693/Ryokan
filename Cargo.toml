@@ -12,8 +12,12 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace", "compression-br", "compression-gzip", "set-header"] }
 
 # Templating
-askama = { version = "0.12", features = ["with-axum"] }
-askama_axum = "0.4"
+# askama 0.13 merged back with the rinja fork and dropped the
+# per-framework integration crates / `with-*` features. Handlers now
+# call `template.render()` directly and wrap the result in `Html(..)`
+# themselves, which is what this codebase already does — so the axum
+# integration just vanishes on the bump.
+askama = "0.15"
 
 # Database
 # default-features = false drops sqlx's `any`/`macros`/`migrate`/`json`
@@ -29,7 +33,13 @@ askama_axum = "0.4"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+# 0.13 moved `.query()` and `.form()` behind their own crate features
+# (previously they came for free with `json`), and switched the default
+# TLS backend from native-tls to rustls+aws-lc. The TLS switch is fine
+# for us (we only talk to public HTTPS endpoints) and removes the
+# OpenSSL headers dependency on Linux builds; we just have to opt back
+# into `query` + `form`.
+reqwest = { version = "0.13", features = ["json", "cookies", "query", "form"] }
 
 # HTML scraping
 scraper = "0.26"
@@ -39,7 +49,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Auth
-bcrypt = "0.16"
+bcrypt = "0.19"
 rand = "0.10"
 hex = "0.4"
 subtle = "2"
@@ -63,8 +73,8 @@ regex-lite = "0.1"
 # do not support — fancy-regex adds PCRE-style backtracking. We keep
 # regex-lite as the default for Ryokan's own internal regexes because
 # they don't need look-around and we want the linear-time guarantee.
-fancy-regex = "0.14"
-sha2 = "0.10"
+fancy-regex = "0.17"
+sha2 = "0.11"
 ammonia = "4"
 
 # Anime release title tokenization (wraps bundled anitomy C++ lib, compiled via cc)
