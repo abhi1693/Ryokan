@@ -246,14 +246,41 @@ async fn copy_artwork(
             Ok(b) => b,
             Err(e) => return CopyOutcome::SourceReadFailed(e),
         };
-        let per_dest = owned_dests
+        // First dest gets the real write; subsequent dests are
+        // hardlinked to it when possible so a multi-dest fan-out
+        // spends one blob's worth of bytes on disk regardless of
+        // `dests.len()`. Motivating case: series-root `banner.jpg`
+        // + `backdrop.jpg` (same blob, same directory) would
+        // otherwise cost ~500 MB of pure duplication in a
+        // 1000-series library, plus the same amount on every
+        // rsync/backup/snapshot.
+        //
+        // Fallback to `fs::write` if the hardlink fails — cross-fs
+        // (backdrop dir vs. series-root dir on different mounts),
+        // unusual FS (FAT32, some SMB mounts), or the first write
+        // errored and the source doesn't exist to link against. The
+        // fallback is behaviorally identical to the pre-dedupe code.
+        let per_dest: Vec<std::io::Result<()>> = owned_dests
             .iter()
-            .map(|dst| -> std::io::Result<()> {
+            .enumerate()
+            .map(|(i, dst)| -> std::io::Result<()> {
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(dst, &bytes)?;
-                Ok(())
+                if i == 0 {
+                    // Anchor: actual bytes on disk. Subsequent
+                    // hardlinks reference this inode.
+                    std::fs::write(dst, &bytes)
+                } else {
+                    // Hardlink wants a nonexistent dst; clean any
+                    // stale file first. `remove_file` error is
+                    // ignored because "already absent" is the
+                    // happy case.
+                    let _ = std::fs::remove_file(dst);
+                    let anchor = &owned_dests[0];
+                    std::fs::hard_link(anchor, dst)
+                        .or_else(|_hardlink_err| std::fs::write(dst, &bytes))
+                }
             })
             .collect();
         CopyOutcome::PerDest(per_dest)
@@ -2173,6 +2200,104 @@ mod tests {
         );
 
         // Cleanup — best effort.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Dedupe invariant: the fan-out must hardlink subsequent dests
+    /// to the first rather than writing the blob bytes twice. A
+    /// regression that silently restores per-dest writes would burn
+    /// on-disk bytes for every import (most visibly on banner +
+    /// backdrop, which always share the same blob in the same dir).
+    /// Unix-only because inode identity is the cheap way to assert
+    /// hardlink-ness without relying on filesystem-specific tools.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_artwork_hardlinks_subsequent_dests_to_the_first() {
+        use std::os::unix::fs::MetadataExt;
+
+        let db = setup_artwork_only_db().await;
+        let dir = unique_test_dir("copy_hardlink");
+        let blob_path = dir.join("blob.jpg");
+        let payload = b"\xFF\xD8\xFF\xE0anchor-inode-test".to_vec();
+        std::fs::write(&blob_path, &payload).expect("write blob");
+        register_blob(&db, "series-42-banner", &blob_path, "deadbeef", payload.len() as i64).await;
+
+        // Both dests live in the same directory (same fs guaranteed
+        // on tmpfs/ext4) so hardlink must succeed without falling
+        // back to `fs::write`.
+        let banner_dst = dir.join("banner.jpg");
+        let backdrop_dst = dir.join("backdrop.jpg");
+
+        let results = copy_artwork(
+            &db,
+            42,
+            "series-42-banner",
+            "banner",
+            None,
+            &[&banner_dst, &backdrop_dst],
+        )
+        .await;
+
+        assert_eq!(results, vec![true, true]);
+
+        let banner_meta = std::fs::metadata(&banner_dst).expect("stat banner");
+        let backdrop_meta = std::fs::metadata(&backdrop_dst).expect("stat backdrop");
+        assert_eq!(
+            banner_meta.ino(),
+            backdrop_meta.ino(),
+            "backdrop.jpg must be hardlinked to banner.jpg, not a separate copy",
+        );
+        // Hardlinks share nlink count ≥ 2 (the anchor + at least one link).
+        assert!(
+            banner_meta.nlink() >= 2,
+            "banner.jpg nlink must reflect the hardlinked backdrop; got {}",
+            banner_meta.nlink(),
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hardlinking is best-effort: if the dst already exists (e.g.
+    /// a previous run landed it), the fan-out must clean it up
+    /// first. A regression that left the stale dst in place would
+    /// silently keep an old blob on one of the Jellyfin image
+    /// slots after an artwork refresh.
+    #[tokio::test]
+    async fn copy_artwork_overwrites_preexisting_dest_files() {
+        let db = setup_artwork_only_db().await;
+        let dir = unique_test_dir("copy_overwrite");
+        let blob_path = dir.join("blob.jpg");
+        let new_payload = b"new artwork blob".to_vec();
+        std::fs::write(&blob_path, &new_payload).expect("write blob");
+        register_blob(
+            &db,
+            "series-42-banner",
+            &blob_path,
+            "deadbeef",
+            new_payload.len() as i64,
+        )
+        .await;
+
+        let banner_dst = dir.join("banner.jpg");
+        let backdrop_dst = dir.join("backdrop.jpg");
+        // Pre-seed both dests with stale bytes.
+        std::fs::write(&banner_dst, b"stale banner").expect("seed banner");
+        std::fs::write(&backdrop_dst, b"stale backdrop").expect("seed backdrop");
+
+        let results = copy_artwork(
+            &db,
+            42,
+            "series-42-banner",
+            "banner",
+            None,
+            &[&banner_dst, &backdrop_dst],
+        )
+        .await;
+
+        assert_eq!(results, vec![true, true]);
+        assert_eq!(std::fs::read(&banner_dst).unwrap(), new_payload);
+        assert_eq!(std::fs::read(&backdrop_dst).unwrap(), new_payload);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
