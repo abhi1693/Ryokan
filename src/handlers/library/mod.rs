@@ -106,7 +106,7 @@ pub struct Episode {
     /// is independent of the library-side `HasFile`.
     pub downloaded: bool,
     pub quality: String,
-    pub quality_state: String,  // "disk", "grabbed", "failed", or ""
+    pub quality_state: String, // "disk", "grabbed", "failed", or ""
     pub size_display: String,
     pub filename: String,
     pub can_auto_search: bool,
@@ -248,4 +248,3 @@ pub struct MarkEpisodeFailedForm {
     #[serde(default)]
     blocklist: bool,
 }
-

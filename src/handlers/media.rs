@@ -1,10 +1,10 @@
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderValue, Response, StatusCode},
+    http::{HeaderValue, Response, StatusCode, header},
 };
 
-use crate::{services::artwork, AppState};
+use crate::{AppState, services::artwork};
 
 pub async fn artwork(
     State(state): State<AppState>,

@@ -400,10 +400,11 @@ pub async fn classify_release(
     let mut evidence = filename.evidence.clone();
     let mut group_web_kind = WebKind::Unknown;
     if let Some(group) = filename.release_group.as_deref()
-        && let Some(group_cls) = classify_group(db, group).await {
-            evidence.push(group_cls.evidence);
-            group_web_kind = group_cls.web_kind;
-        }
+        && let Some(group_cls) = classify_group(db, group).await
+    {
+        evidence.push(group_cls.evidence);
+        group_web_kind = group_cls.web_kind;
+    }
 
     // Layer 4 — temporal inference. Pure synchronous function with no I/O,
     // so unlike Layer 2 we run it up-front alongside L1+L3 whenever a
@@ -443,10 +444,7 @@ pub async fn classify_release(
                 .filter(|e| e.source == result.source)
                 .all(|e| e.origin == Origin::Filename)
             && evidence.iter().any(|e| e.origin != Origin::Filename);
-        if result.source == Source::Unknown
-            || result.needs_review
-            || only_filename_backs_winner
-        {
+        if result.source == Source::Unknown || result.needs_review || only_filename_backs_winner {
             let extra = classify_description(db, ctx.info_hash, ctx.view_url).await;
             if !extra.is_empty() {
                 evidence.extend(extra);
@@ -538,10 +536,11 @@ pub async fn classify_post_download(
     // L3 — release group identity.
     let mut group_web_kind = WebKind::Unknown;
     if let Some(group) = filename.release_group.as_deref()
-        && let Some(group_cls) = classify_group(db, group).await {
-            evidence.push(group_cls.evidence);
-            group_web_kind = group_cls.web_kind;
-        }
+        && let Some(group_cls) = classify_group(db, group).await
+    {
+        evidence.push(group_cls.evidence);
+        group_web_kind = group_cls.web_kind;
+    }
 
     // L4 — temporal inference (when we have series context). Post-download
     // now feeds back the original `is_batch` flag from `grabbed_torrents`
@@ -555,9 +554,10 @@ pub async fn classify_post_download(
             series_ctx.end_year,
             is_batch,
             current_year(),
-        ) {
-            evidence.push(temporal_ev);
-        }
+        )
+    {
+        evidence.push(temporal_ev);
+    }
 
     // L5 — ffprobe stream analysis. Strongest post-download signal. Returns
     // an empty classification on any failure (missing binary, unreadable
@@ -1091,13 +1091,23 @@ mod tests {
             evidence: vec![],
             decision_rule: DecisionRule::Empty,
         };
-        let remux = ClassificationResult { is_remux: true, ..plain.clone() };
-        let bdmv = ClassificationResult { is_bdmv: true, ..plain.clone() };
+        let remux = ClassificationResult {
+            is_remux: true,
+            ..plain.clone()
+        };
+        let bdmv = ClassificationResult {
+            is_bdmv: true,
+            ..plain.clone()
+        };
         // Same source/resolution, the bluray_tier slot in rank() breaks the tie.
         assert!(remux.rank() > plain.rank(), "remux > plain encode");
         assert!(bdmv.rank() > remux.rank(), "BDMV > remux");
         // BDMV wins even when both flags are set.
-        let both = ClassificationResult { is_remux: true, is_bdmv: true, ..plain.clone() };
+        let both = ClassificationResult {
+            is_remux: true,
+            is_bdmv: true,
+            ..plain.clone()
+        };
         assert_eq!(both.bluray_tier(), 2);
         assert_eq!(both.label(), "BD-1080p RAW");
     }
@@ -1115,7 +1125,10 @@ mod tests {
             evidence: vec![],
             decision_rule: DecisionRule::Empty,
         };
-        let webdl = ClassificationResult { web_kind: WebKind::WebDl, ..webrip.clone() };
+        let webdl = ClassificationResult {
+            web_kind: WebKind::WebDl,
+            ..webrip.clone()
+        };
         assert!(webdl.rank() > webrip.rank());
         assert_eq!(webrip.label(), "WEBRip-1080p");
         // WebDl collapses to bare "WEB" at the label layer (issue #48);

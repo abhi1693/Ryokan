@@ -5,8 +5,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::services::progress::ProgressPoll;
 use crate::AppState;
+use crate::services::progress::ProgressPoll;
 
 #[derive(Deserialize)]
 pub struct PollQuery {

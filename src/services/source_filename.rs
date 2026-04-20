@@ -23,7 +23,7 @@
 
 use anitomy::{Anitomy, ElementCategory};
 
-use crate::services::source::{contains_word, Origin, Resolution, Source, SourceEvidence, WebKind};
+use crate::services::source::{Origin, Resolution, Source, SourceEvidence, WebKind, contains_word};
 
 const ORIGIN: Origin = Origin::Filename;
 
@@ -167,11 +167,12 @@ pub fn classify_filename(title: &str) -> FilenameClassification {
     // fallback scanner also lets us pick up a SECOND source signal in the
     // rare multi-source torrent title, which feeds the review-detection rule.
     if let Some(src_str) = elements.get(ElementCategory::Source)
-        && let Some((src, conf, detail)) = source_from_keyword(src_str, result.resolution) {
-            result
-                .evidence
-                .push(SourceEvidence::new(src, conf, ORIGIN, detail));
-        }
+        && let Some((src, conf, detail)) = source_from_keyword(src_str, result.resolution)
+    {
+        result
+            .evidence
+            .push(SourceEvidence::new(src, conf, ORIGIN, detail));
+    }
     for (token, mapped_src) in SOURCE_FALLBACK_TOKENS {
         if !contains_word(&title_lower, token) {
             continue;
@@ -201,12 +202,7 @@ pub fn classify_filename(title: &str) -> FilenameClassification {
 
     // Remux tends to live in VideoTerm rather than Source for some releases.
     // If we detected remux but no BD evidence has been emitted yet, add one.
-    if result.is_remux
-        && !result
-            .evidence
-            .iter()
-            .any(|e| e.source == Source::BluRay)
-    {
+    if result.is_remux && !result.evidence.iter().any(|e| e.source == Source::BluRay) {
         result.evidence.push(SourceEvidence::new(
             Source::BluRay,
             0.95,
@@ -219,12 +215,7 @@ pub fn classify_filename(title: &str) -> FilenameClassification {
     // release is literally the disc. Emit BluRay evidence if no source
     // token has fired yet so the aggregator doesn't fall back to Unknown
     // on a barebones "[group] Series Vol1 BDMV" title.
-    if result.is_bdmv
-        && !result
-            .evidence
-            .iter()
-            .any(|e| e.source == Source::BluRay)
-    {
+    if result.is_bdmv && !result.evidence.iter().any(|e| e.source == Source::BluRay) {
         result.evidence.push(SourceEvidence::new(
             Source::BluRay,
             0.95,
@@ -312,10 +303,7 @@ fn source_from_keyword(keyword: &str, res: Resolution) -> Option<(Source, f32, S
 /// We merge both anitomy-tagged `AudioTerm`s and a raw-title scan so that
 /// releases with codecs packed into brackets (common for mini-encode groups)
 /// still contribute evidence.
-fn audio_signal(
-    audio_terms: &[String],
-    title_lower: &str,
-) -> Option<(Source, f32, String)> {
+fn audio_signal(audio_terms: &[String], title_lower: &str) -> Option<(Source, f32, String)> {
     let mut lossless_hits: Vec<&'static str> = Vec::new();
     let mut web_hits: Vec<&'static str> = Vec::new();
 
@@ -352,11 +340,7 @@ fn audio_signal(
     }
 }
 
-fn classify_audio_token(
-    raw: &str,
-    lossless: &mut Vec<&'static str>,
-    web: &mut Vec<&'static str>,
-) {
+fn classify_audio_token(raw: &str, lossless: &mut Vec<&'static str>, web: &mut Vec<&'static str>) {
     let normalized: String = raw
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-' && *c != '.' && *c != '_')
@@ -521,9 +505,7 @@ mod tests {
         // SubsPlease releases contain no platform tag or source keyword —
         // Layer 1 alone should be unable to classify them. They're picked up
         // by Layer 3 (group table).
-        let fc = classify_filename(
-            "[SubsPlease] Sousou no Frieren - 01 (1080p) [ABCD1234].mkv",
-        );
+        let fc = classify_filename("[SubsPlease] Sousou no Frieren - 01 (1080p) [ABCD1234].mkv");
         assert_eq!(fc.resolution, Resolution::R1080p);
         assert_eq!(fc.release_group.as_deref(), Some("SubsPlease"));
         assert!(
@@ -544,26 +526,22 @@ mod tests {
 
     #[test]
     fn explicit_bdrip_classifies_as_bluray() {
-        let (src, res, _) = classify(
-            "[Beatrice-Raws] Sousou no Frieren 01 [BDRip 1920x1080 HEVC FLAC].mkv",
-        );
+        let (src, res, _) =
+            classify("[Beatrice-Raws] Sousou no Frieren 01 [BDRip 1920x1080 HEVC FLAC].mkv");
         assert_eq!(src, Source::BluRay);
         assert_eq!(res, Resolution::R1080p);
     }
 
     #[test]
     fn explicit_web_dl_classifies_as_web() {
-        let (src, res, _) = classify(
-            "Sousou.no.Frieren.S01E01.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv",
-        );
+        let (src, res, _) = classify("Sousou.no.Frieren.S01E01.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv");
         assert_eq!(src, Source::Web);
         assert_eq!(res, Resolution::R1080p);
     }
 
     #[test]
     fn hdtv_keyword() {
-        let (src, res, _) =
-            classify("Dragon.Ball.Z.Kai.S01E01.720p.HDTV.x264-anon.mkv");
+        let (src, res, _) = classify("Dragon.Ball.Z.Kai.S01E01.720p.HDTV.x264-anon.mkv");
         assert_eq!(src, Source::Hdtv);
         assert_eq!(res, Resolution::R720p);
     }
@@ -572,26 +550,23 @@ mod tests {
     fn vcb_studio_flac_audio_bluray() {
         // VCB-Studio doesn't write "BDRip" in their tags — classification
         // comes from the FLAC audio codec.
-        let (src, res, _) = classify(
-            "[VCB-Studio] Made in Abyss [01][Hi10p_1080p][x264_2flac].mkv",
-        );
+        let (src, res, _) =
+            classify("[VCB-Studio] Made in Abyss [01][Hi10p_1080p][x264_2flac].mkv");
         assert_eq!(src, Source::BluRay);
         assert_eq!(res, Resolution::R1080p);
     }
 
     #[test]
     fn bluray_keyword_with_dimensions() {
-        let (src, res, _) =
-            classify("[Coalgirls] Made in Abyss 01 (1920x1080 Blu-ray FLAC).mkv");
+        let (src, res, _) = classify("[Coalgirls] Made in Abyss 01 (1920x1080 Blu-ray FLAC).mkv");
         assert_eq!(src, Source::BluRay);
         assert_eq!(res, Resolution::R1080p);
     }
 
     #[test]
     fn remux_flag_detected() {
-        let fc = classify_filename(
-            "Sousou.no.Frieren.S01.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FGT.mkv",
-        );
+        let fc =
+            classify_filename("Sousou.no.Frieren.S01.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FGT.mkv");
         assert!(fc.is_remux);
         let mut result = aggregate(&fc.evidence);
         result.resolution = fc.resolution;
@@ -601,38 +576,33 @@ mod tests {
 
     #[test]
     fn netflix_2160p_web() {
-        let (src, res, _) = classify(
-            "Sousou.no.Frieren.S01E01.2160p.NF.WEB-DL.DDP5.1.Atmos.HEVC-FLUX.mkv",
-        );
+        let (src, res, _) =
+            classify("Sousou.no.Frieren.S01E01.2160p.NF.WEB-DL.DDP5.1.Atmos.HEVC-FLUX.mkv");
         assert_eq!(src, Source::Web);
         assert_eq!(res, Resolution::R2160p);
     }
 
     #[test]
     fn amzn_tag_web() {
-        let (src, _, _) =
-            classify("Show.Name.S01E01.1080p.AMZN.WEB-DL.DDP2.0.H.264-XYZ.mkv");
+        let (src, _, _) = classify("Show.Name.S01E01.1080p.AMZN.WEB-DL.DDP2.0.H.264-XYZ.mkv");
         assert_eq!(src, Source::Web);
     }
 
     #[test]
     fn disney_plus_tag_web() {
-        let (src, _, _) =
-            classify("Show.Name.S01E01.1080p.DSNP.WEB-DL.DDP5.1.H.264-ABC.mkv");
+        let (src, _, _) = classify("Show.Name.S01E01.1080p.DSNP.WEB-DL.DDP5.1.H.264-ABC.mkv");
         assert_eq!(src, Source::Web);
     }
 
     #[test]
     fn hidive_tag_web() {
-        let (src, _, _) =
-            classify("Show.Name.S01E01.1080p.HIDI.WEB-DL.AAC2.0.H.264-DEF.mkv");
+        let (src, _, _) = classify("Show.Name.S01E01.1080p.HIDI.WEB-DL.AAC2.0.H.264-DEF.mkv");
         assert_eq!(src, Source::Web);
     }
 
     #[test]
     fn dvdrip_480p() {
-        let (src, res, _) =
-            classify("Old.Anime.S01E01.DVDRip.480p.XviD-ABC.mkv");
+        let (src, res, _) = classify("Old.Anime.S01E01.DVDRip.480p.XviD-ABC.mkv");
         assert_eq!(src, Source::Dvd);
         assert_eq!(res, Resolution::R480p);
     }
@@ -641,8 +611,7 @@ mod tests {
     fn bdrip_480p_downgrades_to_dvd() {
         // BD keyword + 480p → DVD override. Old "BDRip 480p" tags generally
         // mean the video master was sourced from DVD.
-        let (src, res, _) =
-            classify("[SomeGroup] Old Anime 01 [BDRip 480p AAC].mkv");
+        let (src, res, _) = classify("[SomeGroup] Old Anime 01 [BDRip 480p AAC].mkv");
         assert_eq!(src, Source::Dvd);
         assert_eq!(res, Resolution::R480p);
     }
@@ -661,9 +630,7 @@ mod tests {
 
     #[test]
     fn dvdrip_ac3() {
-        let (src, res, _) = classify(
-            "Neon.Genesis.Evangelion.S01E01.DVDRip.x264.AC3-ABC.mkv",
-        );
+        let (src, res, _) = classify("Neon.Genesis.Evangelion.S01E01.DVDRip.x264.AC3-ABC.mkv");
         assert_eq!(src, Source::Dvd);
         assert!(matches!(
             res,
@@ -673,27 +640,22 @@ mod tests {
 
     #[test]
     fn judas_bd_mini_encode() {
-        let (src, res, _) = classify(
-            "[Judas] Sousou no Frieren - S01E01 (BD 1080p HEVC Opus).mkv",
-        );
+        let (src, res, _) = classify("[Judas] Sousou no Frieren - S01E01 (BD 1080p HEVC Opus).mkv");
         assert_eq!(src, Source::BluRay);
         assert_eq!(res, Resolution::R1080p);
     }
 
     #[test]
     fn kawaiika_bdrip() {
-        let (src, res, _) = classify(
-            "[Kawaiika-Raws] Sousou no Frieren 01 [BD 1080p HEVC E-AC3].mkv",
-        );
+        let (src, res, _) =
+            classify("[Kawaiika-Raws] Sousou no Frieren 01 [BD 1080p HEVC E-AC3].mkv");
         assert_eq!(src, Source::BluRay);
         assert_eq!(res, Resolution::R1080p);
     }
 
     #[test]
     fn sam_bdrip_flac() {
-        let (src, res, _) = classify(
-            "[sam] Made in Abyss S01E01 [BDRip 1080p HEVC FLAC].mkv",
-        );
+        let (src, res, _) = classify("[sam] Made in Abyss S01E01 [BDRip 1080p HEVC FLAC].mkv");
         assert_eq!(src, Source::BluRay);
         assert_eq!(res, Resolution::R1080p);
     }
@@ -717,9 +679,7 @@ mod tests {
 
     #[test]
     fn resolution_from_raw_dimensions() {
-        let fc = classify_filename(
-            "[Beatrice-Raws] Show 01 [BDRip 1920x1080 HEVC FLAC].mkv",
-        );
+        let fc = classify_filename("[Beatrice-Raws] Show 01 [BDRip 1920x1080 HEVC FLAC].mkv");
         assert_eq!(fc.resolution, Resolution::R1080p);
     }
 
@@ -746,9 +706,7 @@ mod tests {
 
     #[test]
     fn release_group_extracted() {
-        let fc = classify_filename(
-            "[Beatrice-Raws] Made in Abyss 01 [BDRip 1080p HEVC FLAC].mkv",
-        );
+        let fc = classify_filename("[Beatrice-Raws] Made in Abyss 01 [BDRip 1080p HEVC FLAC].mkv");
         assert_eq!(fc.release_group.as_deref(), Some("Beatrice-Raws"));
     }
 
@@ -774,8 +732,7 @@ mod tests {
     fn conflict_between_bdrip_and_aac_resolves_to_bluray() {
         // BDRip keyword (0.95) should dominate the weaker AAC signal (0.75).
         // 0.95 ≥ STRONG_THRESHOLD, rule 1 short-circuits to BluRay.
-        let (src, _, _) =
-            classify("[Group] Show 01 [BDRip 1080p HEVC AAC].mkv");
+        let (src, _, _) = classify("[Group] Show 01 [BDRip 1080p HEVC AAC].mkv");
         assert_eq!(src, Source::BluRay);
     }
 
@@ -784,9 +741,7 @@ mod tests {
         // Contrived: both WEB-DL and BD keywords in the same title. In
         // practice this would be a misnamed release. Aggregator should still
         // pick one but the ClassificationResult's needs_review flag is set.
-        let fc = classify_filename(
-            "[Group] Show - 01 [WEB-DL 1080p] [BDRip Re-encode] [FLAC].mkv",
-        );
+        let fc = classify_filename("[Group] Show - 01 [WEB-DL 1080p] [BDRip Re-encode] [FLAC].mkv");
         // Both signals are present in the evidence trail.
         let has_web = fc.evidence.iter().any(|e| e.source == Source::Web);
         let has_bd = fc.evidence.iter().any(|e| e.source == Source::BluRay);
@@ -801,18 +756,14 @@ mod tests {
 
     #[test]
     fn web_dl_filename_sets_webdl_kind() {
-        let fc = classify_filename(
-            "Sousou.no.Frieren.S01E01.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv",
-        );
+        let fc = classify_filename("Sousou.no.Frieren.S01E01.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv");
         assert_eq!(fc.web_kind, WebKind::WebDl);
         assert!(!fc.is_bdmv);
     }
 
     #[test]
     fn webrip_filename_sets_webrip_kind() {
-        let fc = classify_filename(
-            "Show.Name.S01E01.1080p.WEBRip.x264-XYZ.mkv",
-        );
+        let fc = classify_filename("Show.Name.S01E01.1080p.WEBRip.x264-XYZ.mkv");
         assert_eq!(fc.web_kind, WebKind::WebRip);
         assert!(!fc.is_bdmv);
     }
@@ -822,17 +773,13 @@ mod tests {
         // A title that just says "WEB" without a -DL/-Rip qualifier should
         // not commit to either variant. The Source::Web evidence still
         // fires, but web_kind stays Unknown.
-        let fc = classify_filename(
-            "Show.Name.S01E01.1080p.WEB.x264-XYZ.mkv",
-        );
+        let fc = classify_filename("Show.Name.S01E01.1080p.WEB.x264-XYZ.mkv");
         assert_eq!(fc.web_kind, WebKind::Unknown);
     }
 
     #[test]
     fn bdmv_keyword_sets_is_bdmv_and_emits_bluray() {
-        let fc = classify_filename(
-            "[Group] Sousou no Frieren Vol.1 BDMV [Bluray ISO 1080p]",
-        );
+        let fc = classify_filename("[Group] Sousou no Frieren Vol.1 BDMV [Bluray ISO 1080p]");
         assert!(fc.is_bdmv, "BDMV token should set is_bdmv");
         // The dedicated BDMV emitter should fire so the aggregator commits
         // to BluRay even on a barebones disc dump.
@@ -842,9 +789,7 @@ mod tests {
 
     #[test]
     fn bdraw_token_sets_is_bdmv() {
-        let fc = classify_filename(
-            "[Group] Sousou no Frieren Vol.1 [BD-RAW 1080p]",
-        );
+        let fc = classify_filename("[Group] Sousou no Frieren Vol.1 [BD-RAW 1080p]");
         assert!(fc.is_bdmv);
     }
 
@@ -853,18 +798,15 @@ mod tests {
         // Remux and BDMV are distinct release classes — a Remux is an
         // MKV-wrapped extract, not the disc structure itself. Make sure
         // the Remux detector doesn't accidentally trip the BDMV flag.
-        let fc = classify_filename(
-            "Sousou.no.Frieren.S01.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FGT.mkv",
-        );
+        let fc =
+            classify_filename("Sousou.no.Frieren.S01.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FGT.mkv");
         assert!(fc.is_remux);
         assert!(!fc.is_bdmv);
     }
 
     #[test]
     fn bdmv_does_not_set_is_remux() {
-        let fc = classify_filename(
-            "[Group] Sousou no Frieren Vol.1 BDMV [1080p]",
-        );
+        let fc = classify_filename("[Group] Sousou no Frieren Vol.1 BDMV [1080p]");
         assert!(fc.is_bdmv);
         assert!(!fc.is_remux);
     }

@@ -34,9 +34,8 @@ static SEL_NEXT: LazyLock<Selector> = LazyLock::new(|| {
 /// (`/view/<id>`). Used by [`fetch_view_result`] for the SeaDex-bypass
 /// path that ingests curated torrents directly from their view URLs
 /// instead of going through the text search.
-static SEL_VIEW_TITLE: LazyLock<Selector> = LazyLock::new(|| {
-    Selector::parse("div.panel h3.panel-title").expect("SEL_VIEW_TITLE parses")
-});
+static SEL_VIEW_TITLE: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("div.panel h3.panel-title").expect("SEL_VIEW_TITLE parses"));
 static SEL_VIEW_ROW: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("div.panel-body div.row").expect("SEL_VIEW_ROW parses"));
 // Target Nyaa's actual Bootstrap grid columns (`col-md-1`, `col-md-5`, etc.)
@@ -45,15 +44,13 @@ static SEL_VIEW_ROW: LazyLock<Selector> =
 // made the label/value pair-up (`while i + 1 < cols.len()` in
 // `parse_view_page`) drift and silently zero out seeder/leecher counts
 // on view pages that had any extra inner markup.
-static SEL_VIEW_COL: LazyLock<Selector> = LazyLock::new(|| {
-    Selector::parse("div[class*='col-md-']").expect("SEL_VIEW_COL parses")
-});
+static SEL_VIEW_COL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("div[class*='col-md-']").expect("SEL_VIEW_COL parses"));
 static SEL_VIEW_MAGNET: LazyLock<Selector> = LazyLock::new(|| {
     Selector::parse("a.card-footer-item[href^='magnet:']").expect("SEL_VIEW_MAGNET parses")
 });
 static SEL_VIEW_TORRENT: LazyLock<Selector> = LazyLock::new(|| {
-    Selector::parse("a.card-footer-item[href$='.torrent']")
-        .expect("SEL_VIEW_TORRENT parses")
+    Selector::parse("a.card-footer-item[href$='.torrent']").expect("SEL_VIEW_TORRENT parses")
 });
 
 /// Episode range like "01-12", "01~24", "1 - 24". Broader than the old
@@ -214,7 +211,11 @@ pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, S
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
     let (results, has_next) = parse_results(&html, opts);
-    Ok(SearchResponse { results, page, has_next })
+    Ok(SearchResponse {
+        results,
+        page,
+        has_next,
+    })
 }
 
 fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) {
@@ -320,7 +321,8 @@ fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) 
             info_hash,
         };
 
-        result.score = crate::services::scoring::score_result_with_sub_pref(&result, opts, opts.prefer_subs);
+        result.score =
+            crate::services::scoring::score_result_with_sub_pref(&result, opts, opts.prefer_subs);
         results.push(result);
     }
 
@@ -360,7 +362,7 @@ struct ClassifiedFields {
 /// parser is sync. Interactive paths that want Layer 3 enrichment call
 /// [`enrich_results_with_group_map`] after parsing.
 fn classify_search_result(title: &str) -> ClassifiedFields {
-    use crate::services::source::{ClassificationResult, DecisionRule, Source, Resolution};
+    use crate::services::source::{ClassificationResult, DecisionRule, Resolution, Source};
     use crate::services::source_filename::classify_filename;
 
     let fc = classify_filename(title);
@@ -430,10 +432,7 @@ fn classify_search_result(title: &str) -> ClassifiedFields {
 /// Call this from interactive search handlers after `nyaa::search` —
 /// auto-search runs the full source pipeline downstream so it doesn't
 /// need the extra call.
-pub async fn enrich_results_with_group_map(
-    db: &sqlx::SqlitePool,
-    results: &mut [SearchResult],
-) {
+pub async fn enrich_results_with_group_map(db: &sqlx::SqlitePool, results: &mut [SearchResult]) {
     use crate::services::source::{Resolution, Source};
     use crate::services::source_groups::classify_group;
 
@@ -514,8 +513,8 @@ fn detect_batch(title: &str) -> bool {
     //
     // The Roman-numeral check runs against the raw title (not `lower`)
     // because the regex is case-sensitive — see ROMAN_SEASON_MARKER_RE.
-    let has_season_marker = SEASON_MARKER_RE.is_match(&lower)
-        || ROMAN_SEASON_MARKER_RE.is_match(title);
+    let has_season_marker =
+        SEASON_MARKER_RE.is_match(&lower) || ROMAN_SEASON_MARKER_RE.is_match(title);
     if has_season_marker && !SINGLE_EP_RE.is_match(&lower) {
         return true;
     }
@@ -604,15 +603,10 @@ pub async fn fetch_view_result(
         .await
         .map_err(|e| format!("Failed to read view body: {}", e))?;
 
-    parse_view_page(&html, view_url, opts)
-        .ok_or_else(|| "Nyaa view page parse failed".to_string())
+    parse_view_page(&html, view_url, opts).ok_or_else(|| "Nyaa view page parse failed".to_string())
 }
 
-fn parse_view_page(
-    html: &str,
-    view_url: &str,
-    opts: &SearchOptions,
-) -> Option<SearchResult> {
+fn parse_view_page(html: &str, view_url: &str, opts: &SearchOptions) -> Option<SearchResult> {
     let document = Html::parse_document(html);
 
     // Title is the first `<h3 class="panel-title">` under the first
@@ -714,11 +708,8 @@ fn parse_view_page(
         info_hash,
     };
 
-    result.score = crate::services::scoring::score_result_with_sub_pref(
-        &result,
-        opts,
-        opts.prefer_subs,
-    );
+    result.score =
+        crate::services::scoring::score_result_with_sub_pref(&result, opts, opts.prefer_subs);
 
     Some(result)
 }
@@ -794,10 +785,12 @@ mod tests {
         assert_eq!(result.leechers, 0);
         assert_eq!(result.downloads, 2286);
         assert_eq!(result.size, "23.8 GiB");
-        assert!(result.size_bytes > 20 * 1024 * 1024 * 1024, "size_bytes should parse to GiB range");
+        assert!(
+            result.size_bytes > 20 * 1024 * 1024 * 1024,
+            "size_bytes should parse to GiB range"
+        );
         assert_eq!(
-            result.info_hash,
-            "0f8ee3286d768fb53ae593f10155a5077e38e893",
+            result.info_hash, "0f8ee3286d768fb53ae593f10155a5077e38e893",
             "info_hash should be extracted from the magnet link"
         );
         assert!(
@@ -808,7 +801,10 @@ mod tests {
         assert_eq!(result.torrent, "https://nyaa.si/download/1713886.torrent");
         assert_eq!(result.link, "https://nyaa.si/view/1713886");
         // `detect_batch` fires on the season marker in the title.
-        assert!(result.is_batch, "smol pack titled with Season N should be flagged as batch");
+        assert!(
+            result.is_batch,
+            "smol pack titled with Season N should be flagged as batch"
+        );
         assert_eq!(result.resolution, "1080");
         assert_eq!(result.group, "smol");
     }
@@ -950,7 +946,8 @@ mod tests {
     fn classify_search_result_bdmv_label_matches_grab_path() {
         // BDMV releases must produce `BD-1080p RAW` — the same label the
         // grab-side ClassificationResult::label() emits, so UI and DB agree.
-        let c = classify_search_result("[smol] Monogatari S1 (BDMV 1080p x264 FLAC) [f00ba211].mkv");
+        let c =
+            classify_search_result("[smol] Monogatari S1 (BDMV 1080p x264 FLAC) [f00ba211].mkv");
         assert_eq!(c.resolution, "1080");
         assert_eq!(c.source, "BluRay");
         assert!(c.is_bdmv);
@@ -1048,17 +1045,25 @@ mod tests {
 
         let mut results = vec![SearchResult {
             title: "[SubsPlease] Show - 01 (BD 1080p) [abc].mkv".to_string(),
-            link: String::new(), magnet: String::new(), torrent: String::new(),
-            size: String::new(), size_bytes: 0,
-            seeders: 0, leechers: 0, downloads: 0,
+            link: String::new(),
+            magnet: String::new(),
+            torrent: String::new(),
+            size: String::new(),
+            size_bytes: 0,
+            seeders: 0,
+            leechers: 0,
+            downloads: 0,
             group: "SubsPlease".to_string(),
             resolution: "1080".to_string(),
             quality_label: "BD-1080p".to_string(),
             source: "BluRay".to_string(),
             web_kind: String::new(),
-            is_remux: false, is_bdmv: false,
-            is_batch: false, is_trusted: false,
-            score: 0, info_hash: String::new(),
+            is_remux: false,
+            is_bdmv: false,
+            is_batch: false,
+            is_trusted: false,
+            score: 0,
+            info_hash: String::new(),
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;

@@ -34,13 +34,17 @@ pub async fn touch_definition(
     .bind(task_key)
     .bind(display_name)
     .bind(schedule_label)
-    .bind(if enabled {1_i64} else {0_i64})
+    .bind(if enabled { 1_i64 } else { 0_i64 })
     .execute(db)
     .await?;
     Ok(())
 }
 
-pub async fn mark_started(db: &SqlitePool, task_key: &str, detail: &str) -> Result<(), sqlx::Error> {
+pub async fn mark_started(
+    db: &SqlitePool,
+    task_key: &str,
+    detail: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"UPDATE scheduled_task_runs
            SET last_started_at = CURRENT_TIMESTAMP,
@@ -56,7 +60,12 @@ pub async fn mark_started(db: &SqlitePool, task_key: &str, detail: &str) -> Resu
     Ok(())
 }
 
-pub async fn mark_finished(db: &SqlitePool, task_key: &str, status: &str, detail: &str) -> Result<(), sqlx::Error> {
+pub async fn mark_finished(
+    db: &SqlitePool,
+    task_key: &str,
+    status: &str,
+    detail: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"UPDATE scheduled_task_runs
            SET last_finished_at = CURRENT_TIMESTAMP,
@@ -83,10 +92,7 @@ pub async fn mark_finished(db: &SqlitePool, task_key: &str, status: &str, detail
 /// into a DateTime type on the Rust side just to subtract them. The
 /// column is stored in UTC (`CURRENT_TIMESTAMP`), and `'now'` is
 /// also UTC, so no timezone math is needed.
-pub async fn minutes_since_last_finished(
-    db: &SqlitePool,
-    task_key: &str,
-) -> Option<i64> {
+pub async fn minutes_since_last_finished(db: &SqlitePool, task_key: &str) -> Option<i64> {
     let row = sqlx::query(
         r#"SELECT CAST((strftime('%s','now') - strftime('%s', last_finished_at)) / 60 AS INTEGER) AS minutes_ago
            FROM scheduled_task_runs
@@ -141,14 +147,17 @@ pub async fn list(db: &SqlitePool) -> Result<Vec<ScheduledTaskStatus>, sqlx::Err
     .fetch_all(db)
     .await?;
 
-    Ok(rows.into_iter().map(|row| ScheduledTaskStatus {
-        task_key: row.get("task_key"),
-        display_name: row.get("display_name"),
-        schedule_label: row.get("schedule_label"),
-        enabled: row.get::<i64, _>("enabled") != 0,
-        last_started_at: row.get::<Option<String>, _>("last_started_at"),
-        last_finished_at: row.get::<Option<String>, _>("last_finished_at"),
-        last_status: row.get("last_status"),
-        last_detail: row.get("last_detail"),
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| ScheduledTaskStatus {
+            task_key: row.get("task_key"),
+            display_name: row.get("display_name"),
+            schedule_label: row.get("schedule_label"),
+            enabled: row.get::<i64, _>("enabled") != 0,
+            last_started_at: row.get::<Option<String>, _>("last_started_at"),
+            last_finished_at: row.get::<Option<String>, _>("last_finished_at"),
+            last_status: row.get("last_status"),
+            last_detail: row.get("last_detail"),
+        })
+        .collect())
 }

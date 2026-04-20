@@ -7,21 +7,18 @@
 //! same request flow shape: form-extract → validate → DB write → log → JSON
 //! response.
 
-use axum::{
-    extract::State,
-    response::Json,
-};
+use axum::{extract::State, response::Json};
 
+use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, grabbed_torrents, monitoring, series};
 use crate::services::{logger, media, metadata_sync, monitoring as monitoring_service};
-use crate::AppState;
 
 use super::reconcile::reconcile_all_fallback_entries;
-use super::search::{auto_search_series, AutoSearchQuery};
+use super::search::{AutoSearchQuery, auto_search_series};
 use super::{
-    AddSeriesForm, RemoveSeriesForm, SetAllowUpgradesForm, SetEpisodeMonitoringForm,
-    SetFolderForm, SetManualOverrideForm, SetMonitoringForm, SetSearchOverridesForm,
+    AddSeriesForm, RemoveSeriesForm, SetAllowUpgradesForm, SetEpisodeMonitoringForm, SetFolderForm,
+    SetManualOverrideForm, SetMonitoringForm, SetSearchOverridesForm,
 };
 
 #[utoipa::path(
@@ -67,9 +64,17 @@ pub async fn add_series(
     logger::info(
         &state.db,
         LogCategory::Library,
-        &format!("{} library entry: {}", if created { "Added" } else { "Updated" }, form.title),
-        &format!("id={}, anilist_id={}, mal_id={:?}, format={}, episodes={:?}", id, form.anilist_id, form.mal_id, form.format, form.episodes),
-    ).await;
+        &format!(
+            "{} library entry: {}",
+            if created { "Added" } else { "Updated" },
+            form.title
+        ),
+        &format!(
+            "id={}, anilist_id={}, mal_id={:?}, format={}, episodes={:?}",
+            id, form.anilist_id, form.mal_id, form.format, form.episodes
+        ),
+    )
+    .await;
 
     if let Ok(Some(tracked)) = series::get_by_id(&state.db, id).await {
         let db_clone = state.db.clone();
@@ -81,22 +86,32 @@ pub async fn add_series(
                 .flatten()
                 .map(|c| c.force_mal_fallback)
                 .unwrap_or(false);
-            match metadata_sync::refresh_series_metadata(&db_clone, &tracked_clone, force_fallback).await {
+            match metadata_sync::refresh_series_metadata(&db_clone, &tracked_clone, force_fallback)
+                .await
+            {
                 Ok(detail) => {
                     logger::info(
                         &db_clone,
                         LogCategory::AniList,
                         &format!("Hydrated local metadata for {}", tracked_clone.title),
-                        &format!("provider_id={}, mal_id={:?}, episodes={:?}", detail.id, detail.id_mal, detail.episodes),
-                    ).await;
+                        &format!(
+                            "provider_id={}, mal_id={:?}, episodes={:?}",
+                            detail.id, detail.id_mal, detail.episodes
+                        ),
+                    )
+                    .await;
                 }
                 Err(err) => {
                     logger::warn(
                         &db_clone,
                         LogCategory::AniList,
-                        &format!("Failed to hydrate local metadata for {}", tracked_clone.title),
+                        &format!(
+                            "Failed to hydrate local metadata for {}",
+                            tracked_clone.title
+                        ),
                         &err,
-                    ).await;
+                    )
+                    .await;
                 }
             }
         });
@@ -129,9 +144,7 @@ pub async fn add_series(
                     &format!("Initial classify scan for {}", scan_title),
                     &format!(
                         "files_scanned={}, classified={}, needs_review={}",
-                        report.files_scanned,
-                        report.files_classified,
-                        report.files_needing_review,
+                        report.files_scanned, report.files_classified, report.files_needing_review,
                     ),
                 )
                 .await;
@@ -139,7 +152,9 @@ pub async fn add_series(
         });
     }
 
-    let monitor = monitoring_service::recompute_series_monitoring(&state.db, id).await.ok();
+    let monitor = monitoring_service::recompute_series_monitoring(&state.db, id)
+        .await
+        .ok();
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -170,8 +185,12 @@ pub async fn reconcile_fallbacks(
         &state.db,
         LogCategory::AniList,
         "Fallback reconciliation complete",
-        &format!("checked={}, upgraded={}, failed={}", report.checked, report.upgraded, report.failed),
-    ).await;
+        &format!(
+            "checked={}, upgraded={}, failed={}",
+            report.checked, report.upgraded, report.failed
+        ),
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "checked": report.checked,
@@ -249,87 +268,92 @@ pub async fn remove_series(
     let mut folder_status: &'static str = "skipped";
     let mut folder_detail: String = String::new();
 
-    if delete_files
-        && let Some(ref tracked) = tracked {
-            // 1. Tell qBittorrent to drop every torrent (with files) we ever
-            //    grabbed for this series.
-            let hashes = match grabbed_torrents::get_all_for_series(&state.db, series_id).await {
-                Ok(h) => h,
-                Err(e) => {
-                    return Err(fail_with(&state.db, series_id, "list_grabbed_torrents", e.to_string()).await);
-                }
-            };
+    if delete_files && let Some(ref tracked) = tracked {
+        // 1. Tell qBittorrent to drop every torrent (with files) we ever
+        //    grabbed for this series.
+        let hashes = match grabbed_torrents::get_all_for_series(&state.db, series_id).await {
+            Ok(h) => h,
+            Err(e) => {
+                return Err(fail_with(
+                    &state.db,
+                    series_id,
+                    "list_grabbed_torrents",
+                    e.to_string(),
+                )
+                .await);
+            }
+        };
 
-            if !hashes.is_empty() {
-                let qbit_opt = state.qbit.read().await.clone();
-                if let Some(qbit) = qbit_opt {
-                    for (_id, hash) in &hashes {
-                        if hash.is_empty() {
-                            continue;
-                        }
-                        match qbit.delete_torrent(hash, true).await {
-                            Ok(()) => torrents_removed += 1,
-                            Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
-                        }
+        if !hashes.is_empty() {
+            let qbit_opt = state.qbit.read().await.clone();
+            if let Some(qbit) = qbit_opt {
+                for (_id, hash) in &hashes {
+                    if hash.is_empty() {
+                        continue;
                     }
-                } else {
-                    torrent_failures.push("qBittorrent client not configured".to_string());
+                    match qbit.delete_torrent(hash, true).await {
+                        Ok(()) => torrents_removed += 1,
+                        Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
+                    }
                 }
+            } else {
+                torrent_failures.push("qBittorrent client not configured".to_string());
             }
+        }
 
-            // 2. Drop the grabbed_torrents rows for this series so the table
-            //    doesn't accumulate stale references to hashes qBit just
-            //    forgot about.
-            if let Err(err) = grabbed_torrents::delete_all_for_series(&state.db, series_id).await {
-                torrent_failures.push(format!("clear grabbed_torrents: {}", err));
-            }
+        // 2. Drop the grabbed_torrents rows for this series so the table
+        //    doesn't accumulate stale references to hashes qBit just
+        //    forgot about.
+        if let Err(err) = grabbed_torrents::delete_all_for_series(&state.db, series_id).await {
+            torrent_failures.push(format!("clear grabbed_torrents: {}", err));
+        }
 
-            // 3. Delete the series media folder. Canonicalize + assert under
-            //    the configured media root before recursing.
-            let cfg_opt = config::get_config(&state.db).await.ok().flatten();
-            if let Some(cfg) = cfg_opt
-                && !tracked.folder_name.trim().is_empty() && !cfg.media_root.trim().is_empty() {
-                    let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
-                    match tokio::fs::canonicalize(&cfg.media_root).await {
-                        Ok(media_root_canon) => {
-                            match tokio::fs::canonicalize(&series_dir).await {
-                                Ok(series_canon) if series_canon.starts_with(&media_root_canon) => {
-                                    match tokio::fs::remove_dir_all(&series_canon).await {
-                                        Ok(()) => {
-                                            folder_status = "removed";
-                                            folder_detail = series_canon.display().to_string();
-                                        }
-                                        Err(err) => {
-                                            folder_status = "error";
-                                            folder_detail = format!("{}: {}", series_canon.display(), err);
-                                        }
-                                    }
-                                }
-                                Ok(other) => {
-                                    folder_status = "refused";
-                                    folder_detail = format!(
-                                        "resolves outside media root: {} -> {}",
-                                        series_dir.display(),
-                                        other.display()
-                                    );
-                                }
-                                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                                    folder_status = "missing";
-                                    folder_detail = series_dir.display().to_string();
-                                }
-                                Err(err) => {
-                                    folder_status = "error";
-                                    folder_detail = format!("{}: {}", series_dir.display(), err);
-                                }
+        // 3. Delete the series media folder. Canonicalize + assert under
+        //    the configured media root before recursing.
+        let cfg_opt = config::get_config(&state.db).await.ok().flatten();
+        if let Some(cfg) = cfg_opt
+            && !tracked.folder_name.trim().is_empty()
+            && !cfg.media_root.trim().is_empty()
+        {
+            let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
+            match tokio::fs::canonicalize(&cfg.media_root).await {
+                Ok(media_root_canon) => match tokio::fs::canonicalize(&series_dir).await {
+                    Ok(series_canon) if series_canon.starts_with(&media_root_canon) => {
+                        match tokio::fs::remove_dir_all(&series_canon).await {
+                            Ok(()) => {
+                                folder_status = "removed";
+                                folder_detail = series_canon.display().to_string();
+                            }
+                            Err(err) => {
+                                folder_status = "error";
+                                folder_detail = format!("{}: {}", series_canon.display(), err);
                             }
                         }
-                        Err(err) => {
-                            folder_status = "error";
-                            folder_detail = format!("media_root canonicalize: {}", err);
-                        }
                     }
+                    Ok(other) => {
+                        folder_status = "refused";
+                        folder_detail = format!(
+                            "resolves outside media root: {} -> {}",
+                            series_dir.display(),
+                            other.display()
+                        );
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        folder_status = "missing";
+                        folder_detail = series_dir.display().to_string();
+                    }
+                    Err(err) => {
+                        folder_status = "error";
+                        folder_detail = format!("{}: {}", series_dir.display(), err);
+                    }
+                },
+                Err(err) => {
+                    folder_status = "error";
+                    folder_detail = format!("media_root canonicalize: {}", err);
                 }
+            }
         }
+    }
 
     // 4. Remove the DB tracking rows. This is the irreversible step, so
     //    do it last — if filesystem cleanup blew up the operator can
@@ -370,7 +394,11 @@ pub async fn remove_series(
             delete_files,
             torrents_removed,
             folder_status,
-            if safe_folder_detail.is_empty() { String::new() } else { format!(" ({})", safe_folder_detail) },
+            if safe_folder_detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", safe_folder_detail)
+            },
             if safe_torrent_failures.is_empty() {
                 String::new()
             } else {
@@ -448,8 +476,14 @@ pub async fn set_monitoring(
         &state.db,
         LogCategory::Library,
         &format!("Updated monitoring for series {}", series_id),
-        &format!("mode={}, monitored={}/{}", summary.mode.as_str(), summary.monitored_count, summary.total_count),
-    ).await;
+        &format!(
+            "mode={}, monitored={}/{}",
+            summary.mode.as_str(),
+            summary.monitored_count,
+            summary.total_count
+        ),
+    )
+    .await;
 
     // Auto-grab monitored episodes if requested (e.g. after initial add).
     if form.auto_grab.unwrap_or(false)
@@ -473,7 +507,8 @@ pub async fn set_monitoring(
                     axum::extract::State(state_clone),
                     axum::extract::Path(series_id),
                     axum::extract::Query(AutoSearchQuery::default()),
-                ).await;
+                )
+                .await;
             });
         }
     }
@@ -503,9 +538,14 @@ pub async fn set_episode_monitoring(
     State(state): State<AppState>,
     Json(form): Json<SetEpisodeMonitoringForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    monitoring::set_episode_monitored(&state.db, form.series_id, form.episode_number, form.monitored)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    monitoring::set_episode_monitored(
+        &state.db,
+        form.series_id,
+        form.episode_number,
+        form.monitored,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "episode_number": form.episode_number,
@@ -537,9 +577,13 @@ pub async fn set_allow_upgrades(
     logger::info(
         &state.db,
         LogCategory::Library,
-        &format!("Upgrade opt-in for series {} set to {}", form.series_id, form.allow),
+        &format!(
+            "Upgrade opt-in for series {} set to {}",
+            form.series_id, form.allow
+        ),
         "",
-    ).await;
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
@@ -583,7 +627,8 @@ pub async fn set_search_overrides(
             form.custom_query_tokens.trim(),
             form.restrict_to_uploader.trim(),
         ),
-    ).await;
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
@@ -661,9 +706,13 @@ pub async fn set_manual_override(
     logger::info(
         &state.db,
         LogCategory::Library,
-        &format!("Manual override {} for series {} ep {}", action, form.series_id, form.episode_number),
+        &format!(
+            "Manual override {} for series {} ep {}",
+            action, form.series_id, form.episode_number
+        ),
         "",
-    ).await;
+    )
+    .await;
 
     Ok(Json(serde_json::json!({
         "ok": true,

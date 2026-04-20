@@ -1,18 +1,22 @@
 use askama::Template;
 use axum::{
+    Form,
     extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Json, Response},
-    Form,
 };
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::models::{config, log::{self, LogCategory, LogLevel}, rss, scheduled_tasks};
-use crate::services::{logger, metadata_sync, post_processing, rss as rss_service, upgrade};
 use crate::AppState;
+use crate::models::{
+    config,
+    log::{self, LogCategory, LogLevel},
+    rss, scheduled_tasks,
+};
+use crate::services::{logger, metadata_sync, post_processing, rss as rss_service, upgrade};
 
 #[derive(Template)]
 #[template(path = "system.html")]
@@ -109,7 +113,9 @@ pub async fn system_page(
     };
     let rss_recent_fut = async {
         if tab == "rss" {
-            rss::recent_decisions(&state.db, 500).await.unwrap_or_default()
+            rss::recent_decisions(&state.db, 500)
+                .await
+                .unwrap_or_default()
         } else {
             Vec::new()
         }
@@ -134,12 +140,24 @@ pub async fn system_page(
     let rss_last_run = rss_last_run_res.unwrap_or(None);
     let log_count = log_count_res.unwrap_or(0);
 
-    let force_mal_fallback = cfg.as_ref().map(|cfg| cfg.force_mal_fallback).unwrap_or(false);
-    let force_kitsu_fallback = cfg.as_ref().map(|cfg| cfg.force_kitsu_fallback).unwrap_or(false);
+    let force_mal_fallback = cfg
+        .as_ref()
+        .map(|cfg| cfg.force_mal_fallback)
+        .unwrap_or(false);
+    let force_kitsu_fallback = cfg
+        .as_ref()
+        .map(|cfg| cfg.force_kitsu_fallback)
+        .unwrap_or(false);
     let auto_grab_on_add = cfg.as_ref().map(|cfg| cfg.auto_grab_on_add).unwrap_or(true);
-    let allow_non_english = cfg.as_ref().map(|cfg| cfg.allow_non_english).unwrap_or(false);
+    let allow_non_english = cfg
+        .as_ref()
+        .map(|cfg| cfg.allow_non_english)
+        .unwrap_or(false);
     let rss_enabled = cfg.as_ref().map(|cfg| cfg.rss_enabled).unwrap_or(false);
-    let rss_interval_minutes = cfg.as_ref().map(|cfg| cfg.rss_interval_minutes).unwrap_or(5);
+    let rss_interval_minutes = cfg
+        .as_ref()
+        .map(|cfg| cfg.rss_interval_minutes)
+        .unwrap_or(5);
 
     let categories = vec![
         ("search", LogCategory::Search.label()),
@@ -204,12 +222,46 @@ pub async fn debug_settings_submit(
                 &state.db,
                 LogCategory::System,
                 "Updated fallback debug settings",
-                &format!("mal_jikan={}, kitsu={}", if cfg.force_mal_fallback { "enabled" } else { "disabled" }, if cfg.force_kitsu_fallback { "enabled" } else { "disabled" }),
-            ).await;
-            (Some(format!("Fallback debug settings saved. MAL/Jikan: {}. Kitsu: {}.", if cfg.force_mal_fallback { "enabled" } else { "disabled" }, if cfg.force_kitsu_fallback { "enabled" } else { "disabled" })), None)
+                &format!(
+                    "mal_jikan={}, kitsu={}",
+                    if cfg.force_mal_fallback {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    if cfg.force_kitsu_fallback {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                ),
+            )
+            .await;
+            (
+                Some(format!(
+                    "Fallback debug settings saved. MAL/Jikan: {}. Kitsu: {}.",
+                    if cfg.force_mal_fallback {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    if cfg.force_kitsu_fallback {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                )),
+                None,
+            )
         }
         Err(e) => {
-            logger::error(&state.db, LogCategory::System, "Failed to update fallback debug settings", &e.to_string()).await;
+            logger::error(
+                &state.db,
+                LogCategory::System,
+                "Failed to update fallback debug settings",
+                &e.to_string(),
+            )
+            .await;
             (None, Some(format!("Failed to save debug settings: {}", e)))
         }
     };
@@ -294,8 +346,6 @@ pub async fn api_logs_poll(
     Json(entries)
 }
 
-
-
 #[utoipa::path(
     post,
     path = "/api/system/rebuild-anilist-cache",
@@ -370,19 +420,23 @@ pub async fn api_rebuild_cached_metadata(
                 Ok(Err(join_err)) => {
                     // Inner panicked. The middle task caught it and
                     // bubbled it up cleanly.
-                    let kind = if join_err.is_panic() { "panicked" } else { "join error" };
-                    (
-                        "error",
-                        format!("rebuild sweep {kind}: {join_err}"),
-                        None,
-                    )
+                    let kind = if join_err.is_panic() {
+                        "panicked"
+                    } else {
+                        "join error"
+                    };
+                    ("error", format!("rebuild sweep {kind}: {join_err}"), None)
                 }
                 Err(join_err) => {
                     // Middle itself panicked — e.g. `mark_started`
                     // internals, or something between the nested
                     // spawns. Still mark the run finished so the
                     // status row exits `running`.
-                    let kind = if join_err.is_panic() { "panicked" } else { "join error" };
+                    let kind = if join_err.is_panic() {
+                        "panicked"
+                    } else {
+                        "join error"
+                    };
                     (
                         "error",
                         format!("rebuild orchestration task {kind}: {join_err}"),
@@ -441,18 +495,44 @@ pub async fn api_rebuild_cached_metadata(
 pub async fn api_anibridge_reload(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    logger::info(&state.db, LogCategory::System, "Anibridge mappings reload requested", "").await;
-    let _ = scheduled_tasks::mark_started(&state.db, "anibridge_refresh", "Manual anibridge mappings refresh").await;
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "Anibridge mappings reload requested",
+        "",
+    )
+    .await;
+    let _ = scheduled_tasks::mark_started(
+        &state.db,
+        "anibridge_refresh",
+        "Manual anibridge mappings refresh",
+    )
+    .await;
 
     if crate::services::anibridge::reload().await {
-        let _ = scheduled_tasks::mark_finished(&state.db, "anibridge_refresh", "ok", "Mappings refreshed").await;
+        let _ = scheduled_tasks::mark_finished(
+            &state.db,
+            "anibridge_refresh",
+            "ok",
+            "Mappings refreshed",
+        )
+        .await;
         Ok(Json(serde_json::json!({
             "ok": true,
             "message": "Anibridge mappings reloaded successfully",
         })))
     } else {
-        let _ = scheduled_tasks::mark_finished(&state.db, "anibridge_refresh", "error", "Failed to download mappings").await;
-        Err((axum::http::StatusCode::BAD_GATEWAY, "Failed to reload anibridge mappings".to_string()))
+        let _ = scheduled_tasks::mark_finished(
+            &state.db,
+            "anibridge_refresh",
+            "error",
+            "Failed to download mappings",
+        )
+        .await;
+        Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            "Failed to reload anibridge mappings".to_string(),
+        ))
     }
 }
 
@@ -550,7 +630,11 @@ pub async fn api_logs_client(
         return (StatusCode::BAD_REQUEST, "title or body too large").into_response();
     }
     if !check_client_log_rate() {
-        return (StatusCode::TOO_MANY_REQUESTS, "client log rate limit exceeded").into_response();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "client log rate limit exceeded",
+        )
+            .into_response();
     }
     let level = match form.kind.as_str() {
         "warn" => LogLevel::Warn,
@@ -566,7 +650,6 @@ pub async fn api_logs_client(
     logger::log(&state.db, level, category, &form.title, detail).await;
     Json(serde_json::json!({"ok": true})).into_response()
 }
-
 
 #[utoipa::path(
     post,
@@ -585,7 +668,8 @@ pub async fn api_rss_sync(
     let _ = scheduled_tasks::mark_started(&state.db, "rss_sync", "Manual RSS sync started").await;
     match rss_service::sync_once(&state, "manual").await {
         Ok(summary) => {
-            let _ = scheduled_tasks::mark_finished(&state.db, "rss_sync", "ok", &summary.detail).await;
+            let _ =
+                scheduled_tasks::mark_finished(&state.db, "rss_sync", "ok", &summary.detail).await;
             Ok(Json(serde_json::json!({
                 "ok": true,
                 "message": summary.detail,
@@ -594,10 +678,14 @@ pub async fn api_rss_sync(
         }
         Err(err) => {
             let _ = scheduled_tasks::mark_finished(&state.db, "rss_sync", "error", &err).await;
-            Err((axum::http::StatusCode::BAD_GATEWAY, serde_json::json!({
-                "ok": false,
-                "message": err,
-            }).to_string()))
+            Err((
+                axum::http::StatusCode::BAD_GATEWAY,
+                serde_json::json!({
+                    "ok": false,
+                    "message": err,
+                })
+                .to_string(),
+            ))
         }
     }
 }
@@ -624,7 +712,8 @@ pub async fn api_rss_clear_history(
         LogCategory::System,
         "RSS grab history cleared",
         &format!("Removed {} grabbed entries", deleted),
-    ).await;
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "message": format!("Cleared {} grab history entries. Previously grabbed episodes will be re-evaluated on next sync.", deleted),
@@ -644,7 +733,12 @@ pub async fn api_rss_clear_history(
 pub async fn api_force_metadata_refresh(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(&state.db, "metadata_refresh", "Manual metadata refresh started").await;
+    let _ = scheduled_tasks::mark_started(
+        &state.db,
+        "metadata_refresh",
+        "Manual metadata refresh started",
+    )
+    .await;
     let (refreshed, failed) = metadata_sync::refresh_all_series_metadata(&state.db).await;
     let status = if failed > 0 { "warn" } else { "ok" };
     let detail = format!("refreshed={}, failed={}", refreshed, failed);
@@ -677,7 +771,11 @@ pub async fn api_force_cleanup(
         errors.push(format!("rss: {}", e));
     }
     let status = if errors.is_empty() { "ok" } else { "warn" };
-    let detail = if errors.is_empty() { "Cleanup completed".to_string() } else { errors.join("; ") };
+    let detail = if errors.is_empty() {
+        "Cleanup completed".to_string()
+    } else {
+        errors.join("; ")
+    };
     let _ = scheduled_tasks::mark_finished(&state.db, "cleanup", status, &detail).await;
     Ok(Json(serde_json::json!({
         "ok": errors.is_empty(),
@@ -698,9 +796,13 @@ pub async fn api_force_cleanup(
 pub async fn api_force_post_processing(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(&state.db, "post_processing", "Manual post-processing run").await;
+    let _ =
+        scheduled_tasks::mark_started(&state.db, "post_processing", "Manual post-processing run")
+            .await;
     post_processing::run_once(&state).await;
-    let _ = scheduled_tasks::mark_finished(&state.db, "post_processing", "ok", "Manual run completed").await;
+    let _ =
+        scheduled_tasks::mark_finished(&state.db, "post_processing", "ok", "Manual run completed")
+            .await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "message": "Post-processing run completed",
@@ -717,9 +819,7 @@ pub async fn api_force_post_processing(
         (status = 200, description = "Library classify report", body = serde_json::Value),
     ),
 )]
-pub async fn api_force_library_classify(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn api_force_library_classify(State(state): State<AppState>) -> Json<serde_json::Value> {
     let report = post_processing::scan_library_for_unclassified(&state).await;
     let message = format!(
         "Library classify scan complete. Series scanned: {}. Files scanned: {}. Classified: {}. Needs review: {}.",
@@ -752,10 +852,14 @@ pub async fn api_force_library_classify(
 pub async fn api_force_upgrade_search(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(&state.db, "upgrade_search", "Manual upgrade search started").await;
+    let _ =
+        scheduled_tasks::mark_started(&state.db, "upgrade_search", "Manual upgrade search started")
+            .await;
     match upgrade::run_once(&state).await {
         Ok(summary) => {
-            let _ = scheduled_tasks::mark_finished(&state.db, "upgrade_search", "ok", &summary.detail).await;
+            let _ =
+                scheduled_tasks::mark_finished(&state.db, "upgrade_search", "ok", &summary.detail)
+                    .await;
             Ok(Json(serde_json::json!({
                 "ok": true,
                 "message": summary.detail,
@@ -765,9 +869,9 @@ pub async fn api_force_upgrade_search(
             })))
         }
         Err(err) => {
-            let _ = scheduled_tasks::mark_finished(&state.db, "upgrade_search", "error", &err).await;
+            let _ =
+                scheduled_tasks::mark_finished(&state.db, "upgrade_search", "error", &err).await;
             Err((axum::http::StatusCode::BAD_GATEWAY, err))
         }
     }
 }
-

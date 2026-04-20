@@ -14,8 +14,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::models::config::{self, Config};
 use crate::AppState;
+use crate::models::config::{self, Config};
 
 /// Validate the incoming request against the configured API key for one of
 /// the arr-compatibility shims. `extract` returns `(enabled, api_key)` from

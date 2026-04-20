@@ -1,69 +1,106 @@
-use std::{cmp::Ordering, collections::{HashMap, HashSet}, sync::LazyLock};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+};
 
 use regex_lite::Regex;
 
 use crate::{
-    models::{config, episode_tags, monitoring, rss, series},
+    AppState,
     models::log::LogCategory,
+    models::{config, episode_tags, monitoring, rss, series},
     services::source::{self, ClassificationResult, Resolution, Source},
     services::{auto_search, logger, media, monitoring as monitoring_service, quality},
-    AppState,
 };
 
 mod feed;
 use feed::{build_item_key, detect_batch, extract_group, extract_resolution, fetch_feeds};
 
-static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 // ── Pre-compiled regexes ───────────────────────────────────────────────────
 // Core-title normalisation
-static RE_CORE_TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:season\s*\d+|\d+(?:st|nd|rd|th)\s+season|s\d{1,2}(?:e\d{1,4})?|part\s*\d+|cour\s*\d+|final|end(?:ing)?s?)\b").unwrap());
+static RE_CORE_TITLE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:season\s*\d+|\d+(?:st|nd|rd|th)\s+season|s\d{1,2}(?:e\d{1,4})?|part\s*\d+|cour\s*\d+|final|end(?:ing)?s?)\b").unwrap()
+});
 
 // Season number extraction (tried in order)
-static RE_SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
-    Regex::new(r"(?i)\bseason\s*(\d{1,2})\b").unwrap(),
-    Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b").unwrap(),
-    Regex::new(r"(?i)\bs(\d{1,2})\b").unwrap(),
-    Regex::new(r"(?i)\bpart\s*(\d{1,2})\b").unwrap(),
-    Regex::new(r"(?i)\bcour\s*(\d{1,2})\b").unwrap(),
-]);
+static RE_SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        Regex::new(r"(?i)\bseason\s*(\d{1,2})\b").unwrap(),
+        Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b").unwrap(),
+        Regex::new(r"(?i)\bs(\d{1,2})\b").unwrap(),
+        Regex::new(r"(?i)\bpart\s*(\d{1,2})\b").unwrap(),
+        Regex::new(r"(?i)\bcour\s*(\d{1,2})\b").unwrap(),
+    ]
+});
 
 // Season+episode range patterns
-static RE_SEASON_EP_RANGE: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
+static RE_SEASON_EP_RANGE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
     Regex::new(r"(?i)\bs(\d{1,2})\s*e(\d{1,4})\s*[-~]\s*e?(\d{1,4})(?:v\d+)?\b").unwrap(),
     Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
     Regex::new(r"(?i)\bseason\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
     Regex::new(r"(?i)\bpart\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
     Regex::new(r"(?i)\bcour\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
-]);
+]
+});
 
 // Season+episode single patterns
-static RE_SEASON_EP_SINGLE: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
-    Regex::new(r"(?i)\bs(\d{1,2})\s*e(\d{1,4})(?:v\d+)?\b").unwrap(),
-    Regex::new(r"(?i)\bs(\d{1,2})[ ._-]*ep?(\d{1,4})(?:v\d+)?\b").unwrap(),
-]);
+static RE_SEASON_EP_SINGLE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        Regex::new(r"(?i)\bs(\d{1,2})\s*e(\d{1,4})(?:v\d+)?\b").unwrap(),
+        Regex::new(r"(?i)\bs(\d{1,2})[ ._-]*ep?(\d{1,4})(?:v\d+)?\b").unwrap(),
+    ]
+});
 
 // Season+dash+episode patterns
-static RE_SEASON_DASH: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
+static RE_SEASON_DASH: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
     Regex::new(r"(?i)\bs(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
     Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
     Regex::new(r"(?i)\bseason\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
     Regex::new(r"(?i)\bpart\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
     Regex::new(r"(?i)\bcour\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
-]);
+]
+});
 
 // Range pattern (no season prefix)
-static RE_RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?\b").unwrap());
+static RE_RANGE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?\b").unwrap());
 
 // Absolute episode patterns (tried in order)
-static RE_ABSOLUTE: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| vec![
-    ("absolute_dash", Regex::new(r"(?i)(?:^|\s)-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap()),
-    ("absolute", Regex::new(r"(?i)\bepisode\s*(\d{1,4})(?:v\d+)?\b").unwrap()),
-    ("absolute", Regex::new(r"(?i)\be(?:p\.?|pisode)?\s*(\d{1,4})(?:v\d+)?\b").unwrap()),
-    ("absolute", Regex::new(r"(?i)\b(\d{1,4})(?:v\d+)?\s*(?:\(|\[)").unwrap()),
-    ("absolute_dash", Regex::new(r"(?i)\b-\s*(\d{1,4})(?:v\d+)?(?:\s+final|\s+end)?(?:\.[a-z0-9]{2,4}|$)").unwrap()),
-    ("absolute", Regex::new(r"(?i)\b(\d{1,4})(?:v\d+)?\s*(?:final|end)\b").unwrap()),
-]);
+static RE_ABSOLUTE: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
+    vec![
+        (
+            "absolute_dash",
+            Regex::new(r"(?i)(?:^|\s)-\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
+        ),
+        (
+            "absolute",
+            Regex::new(r"(?i)\bepisode\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
+        ),
+        (
+            "absolute",
+            Regex::new(r"(?i)\be(?:p\.?|pisode)?\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
+        ),
+        (
+            "absolute",
+            Regex::new(r"(?i)\b(\d{1,4})(?:v\d+)?\s*(?:\(|\[)").unwrap(),
+        ),
+        (
+            "absolute_dash",
+            Regex::new(r"(?i)\b-\s*(\d{1,4})(?:v\d+)?(?:\s+final|\s+end)?(?:\.[a-z0-9]{2,4}|$)")
+                .unwrap(),
+        ),
+        (
+            "absolute",
+            Regex::new(r"(?i)\b(\d{1,4})(?:v\d+)?\s*(?:final|end)\b").unwrap(),
+        ),
+    ]
+});
 
 #[derive(Debug, Clone)]
 pub struct RssItem {
@@ -185,13 +222,19 @@ impl SeriesMeta {
 }
 
 pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, String> {
-    let _guard = RSS_SYNC_LOCK.try_lock().map_err(|_| "RSS sync is already running".to_string())?;
+    let _guard = RSS_SYNC_LOCK
+        .try_lock()
+        .map_err(|_| "RSS sync is already running".to_string())?;
 
-    let run_id = rss::start_run(&state.db, trigger).await.map_err(|e| e.to_string())?;
+    let run_id = rss::start_run(&state.db, trigger)
+        .await
+        .map_err(|e| e.to_string())?;
     let result = match tokio::time::timeout(
         std::time::Duration::from_secs(300),
         sync_once_inner(state, trigger),
-    ).await {
+    )
+    .await
+    {
         Ok(inner) => inner,
         Err(_) => Err("RSS sync timed out after 5 minutes".to_string()),
     };
@@ -209,7 +252,8 @@ pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, S
                     skipped: summary.skipped,
                     detail: &summary.detail,
                 },
-            ).await;
+            )
+            .await;
         }
         Err(err) => {
             let _ = rss::finish_run(
@@ -223,7 +267,8 @@ pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, S
                     skipped: 0,
                     detail: err,
                 },
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -236,7 +281,9 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
 
-    let tracked = series::get_all(&state.db).await.map_err(|e| e.to_string())?;
+    let tracked = series::get_all(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
     let has_music_series = tracked.iter().any(|s| s.format == "MUSIC");
     let items = fetch_feeds(cfg.allow_non_english, has_music_series).await?;
     for row in &tracked {
@@ -252,7 +299,10 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     // Cache on-disk episode scans per folder to avoid repeated filesystem walks.
     let mut disk_cache: HashMap<String, Vec<media::EpisodeFile>> = HashMap::new();
     let mut monitored_cache: HashMap<i64, HashSet<i32>> = HashMap::new();
-    let mut quality_tags_cache: HashMap<i64, HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>> = HashMap::new();
+    let mut quality_tags_cache: HashMap<
+        i64,
+        HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
+    > = HashMap::new();
 
     let (cutoff_src, cutoff_is_remux, cutoff_is_bdmv) =
         source::parse_cutoff_source(&cfg.cutoff_source);
@@ -269,7 +319,13 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let mut skipped = 0;
     let mut pending: Vec<PendingCandidate> = Vec::new();
 
-    logger::info(&state.db, LogCategory::System, "RSS sync started", &format!("trigger={} items={}", trigger, items.len())).await;
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "RSS sync started",
+        &format!("trigger={} items={}", trigger, items.len()),
+    )
+    .await;
 
     // One SELECT instead of N: pre-load every previously-grabbed item_key
     // so the per-item dedup check is an in-memory HashSet lookup rather
@@ -285,18 +341,22 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         let item_key = build_item_key(&item);
         if already_grabbed.contains(&item_key) {
             skipped += 1;
-            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                item_key: &item_key,
-                title: &item.title,
-                link: &item.link,
-                series_id: None,
-                series_title: "",
-                group_name: &item.group,
-                is_batch: item.is_batch,
-                decision: "skipped",
-                reason: "Already grabbed earlier; skipping duplicate RSS item",
-                source: "rss",
-            }).await;
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &item_key,
+                    title: &item.title,
+                    link: &item.link,
+                    series_id: None,
+                    series_title: "",
+                    group_name: &item.group,
+                    is_batch: item.is_batch,
+                    decision: "skipped",
+                    reason: "Already grabbed earlier; skipping duplicate RSS item",
+                    source: "rss",
+                },
+            )
+            .await;
             continue;
         }
 
@@ -304,18 +364,22 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             skipped += 1;
             let diag = build_match_diag(&item, None, 0);
             let reason = format!("No tracked series match | {}", diag);
-            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                item_key: &item_key,
-                title: &item.title,
-                link: &item.link,
-                series_id: None,
-                series_title: "",
-                group_name: &item.group,
-                is_batch: item.is_batch,
-                decision: "skipped",
-                reason: &reason,
-                source: "rss",
-            }).await;
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &item_key,
+                    title: &item.title,
+                    link: &item.link,
+                    series_id: None,
+                    series_title: "",
+                    group_name: &item.group,
+                    is_batch: item.is_batch,
+                    decision: "skipped",
+                    reason: &reason,
+                    source: "rss",
+                },
+            )
+            .await;
             continue;
         };
 
@@ -323,52 +387,72 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
 
         if group_matches_blacklist(&item.group, &blacklist) {
             skipped += 1;
-            let reason = format!("Blocked group: {} | {}", item.group, build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                item_key: &item_key,
-                title: &item.title,
-                link: &item.link,
-                series_id: Some(found.series.id),
-                series_title: &found.series.title,
-                group_name: &item.group,
-                is_batch: item.is_batch,
-                decision: "rejected",
-                reason: &reason,
-                source: "rss",
-            }).await;
+            let reason = format!(
+                "Blocked group: {} | {}",
+                item.group,
+                build_match_diag(&item, Some(&found), 0)
+            );
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &item_key,
+                    title: &item.title,
+                    link: &item.link,
+                    series_id: Some(found.series.id),
+                    series_title: &found.series.title,
+                    group_name: &item.group,
+                    is_batch: item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: "rss",
+                },
+            )
+            .await;
             continue;
         }
 
         if !whitelist.is_empty() && !group_matches_whitelist(&item.group, &whitelist) {
             skipped += 1;
             let reason = if item.group.trim().is_empty() {
-                format!("Release group missing and whitelist is enabled | {}", build_match_diag(&item, Some(&found), 0))
+                format!(
+                    "Release group missing and whitelist is enabled | {}",
+                    build_match_diag(&item, Some(&found), 0)
+                )
             } else {
-                format!("Group not in whitelist: {} | {}", item.group, build_match_diag(&item, Some(&found), 0))
+                format!(
+                    "Group not in whitelist: {} | {}",
+                    item.group,
+                    build_match_diag(&item, Some(&found), 0)
+                )
             };
-            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                item_key: &item_key,
-                title: &item.title,
-                link: &item.link,
-                series_id: Some(found.series.id),
-                series_title: &found.series.title,
-                group_name: &item.group,
-                is_batch: item.is_batch,
-                decision: "rejected",
-                reason: &reason,
-                source: "rss",
-            }).await;
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &item_key,
+                    title: &item.title,
+                    link: &item.link,
+                    series_id: Some(found.series.id),
+                    series_title: &found.series.title,
+                    group_name: &item.group,
+                    is_batch: item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: "rss",
+                },
+            )
+            .await;
             continue;
         }
 
         let monitored_eps = if let Some(cached) = monitored_cache.get(&found.series.id) {
             cached.clone()
         } else {
-            let values: HashSet<i32> = monitoring::get_monitored_episode_numbers(&state.db, found.series.id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
+            let values: HashSet<i32> =
+                monitoring::get_monitored_episode_numbers(&state.db, found.series.id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
             monitored_cache.insert(found.series.id, values.clone());
             values
         };
@@ -382,7 +466,9 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
 
         let disk_files = disk_cache
             .entry(found.series.folder_name.clone())
-            .or_insert_with(|| media::scan_series_folder(&cfg.media_root, &found.series.folder_name));
+            .or_insert_with(|| {
+                media::scan_series_folder(&cfg.media_root, &found.series.folder_name)
+            });
         let qtags = if let Some(cached) = quality_tags_cache.get(&found.series.id) {
             cached
         } else {
@@ -391,45 +477,72 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 .unwrap_or_default();
             quality_tags_cache.entry(found.series.id).or_insert(tags)
         };
-        let decision = evaluate_candidate(&found.series, &item, disk_files, &actionable_eps, &cutoff, qtags);
+        let decision = evaluate_candidate(
+            &found.series,
+            &item,
+            disk_files,
+            &actionable_eps,
+            &cutoff,
+            qtags,
+        );
         if let Some(reason) = decision.reject_reason {
             skipped += 1;
             let reason = format!("{} | {}", reason, build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                item_key: &item_key,
-                title: &item.title,
-                link: &item.link,
-                series_id: Some(found.series.id),
-                series_title: &found.series.title,
-                group_name: &item.group,
-                is_batch: item.is_batch,
-                decision: "rejected",
-                reason: &reason,
-                source: "rss",
-            }).await;
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &item_key,
+                    title: &item.title,
+                    link: &item.link,
+                    series_id: Some(found.series.id),
+                    series_title: &found.series.title,
+                    group_name: &item.group,
+                    is_batch: item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: "rss",
+                },
+            )
+            .await;
             continue;
         }
 
         let canonical_key = canonical_episode_key(&found, item.is_batch);
         if !canonical_key.is_empty() && canonical_history.contains(&canonical_key) {
             skipped += 1;
-            let reason = format!("Logical episode is already queued or was grabbed earlier | {}", build_match_diag(&item, Some(&found), 0));
-            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                item_key: &item_key,
-                title: &item.title,
-                link: &item.link,
-                series_id: Some(found.series.id),
-                series_title: &found.series.title,
-                group_name: &item.group,
-                is_batch: item.is_batch,
-                decision: "rejected",
-                reason: &reason,
-                source: "rss",
-            }).await;
+            let reason = format!(
+                "Logical episode is already queued or was grabbed earlier | {}",
+                build_match_diag(&item, Some(&found), 0)
+            );
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &item_key,
+                    title: &item.title,
+                    link: &item.link,
+                    series_id: Some(found.series.id),
+                    series_title: &found.series.title,
+                    group_name: &item.group,
+                    is_batch: item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: "rss",
+                },
+            )
+            .await;
             continue;
         }
 
-        let score = score_candidate(&state.db, &cfg, &item, &found.series, &found.resolved_eps, found.alias_score, found.parsed.parse_mode).await;
+        let score = score_candidate(
+            &state.db,
+            &cfg,
+            &item,
+            &found.series,
+            &found.resolved_eps,
+            found.alias_score,
+            found.parsed.parse_mode,
+        )
+        .await;
         pending.push(PendingCandidate {
             item,
             item_key,
@@ -458,23 +571,39 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let Some(client) = qbit.as_ref() else {
         for cand in pending {
             skipped += 1;
-            let reason = format!("qBittorrent is not configured | {}", build_match_diag(&cand.item, Some(&cand.found), cand.score));
-            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                item_key: &cand.item_key,
-                title: &cand.item.title,
-                link: &cand.item.link,
-                series_id: Some(cand.found.series.id),
-                series_title: &cand.found.series.title,
-                group_name: &cand.item.group,
-                is_batch: cand.item.is_batch,
-                decision: "rejected",
-                reason: &reason,
-                source: "rss",
-            }).await;
+            let reason = format!(
+                "qBittorrent is not configured | {}",
+                build_match_diag(&cand.item, Some(&cand.found), cand.score)
+            );
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &cand.item_key,
+                    title: &cand.item.title,
+                    link: &cand.item.link,
+                    series_id: Some(cand.found.series.id),
+                    series_title: &cand.found.series.title,
+                    group_name: &cand.item.group,
+                    is_batch: cand.item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: "rss",
+                },
+            )
+            .await;
         }
-        let detail = format!("Processed {} items • matched {} • grabbed {} • skipped {}", items_seen, matched, grabbed, skipped);
+        let detail = format!(
+            "Processed {} items • matched {} • grabbed {} • skipped {}",
+            items_seen, matched, grabbed, skipped
+        );
         logger::info(&state.db, LogCategory::System, "RSS sync finished", &detail).await;
-        return Ok(SyncSummary { items_seen, matched, grabbed, skipped, detail });
+        return Ok(SyncSummary {
+            items_seen,
+            matched,
+            grabbed,
+            skipped,
+            detail,
+        });
     };
 
     for (idx, cand) in pending.into_iter().enumerate() {
@@ -485,18 +614,22 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 "Lower score than selected candidate for the same logical episode | {}",
                 build_match_diag(&cand.item, Some(&cand.found), cand.score)
             );
-            let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                item_key: &cand.item_key,
-                title: &cand.item.title,
-                link: &cand.item.link,
-                series_id: Some(cand.found.series.id),
-                series_title: &cand.found.series.title,
-                group_name: &cand.item.group,
-                is_batch: cand.item.is_batch,
-                decision: "rejected",
-                reason: &reason,
-                source: "rss",
-            }).await;
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &cand.item_key,
+                    title: &cand.item.title,
+                    link: &cand.item.link,
+                    series_id: Some(cand.found.series.id),
+                    series_title: &cand.found.series.title,
+                    group_name: &cand.item.group,
+                    is_batch: cand.item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: "rss",
+                },
+            )
+            .await;
             continue;
         }
 
@@ -513,23 +646,37 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 grabbed += 1;
                 let action = if cand.is_upgrade { "upgrade" } else { "new" };
                 let reason = if cand.item.is_batch {
-                    format!("Accepted best batch candidate ({}) for {} episode(s) | {}", action, cand.new_episode_count.max(1), build_match_diag(&cand.item, Some(&cand.found), cand.score))
+                    format!(
+                        "Accepted best batch candidate ({}) for {} episode(s) | {}",
+                        action,
+                        cand.new_episode_count.max(1),
+                        build_match_diag(&cand.item, Some(&cand.found), cand.score)
+                    )
                 } else {
-                    format!("Accepted best candidate ({}) for {} episode(s) | {}", action, cand.new_episode_count.max(1), build_match_diag(&cand.item, Some(&cand.found), cand.score))
+                    format!(
+                        "Accepted best candidate ({}) for {} episode(s) | {}",
+                        action,
+                        cand.new_episode_count.max(1),
+                        build_match_diag(&cand.item, Some(&cand.found), cand.score)
+                    )
                 };
                 canonical_history.insert(canonical_episode_key(&cand.found, cand.item.is_batch));
-                let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                    item_key: &cand.item_key,
-                    title: &cand.item.title,
-                    link: &cand.item.link,
-                    series_id: Some(cand.found.series.id),
-                    series_title: &cand.found.series.title,
-                    group_name: &cand.item.group,
-                    is_batch: cand.item.is_batch,
-                    decision: "grabbed",
-                    reason: &reason,
-                    source: "rss",
-                }).await;
+                let _ = rss::record_decision(
+                    &state.db,
+                    rss::DecisionRecord {
+                        item_key: &cand.item_key,
+                        title: &cand.item.title,
+                        link: &cand.item.link,
+                        series_id: Some(cand.found.series.id),
+                        series_title: &cand.found.series.title,
+                        group_name: &cand.item.group,
+                        is_batch: cand.item.is_batch,
+                        decision: "grabbed",
+                        reason: &reason,
+                        source: "rss",
+                    },
+                )
+                .await;
                 // Record for post-processing.
                 let ep_list: Vec<i32> = cand.found.resolved_eps.iter().copied().collect();
                 let _ = crate::models::grabbed_torrents::record_grab(
@@ -539,7 +686,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     cand.found.series.id,
                     &ep_list,
                     cand.item.is_batch,
-                ).await;
+                )
+                .await;
                 // Record quality tag + classification for episode status display.
                 let classification = crate::services::source::classify_release(
                     &state.db,
@@ -555,7 +703,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                         season_year: cand.found.series.season_year,
                         end_year: cand.found.series.end_year,
                     }),
-                ).await;
+                )
+                .await;
                 for ep_num in &ep_list {
                     // RSS items don't carry size info in the feed — the
                     // grab history row starts at 0 and gets filled in
@@ -571,31 +720,49 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                         &cand.item.group,
                         0,
                         false,
-                    ).await;
+                    )
+                    .await;
                 }
             }
             Err(err) => {
                 skipped += 1;
-                let reason = format!("{} | {}", err, build_match_diag(&cand.item, Some(&cand.found), cand.score));
-                let _ = rss::record_decision(&state.db, rss::DecisionRecord {
-                    item_key: &cand.item_key,
-                    title: &cand.item.title,
-                    link: &cand.item.link,
-                    series_id: Some(cand.found.series.id),
-                    series_title: &cand.found.series.title,
-                    group_name: &cand.item.group,
-                    is_batch: cand.item.is_batch,
-                    decision: "error",
-                    reason: &reason,
-                    source: "rss",
-                }).await;
+                let reason = format!(
+                    "{} | {}",
+                    err,
+                    build_match_diag(&cand.item, Some(&cand.found), cand.score)
+                );
+                let _ = rss::record_decision(
+                    &state.db,
+                    rss::DecisionRecord {
+                        item_key: &cand.item_key,
+                        title: &cand.item.title,
+                        link: &cand.item.link,
+                        series_id: Some(cand.found.series.id),
+                        series_title: &cand.found.series.title,
+                        group_name: &cand.item.group,
+                        is_batch: cand.item.is_batch,
+                        decision: "error",
+                        reason: &reason,
+                        source: "rss",
+                    },
+                )
+                .await;
             }
         }
     }
 
-    let detail = format!("Processed {} items • matched {} • grabbed {} • skipped {}", items_seen, matched, grabbed, skipped);
+    let detail = format!(
+        "Processed {} items • matched {} • grabbed {} • skipped {}",
+        items_seen, matched, grabbed, skipped
+    );
     logger::info(&state.db, LogCategory::System, "RSS sync finished", &detail).await;
-    Ok(SyncSummary { items_seen, matched, grabbed, skipped, detail })
+    Ok(SyncSummary {
+        items_seen,
+        matched,
+        grabbed,
+        skipped,
+        detail,
+    })
 }
 
 async fn load_canonical_history(
@@ -614,13 +781,14 @@ async fn load_canonical_history(
     }
 
     if let Some(client) = qbit
-        && let Ok(torrents) = client.get_torrents().await {
-            for torrent in torrents {
-                if let Some(key) = canonical_key_for_title(&torrent.name, all_meta) {
-                    keys.insert(key);
-                }
+        && let Ok(torrents) = client.get_torrents().await
+    {
+        for torrent in torrents {
+            if let Some(key) = canonical_key_for_title(&torrent.name, all_meta) {
+                keys.insert(key);
             }
         }
+    }
 
     keys
 }
@@ -715,12 +883,17 @@ async fn score_candidate(
         cutoff_resolution,
     );
 
-    score += quality::preferred_group_bonus(&item.group, &quality::parse_group_list(&cfg.preferred_groups));
+    score += quality::preferred_group_bonus(
+        &item.group,
+        &quality::parse_group_list(&cfg.preferred_groups),
+    );
     score += (alias_score * 50.0) as i32;
 
     if !item.is_batch {
         score += 25;
-    } else if is_finished_status(&found.status) || finished_mode != quality::FinishedSeriesMode::SameAsAiring {
+    } else if is_finished_status(&found.status)
+        || finished_mode != quality::FinishedSeriesMode::SameAsAiring
+    {
         score += 5;
     } else {
         score -= 15;
@@ -768,14 +941,23 @@ fn evaluate_candidate(
     if item.is_batch {
         if !parsed_eps.is_empty() {
             // For batches, count episodes that are either missing or upgradeable.
-            let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
-            let upgrade_count = parsed_eps.iter().filter(|ep| {
-                existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
-            }).count() as i32;
+            let new_count = parsed_eps
+                .iter()
+                .filter(|ep| !existing_ep_numbers.contains(ep))
+                .count() as i32;
+            let upgrade_count = parsed_eps
+                .iter()
+                .filter(|ep| {
+                    existing_ep_numbers.contains(ep)
+                        && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
+                })
+                .count() as i32;
             let actionable = new_count + upgrade_count;
             if actionable == 0 {
                 return CandidateDecision {
-                    reject_reason: Some("Batch episodes are already on disk at or above cutoff".to_string()),
+                    reject_reason: Some(
+                        "Batch episodes are already on disk at or above cutoff".to_string(),
+                    ),
                     new_episode_count: 0,
                     is_upgrade: false,
                 };
@@ -788,7 +970,11 @@ fn evaluate_candidate(
         }
 
         if is_finished_status(&found.status) {
-            return CandidateDecision { reject_reason: None, new_episode_count: 0, is_upgrade: false };
+            return CandidateDecision {
+                reject_reason: None,
+                new_episode_count: 0,
+                is_upgrade: false,
+            };
         }
 
         return CandidateDecision {
@@ -806,10 +992,17 @@ fn evaluate_candidate(
         };
     }
 
-    let new_count = parsed_eps.iter().filter(|ep| !existing_ep_numbers.contains(ep)).count() as i32;
-    let upgrade_count = parsed_eps.iter().filter(|ep| {
-        existing_ep_numbers.contains(ep) && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
-    }).count() as i32;
+    let new_count = parsed_eps
+        .iter()
+        .filter(|ep| !existing_ep_numbers.contains(ep))
+        .count() as i32;
+    let upgrade_count = parsed_eps
+        .iter()
+        .filter(|ep| {
+            existing_ep_numbers.contains(ep)
+                && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
+        })
+        .count() as i32;
     let actionable = new_count + upgrade_count;
 
     if actionable == 0 {
@@ -945,10 +1138,16 @@ fn canonical_family_key(family: &[SeriesMeta]) -> String {
         .collect();
     keys.sort();
     keys.dedup();
-    keys.into_iter().next().unwrap_or_else(|| "unknownfamily".to_string())
+    keys.into_iter()
+        .next()
+        .unwrap_or_else(|| "unknownfamily".to_string())
 }
 
-fn canonical_absolute_numbers(meta: &SeriesMeta, family: &[SeriesMeta], resolved_eps: &HashSet<i32>) -> HashSet<i32> {
+fn canonical_absolute_numbers(
+    meta: &SeriesMeta,
+    family: &[SeriesMeta],
+    resolved_eps: &HashSet<i32>,
+) -> HashSet<i32> {
     if resolved_eps.is_empty() {
         return HashSet::new();
     }
@@ -997,7 +1196,9 @@ fn shares_core_alias(a: &SeriesMeta, b: &SeriesMeta) -> bool {
             }
             let at = auto_search::token_set(ac);
             let bt = auto_search::token_set(bc);
-            if auto_search::token_overlap_ratio(&at, &bt) >= 0.95 && auto_search::token_overlap_ratio(&bt, &at) >= 0.95 {
+            if auto_search::token_overlap_ratio(&at, &bt) >= 0.95
+                && auto_search::token_overlap_ratio(&bt, &at) >= 0.95
+            {
                 return true;
             }
         }
@@ -1040,45 +1241,69 @@ struct AliasSet<'a> {
 }
 
 fn score_alias_overlap(item: &ItemView<'_>, meta: &AliasSet<'_>) -> f32 {
-    let alias_max = meta.aliases.iter().map(|alias| {
-        let normalized_alias = auto_search::normalize_title(alias);
-        let alias_tokens = auto_search::token_set(&normalized_alias);
-        let mut score = 0.0f32;
-        if !normalized_alias.is_empty() && (item.normalized.contains(&normalized_alias) || normalized_alias.contains(item.normalized)) {
-            score = score.max(1.0);
-        }
-        let overlap_ab = auto_search::token_overlap_ratio(item.tokens, &alias_tokens);
-        let overlap_ba = auto_search::token_overlap_ratio(&alias_tokens, item.tokens);
-        score.max(overlap_ab.min(overlap_ba))
-    }).fold(0.0f32, f32::max);
+    let alias_max = meta
+        .aliases
+        .iter()
+        .map(|alias| {
+            let normalized_alias = auto_search::normalize_title(alias);
+            let alias_tokens = auto_search::token_set(&normalized_alias);
+            let mut score = 0.0f32;
+            if !normalized_alias.is_empty()
+                && (item.normalized.contains(&normalized_alias)
+                    || normalized_alias.contains(item.normalized))
+            {
+                score = score.max(1.0);
+            }
+            let overlap_ab = auto_search::token_overlap_ratio(item.tokens, &alias_tokens);
+            let overlap_ba = auto_search::token_overlap_ratio(&alias_tokens, item.tokens);
+            score.max(overlap_ab.min(overlap_ba))
+        })
+        .fold(0.0f32, f32::max);
 
-    let core_max = meta.core_aliases.iter().map(|alias_core| {
-        let core_tokens = auto_search::token_set(alias_core);
-        let mut score = 0.0f32;
-        if !alias_core.is_empty() && !item.core.is_empty() && (item.core.contains(alias_core) || alias_core.contains(item.core)) {
-            score = score.max(1.0);
-        }
-        let overlap_ab = auto_search::token_overlap_ratio(item.core_tokens, &core_tokens);
-        let overlap_ba = auto_search::token_overlap_ratio(&core_tokens, item.core_tokens);
-        score.max(overlap_ab.min(overlap_ba))
-    }).fold(0.0f32, f32::max);
+    let core_max = meta
+        .core_aliases
+        .iter()
+        .map(|alias_core| {
+            let core_tokens = auto_search::token_set(alias_core);
+            let mut score = 0.0f32;
+            if !alias_core.is_empty()
+                && !item.core.is_empty()
+                && (item.core.contains(alias_core) || alias_core.contains(item.core))
+            {
+                score = score.max(1.0);
+            }
+            let overlap_ab = auto_search::token_overlap_ratio(item.core_tokens, &core_tokens);
+            let overlap_ba = auto_search::token_overlap_ratio(&core_tokens, item.core_tokens);
+            score.max(overlap_ab.min(overlap_ba))
+        })
+        .fold(0.0f32, f32::max);
 
-    let collapsed_max = meta.collapsed_aliases.iter().chain(meta.collapsed_core_aliases.iter()).map(|alias| {
-        if alias.is_empty() {
-            return 0.0;
-        }
-        if item.collapsed == *alias || item.collapsed_core == *alias || item.collapsed.contains(alias) || alias.contains(item.collapsed_core) {
-            1.0
-        } else {
-            0.0
-        }
-    }).fold(0.0f32, f32::max);
+    let collapsed_max = meta
+        .collapsed_aliases
+        .iter()
+        .chain(meta.collapsed_core_aliases.iter())
+        .map(|alias| {
+            if alias.is_empty() {
+                return 0.0;
+            }
+            if item.collapsed == *alias
+                || item.collapsed_core == *alias
+                || item.collapsed.contains(alias)
+                || alias.contains(item.collapsed_core)
+            {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .fold(0.0f32, f32::max);
 
     alias_max.max(core_max).max(collapsed_max)
 }
 
 fn normalize_core_title(value: &str) -> String {
-    RE_CORE_TITLE.replace_all(value, " ")
+    RE_CORE_TITLE
+        .replace_all(value, " ")
         .split_whitespace()
         .filter(|token| !matches!(*token, "season" | "part" | "cour"))
         .collect::<Vec<_>>()
@@ -1091,9 +1316,11 @@ fn collapse_alias(value: &str) -> String {
 
 fn parse_season_number(value: &str) -> Option<i32> {
     for re in RE_SEASON_PATTERNS.iter() {
-        if let Some(value) = re.captures(value)
+        if let Some(value) = re
+            .captures(value)
             .and_then(|caps| caps.get(1))
-            .and_then(|m| m.as_str().parse::<i32>().ok()) {
+            .and_then(|m| m.as_str().parse::<i32>().ok())
+        {
             return Some(value);
         }
     }
@@ -1115,15 +1342,33 @@ fn parse_release(item: &RssItem) -> ParsedRelease {
     // Season+episode range patterns
     for re in RE_SEASON_EP_RANGE.iter() {
         if let Some(caps) = re.captures(&lower) {
-            season_hint = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).or(season_hint);
-            let start = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
-            let end = caps.get(3).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
+            season_hint = caps
+                .get(1)
+                .and_then(|m| m.as_str().parse::<i32>().ok())
+                .or(season_hint);
+            let start = caps
+                .get(2)
+                .and_then(|m| m.as_str().parse::<i32>().ok())
+                .unwrap_or(0);
+            let end = caps
+                .get(3)
+                .and_then(|m| m.as_str().parse::<i32>().ok())
+                .unwrap_or(0);
             if start > 0 && end >= start && end - start <= 200 {
                 for ep in start..=end {
                     season_relative_eps.insert(ep);
                 }
                 parse_mode = "season_episode_range";
-                return ParsedRelease { normalized_title, core_title, collapsed_title, collapsed_core_title, season_hint, season_relative_eps, absolute_eps, parse_mode };
+                return ParsedRelease {
+                    normalized_title,
+                    core_title,
+                    collapsed_title,
+                    collapsed_core_title,
+                    season_hint,
+                    season_relative_eps,
+                    absolute_eps,
+                    parse_mode,
+                };
             }
         }
     }
@@ -1131,11 +1376,23 @@ fn parse_release(item: &RssItem) -> ParsedRelease {
     // Season+episode single patterns
     for re in RE_SEASON_EP_SINGLE.iter() {
         if let Some(caps) = re.captures(&lower) {
-            season_hint = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).or(season_hint);
+            season_hint = caps
+                .get(1)
+                .and_then(|m| m.as_str().parse::<i32>().ok())
+                .or(season_hint);
             if let Some(ep) = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
                 season_relative_eps.insert(ep);
                 parse_mode = "season_episode";
-                return ParsedRelease { normalized_title, core_title, collapsed_title, collapsed_core_title, season_hint, season_relative_eps, absolute_eps, parse_mode };
+                return ParsedRelease {
+                    normalized_title,
+                    core_title,
+                    collapsed_title,
+                    collapsed_core_title,
+                    season_hint,
+                    season_relative_eps,
+                    absolute_eps,
+                    parse_mode,
+                };
             }
         }
     }
@@ -1143,19 +1400,37 @@ fn parse_release(item: &RssItem) -> ParsedRelease {
     // Season+dash+episode patterns
     for re in RE_SEASON_DASH.iter() {
         if let Some(caps) = re.captures(&lower) {
-            season_hint = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).or(season_hint);
+            season_hint = caps
+                .get(1)
+                .and_then(|m| m.as_str().parse::<i32>().ok())
+                .or(season_hint);
             if let Some(ep) = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
                 season_relative_eps.insert(ep);
                 parse_mode = "season_dash_episode";
-                return ParsedRelease { normalized_title, core_title, collapsed_title, collapsed_core_title, season_hint, season_relative_eps, absolute_eps, parse_mode };
+                return ParsedRelease {
+                    normalized_title,
+                    core_title,
+                    collapsed_title,
+                    collapsed_core_title,
+                    season_hint,
+                    season_relative_eps,
+                    absolute_eps,
+                    parse_mode,
+                };
             }
         }
     }
 
     // Plain range (no season prefix)
     if let Some(caps) = RE_RANGE.captures(&lower) {
-        let start = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
-        let end = caps.get(2).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(0);
+        let start = caps
+            .get(1)
+            .and_then(|m| m.as_str().parse::<i32>().ok())
+            .unwrap_or(0);
+        let end = caps
+            .get(2)
+            .and_then(|m| m.as_str().parse::<i32>().ok())
+            .unwrap_or(0);
         if start > 0 && end >= start && end - start <= 200 {
             for ep in start..=end {
                 absolute_eps.insert(ep);
@@ -1179,7 +1454,16 @@ fn parse_release(item: &RssItem) -> ParsedRelease {
         }
     }
 
-    ParsedRelease { normalized_title, core_title, collapsed_title, collapsed_core_title, season_hint, season_relative_eps, absolute_eps, parse_mode }
+    ParsedRelease {
+        normalized_title,
+        core_title,
+        collapsed_title,
+        collapsed_core_title,
+        season_hint,
+        season_relative_eps,
+        absolute_eps,
+        parse_mode,
+    }
 }
 
 fn resolve_episode_numbers(
@@ -1203,7 +1487,16 @@ fn resolve_episode_numbers(
         if parsed.season_hint.is_some() {
             return (parsed.season_relative_eps.clone(), "explicit_season");
         }
-        let direct_fit = meta.series.episodes.map(|eps| parsed.season_relative_eps.iter().all(|n| *n >= 1 && *n <= eps)).unwrap_or(true);
+        let direct_fit = meta
+            .series
+            .episodes
+            .map(|eps| {
+                parsed
+                    .season_relative_eps
+                    .iter()
+                    .all(|n| *n >= 1 && *n <= eps)
+            })
+            .unwrap_or(true);
         if direct_fit {
             return (parsed.season_relative_eps.clone(), "season_relative");
         }
@@ -1211,7 +1504,11 @@ fn resolve_episode_numbers(
 
     if !parsed.absolute_eps.is_empty() {
         if parsed.season_hint.is_some() {
-            let direct_fit = meta.series.episodes.map(|eps| parsed.absolute_eps.iter().all(|n| *n >= 1 && *n <= eps)).unwrap_or(true);
+            let direct_fit = meta
+                .series
+                .episodes
+                .map(|eps| parsed.absolute_eps.iter().all(|n| *n >= 1 && *n <= eps))
+                .unwrap_or(true);
             if direct_fit {
                 return (parsed.absolute_eps.clone(), "season_hint_relative");
             }
@@ -1222,21 +1519,33 @@ fn resolve_episode_numbers(
             let mut offset = 0i32;
             for entry in family {
                 let season = entry.season_num.unwrap_or(1);
-                if season >= target_season { break; }
+                if season >= target_season {
+                    break;
+                }
                 offset += entry.series.episodes.unwrap_or(0).max(0);
             }
             let mut mapped = HashSet::new();
             for number in &parsed.absolute_eps {
                 let relative = *number - offset;
-                if relative < 1 { return (HashSet::new(), "absolute_miss"); }
+                if relative < 1 {
+                    return (HashSet::new(), "absolute_miss");
+                }
                 if let Some(total) = meta.series.episodes
-                    && relative > total { return (HashSet::new(), "absolute_miss"); }
+                    && relative > total
+                {
+                    return (HashSet::new(), "absolute_miss");
+                }
                 mapped.insert(relative);
             }
             if !mapped.is_empty() {
                 return (mapped, "absolute_mapped");
             }
-        } else if meta.series.episodes.map(|eps| parsed.absolute_eps.iter().all(|n| *n >= 1 && *n <= eps)).unwrap_or(true) {
+        } else if meta
+            .series
+            .episodes
+            .map(|eps| parsed.absolute_eps.iter().all(|n| *n >= 1 && *n <= eps))
+            .unwrap_or(true)
+        {
             return (parsed.absolute_eps.clone(), "absolute_direct");
         }
     }
@@ -1263,17 +1572,26 @@ fn format_episode_set(values: &HashSet<i32>) -> String {
     if items.is_empty() {
         return "none".to_string();
     }
-    items.into_iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+    items
+        .into_iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn build_match_diag(item: &RssItem, found: Option<&MatchResult>, score: i32) -> String {
     let parsed = parse_release(item);
     let raw_numbers_str = format_episode_set(&parsed.absolute_eps);
     let season_numbers_str = format_episode_set(&parsed.season_relative_eps);
-    let resolved_eps_str = found.map(|m| format_episode_set(&m.resolved_eps)).unwrap_or_else(|| "none".to_string());
-    let canonical_abs_str = found.map(|m| format_episode_set(&m.canonical_abs_eps)).unwrap_or_else(|| "none".to_string());
+    let resolved_eps_str = found
+        .map(|m| format_episode_set(&m.resolved_eps))
+        .unwrap_or_else(|| "none".to_string());
+    let canonical_abs_str = found
+        .map(|m| format_episode_set(&m.canonical_abs_eps))
+        .unwrap_or_else(|| "none".to_string());
     let series_label = found.map(|m| m.series.title.as_str()).unwrap_or("none");
-    let explicit_season = parsed.season_hint
+    let explicit_season = parsed
+        .season_hint
         .map(|v| v.to_string())
         .unwrap_or_else(|| "none".to_string());
     let resolution_mode = found.map(|m| m.resolution_mode).unwrap_or("none");
@@ -1282,7 +1600,11 @@ fn build_match_diag(item: &RssItem, found: Option<&MatchResult>, score: i32) -> 
         "series={} | family={} | group={} | batch={} | season={} | rel={} | abs={} | resolved={} | canonical_abs={} | score={} | parse={} | mode={} | core={}",
         series_label,
         family_key,
-        if item.group.trim().is_empty() { "none" } else { item.group.trim() },
+        if item.group.trim().is_empty() {
+            "none"
+        } else {
+            item.group.trim()
+        },
         item.is_batch,
         explicit_season,
         season_numbers_str,
@@ -1297,10 +1619,13 @@ fn build_match_diag(item: &RssItem, found: Option<&MatchResult>, score: i32) -> 
 }
 
 fn group_matches_whitelist(group: &str, whitelist: &[String]) -> bool {
-    whitelist.iter().any(|wanted| wanted.eq_ignore_ascii_case(group.trim()))
+    whitelist
+        .iter()
+        .any(|wanted| wanted.eq_ignore_ascii_case(group.trim()))
 }
 
 fn group_matches_blacklist(group: &str, blacklist: &[String]) -> bool {
-    blacklist.iter().any(|blocked| blocked.eq_ignore_ascii_case(group.trim()))
+    blacklist
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(group.trim()))
 }
-

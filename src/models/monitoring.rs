@@ -123,5 +123,8 @@ pub async fn get_monitored_episode_numbers(
     .fetch_all(db)
     .await?;
 
-    Ok(rows.into_iter().map(|row| row.get("episode_number")).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get("episode_number"))
+        .collect())
 }

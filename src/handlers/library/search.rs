@@ -15,15 +15,15 @@ use axum::{
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
+use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, monitoring, series};
 use crate::services::{anilist, auto_search, logger, media, progress};
-use crate::AppState;
 
+use super::AnilistSearchQuery;
 use super::reconcile::{
     force_mal_fallback_enabled, maybe_hydrate_cumulative_offset, resolve_series_context,
 };
-use super::AnilistSearchQuery;
 
 #[utoipa::path(
     get,
@@ -70,7 +70,8 @@ pub async fn anilist_search(
             force_fallback,
             params.source.as_deref().unwrap_or("(config default)"),
         ),
-    ).await;
+    )
+    .await;
 
     Ok(Json(results))
 }
@@ -98,7 +99,6 @@ pub async fn api_series_detail(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(detail))
 }
-
 
 /// Phase 2: sibling auto-expansion for multi-series batch releases.
 ///
@@ -149,9 +149,11 @@ fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32>
         .collect();
     if ep_nums.is_empty()
         && let Some(total) = detail.episodes
-            && total > 0 && total <= 1000 {
-                ep_nums = (1..=total).collect();
-            }
+        && total > 0
+        && total <= 1000
+    {
+        ep_nums = (1..=total).collect();
+    }
     ep_nums.sort_unstable();
     ep_nums
 }
@@ -160,7 +162,7 @@ fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32>
 // `services::auto_expand` so `services::post_processing` can call the
 // same routine as a fallback when the grab-time metadata wait here
 // timed out. Re-export locally so call sites in this file stay terse.
-use crate::services::auto_expand::{expand_from_files, AutoExpandGrabContext};
+use crate::services::auto_expand::{AutoExpandGrabContext, expand_from_files};
 
 /// Grab-time outer orchestrator: wait for qBit metadata, then delegate
 /// to [`services::auto_expand::expand_from_files`]. Failure here
@@ -232,7 +234,15 @@ pub(super) async fn run_auto_search_targets(
     allow_batch: bool,
     series_id: Option<i64>,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
-    run_auto_search_targets_with_upgrades(state, request_id, targets, allow_batch, series_id, std::collections::HashMap::new()).await
+    run_auto_search_targets_with_upgrades(
+        state,
+        request_id,
+        targets,
+        allow_batch,
+        series_id,
+        std::collections::HashMap::new(),
+    )
+    .await
 }
 
 /// Optional `?progress_id=<opaque>` query string the frontend appends to
@@ -312,7 +322,14 @@ async fn emit_auto_search_terminal(
             }
         }
         Err((_, msg)) => {
-            progress::emit("error", "error", "Auto search failed", Some(msg.clone()), true).await;
+            progress::emit(
+                "error",
+                "error",
+                "Auto search failed",
+                Some(msg.clone()),
+                true,
+            )
+            .await;
         }
     }
 }
@@ -323,12 +340,18 @@ async fn run_auto_search_targets_with_upgrades(
     targets: Vec<auto_search::SearchTarget>,
     allow_batch: bool,
     series_id: Option<i64>,
-    upgrade_classifications: std::collections::HashMap<i32, crate::services::source::ClassificationResult>,
+    upgrade_classifications: std::collections::HashMap<
+        i32,
+        crate::services::source::ClassificationResult,
+    >,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
     let qbit = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "qBittorrent not configured".to_string(),
+            ))?
             .clone()
     };
 
@@ -351,7 +374,8 @@ async fn run_auto_search_targets_with_upgrades(
         LogCategory::AutoSearch,
         &format!("Auto search started for {}", title),
         &format!("{} target(s), allow_batch={}", targets.len(), allow_batch),
-    ).await;
+    )
+    .await;
     progress::emit(
         "search",
         "info",
@@ -387,7 +411,17 @@ async fn run_auto_search_targets_with_upgrades(
             false,
         )
         .await;
-        match auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, allow_batch, is_upgrade, &cfs).await {
+        match auto_search::find_best_for_target(
+            &state.db,
+            &detail,
+            &cfg,
+            &target,
+            allow_batch,
+            is_upgrade,
+            &cfs,
+        )
+        .await
+        {
             Some(result) => {
                 // Classify up front so both upgrade-verification and log labels
                 // read the same result.
@@ -405,19 +439,43 @@ async fn run_auto_search_targets_with_upgrades(
                         season_year: detail.season_year,
                         end_year: detail.end_year,
                     }),
-                ).await;
+                )
+                .await;
 
                 // For upgrade targets, verify the found release is actually
                 // better quality than what's already on disk.
                 if let auto_search::SearchTarget::Episode(ep_num) = &target
-                    && let Some(existing) = upgrade_classifications.get(ep_num) {
-                        if incoming_classification.rank() <= existing.rank() {
-                            logger::debug(&state.db, LogCategory::AutoSearch, &format!("{}: skipped upgrade (incoming {} not better than existing {})", label, incoming_classification.label(), existing.label()), &result.title).await;
-                            skipped.push(format!("{}: no quality upgrade available", label));
-                            continue;
-                        }
-                        logger::info(&state.db, LogCategory::AutoSearch, &format!("{}: upgrading from {} to {}", label, existing.label(), incoming_classification.label()), &result.title).await;
+                    && let Some(existing) = upgrade_classifications.get(ep_num)
+                {
+                    if incoming_classification.rank() <= existing.rank() {
+                        logger::debug(
+                            &state.db,
+                            LogCategory::AutoSearch,
+                            &format!(
+                                "{}: skipped upgrade (incoming {} not better than existing {})",
+                                label,
+                                incoming_classification.label(),
+                                existing.label()
+                            ),
+                            &result.title,
+                        )
+                        .await;
+                        skipped.push(format!("{}: no quality upgrade available", label));
+                        continue;
                     }
+                    logger::info(
+                        &state.db,
+                        LogCategory::AutoSearch,
+                        &format!(
+                            "{}: upgrading from {} to {}",
+                            label,
+                            existing.label(),
+                            incoming_classification.label()
+                        ),
+                        &result.title,
+                    )
+                    .await;
+                }
                 // For selective downloads, prefer the `.torrent` URL
                 // over the magnet: qBit can parse metadata straight
                 // from the file instead of waiting on DHT/trackers.
@@ -431,7 +489,13 @@ async fn run_auto_search_targets_with_upgrades(
                     result.torrent.clone()
                 };
                 if url.is_empty() {
-                    logger::warn(&state.db, LogCategory::AutoSearch, &format!("{}: no magnet/torrent URL", label), &result.title).await;
+                    logger::warn(
+                        &state.db,
+                        LogCategory::AutoSearch,
+                        &format!("{}: no magnet/torrent URL", label),
+                        &result.title,
+                    )
+                    .await;
                     skipped.push(format!("{}: no magnet/torrent URL", label));
                     continue;
                 }
@@ -458,13 +522,18 @@ async fn run_auto_search_targets_with_upgrades(
                         })
                         .await
                     {
-                        Ok(crate::services::qbit::SelectiveOutcome::Filtered(kept)) => Ok(Some(kept)),
+                        Ok(crate::services::qbit::SelectiveOutcome::Filtered(kept)) => {
+                            Ok(Some(kept))
+                        }
                         Ok(crate::services::qbit::SelectiveOutcome::FullDownload) => Ok(None),
                         Err(e) => {
                             logger::warn(
                                 &state.db,
                                 LogCategory::Grab,
-                                &format!("{}: selective download failed, falling back to full grab", label),
+                                &format!(
+                                    "{}: selective download failed, falling back to full grab",
+                                    label
+                                ),
                                 &e,
                             )
                             .await;
@@ -485,13 +554,26 @@ async fn run_auto_search_targets_with_upgrades(
                             &state.db,
                             LogCategory::Grab,
                             &format!("Grabbed: {}", result.title),
-                            &format!("target={}, group={}, score={}, tier={}, batch={}{}", label, result.group, result.score, incoming_classification.label(), result.is_batch, selective_suffix),
-                        ).await;
+                            &format!(
+                                "target={}, group={}, score={}, tier={}, batch={}{}",
+                                label,
+                                result.group,
+                                result.score,
+                                incoming_classification.label(),
+                                result.is_batch,
+                                selective_suffix
+                            ),
+                        )
+                        .await;
                         progress::emit(
                             "grab",
                             "success",
                             format!("Grabbed: {}", label),
-                            Some(format!("{} [{}]", result.title, incoming_classification.label())),
+                            Some(format!(
+                                "{} [{}]",
+                                result.title,
+                                incoming_classification.label()
+                            )),
                             false,
                         )
                         .await;
@@ -517,7 +599,10 @@ async fn run_auto_search_targets_with_upgrades(
                                 sid,
                                 &ep_nums,
                                 result.is_batch,
-                            ).await.ok().flatten();
+                            )
+                            .await
+                            .ok()
+                            .flatten();
                             for ep_num in &ep_nums {
                                 let _ = episode_tags::record_grab(
                                     &state.db,
@@ -528,7 +613,8 @@ async fn run_auto_search_targets_with_upgrades(
                                     &result.group,
                                     result.size_bytes,
                                     result.is_batch,
-                                ).await;
+                                )
+                                .await;
                             }
                             // Phase 2 sibling auto-expand: when the
                             // grab is a batch covering a franchise
@@ -553,45 +639,54 @@ async fn run_auto_search_targets_with_upgrades(
                             // download) still auto-expands because the
                             // whole pack is actually downloading.
                             let selective_narrowed = wants_selective && kept.is_some();
-                            if result.is_batch && !selective_narrowed
-                                && let Some(grab_id) = grab_id {
-                                    // Fire-and-forget so the HTTP handler
-                                    // doesn't block up to ~60s waiting on
-                                    // qBit to discover metadata (see the
-                                    // `wait_for_metadata` call inside
-                                    // `auto_expand_library_from_pack`).
-                                    // Failures here only affect post-
-                                    // processing routing, which already
-                                    // falls back to the parent series.
-                                    let db_task = state.db.clone();
-                                    let qbit_task = qbit.clone();
-                                    let info_hash_task = result.info_hash.clone();
-                                    let detail_task = detail.clone();
-                                    let ep_nums_task = ep_nums.clone();
-                                    let title_task = result.title.clone();
-                                    let grab_ctx_task = AutoExpandGrabContext {
-                                        classification: incoming_classification.clone(),
-                                        release_group: result.group.clone(),
-                                        size_bytes: result.size_bytes,
-                                    };
-                                    tokio::spawn(async move {
-                                        auto_expand_library_from_pack(
-                                            &db_task,
-                                            &qbit_task,
-                                            &info_hash_task,
-                                            &detail_task,
-                                            sid,
-                                            &ep_nums_task,
-                                            grab_id,
-                                            &title_task,
-                                            &grab_ctx_task,
-                                        ).await;
-                                    });
-                                }
+                            if result.is_batch
+                                && !selective_narrowed
+                                && let Some(grab_id) = grab_id
+                            {
+                                // Fire-and-forget so the HTTP handler
+                                // doesn't block up to ~60s waiting on
+                                // qBit to discover metadata (see the
+                                // `wait_for_metadata` call inside
+                                // `auto_expand_library_from_pack`).
+                                // Failures here only affect post-
+                                // processing routing, which already
+                                // falls back to the parent series.
+                                let db_task = state.db.clone();
+                                let qbit_task = qbit.clone();
+                                let info_hash_task = result.info_hash.clone();
+                                let detail_task = detail.clone();
+                                let ep_nums_task = ep_nums.clone();
+                                let title_task = result.title.clone();
+                                let grab_ctx_task = AutoExpandGrabContext {
+                                    classification: incoming_classification.clone(),
+                                    release_group: result.group.clone(),
+                                    size_bytes: result.size_bytes,
+                                };
+                                tokio::spawn(async move {
+                                    auto_expand_library_from_pack(
+                                        &db_task,
+                                        &qbit_task,
+                                        &info_hash_task,
+                                        &detail_task,
+                                        sid,
+                                        &ep_nums_task,
+                                        grab_id,
+                                        &title_task,
+                                        &grab_ctx_task,
+                                    )
+                                    .await;
+                                });
+                            }
                         }
                     }
                     Err(e) => {
-                        logger::error(&state.db, LogCategory::QBit, &format!("Failed to add torrent for {}", label), &e).await;
+                        logger::error(
+                            &state.db,
+                            LogCategory::QBit,
+                            &format!("Failed to add torrent for {}", label),
+                            &e,
+                        )
+                        .await;
                         return Err((axum::http::StatusCode::BAD_GATEWAY, e));
                     }
                 }
@@ -605,13 +700,27 @@ async fn run_auto_search_targets_with_upgrades(
                     score: result.score,
                 });
                 if queued_batch && allow_batch {
-                    logger::info(&state.db, LogCategory::AutoSearch, "Season pack queued; stopping episode search", "").await;
-                    skipped.push("Season pack queued; skipped additional episode searches".to_string());
+                    logger::info(
+                        &state.db,
+                        LogCategory::AutoSearch,
+                        "Season pack queued; stopping episode search",
+                        "",
+                    )
+                    .await;
+                    skipped.push(
+                        "Season pack queued; skipped additional episode searches".to_string(),
+                    );
                     break;
                 }
             }
             None => {
-                logger::debug(&state.db, LogCategory::AutoSearch, &format!("{}: no matching release found", label), "").await;
+                logger::debug(
+                    &state.db,
+                    LogCategory::AutoSearch,
+                    &format!("{}: no matching release found", label),
+                    "",
+                )
+                .await;
                 skipped.push(format!("{}: no matching release found", label));
             }
         }
@@ -620,9 +729,14 @@ async fn run_auto_search_targets_with_upgrades(
     logger::info(
         &state.db,
         LogCategory::AutoSearch,
-        &format!("Auto search complete: {} grabbed, {} skipped", grabbed.len(), skipped.len()),
+        &format!(
+            "Auto search complete: {} grabbed, {} skipped",
+            grabbed.len(),
+            skipped.len()
+        ),
         &format!("profile={}", cfg.quality_profile),
-    ).await;
+    )
+    .await;
 
     Ok(auto_search::AutoSearchReport {
         grabbed,
@@ -655,7 +769,8 @@ pub async fn auto_search_series(
         None => None,
     };
     if let Some(h) = &progress_handle {
-        h.emit("start", "info", "Preparing auto-search…", None, false).await;
+        h.emit("start", "info", "Preparing auto-search…", None, false)
+            .await;
     }
     let cfg = config::get_config(&state.db)
         .await
@@ -678,7 +793,10 @@ pub async fn auto_search_series(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
     let tracked = maybe_hydrate_cumulative_offset(&state.db, tracked, &detail).await;
-    let folder_name = tracked.as_ref().map(|s| s.folder_name.clone()).unwrap_or_default();
+    let folder_name = tracked
+        .as_ref()
+        .map(|s| s.folder_name.clone())
+        .unwrap_or_default();
     let existing_files = media::scan_series_folder(&cfg.media_root, &folder_name);
     let existing_eps: Vec<i32> = existing_files.iter().map(|f| f.episode_number).collect();
 
@@ -701,7 +819,9 @@ pub async fn auto_search_series(
         crate::services::source::parse_cutoff_source(&cfg.cutoff_source);
     let cutoff_resolution = crate::services::source::Resolution::from_str(&cfg.cutoff_resolution);
     let quality_tags = if let Some(ref t) = tracked {
-        episode_tags::get_for_series(&state.db, t.id).await.unwrap_or_default()
+        episode_tags::get_for_series(&state.db, t.id)
+            .await
+            .unwrap_or_default()
     } else {
         std::collections::HashMap::new()
     };
@@ -724,27 +844,46 @@ pub async fn auto_search_series(
         .collect();
     for (target, _) in &upgrade_targets {
         if let auto_search::SearchTarget::Episode(n) = target
-            && !existing_target_eps.contains(n) {
-                targets.push(target.clone());
-            }
+            && !existing_target_eps.contains(n)
+        {
+            targets.push(target.clone());
+        }
     }
 
     let target_summary = if targets.len() <= 5 {
-        targets.iter().map(auto_search::target_label).collect::<Vec<_>>().join(", ")
+        targets
+            .iter()
+            .map(auto_search::target_label)
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
         format!("{} targets", targets.len())
     };
     let upgrade_count = upgrade_targets.len();
-    let title_for_log = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+    let title_for_log = if !detail.title_english.is_empty() {
+        &detail.title_english
+    } else {
+        &detail.title_romaji
+    };
     logger::debug(
         &state.db,
         LogCategory::AutoSearch,
         &format!("Missing targets for {}: {}", title_for_log, target_summary),
-        &format!("on_disk={}, monitored={}, upgradeable={}, total={:?}", existing_eps.len(), monitored_eps.len(), upgrade_count, detail.episodes),
-    ).await;
+        &format!(
+            "on_disk={}, monitored={}, upgradeable={}, total={:?}",
+            existing_eps.len(),
+            monitored_eps.len(),
+            upgrade_count,
+            detail.episodes
+        ),
+    )
+    .await;
     let series_id_for_grab = tracked.as_ref().map(|s| s.id);
     // Build a map of existing episode classifications for upgrade verification in the search task.
-    let upgrade_classifications: std::collections::HashMap<i32, crate::services::source::ClassificationResult> = upgrade_targets
+    let upgrade_classifications: std::collections::HashMap<
+        i32,
+        crate::services::source::ClassificationResult,
+    > = upgrade_targets
         .into_iter()
         .filter_map(|(t, classification)| match t {
             auto_search::SearchTarget::Episode(n) => Some((n, classification)),
@@ -758,30 +897,25 @@ pub async fn auto_search_series(
     // handle through every signature.
     let state_clone = state.clone();
     let progress_for_task = progress_handle.clone();
-    let handle = tokio::spawn(progress::run_with_progress(
-        progress_for_task,
-        async move {
-            let result = run_auto_search_targets_with_upgrades(
-                &state_clone,
-                request_id,
-                targets,
-                true,
-                series_id_for_grab,
-                upgrade_classifications,
-            )
-            .await;
-            emit_auto_search_terminal(&result).await;
-            result
-        },
-    ));
-    let report = handle
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Search task failed: {}", e),
-            )
-        })??;
+    let handle = tokio::spawn(progress::run_with_progress(progress_for_task, async move {
+        let result = run_auto_search_targets_with_upgrades(
+            &state_clone,
+            request_id,
+            targets,
+            true,
+            series_id_for_grab,
+            upgrade_classifications,
+        )
+        .await;
+        emit_auto_search_terminal(&result).await;
+        result
+    }));
+    let report = handle.await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Search task failed: {}", e),
+        )
+    })??;
     Ok(Json(report))
 }
 
@@ -828,16 +962,25 @@ pub async fn auto_search_episode(
 
     if let Some(_tracked) = tracked_row {
         // Monitoring status does not block manual episode searches.
-    } else if matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA") && episode_number != 1 {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "Single-entry media can only search episode 1".to_string()));
+    } else if matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA")
+        && episode_number != 1
+    {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Single-entry media can only search episode 1".to_string(),
+        ));
     }
 
     logger::debug(
         &state.db,
         LogCategory::AutoSearch,
-        &format!("Episode search: series_ref={}, episode={}", request_id, episode_number),
+        &format!(
+            "Episode search: series_ref={}, episode={}",
+            request_id, episode_number
+        ),
         "allow_batch=false",
-    ).await;
+    )
+    .await;
     // Collapse to Single for single-entry media so movie/OVA/special
     // release titles (which don't carry episode numbers) aren't filtered
     // out by the Episode(n) matching rules.
@@ -849,29 +992,24 @@ pub async fn auto_search_episode(
     // into the user's sticky toast without threading the handle down.
     let state_clone = state.clone();
     let progress_for_task = progress_handle.clone();
-    let handle = tokio::spawn(progress::run_with_progress(
-        progress_for_task,
-        async move {
-            let result = run_auto_search_targets(
-                &state_clone,
-                request_id,
-                vec![target],
-                false,
-                series_id_for_grab,
-            )
-            .await;
-            emit_auto_search_terminal(&result).await;
-            result
-        },
-    ));
-    let report = handle
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Search task failed: {}", e),
-            )
-        })??;
+    let handle = tokio::spawn(progress::run_with_progress(progress_for_task, async move {
+        let result = run_auto_search_targets(
+            &state_clone,
+            request_id,
+            vec![target],
+            false,
+            series_id_for_grab,
+        )
+        .await;
+        emit_auto_search_terminal(&result).await;
+        result
+    }));
+    let report = handle.await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Search task failed: {}", e),
+        )
+    })??;
     Ok(Json(report))
 }
 
@@ -900,7 +1038,8 @@ pub async fn search_batch_releases(
         None => None,
     };
     if let Some(h) = &progress_handle {
-        h.emit("start", "info", "Searching for batch release…", None, false).await;
+        h.emit("start", "info", "Searching for batch release…", None, false)
+            .await;
     }
 
     let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
@@ -938,7 +1077,8 @@ pub async fn search_batch_releases(
         &cfg,
         &auto_search::SearchTarget::Single,
         &cfs,
-    ).await;
+    )
+    .await;
 
     let qbit = {
         let qbit = state.qbit.read().await;
@@ -949,10 +1089,14 @@ pub async fn search_batch_releases(
                     // toast is the only surface that tells the user why.
                     let h = h.clone();
                     tokio::spawn(async move {
-                        h.emit("error", "error", "qBittorrent not configured", None, true).await;
+                        h.emit("error", "error", "qBittorrent not configured", None, true)
+                            .await;
                     });
                 }
-                (axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string())
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "qBittorrent not configured".to_string(),
+                )
             })?
             .clone()
     };
@@ -960,17 +1104,35 @@ pub async fn search_batch_releases(
     match best {
         None => {
             if let Some(h) = &progress_handle {
-                h.emit("done", "warn", "No batch release found", None, true).await;
+                h.emit("done", "warn", "No batch release found", None, true)
+                    .await;
             }
-            Err((axum::http::StatusCode::NOT_FOUND, "No batch release found".to_string()))
+            Err((
+                axum::http::StatusCode::NOT_FOUND,
+                "No batch release found".to_string(),
+            ))
         }
         Some(result) => {
-            let url = if !result.magnet.is_empty() { result.magnet.clone() } else { result.torrent.clone() };
+            let url = if !result.magnet.is_empty() {
+                result.magnet.clone()
+            } else {
+                result.torrent.clone()
+            };
             if url.is_empty() {
                 if let Some(h) = &progress_handle {
-                    h.emit("error", "error", "No magnet/torrent URL for batch release", None, true).await;
+                    h.emit(
+                        "error",
+                        "error",
+                        "No magnet/torrent URL for batch release",
+                        None,
+                        true,
+                    )
+                    .await;
                 }
-                return Err((axum::http::StatusCode::BAD_GATEWAY, "No magnet/torrent URL for batch release".to_string()));
+                return Err((
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "No magnet/torrent URL for batch release".to_string(),
+                ));
             }
             if let Some(h) = &progress_handle {
                 h.emit(
@@ -982,17 +1144,23 @@ pub async fn search_batch_releases(
                 )
                 .await;
             }
-            qbit.add_torrent(&url).await
-                .map_err(|e| {
-                    if let Some(h) = &progress_handle {
-                        let h = h.clone();
-                        let err = e.clone();
-                        tokio::spawn(async move {
-                            h.emit("error", "error", "qBittorrent rejected the torrent", Some(err), true).await;
-                        });
-                    }
-                    (axum::http::StatusCode::BAD_GATEWAY, e)
-                })?;
+            qbit.add_torrent(&url).await.map_err(|e| {
+                if let Some(h) = &progress_handle {
+                    let h = h.clone();
+                    let err = e.clone();
+                    tokio::spawn(async move {
+                        h.emit(
+                            "error",
+                            "error",
+                            "qBittorrent rejected the torrent",
+                            Some(err),
+                            true,
+                        )
+                        .await;
+                    });
+                }
+                (axum::http::StatusCode::BAD_GATEWAY, e)
+            })?;
             let classification = crate::services::source::classify_release(
                 &state.db,
                 &result.title,
@@ -1007,14 +1175,19 @@ pub async fn search_batch_releases(
                     season_year: detail.season_year,
                     end_year: detail.end_year,
                 }),
-            ).await;
+            )
+            .await;
             let tier_label = classification.label();
             logger::info(
                 &state.db,
                 LogCategory::Grab,
                 &format!("Grabbed batch: {}", result.title),
-                &format!("group={}, score={}, tier={}", result.group, result.score, tier_label),
-            ).await;
+                &format!(
+                    "group={}, score={}, tier={}",
+                    result.group, result.score, tier_label
+                ),
+            )
+            .await;
             if let Some(sid) = series_id_for_grab {
                 // Parse episode list from the batch title so every covered
                 // episode gets a per-episode `episode_quality_tags` row at
@@ -1039,7 +1212,8 @@ pub async fn search_batch_releases(
                     sid,
                     &ep_nums,
                     result.is_batch,
-                ).await;
+                )
+                .await;
                 for ep_num in &ep_nums {
                     let _ = episode_tags::record_grab(
                         &state.db,
@@ -1050,7 +1224,8 @@ pub async fn search_batch_releases(
                         &result.group,
                         result.size_bytes,
                         result.is_batch,
-                    ).await;
+                    )
+                    .await;
                 }
             }
             if let Some(h) = &progress_handle {
@@ -1113,14 +1288,8 @@ pub async fn interactive_search_episode(
     // Same single-entry collapse as auto_search_episode — the interactive
     // picker otherwise returns zero results for movies.
     let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
-    let mut results = auto_search::find_all_for_target(
-        &state.db,
-        &detail,
-        &cfg,
-        &target,
-        false,
-        &cfs,
-    ).await;
+    let mut results =
+        auto_search::find_all_for_target(&state.db, &detail, &cfg, &target, false, &cfs).await;
 
     // Layer 3 (group-map) enrichment. Auto-search already runs the full
     // source pipeline so its classification is complete, but the interactive
@@ -1173,7 +1342,8 @@ pub async fn interactive_search_batches(
         &cfg,
         &auto_search::SearchTarget::Single,
         &cfs,
-    ).await;
+    )
+    .await;
 
     crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
 
@@ -1222,13 +1392,19 @@ pub async fn grab_batch_result(
     let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
 
     if url.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "No URL provided".to_string()));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "No URL provided".to_string(),
+        ));
     }
 
     let qbit = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "qBittorrent not configured".to_string(),
+            ))?
             .clone()
     };
 
@@ -1237,8 +1413,8 @@ pub async fn grab_batch_result(
     // part number. Franchise roots (JoJo S1) deliberately fall
     // through so the multi-series auto-expand path below can route
     // each sibling's files into its own library entry instead.
-    let wants_selective = !info_hash.is_empty()
-        && auto_search::has_selective_discriminator(&detail);
+    let wants_selective =
+        !info_hash.is_empty() && auto_search::has_selective_discriminator(&detail);
     let selective_outcome: Option<Vec<usize>> = if wants_selective {
         let detail_clone = detail.clone();
         match qbit
@@ -1253,7 +1429,10 @@ pub async fn grab_batch_result(
                 logger::warn(
                     &state.db,
                     LogCategory::Grab,
-                    &format!("Selective batch download failed, falling back to full grab: {}", title),
+                    &format!(
+                        "Selective batch download failed, falling back to full grab: {}",
+                        title
+                    ),
                     &e,
                 )
                 .await;
@@ -1287,7 +1466,8 @@ pub async fn grab_batch_result(
             season_year: detail.season_year,
             end_year: detail.end_year,
         }),
-    ).await;
+    )
+    .await;
 
     let selective_suffix = match (&selective_outcome, wants_selective) {
         (Some(kept), _) => format!(", selective={}", kept.len()),
@@ -1298,8 +1478,14 @@ pub async fn grab_batch_result(
         &state.db,
         LogCategory::Grab,
         &format!("Grabbed batch (interactive): {}", title),
-        &format!("group={}, tier={}{}", group, classification.label(), selective_suffix),
-    ).await;
+        &format!(
+            "group={}, tier={}{}",
+            group,
+            classification.label(),
+            selective_suffix
+        ),
+    )
+    .await;
 
     if let Some(sid) = series_id {
         // Parse episode list from the batch title so every covered
@@ -1311,7 +1497,10 @@ pub async fn grab_batch_result(
         let ep_nums = batch_episode_numbers(&title, &detail);
         let grab_id = crate::models::grabbed_torrents::record_grab(
             &state.db, &info_hash, &title, sid, &ep_nums, true,
-        ).await.ok().flatten();
+        )
+        .await
+        .ok()
+        .flatten();
         for ep_num in &ep_nums {
             let _ = episode_tags::record_grab(
                 &state.db,
@@ -1322,7 +1511,8 @@ pub async fn grab_batch_result(
                 &group,
                 size_bytes,
                 true,
-            ).await;
+            )
+            .await;
         }
         // Phase 2 sibling auto-expand. Skip when selective narrowing
         // successfully applied — the user picked a specific sibling
@@ -1334,36 +1524,36 @@ pub async fn grab_batch_result(
         // download) still auto-expands because the whole pack is
         // actually downloading.
         let selective_narrowed = wants_selective && selective_outcome.is_some();
-        if !selective_narrowed
-            && let Some(grab_id) = grab_id {
-                // Fire-and-forget so the HTTP handler doesn't block
-                // up to ~60s on qBit metadata discovery. See the
-                // matching spawn in `run_auto_search_targets_with_upgrades`.
-                let db_task = state.db.clone();
-                let qbit_task = qbit.clone();
-                let info_hash_task = info_hash.clone();
-                let detail_task = detail.clone();
-                let title_task = title.clone();
-                let ep_nums_task = ep_nums.clone();
-                let grab_ctx_task = AutoExpandGrabContext {
-                    classification: classification.clone(),
-                    release_group: group.clone(),
-                    size_bytes,
-                };
-                tokio::spawn(async move {
-                    auto_expand_library_from_pack(
-                        &db_task,
-                        &qbit_task,
-                        &info_hash_task,
-                        &detail_task,
-                        sid,
-                        &ep_nums_task,
-                        grab_id,
-                        &title_task,
-                        &grab_ctx_task,
-                    ).await;
-                });
-            }
+        if !selective_narrowed && let Some(grab_id) = grab_id {
+            // Fire-and-forget so the HTTP handler doesn't block
+            // up to ~60s on qBit metadata discovery. See the
+            // matching spawn in `run_auto_search_targets_with_upgrades`.
+            let db_task = state.db.clone();
+            let qbit_task = qbit.clone();
+            let info_hash_task = info_hash.clone();
+            let detail_task = detail.clone();
+            let title_task = title.clone();
+            let ep_nums_task = ep_nums.clone();
+            let grab_ctx_task = AutoExpandGrabContext {
+                classification: classification.clone(),
+                release_group: group.clone(),
+                size_bytes,
+            };
+            tokio::spawn(async move {
+                auto_expand_library_from_pack(
+                    &db_task,
+                    &qbit_task,
+                    &info_hash_task,
+                    &detail_task,
+                    sid,
+                    &ep_nums_task,
+                    grab_id,
+                    &title_task,
+                    &grab_ctx_task,
+                )
+                .await;
+            });
+        }
     }
 
     Ok(Json(serde_json::json!({
@@ -1410,13 +1600,19 @@ pub async fn grab_interactive_result(
     let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
 
     if url.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "No URL provided".to_string()));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "No URL provided".to_string(),
+        ));
     }
 
     let qbit = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "qBittorrent not configured".to_string(),
+            ))?
             .clone()
     };
 
@@ -1427,8 +1623,8 @@ pub async fn grab_interactive_result(
     // own subtitle return `false` here and fall through to the plain
     // `add_torrent` path — interactive single-episode grabs don't
     // auto-expand the library (that's `grab_batch_result`'s job).
-    let wants_selective = !info_hash.is_empty()
-        && auto_search::has_selective_discriminator(&detail);
+    let wants_selective =
+        !info_hash.is_empty() && auto_search::has_selective_discriminator(&detail);
     let selective_outcome: Option<Vec<usize>> = if wants_selective {
         let detail_clone = detail.clone();
         match qbit
@@ -1443,7 +1639,10 @@ pub async fn grab_interactive_result(
                 logger::warn(
                     &state.db,
                     LogCategory::Grab,
-                    &format!("Selective download failed, falling back to full grab: {}", title),
+                    &format!(
+                        "Selective download failed, falling back to full grab: {}",
+                        title
+                    ),
                     &e,
                 )
                 .await;
@@ -1478,7 +1677,8 @@ pub async fn grab_interactive_result(
         Some(&resolution),
         None,
         series_ctx,
-    ).await;
+    )
+    .await;
     let selective_suffix = match (&selective_outcome, wants_selective) {
         (Some(kept), _) => format!(", selective={}", kept.len()),
         (None, true) => ", selective=full(timeout)".to_string(),
@@ -1490,18 +1690,36 @@ pub async fn grab_interactive_result(
         &format!("Interactive grab: {}", title),
         &format!(
             "episode={}, group={}, tier={}{}",
-            episode_number, group, classification.label(), selective_suffix
+            episode_number,
+            group,
+            classification.label(),
+            selective_suffix
         ),
-    ).await;
+    )
+    .await;
 
     if let Some(sid) = series_id {
         // Interactive single-episode grab — not a batch by definition.
         let _ = crate::models::grabbed_torrents::record_grab(
-            &state.db, &info_hash, &title, sid, &[episode_number], false,
-        ).await;
+            &state.db,
+            &info_hash,
+            &title,
+            sid,
+            &[episode_number],
+            false,
+        )
+        .await;
         let _ = episode_tags::record_grab(
-            &state.db, sid, episode_number, &classification, &title, &group, size_bytes, false,
-        ).await;
+            &state.db,
+            sid,
+            episode_number,
+            &classification,
+            &title,
+            &group,
+            size_bytes,
+            false,
+        )
+        .await;
     }
 
     Ok(Json(serde_json::json!({
@@ -1554,11 +1772,7 @@ mod tests {
         }
     }
 
-    fn related_entry(
-        id: i64,
-        title_english: &str,
-        episodes: Option<i32>,
-    ) -> anilist::RelatedEntry {
+    fn related_entry(id: i64, title_english: &str, episodes: Option<i32>) -> anilist::RelatedEntry {
         anilist::RelatedEntry {
             id,
             id_mal: None,
@@ -1749,9 +1963,11 @@ mod tests {
         // match and the fallback path's title-prefix rule must fire.
         let mut parent_detail = empty_anime_detail(21320, "Owarimonogatari");
         parent_detail.episodes = Some(13);
-        parent_detail
-            .relations
-            .push(related_entry(21860, "Owarimonogatari Second Season", Some(7)));
+        parent_detail.relations.push(related_entry(
+            21860,
+            "Owarimonogatari Second Season",
+            Some(7),
+        ));
 
         // 13 parent files (S07E01..E13) + 7 sibling files (S07E14..E20).
         let mut filenames: Vec<String> = Vec::new();
@@ -1797,9 +2013,11 @@ mod tests {
         assert_eq!(sibling_route.file_indices, vec![13, 14, 15, 16, 17, 18, 19]);
         // The matched subtitle records the detection method for
         // operator inspection.
-        assert!(sibling_route
-            .matched_subtitle
-            .starts_with("episode-range fallback"));
+        assert!(
+            sibling_route
+                .matched_subtitle
+                .starts_with("episode-range fallback")
+        );
         // Absolute numbering → offset = parent_cap = 13.
         assert_eq!(sibling_route.episode_offset, 13);
         // Stored episode_numbers are effective (post-offset) values,
@@ -1811,7 +2029,10 @@ mod tests {
             .iter()
             .find(|r| r.series_id == parent_id)
             .expect("parent route present");
-        assert_eq!(parent_route.file_indices, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(
+            parent_route.file_indices,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
         assert_eq!(parent_route.episode_offset, 0);
 
         // Regression guard: auto-expand must also write per-episode
@@ -2093,10 +2314,8 @@ mod tests {
         // the trailing single-token subtitle can't be extracted, so
         // detection falls through to the episode-range + title-prefix
         // path.
-        let mut parent_detail = empty_anime_detail(
-            20899,
-            "JoJo's Bizarre Adventure: Stardust Crusaders",
-        );
+        let mut parent_detail =
+            empty_anime_detail(20899, "JoJo's Bizarre Adventure: Stardust Crusaders");
         parent_detail.episodes = Some(24);
         parent_detail.relations.push(related_entry(
             22663,

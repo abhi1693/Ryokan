@@ -31,9 +31,7 @@ pub struct NeedsReviewEntry {
 /// "Needs review" list view. Excludes rows the user has already manually
 /// overridden (manual_override = 1 clears `needs_review` too, but we
 /// filter defensively in case an older row has both set).
-pub async fn get_needs_review(
-    db: &SqlitePool,
-) -> Result<Vec<NeedsReviewEntry>, sqlx::Error> {
+pub async fn get_needs_review(db: &SqlitePool) -> Result<Vec<NeedsReviewEntry>, sqlx::Error> {
     sqlx::query_as::<_, NeedsReviewEntry>(
         "SELECT t.series_id, t.episode_number, t.quality_tag, t.release_title, t.release_group,
                 t.source, t.resolution, t.classification_confidence,
@@ -159,17 +157,24 @@ pub async fn record_grab(
     let quality_tag = classification.label();
     let source_str = classification.source.as_str();
     let resolution_str = classification.resolution.as_str();
-    let is_remux = if classification.is_remux { 1_i64 } else { 0_i64 };
+    let is_remux = if classification.is_remux {
+        1_i64
+    } else {
+        0_i64
+    };
     let is_bdmv = if classification.is_bdmv { 1_i64 } else { 0_i64 };
     let web_kind_str = classification.web_kind.as_str();
     let confidence = classification.confidence as f64;
-    let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
+    let needs_review = if classification.needs_review {
+        1_i64
+    } else {
+        0_i64
+    };
     // Serialize the full evidence trail so the Needs-Review UI can audit
     // *why* the row was flagged without re-running classification. Empty
     // string on serialize failure — the row is still valid, we just lose
     // the trail on that particular write.
-    let evidence_json =
-        serde_json::to_string(&classification.evidence).unwrap_or_default();
+    let evidence_json = serde_json::to_string(&classification.evidence).unwrap_or_default();
 
     // Seed `file_name` with the Nyaa release title. For non-batch grabs
     // post-processing later overwrites it with the Sonarr-style renamed
@@ -325,13 +330,20 @@ pub async fn update_classification(
     let quality_tag = classification.label();
     let source_str = classification.source.as_str();
     let resolution_str = classification.resolution.as_str();
-    let is_remux = if classification.is_remux { 1_i64 } else { 0_i64 };
+    let is_remux = if classification.is_remux {
+        1_i64
+    } else {
+        0_i64
+    };
     let is_bdmv = if classification.is_bdmv { 1_i64 } else { 0_i64 };
     let web_kind_str = classification.web_kind.as_str();
     let confidence = classification.confidence as f64;
-    let needs_review = if classification.needs_review { 1_i64 } else { 0_i64 };
-    let evidence_json =
-        serde_json::to_string(&classification.evidence).unwrap_or_default();
+    let needs_review = if classification.needs_review {
+        1_i64
+    } else {
+        0_i64
+    };
+    let evidence_json = serde_json::to_string(&classification.evidence).unwrap_or_default();
 
     sqlx::query(
         "UPDATE episode_quality_tags SET
@@ -459,8 +471,7 @@ pub async fn set_manual_override(
             }
             Some(row) => {
                 let release_title: String = row.get("release_title");
-                let fallback =
-                    crate::services::source::classify_release_sync(&release_title, None);
+                let fallback = crate::services::source::classify_release_sync(&release_title, None);
                 let derived_tag = fallback.label();
                 let src_str = fallback.source.as_str();
                 let res_str = fallback.resolution.as_str();
@@ -875,7 +886,9 @@ mod tests {
         )
         .await
         .expect("record grab");
-        mark_completed(&db, sid, &[1]).await.expect("mark completed");
+        mark_completed(&db, sid, &[1])
+            .await
+            .expect("mark completed");
         set_manual_override(&db, sid, 1, "BluRay", "1080p", false, false, "")
             .await
             .expect("pin override");
@@ -999,7 +1012,13 @@ mod tests {
         let tags = get_for_series(&db, sid).await.expect("get for series");
         let tag = tags.get(&1).expect("tag row");
         assert!(tag.manual_override, "override must survive re-grab");
-        assert_eq!(tag.source, "BluRay", "pinned source must not be overwritten");
-        assert_eq!(tag.resolution, "1080p", "pinned resolution must not be overwritten");
+        assert_eq!(
+            tag.source, "BluRay",
+            "pinned source must not be overwritten"
+        );
+        assert_eq!(
+            tag.resolution, "1080p",
+            "pinned resolution must not be overwritten"
+        );
     }
 }

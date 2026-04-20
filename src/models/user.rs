@@ -85,7 +85,11 @@ pub async fn reset_all(db: &SqlitePool) -> Result<(), sqlx::Error> {
 /// an attacker can enumerate valid usernames in a timing side channel
 /// (the missing-user branch would short-circuit ~50ms faster than the
 /// bcrypt-verify branch).
-pub async fn verify_user(db: &SqlitePool, username: &str, password: &str) -> Result<Option<User>, String> {
+pub async fn verify_user(
+    db: &SqlitePool,
+    username: &str,
+    password: &str,
+) -> Result<Option<User>, String> {
     let row: Option<(i64, String, String)> =
         sqlx::query_as("SELECT id, username, password_hash FROM users WHERE username = ?")
             .bind(username)
@@ -151,7 +155,9 @@ mod tests {
         let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
         crate::models::migrate(&db).await.unwrap();
 
-        create_user(&db, "admin", "hunter2").await.expect("create admin");
+        create_user(&db, "admin", "hunter2")
+            .await
+            .expect("create admin");
 
         // Seed a session row directly — real sessions are minted by the
         // login handler, but for this test we only need a row present so

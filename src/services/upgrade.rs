@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
+use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, metadata_cache, series};
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
 use crate::services::{auto_search, logger, media};
-use crate::AppState;
 
 static UPGRADE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -150,8 +150,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         };
 
         let mut upgrade_classifications: HashMap<i32, ClassificationResult> = HashMap::new();
-        let mut targets: Vec<auto_search::SearchTarget> =
-            Vec::with_capacity(upgrade_targets.len());
+        let mut targets: Vec<auto_search::SearchTarget> = Vec::with_capacity(upgrade_targets.len());
         for (t, c) in upgrade_targets {
             if let auto_search::SearchTarget::Episode(n) = &t {
                 upgrade_classifications.insert(*n, c);
@@ -172,8 +171,10 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         for target in targets {
             let label = auto_search::target_label(&target);
             // batch_episode_match=true so BD season packs can match episode targets.
-            let best =
-                auto_search::find_best_for_target(&state.db, &detail, &cfg, &target, true, true, &cfs).await;
+            let best = auto_search::find_best_for_target(
+                &state.db, &detail, &cfg, &target, true, true, &cfs,
+            )
+            .await;
 
             let Some(result) = best else {
                 continue;
@@ -200,24 +201,25 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
 
             // Verify this is actually an upgrade.
             if let auto_search::SearchTarget::Episode(ep_num) = &target
-                && let Some(existing_classification) = upgrade_classifications.get(ep_num) {
-                    if incoming_classification.rank() <= existing_classification.rank() {
-                        continue;
-                    }
-                    logger::info(
-                        &state.db,
-                        LogCategory::AutoSearch,
-                        &format!(
-                            "Upgrade: {} {} — {} -> {}",
-                            title,
-                            label,
-                            existing_classification.label(),
-                            incoming_classification.label()
-                        ),
-                        &result.title,
-                    )
-                    .await;
+                && let Some(existing_classification) = upgrade_classifications.get(ep_num)
+            {
+                if incoming_classification.rank() <= existing_classification.rank() {
+                    continue;
                 }
+                logger::info(
+                    &state.db,
+                    LogCategory::AutoSearch,
+                    &format!(
+                        "Upgrade: {} {} — {} -> {}",
+                        title,
+                        label,
+                        existing_classification.label(),
+                        incoming_classification.label()
+                    ),
+                    &result.title,
+                )
+                .await;
+            }
 
             let url = if !result.magnet.is_empty() {
                 result.magnet.clone()

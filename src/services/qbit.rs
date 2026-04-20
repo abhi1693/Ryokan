@@ -188,7 +188,11 @@ impl QbitClient {
     }
 
     /// Perform a POST with form data and automatic re-auth on 403.
-    async fn do_post_form(&self, endpoint: &str, form: &[(&str, &str)]) -> Result<reqwest::Response, String> {
+    async fn do_post_form(
+        &self,
+        endpoint: &str,
+        form: &[(&str, &str)],
+    ) -> Result<reqwest::Response, String> {
         self.ensure_login().await?;
 
         let url = format!("{}{}", self.base_url, endpoint);
@@ -232,7 +236,9 @@ impl QbitClient {
         // a torrent qBit silently rejected — and post-processing then
         // looked forever for an import that was never going to land.
         if body.trim() == "Fails." {
-            return Err(format!("qbit add rejected url={url}: qBit returned 'Fails.'"));
+            return Err(format!(
+                "qbit add rejected url={url}: qBit returned 'Fails.'"
+            ));
         }
         self.invalidate_torrents_cache().await;
         Ok(())
@@ -266,7 +272,9 @@ impl QbitClient {
             ("id", id_str.as_str()),
             ("priority", prio_str.as_str()),
         ];
-        let resp = self.do_post_form("/api/v2/torrents/filePrio", &form).await?;
+        let resp = self
+            .do_post_form("/api/v2/torrents/filePrio", &form)
+            .await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -303,10 +311,7 @@ impl QbitClient {
                 }
             }
             if start.elapsed() >= timeout {
-                return Err(format!(
-                    "qbit metadata fetch timed out after {:?}",
-                    timeout
-                ));
+                return Err(format!("qbit metadata fetch timed out after {:?}", timeout));
             }
             tokio::time::sleep(delay).await;
             // Gentle backoff, capped at 2s per poll.
@@ -435,9 +440,10 @@ impl QbitClient {
         {
             let guard = self.torrents_cache.lock().await;
             if let Some((stamped, torrents)) = guard.as_ref()
-                && stamped.elapsed() < TORRENTS_CACHE_TTL {
-                    return Ok(torrents.clone());
-                }
+                && stamped.elapsed() < TORRENTS_CACHE_TTL
+            {
+                return Ok(torrents.clone());
+            }
         }
 
         // Miss: decide whether we're the fetcher or a waiter. Taking
@@ -468,9 +474,10 @@ impl QbitClient {
             {
                 let guard = self.torrents_cache.lock().await;
                 if let Some((stamped, torrents)) = guard.as_ref()
-                    && stamped.elapsed() < TORRENTS_CACHE_TTL {
-                        return Ok(torrents.clone());
-                    }
+                    && stamped.elapsed() < TORRENTS_CACHE_TTL
+                {
+                    return Ok(torrents.clone());
+                }
             }
             return self.get_torrents_uncached().await;
         }
@@ -535,7 +542,11 @@ impl QbitClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("qbit torrent files fetch failed: {} {}", status, body.trim()));
+            return Err(format!(
+                "qbit torrent files fetch failed: {} {}",
+                status,
+                body.trim()
+            ));
         }
         let files: Vec<TorrentFile> = resp
             .json()
@@ -605,7 +616,6 @@ impl QbitClient {
         Ok(version)
     }
 }
-
 
 fn normalize_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim().trim_end_matches('/');

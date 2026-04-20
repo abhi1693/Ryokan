@@ -63,8 +63,7 @@ static RATE_LIMIT_STATE: LazyLock<StdMutex<Option<RateLimitState>>> =
 /// inter-request spacing derived from the current per-minute limit, so
 /// a relation walk that fires N back-to-back AL calls can't burst over
 /// AL's burst limiter (which is documented but not header-exposed).
-static LAST_AL_REQUEST: LazyLock<StdMutex<Option<Instant>>> =
-    LazyLock::new(|| StdMutex::new(None));
+static LAST_AL_REQUEST: LazyLock<StdMutex<Option<Instant>>> = LazyLock::new(|| StdMutex::new(None));
 
 /// Monotonically-set "AniList is in cooldown until Instant". Consulted at the
 /// top of every search so that once we've learned AniList is rate-limiting us,
@@ -118,7 +117,9 @@ pub(super) fn record_rate_limit_headers(headers: &reqwest::header::HeaderMap) {
     if let Ok(mut guard) = RATE_LIMIT_STATE.lock() {
         let prev = *guard;
         *guard = Some(RateLimitState {
-            limit: limit.or(prev.map(|s| s.limit)).unwrap_or(ANILIST_LIMIT_FALLBACK),
+            limit: limit
+                .or(prev.map(|s| s.limit))
+                .unwrap_or(ANILIST_LIMIT_FALLBACK),
             remaining: remaining.or(prev.map(|s| s.remaining)).unwrap_or(0),
             // Keep the prior reset_at if AL didn't send one this time —
             // it's the most recent ground truth we have for when the
@@ -237,9 +238,10 @@ pub(super) fn cooldown_from_headers(
 
 pub fn anilist_cooldown_active() -> bool {
     if let Ok(guard) = ANILIST_COOLDOWN_UNTIL.lock()
-        && let Some(until) = *guard {
-            return Instant::now() < until;
-        }
+        && let Some(until) = *guard
+    {
+        return Instant::now() < until;
+    }
     false
 }
 
@@ -296,7 +298,10 @@ pub(super) fn classify_anilist_failure(
     if is_cloudflare {
         return (
             AniListFailureKind::RateLimited,
-            format!("AniList rate-limited: Cloudflare challenge (HTTP {})", status),
+            format!(
+                "AniList rate-limited: Cloudflare challenge (HTTP {})",
+                status
+            ),
         );
     }
 
@@ -351,10 +356,7 @@ pub(super) fn excerpt(text: &str) -> String {
 
 /// Pure cooldown-duration computation. Extracted from `set_anilist_cooldown`
 /// for unit-testability — the wall-clock side effect lives in the caller.
-fn compute_cooldown_duration(
-    retry_after_secs: Option<u64>,
-    default_dur: Duration,
-) -> Duration {
+fn compute_cooldown_duration(retry_after_secs: Option<u64>, default_dur: Duration) -> Duration {
     let base = retry_after_secs
         .map(Duration::from_secs)
         .unwrap_or(default_dur)
@@ -408,7 +410,11 @@ mod tests {
             "<html><body>502 Bad Gateway</body></html>",
         );
         assert_eq!(kind, AniListFailureKind::Unavailable);
-        assert!(!is_rate_limit_error(&msg), "5xx must not match throttle: {}", msg);
+        assert!(
+            !is_rate_limit_error(&msg),
+            "5xx must not match throttle: {}",
+            msg
+        );
     }
 
     #[test]
@@ -428,7 +434,11 @@ mod tests {
             r#"{"errors":[{"message":"Forbidden"}]}"#,
         );
         assert_eq!(kind, AniListFailureKind::Unavailable);
-        assert!(!is_rate_limit_error(&msg), "non-CF 403 must not match throttle: {}", msg);
+        assert!(
+            !is_rate_limit_error(&msg),
+            "non-CF 403 must not match throttle: {}",
+            msg
+        );
     }
 
     #[test]
@@ -475,7 +485,11 @@ mod tests {
     }
 
     fn state(limit: u32, remaining: u32, reset_at: Option<Instant>) -> RateLimitState {
-        RateLimitState { limit, remaining, reset_at }
+        RateLimitState {
+            limit,
+            remaining,
+            reset_at,
+        }
     }
 
     #[test]
@@ -549,17 +563,19 @@ mod tests {
     fn cooldown_from_headers_prefers_x_ratelimit_reset() {
         use reqwest::header::HeaderMap;
         let mut h = HeaderMap::new();
-        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        h.insert("x-ratelimit-reset", (now_unix + 30).to_string().parse().unwrap());
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        h.insert(
+            "x-ratelimit-reset",
+            (now_unix + 30).to_string().parse().unwrap(),
+        );
         h.insert("retry-after", "999".parse().unwrap());
         let dur = cooldown_from_headers(&h, ANILIST_COOLDOWN_DEFAULT);
         let lower = Duration::from_secs(30) + COOLDOWN_SAFETY_MARGIN - Duration::from_secs(2);
         let upper = Duration::from_secs(30) + COOLDOWN_SAFETY_MARGIN + Duration::from_secs(2);
-        assert!(
-            dur >= lower && dur <= upper,
-            "expected ~32s, got {:?}",
-            dur
-        );
+        assert!(dur >= lower && dur <= upper, "expected ~32s, got {:?}", dur);
     }
 
     #[test]
@@ -583,8 +599,14 @@ mod tests {
     fn cooldown_from_headers_caps_runaway_reset_at_max() {
         use reqwest::header::HeaderMap;
         let mut h = HeaderMap::new();
-        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        h.insert("x-ratelimit-reset", (now_unix + 3600).to_string().parse().unwrap());
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        h.insert(
+            "x-ratelimit-reset",
+            (now_unix + 3600).to_string().parse().unwrap(),
+        );
         let dur = cooldown_from_headers(&h, ANILIST_COOLDOWN_DEFAULT);
         assert_eq!(dur, ANILIST_COOLDOWN_MAX + COOLDOWN_SAFETY_MARGIN);
     }

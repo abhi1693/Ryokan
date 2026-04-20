@@ -115,13 +115,22 @@ pub fn classify_temporal(
     // run ends. A batch grabbed a year or more after the end date is much
     // more likely to be a BD rip than a TV encode.
     if years_since_end >= 1 && is_batch {
-        let confidence = if using_fallback { 0.65 * FALLBACK_CONFIDENCE_SCALE } else { 0.65 };
+        let confidence = if using_fallback {
+            0.65 * FALLBACK_CONFIDENCE_SCALE
+        } else {
+            0.65
+        };
         let detail = if using_fallback {
             "finished 1+ year ago + batch (start-year fallback)"
         } else {
             "finished 1+ year ago + batch"
         };
-        return Some(SourceEvidence::new(Source::BluRay, confidence, ORIGIN, detail));
+        return Some(SourceEvidence::new(
+            Source::BluRay,
+            confidence,
+            ORIGIN,
+            detail,
+        ));
     }
 
     // Rule 3: finished this year + single-episode release → Web.
@@ -275,8 +284,11 @@ mod tests {
         // fallback confidence.
         let ev = classify_temporal("FINISHED", Some(2015), Some(2025), true, 2026).unwrap();
         assert_eq!(ev.source, Source::BluRay);
-        assert!((ev.confidence - 0.65).abs() < 1e-4,
-            "end_year path should emit full confidence, got {}", ev.confidence);
+        assert!(
+            (ev.confidence - 0.65).abs() < 1e-4,
+            "end_year path should emit full confidence, got {}",
+            ev.confidence
+        );
     }
 
     #[test]
@@ -285,8 +297,11 @@ mod tests {
         // scales confidence down to ~0.55.
         let ev = classify_temporal("FINISHED", Some(2024), None, true, 2026).unwrap();
         assert_eq!(ev.source, Source::BluRay);
-        assert!((ev.confidence - 0.55).abs() < 1e-3,
-            "fallback confidence should be ~0.55, got {}", ev.confidence);
+        assert!(
+            (ev.confidence - 0.55).abs() < 1e-3,
+            "fallback confidence should be ~0.55, got {}",
+            ev.confidence
+        );
         assert!(ev.detail.contains("fallback"));
     }
 

@@ -275,9 +275,10 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
                 }
                 if let Some(bps) = s.get("bits_per_raw_sample").and_then(|v| v.as_str())
                     && let Ok(n) = bps.parse::<u8>()
-                        && n > 0 {
-                            facts.bit_depth = n;
-                        }
+                    && n > 0
+                {
+                    facts.bit_depth = n;
+                }
             }
             "audio" => {
                 facts.audio_codecs.push(codec_name.clone());
@@ -300,9 +301,7 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
             // PGS (Blu-ray) subtitles come through as "hdmv_pgs_subtitle"
             // under codec_name. Also accept the older S_HDMV/PGS form that
             // shows up in some mkvtoolnix-produced files.
-            "subtitle"
-                if codec_name.contains("pgs") || codec_name.contains("hdmv_pgs") =>
-            {
+            "subtitle" if codec_name.contains("pgs") || codec_name.contains("hdmv_pgs") => {
                 facts.has_pgs_subs = true;
             }
             _ => {}
@@ -600,10 +599,11 @@ mod tests {
             audio_stream("dts"), // fake — dts_hd_ma shows up as "dts" with a profile
         ]));
         // Plain DTS doesn't fire — we need "dts" + "hd" in the name.
-        assert!(!out.evidence.iter().any(|e| {
-            e.source == Source::BluRay
-                && e.detail.contains("DTS")
-        }));
+        assert!(
+            !out.evidence
+                .iter()
+                .any(|e| { e.source == Source::BluRay && e.detail.contains("DTS") })
+        );
         let out2 = scan_ffprobe_json(&probe_json(vec![
             video_stream("hevc", 1920, 1080, "yuv420p"),
             audio_stream("dts_hd_ma"),

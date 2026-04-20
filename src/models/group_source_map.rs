@@ -86,15 +86,18 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     // ── Legacy BD encoders ────────────────────────────────────────────────
     // Well-known BD-only encoders that predate or sit outside the current
     // TRaSH custom formats but are still widely seeded.
-    ("VCB-Studio", Source::BluRay, 0.95, "legacy BD encode specialist"),
+    (
+        "VCB-Studio",
+        Source::BluRay,
+        0.95,
+        "legacy BD encode specialist",
+    ),
     ("Coalgirls", Source::BluRay, 0.95, "legacy BD encoder"),
-
     // ── TRaSH BD Tier 01 ──────────────────────────────────────────────────
     ("DemiHuman", Source::BluRay, 0.95, "TRaSH BD tier 01"),
     ("Flugel", Source::BluRay, 0.95, "TRaSH BD tier 01"),
     ("Moxie", Source::BluRay, 0.95, "TRaSH BD tier 01"),
     ("NAN0", Source::BluRay, 0.95, "TRaSH BD tier 01"),
-
     // ── TRaSH BD Tier 02 ──────────────────────────────────────────────────
     ("Aergia", Source::BluRay, 0.95, "TRaSH BD tier 02"),
     ("FateSucks", Source::BluRay, 0.95, "TRaSH BD tier 02"),
@@ -110,7 +113,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("PMR", Source::BluRay, 0.95, "TRaSH BD tier 02"),
     ("WAP", Source::BluRay, 0.95, "TRaSH BD tier 02"),
     ("YURI", Source::BluRay, 0.95, "TRaSH BD tier 02"),
-
     // ── TRaSH BD Tier 03 ──────────────────────────────────────────────────
     ("ARC", Source::BluRay, 0.95, "TRaSH BD tier 03"),
     ("BBT-RMX", Source::BluRay, 0.95, "TRaSH BD tier 03"),
@@ -141,7 +143,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     // so treat it as source-ambiguous and let other evidence decide.
     ("SubsMix", Source::BluRay, 0.95, "TRaSH BD tier 03"),
     ("uba", Source::BluRay, 0.95, "TRaSH BD tier 03"),
-
     // ── TRaSH BD Tier 04 ──────────────────────────────────────────────────
     ("ABdex", Source::BluRay, 0.95, "TRaSH BD tier 04"),
     ("Afro", Source::BluRay, 0.95, "TRaSH BD tier 04"),
@@ -175,7 +176,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Vanilla", Source::BluRay, 0.95, "TRaSH BD tier 04"),
     ("Virtuality", Source::BluRay, 0.95, "TRaSH BD tier 04"),
     ("VULCAN", Source::BluRay, 0.95, "TRaSH BD tier 04"),
-
     // ── TRaSH BD Tier 05 ──────────────────────────────────────────────────
     ("Animorphs", Source::BluRay, 0.95, "TRaSH BD tier 05"),
     ("AOmundson", Source::BluRay, 0.95, "TRaSH BD tier 05"),
@@ -206,7 +206,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("WBDP", Source::BluRay, 0.95, "TRaSH BD tier 05"),
     ("WSE", Source::BluRay, 0.95, "TRaSH BD tier 05"),
     ("Yuki", Source::BluRay, 0.95, "TRaSH BD tier 05"),
-
     // ── TRaSH BD Tier 06 ──────────────────────────────────────────────────
     ("ANE", Source::BluRay, 0.95, "TRaSH BD tier 06"),
     ("Bunny-Apocalypse", Source::BluRay, 0.95, "TRaSH BD tier 06"),
@@ -221,7 +220,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Starbez", Source::BluRay, 0.95, "TRaSH BD tier 06"),
     ("Yoghurt", Source::BluRay, 0.95, "TRaSH BD tier 06"),
     ("YURASUKA", Source::BluRay, 0.95, "TRaSH BD tier 06"),
-
     // ── TRaSH BD Tier 07 ──────────────────────────────────────────────────
     ("AC", Source::BluRay, 0.95, "TRaSH BD tier 07"),
     ("Almighty", Source::BluRay, 0.95, "TRaSH BD tier 07"),
@@ -251,7 +249,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("SEV", Source::BluRay, 0.95, "TRaSH BD tier 07"),
     ("THORA", Source::BluRay, 0.95, "TRaSH BD tier 07"),
     ("Vivid", Source::BluRay, 0.95, "TRaSH BD tier 07"),
-
     // ── TRaSH BD Tier 08 ──────────────────────────────────────────────────
     ("AkihitoSubs", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Arukoru", Source::BluRay, 0.95, "TRaSH BD tier 08"),
@@ -265,7 +262,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Nep_Blanc", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Prof", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Shiro", Source::BluRay, 0.95, "TRaSH BD tier 08"),
-
     // ── TRaSH anime-raws (Japanese BD raw encoders) ───────────────────────
     // BD-only raw encoding specialists from the `anime-raws` CF. Confidence
     // is 0.95 because these groups exclusively work from Blu-ray sources.
@@ -289,11 +285,9 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Scryous-Raws", Source::BluRay, 0.95, "TRaSH anime raws"),
     ("Seicher-Raws", Source::BluRay, 0.95, "TRaSH anime raws"),
     ("Shiniori-Raws", Source::BluRay, 0.95, "TRaSH anime raws"),
-
     // ── TRaSH WEB Tier 01 ─────────────────────────────────────────────────
     ("Setsugen", Source::Web, 0.95, "TRaSH WEB tier 01"),
     ("Z4ST1N", Source::Web, 0.95, "TRaSH WEB tier 01"),
-
     // ── TRaSH WEB Tier 02 ─────────────────────────────────────────────────
     ("0x539", Source::Web, 0.95, "TRaSH WEB tier 02"),
     ("Cyan", Source::Web, 0.95, "TRaSH WEB tier 02"),
@@ -306,18 +300,15 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("Slyfox", Source::Web, 0.95, "TRaSH WEB tier 02"),
     ("SoLCE", Source::Web, 0.95, "TRaSH WEB tier 02"),
     ("tenshi", Source::Web, 0.95, "TRaSH WEB tier 02"),
-
     // ── TRaSH WEB Tier 03 ─────────────────────────────────────────────────
     ("AnoZu", Source::Web, 0.95, "TRaSH WEB tier 03"),
     ("Dooky", Source::Web, 0.95, "TRaSH WEB tier 03"),
     ("Kitsune", Source::Web, 0.95, "TRaSH WEB tier 03"),
     ("SubsPlus+", Source::Web, 0.95, "TRaSH WEB tier 03"),
-
     // ── TRaSH WEB Tier 04 ─────────────────────────────────────────────────
     ("Erai-raws", Source::Web, 0.95, "TRaSH WEB tier 04"),
     ("ToonsHub", Source::Web, 0.95, "TRaSH WEB tier 04"),
     ("VARYG", Source::Web, 0.95, "TRaSH WEB tier 04"),
-
     // ── TRaSH WEB Tier 05 ─────────────────────────────────────────────────
     ("BlueLobster", Source::Web, 0.95, "TRaSH WEB tier 05"),
     ("GST", Source::Web, 0.95, "TRaSH WEB tier 05"),
@@ -333,7 +324,6 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("SubsPlease", Source::Web, 0.95, "TRaSH WEB tier 05"),
     ("URANIME", Source::Web, 0.95, "TRaSH WEB tier 05"),
     ("ZigZag", Source::Web, 0.95, "TRaSH WEB tier 05"),
-
     // ── TRaSH WEB Tier 06 ─────────────────────────────────────────────────
     ("DameDesuYo", Source::Web, 0.95, "TRaSH WEB tier 06"),
     ("Doki", Source::Web, 0.95, "TRaSH WEB tier 06"),

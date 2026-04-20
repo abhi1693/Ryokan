@@ -37,9 +37,8 @@ pub async fn get_by_series_id(
     };
 
     let detail_json: String = row.get("detail_json");
-    let detail: AnimeDetail = serde_json::from_str(&detail_json).map_err(|e| {
-        sqlx::Error::Decode(Box::new(e))
-    })?;
+    let detail: AnimeDetail =
+        serde_json::from_str(&detail_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
 
     Ok(Some(CachedSeriesMetadata {
         provider_id: row.get("provider_id"),
@@ -56,8 +55,8 @@ pub async fn upsert(
     mal_id: Option<i64>,
     detail: &AnimeDetail,
 ) -> Result<(), sqlx::Error> {
-    let detail_json = serde_json::to_string(detail)
-        .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    let detail_json =
+        serde_json::to_string(detail).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
 
     sqlx::query(
         r#"
@@ -79,7 +78,6 @@ pub async fn upsert(
 
     Ok(())
 }
-
 
 pub async fn get_by_provider_id(
     db: &SqlitePool,
@@ -106,9 +104,8 @@ pub async fn get_by_provider_id(
     };
 
     let detail_json: String = row.get("detail_json");
-    let detail: AnimeDetail = serde_json::from_str(&detail_json).map_err(|e| {
-        sqlx::Error::Decode(Box::new(e))
-    })?;
+    let detail: AnimeDetail =
+        serde_json::from_str(&detail_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
 
     Ok(Some(CachedSeriesMetadata {
         provider_id: row.get("provider_id"),
@@ -124,8 +121,8 @@ pub async fn upsert_provider(
     mal_id: Option<i64>,
     detail: &AnimeDetail,
 ) -> Result<(), sqlx::Error> {
-    let detail_json = serde_json::to_string(detail)
-        .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    let detail_json =
+        serde_json::to_string(detail).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
 
     sqlx::query(
         r#"

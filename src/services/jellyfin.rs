@@ -60,7 +60,11 @@ impl JellyfinClient {
         &self.base_url
     }
 
-    async fn get<T: for<'de> Deserialize<'de>>(&self, endpoint: &str, query: &[(&str, String)]) -> Result<T, String> {
+    async fn get<T: for<'de> Deserialize<'de>>(
+        &self,
+        endpoint: &str,
+        query: &[(&str, String)],
+    ) -> Result<T, String> {
         if !self.is_configured() {
             return Err("Jellyfin is not configured".to_string());
         }
@@ -76,14 +80,23 @@ impl JellyfinClient {
             req = req.query(query);
         }
 
-        let resp = req.send().await.map_err(|e| format!("Jellyfin request failed: {}", e))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("Jellyfin request failed: {}", e))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Jellyfin request failed ({}): {}", status, truncate(&body)));
+            return Err(format!(
+                "Jellyfin request failed ({}): {}",
+                status,
+                truncate(&body)
+            ));
         }
 
-        resp.json::<T>().await.map_err(|e| format!("Jellyfin response parse failed: {}", e))
+        resp.json::<T>()
+            .await
+            .map_err(|e| format!("Jellyfin response parse failed: {}", e))
     }
 
     async fn post_empty(&self, endpoint: &str) -> Result<(), String> {
@@ -103,7 +116,11 @@ impl JellyfinClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Jellyfin request failed ({}): {}", status, truncate(&body)));
+            return Err(format!(
+                "Jellyfin request failed ({}): {}",
+                status,
+                truncate(&body)
+            ));
         }
 
         Ok(())

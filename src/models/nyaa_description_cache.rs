@@ -80,11 +80,10 @@ pub async fn upsert(db: &SqlitePool, info_hash: &str, description: &str) {
 /// by `upsert`, so this only evicts rows that truly went cold.
 pub async fn cleanup(db: &SqlitePool, max_age_days: i32) -> Result<u64, sqlx::Error> {
     let cutoff = format!("-{} days", max_age_days);
-    let res = sqlx::query(
-        "DELETE FROM nyaa_description_cache WHERE cached_at < datetime('now', ?)",
-    )
-    .bind(cutoff)
-    .execute(db)
-    .await?;
+    let res =
+        sqlx::query("DELETE FROM nyaa_description_cache WHERE cached_at < datetime('now', ?)")
+            .bind(cutoff)
+            .execute(db)
+            .await?;
     Ok(res.rows_affected())
 }

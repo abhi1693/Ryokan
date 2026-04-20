@@ -1,13 +1,13 @@
 use askama::Template;
 use axum::{
-    extract::State,
     extract::Query,
+    extract::State,
     response::{Html, Json},
 };
 use serde::Deserialize;
 
-use crate::models::grabbed_torrents;
 use crate::AppState;
+use crate::models::grabbed_torrents;
 
 struct QueueTorrentView {
     hash: String,
@@ -22,28 +22,41 @@ struct QueueTorrentView {
 }
 
 fn format_size(bytes: i64) -> String {
-    if bytes <= 0 { return "0 B".to_string(); }
+    if bytes <= 0 {
+        return "0 B".to_string();
+    }
     let units = ["B", "KB", "MB", "GB", "TB"];
     let i = ((bytes as f64).ln() / 1024f64.ln()).floor() as usize;
     let i = i.min(units.len() - 1);
     let val = bytes as f64 / 1024f64.powi(i as i32);
-    if i == 0 { format!("{} {}", val as i64, units[i]) }
-    else { format!("{:.1} {}", val, units[i]) }
+    if i == 0 {
+        format!("{} {}", val as i64, units[i])
+    } else {
+        format!("{:.1} {}", val, units[i])
+    }
 }
 
 fn format_speed(bps: i64) -> String {
-    if bps <= 0 { return String::new(); }
+    if bps <= 0 {
+        return String::new();
+    }
     format!("{}/s", format_size(bps))
 }
 
 fn format_eta(seconds: i64) -> String {
-    if seconds <= 0 || seconds >= 8640000 { return String::new(); }
+    if seconds <= 0 || seconds >= 8640000 {
+        return String::new();
+    }
     let h = seconds / 3600;
     let m = (seconds % 3600) / 60;
     let s = seconds % 60;
-    if h > 0 { format!("{}h {}m", h, m) }
-    else if m > 0 { format!("{}m {}s", m, s) }
-    else { format!("{}s", s) }
+    if h > 0 {
+        format!("{}h {}m", h, m)
+    } else if m > 0 {
+        format!("{}m {}s", m, s)
+    } else {
+        format!("{}s", s)
+    }
 }
 
 fn state_label(state: &str) -> &str {
@@ -124,9 +137,21 @@ pub async fn downloads_page(
                 Ok(mut torrents) => {
                     // Sort: downloading first, then by progress descending.
                     torrents.sort_by(|a, b| {
-                        let a_down = if a.state.contains("DL") || a.state == "downloading" { 0 } else { 1 };
-                        let b_down = if b.state.contains("DL") || b.state == "downloading" { 0 } else { 1 };
-                        a_down.cmp(&b_down).then(b.progress.partial_cmp(&a.progress).unwrap_or(std::cmp::Ordering::Equal))
+                        let a_down = if a.state.contains("DL") || a.state == "downloading" {
+                            0
+                        } else {
+                            1
+                        };
+                        let b_down = if b.state.contains("DL") || b.state == "downloading" {
+                            0
+                        } else {
+                            1
+                        };
+                        a_down.cmp(&b_down).then(
+                            b.progress
+                                .partial_cmp(&a.progress)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
                     });
                     let views = torrents.iter().map(torrent_to_view).collect();
                     (views, String::new())
@@ -140,13 +165,17 @@ pub async fn downloads_page(
     };
 
     let history = if tab == "history" {
-        grabbed_torrents::get_all_with_series(&state.db, 500).await.unwrap_or_default()
+        grabbed_torrents::get_all_with_series(&state.db, 500)
+            .await
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
 
     let blocklist = if tab == "blocklist" {
-        grabbed_torrents::get_blocked(&state.db).await.unwrap_or_default()
+        grabbed_torrents::get_blocked(&state.db)
+            .await
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -198,10 +227,16 @@ pub async fn api_pause_torrent(
     let client = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "qBittorrent not configured".to_string(),
+            ))?
             .clone()
     };
-    client.pause_torrent(&form.hash).await.map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    client
+        .pause_torrent(&form.hash)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -224,10 +259,16 @@ pub async fn api_resume_torrent(
     let client = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "qBittorrent not configured".to_string(),
+            ))?
             .clone()
     };
-    client.resume_torrent(&form.hash).await.map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    client
+        .resume_torrent(&form.hash)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -250,10 +291,16 @@ pub async fn api_delete_torrent(
     let client = {
         let qbit = state.qbit.read().await;
         qbit.as_ref()
-            .ok_or((axum::http::StatusCode::BAD_REQUEST, "qBittorrent not configured".to_string()))?
+            .ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "qBittorrent not configured".to_string(),
+            ))?
             .clone()
     };
-    client.delete_torrent(&form.hash, form.delete_files).await.map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    client
+        .delete_torrent(&form.hash, form.delete_files)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 

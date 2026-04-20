@@ -4,7 +4,8 @@ use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
-const MAPPINGS_URL: &str = "https://github.com/anibridge/anibridge-mappings/releases/latest/download/mappings.min.json";
+const MAPPINGS_URL: &str =
+    "https://github.com/anibridge/anibridge-mappings/releases/latest/download/mappings.min.json";
 
 /// How long the on-disk mappings JSON is considered fresh. This is
 /// also re-used by `main.rs` as the `anibridge_refresh` background-
@@ -53,8 +54,7 @@ fn write_disk_cache(bytes: &[u8]) -> Result<(), String> {
             .map_err(|e| format!("create anibridge cache dir failed: {}", e))?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)
-        .map_err(|e| format!("write anibridge cache tmp failed: {}", e))?;
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write anibridge cache tmp failed: {}", e))?;
     std::fs::rename(&tmp, &path)
         .map_err(|e| format!("rename anibridge cache tmp failed: {}", e))?;
     Ok(())
@@ -87,13 +87,11 @@ fn write_disk_cache_meta(meta: &DiskCacheMeta) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create anibridge meta dir failed: {}", e))?;
     }
-    let json = serde_json::to_vec(meta)
-        .map_err(|e| format!("serialize anibridge meta failed: {}", e))?;
+    let json =
+        serde_json::to_vec(meta).map_err(|e| format!("serialize anibridge meta failed: {}", e))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)
-        .map_err(|e| format!("write anibridge meta tmp failed: {}", e))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| format!("rename anibridge meta tmp failed: {}", e))?;
+    std::fs::write(&tmp, &json).map_err(|e| format!("write anibridge meta tmp failed: {}", e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename anibridge meta tmp failed: {}", e))?;
     Ok(())
 }
 
@@ -287,9 +285,10 @@ fn lookup_show(
         if *id == show_id {
             for e in entries {
                 if let Some(al) = e.anilist_id
-                    && result.iter().any(|r: &AnimeIds| r.anilist_id == Some(al)) {
-                        continue;
-                    }
+                    && result.iter().any(|r: &AnimeIds| r.anilist_id == Some(al))
+                {
+                    continue;
+                }
                 result.push(e.clone());
             }
         }
@@ -411,11 +410,13 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
     let cache_file_present = tokio::task::spawn_blocking(|| cache_file_path().exists())
         .await
         .unwrap_or(false);
-    let conditional_meta = if cache_file_present { stored_meta } else { None };
+    let conditional_meta = if cache_file_present {
+        stored_meta
+    } else {
+        None
+    };
 
-    let mut req = client
-        .get(MAPPINGS_URL)
-        .header("User-Agent", "Ryokan/0.1");
+    let mut req = client.get(MAPPINGS_URL).header("User-Agent", "Ryokan/0.1");
     if let Some(meta) = &conditional_meta {
         if let Some(etag) = &meta.etag {
             req = req.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -464,14 +465,16 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
             .ok_or_else(|| {
                 "Anibridge upstream returned 304 but disk cache is missing".to_string()
             })?;
-        if let Err(e) = tokio::task::spawn_blocking(touch_disk_cache).await
+        if let Err(e) = tokio::task::spawn_blocking(touch_disk_cache)
+            .await
             .unwrap_or_else(|e| Err(format!("touch join failed: {}", e)))
         {
             tracing::warn!("Failed to bump anibridge cache mtime after 304: {}", e);
         }
         if (refreshed_meta.etag.is_some() || refreshed_meta.last_modified.is_some())
             && let Err(e) =
-                tokio::task::spawn_blocking(move || write_disk_cache_meta(&refreshed_meta)).await
+                tokio::task::spawn_blocking(move || write_disk_cache_meta(&refreshed_meta))
+                    .await
                     .unwrap_or_else(|e| Err(format!("disk meta write join failed: {}", e)))
         {
             tracing::warn!("Failed to refresh anibridge cache meta after 304: {}", e);
@@ -530,7 +533,8 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
             // just be a regular GET anyway.
             if (new_meta.etag.is_some() || new_meta.last_modified.is_some())
                 && let Err(e) =
-                    tokio::task::spawn_blocking(move || write_disk_cache_meta(&new_meta)).await
+                    tokio::task::spawn_blocking(move || write_disk_cache_meta(&new_meta))
+                        .await
                         .unwrap_or_else(|e| Err(format!("disk meta write join failed: {}", e)))
             {
                 tracing::warn!("Failed to persist anibridge cache meta to disk: {}", e);
@@ -564,7 +568,14 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
 
     let obj = match data.as_object() {
         Some(o) => o,
-        None => return MappingCache { tmdb_to_anime, tvdb_to_anime, anilist_to_tmdb, mal_to_tmdb },
+        None => {
+            return MappingCache {
+                tmdb_to_anime,
+                tvdb_to_anime,
+                anilist_to_tmdb,
+                mal_to_tmdb,
+            };
+        }
     };
 
     for (source_key, targets) in obj {
@@ -585,13 +596,22 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
 
         for key in &all_keys {
             if let Some(id) = parse_provider_id(key, "anilist") {
-                if !anilist_ids.contains(&id) { anilist_ids.push(id); }
+                if !anilist_ids.contains(&id) {
+                    anilist_ids.push(id);
+                }
             } else if let Some(id) = parse_provider_id(key, "mal") {
-                if !mal_ids.contains(&id) { mal_ids.push(id); }
+                if !mal_ids.contains(&id) {
+                    mal_ids.push(id);
+                }
             } else if let Some(id_season) = parse_show_id(key, "tmdb_show") {
-                if !tmdb_ids.contains(&id_season) { tmdb_ids.push(id_season); }
+                if !tmdb_ids.contains(&id_season) {
+                    tmdb_ids.push(id_season);
+                }
             } else if let Some(id_season) = parse_show_id(key, "tvdb_show")
-                && !tvdb_ids.contains(&id_season) { tvdb_ids.push(id_season); }
+                && !tvdb_ids.contains(&id_season)
+            {
+                tvdb_ids.push(id_season);
+            }
         }
 
         if anilist_ids.is_empty() && mal_ids.is_empty() {
@@ -633,15 +653,21 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                         continue;
                     }
                 } else if let Some(m) = ids.mal_id
-                    && entry.iter().any(|e| e.mal_id == Some(m)) {
-                        continue;
-                    }
+                    && entry.iter().any(|e| e.mal_id == Some(m))
+                {
+                    continue;
+                }
                 entry.push(ids.clone());
             }
         }
     }
 
-    MappingCache { tmdb_to_anime, tvdb_to_anime, anilist_to_tmdb, mal_to_tmdb }
+    MappingCache {
+        tmdb_to_anime,
+        tvdb_to_anime,
+        anilist_to_tmdb,
+        mal_to_tmdb,
+    }
 }
 
 /// Parse "tmdb_show:12345:s1" or "tvdb_show:262954:s6" → Some((12345, 1)) / Some((262954, 6))

@@ -4,19 +4,19 @@
 //! requests into Ryokan's internal data model.
 
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::{Request, StatusCode},
     middleware::Next,
     response::Response,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::AppState;
+use crate::models::log::LogCategory;
 use crate::models::{config, monitoring, series};
 use crate::services::{anibridge, anilist, logger, media, monitoring as monitoring_service};
-use crate::models::log::LogCategory;
-use crate::AppState;
 
 // ── Authentication middleware ──────────────────────────────────────────────
 
@@ -296,9 +296,7 @@ pub async fn quality_profiles() -> Json<Vec<QualityProfile>> {
 }
 
 /// GET /api/v3/rootfolder
-pub async fn root_folders(
-    State(state): State<AppState>,
-) -> Json<Vec<RootFolder>> {
+pub async fn root_folders(State(state): State<AppState>) -> Json<Vec<RootFolder>> {
     let media_root = config::get_config(&state.db)
         .await
         .ok()
@@ -306,7 +304,11 @@ pub async fn root_folders(
         .map(|c| c.media_root)
         .unwrap_or_default();
 
-    let path = if media_root.is_empty() { "/media".to_string() } else { media_root };
+    let path = if media_root.is_empty() {
+        "/media".to_string()
+    } else {
+        media_root
+    };
 
     Json(vec![RootFolder {
         id: 1,
@@ -331,9 +333,7 @@ pub async fn list_tags() -> Json<Vec<Tag>> {
 }
 
 /// POST /api/v3/tag
-pub async fn create_tag(
-    Json(body): Json<TagBody>,
-) -> Json<Tag> {
+pub async fn create_tag(Json(body): Json<TagBody>) -> Json<Tag> {
     Json(Tag {
         id: 1,
         label: body.label.unwrap_or_default(),
@@ -377,7 +377,11 @@ pub async fn series_lookup(
             .flatten();
 
         let tmdb_id = anibridge::resolve_tmdb_id(r.id, r.id_mal).await;
-        let title = if !r.title_english.is_empty() { &r.title_english } else { &r.title_romaji };
+        let title = if !r.title_english.is_empty() {
+            &r.title_english
+        } else {
+            &r.title_romaji
+        };
 
         sonarr_results.push(build_sonarr_series_from_search(
             &r,
@@ -447,7 +451,8 @@ pub async fn add_series(
     // Extract which season Seerr is requesting. Seerr marks exactly one season as
     // monitored per request, so .max() effectively picks the single monitored season.
     let requested_season = body.seasons.as_ref().and_then(|seasons| {
-        seasons.iter()
+        seasons
+            .iter()
             .filter(|s| s.monitored && s.season_number > 0)
             .map(|s| s.season_number)
             .max()
@@ -455,7 +460,10 @@ pub async fn add_series(
 
     tracing::info!(
         "Seerr add_series: tvdb_id={}, title={:?}, requested_season={:?}, seasons={:?}",
-        tvdb_id, body.title, requested_season, body.seasons,
+        tvdb_id,
+        body.title,
+        requested_season,
+        body.seasons,
     );
 
     // Resolve TVDB + season → AniList/MAL IDs via anibridge.
@@ -476,7 +484,10 @@ pub async fn add_series(
 
     tracing::info!(
         "Anibridge resolved TVDB {} season {:?} → {} entries: {:?}",
-        tvdb_id, requested_season, anime_ids.len(), anime_ids,
+        tvdb_id,
+        requested_season,
+        anime_ids.len(),
+        anime_ids,
     );
 
     // #26 — Squashed-merge detection. >1 AL entry means TMDB collapsed
@@ -537,7 +548,9 @@ pub async fn add_series(
             ).await;
         }
     } else if !anime_ids.is_empty()
-        && anime_ids.iter().any(|a| a.anilist_id.is_some() || a.mal_id.is_some())
+        && anime_ids
+            .iter()
+            .any(|a| a.anilist_id.is_some() || a.mal_id.is_some())
     {
         if is_squashed_merge {
             let al_ids: Vec<i64> = anime_ids.iter().filter_map(|a| a.anilist_id).collect();
@@ -546,10 +559,13 @@ pub async fn add_series(
                 LogCategory::Library,
                 &format!(
                     "Seerr add: TVDB {} season {:?} maps to {} AniList entries — fanning out",
-                    tvdb_id, requested_season, anime_ids.len()
+                    tvdb_id,
+                    requested_season,
+                    anime_ids.len()
                 ),
                 &format!("al_ids_sorted={:?}", al_ids),
-            ).await;
+            )
+            .await;
         }
 
         // Pre-batch every still-missing AniList id into one
@@ -571,9 +587,7 @@ pub async fn add_series(
         if !prefetch_ids.is_empty()
             && let Err(e) = anilist::get_anime_details_batch(&prefetch_ids).await
         {
-            tracing::debug!(
-                "Seerr add: AL batch prefetch failed (per-id loop will retry): {e}"
-            );
+            tracing::debug!("Seerr add: AL batch prefetch failed (per-id loop will retry): {e}");
         }
 
         for (ids, existing) in anime_ids.iter().zip(existing_siblings) {
@@ -623,7 +637,11 @@ pub async fn add_series(
                 }
             };
 
-            let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+            let title = if !detail.title_english.is_empty() {
+                &detail.title_english
+            } else {
+                &detail.title_romaji
+            };
             let (id, _created) = series::upsert(
                 &state.db,
                 series::SeriesCore {
@@ -647,7 +665,10 @@ pub async fn add_series(
             let s = series::get_by_id(&state.db, id)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-                .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Series not found after insert".to_string()))?;
+                .ok_or((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Series not found after insert".to_string(),
+                ))?;
             processed.push(s);
             newly_added += 1;
         }
@@ -656,22 +677,35 @@ pub async fn add_series(
         // Single-path only: we have nothing to fan out over.
         let search_title = body.title.as_deref().unwrap_or("");
         if search_title.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, format!("No mapping for TVDB ID {} and no title provided", tvdb_id)));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("No mapping for TVDB ID {} and no title provided", tvdb_id),
+            ));
         }
-        tracing::info!("No anibridge mapping for TVDB {}; searching AniList for '{}'", tvdb_id, search_title);
+        tracing::info!(
+            "No anibridge mapping for TVDB {}; searching AniList for '{}'",
+            tvdb_id,
+            search_title
+        );
 
         let results = anilist::search_anime(search_title)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
-        let best = results.first()
-            .ok_or((StatusCode::NOT_FOUND, format!("No AniList results for '{}'", search_title)))?;
+        let best = results.first().ok_or((
+            StatusCode::NOT_FOUND,
+            format!("No AniList results for '{}'", search_title),
+        ))?;
 
         let detail = anilist::get_anime_detail(best.id)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
-        let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+        let title = if !detail.title_english.is_empty() {
+            &detail.title_english
+        } else {
+            &detail.title_romaji
+        };
         let (id, _created) = series::upsert(
             &state.db,
             series::SeriesCore {
@@ -695,7 +729,10 @@ pub async fn add_series(
         let s = series::get_by_id(&state.db, id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Series not found after insert".to_string()))?;
+            .ok_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Series not found after insert".to_string(),
+            ))?;
         processed.push(s);
         newly_added += 1;
     }
@@ -712,7 +749,9 @@ pub async fn add_series(
     // the whole squashed merge, so each fanned-out cour inherits it.
     let should_monitor = if let Some(ref seasons) = body.seasons {
         if let Some(req_s) = requested_season {
-            seasons.iter().any(|s| s.season_number == req_s && s.monitored)
+            seasons
+                .iter()
+                .any(|s| s.season_number == req_s && s.monitored)
         } else {
             body.monitored.unwrap_or(true)
         }
@@ -738,13 +777,21 @@ pub async fn add_series(
                 "Added via Seerr: {}{}",
                 primary_title,
                 if is_squashed_merge {
-                    format!(" (+{} sibling cour{})", processed.len().saturating_sub(1), if processed.len() == 2 { "" } else { "s" })
+                    format!(
+                        " (+{} sibling cour{})",
+                        processed.len().saturating_sub(1),
+                        if processed.len() == 2 { "" } else { "s" }
+                    )
                 } else {
                     String::new()
                 }
             ),
-            &format!("tvdb_id={}, series_ids={:?}, newly_added={}", tvdb_id, added_ids, newly_added),
-        ).await;
+            &format!(
+                "tvdb_id={}, series_ids={:?}, newly_added={}",
+                tvdb_id, added_ids, newly_added
+            ),
+        )
+        .await;
     }
 
     // Auto-search if requested. Each sibling in a fan-out gets its own
@@ -752,7 +799,8 @@ pub async fn add_series(
     // `auto_search_series` will lazily walk each series' PREQUEL chain
     // and set `cumulative_prior_episodes` on first run so absolute-
     // numbered releases route to the right cour.
-    if body.add_options
+    if body
+        .add_options
         .as_ref()
         .and_then(|o| o.search_for_missing_episodes)
         .unwrap_or(false)
@@ -766,7 +814,8 @@ pub async fn add_series(
                     axum::extract::State(state_clone),
                     axum::extract::Path(id),
                     axum::extract::Query(super::library::search::AutoSearchQuery::default()),
-                ).await;
+                )
+                .await;
             });
         }
     }
@@ -783,7 +832,9 @@ pub async fn add_series(
     // cours exist in Ryokan's DB but don't need to be reflected in the
     // Sonarr response shape.
     let primary = &processed[0];
-    Ok(Json(build_sonarr_series_from_tracked(primary, tvdb_id, &cfg)))
+    Ok(Json(build_sonarr_series_from_tracked(
+        primary, tvdb_id, &cfg,
+    )))
 }
 
 /// PUT /api/v3/series — update an existing series.
@@ -812,7 +863,8 @@ pub async fn update_series(
         LogCategory::Library,
         &format!("Updated via Seerr: {}", s.title),
         &format!("id={}, monitored={:?}", s.id, body.monitored),
-    ).await;
+    )
+    .await;
 
     let cfg = config::get_config(&state.db)
         .await
@@ -832,16 +884,18 @@ pub async fn execute_command(
     let name = body.name.unwrap_or_default();
 
     if name == "SeriesSearch"
-        && let Some(series_id) = body.series_id {
-            let state_clone = state.clone();
-            tokio::spawn(async move {
-                let _ = super::library::search::auto_search_series(
-                    axum::extract::State(state_clone),
-                    axum::extract::Path(series_id),
-                    axum::extract::Query(super::library::search::AutoSearchQuery::default()),
-                ).await;
-            });
-        }
+        && let Some(series_id) = body.series_id
+    {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let _ = super::library::search::auto_search_series(
+                axum::extract::State(state_clone),
+                axum::extract::Path(series_id),
+                axum::extract::Query(super::library::search::AutoSearchQuery::default()),
+            )
+            .await;
+        });
+    }
 
     Json(serde_json::json!({
         "id": 1,
@@ -873,7 +927,10 @@ async fn lookup_by_external_id(
     }
 
     if season_entries.is_empty() {
-        tracing::warn!("No anibridge mapping for TVDB ID {}; returning stub for Seerr", tvdb_id);
+        tracing::warn!(
+            "No anibridge mapping for TVDB ID {}; returning stub for Seerr",
+            tvdb_id
+        );
         return Ok(Json(vec![build_stub_series(tvdb_id, cfg)]));
     }
 
@@ -883,10 +940,20 @@ async fn lookup_by_external_id(
     // the title — but a Jikan fallback may return a part-specific title here.
     let first_ids = &season_entries[0].1;
     let show_detail = fetch_anime_detail(first_ids).await;
-    let show_title = show_detail.as_ref().map(|d| {
-        if !d.title_english.is_empty() { d.title_english.clone() } else { d.title_romaji.clone() }
-    }).unwrap_or_else(|| format!("TVDB:{}", tvdb_id));
-    let show_cover = show_detail.as_ref().map(|d| d.cover_url.clone()).unwrap_or_default();
+    let show_title = show_detail
+        .as_ref()
+        .map(|d| {
+            if !d.title_english.is_empty() {
+                d.title_english.clone()
+            } else {
+                d.title_romaji.clone()
+            }
+        })
+        .unwrap_or_else(|| format!("TVDB:{}", tvdb_id));
+    let show_cover = show_detail
+        .as_ref()
+        .map(|d| d.cover_url.clone())
+        .unwrap_or_default();
 
     // Build a seasons array — one season per anibridge entry.
     let mut seasons = Vec::new();
@@ -909,19 +976,29 @@ async fn lookup_by_external_id(
     }
 
     let season_count = seasons.len() as i32;
-    let year = show_detail.as_ref().and_then(|d| d.season_year).unwrap_or(0);
+    let year = show_detail
+        .as_ref()
+        .and_then(|d| d.season_year)
+        .unwrap_or(0);
 
     let path = if cfg.media_root.is_empty() {
         format!("/media/{}", media::sanitize_folder_name(&show_title))
     } else {
-        format!("{}/{}", cfg.media_root, media::sanitize_folder_name(&show_title))
+        format!(
+            "{}/{}",
+            cfg.media_root,
+            media::sanitize_folder_name(&show_title)
+        )
     };
 
     let result = SonarrSeries {
         id: 0,
         title: show_title.clone(),
         sort_title: show_title.to_lowercase(),
-        status: show_detail.as_ref().map(|d| map_status(&d.status)).unwrap_or_else(|| "continuing".to_string()),
+        status: show_detail
+            .as_ref()
+            .map(|d| map_status(&d.status))
+            .unwrap_or_else(|| "continuing".to_string()),
         overview: String::new(),
         network: String::new(),
         air_time: String::new(),
@@ -944,14 +1021,19 @@ async fn lookup_by_external_id(
         tv_maze_id: 0,
         first_aired: String::new(),
         series_type: "anime".to_string(),
-        clean_title: show_title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""),
+        clean_title: show_title
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), ""),
         imdb_id: String::new(),
         title_slug: format!("ryokan-tvdb-{}", tvdb_id),
         certification: String::new(),
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: String::new(),
-        ratings: SonarrRatings { votes: 0, value: 0.0 },
+        ratings: SonarrRatings {
+            votes: 0,
+            value: 0.0,
+        },
         quality_profile_id: 1,
         root_folder_path: cfg.media_root.clone(),
         statistics: SonarrStatistics {
@@ -966,7 +1048,8 @@ async fn lookup_by_external_id(
 
     tracing::info!(
         "series_lookup TVDB {}: returning 1 series with {} seasons",
-        tvdb_id, season_count,
+        tvdb_id,
+        season_count,
     );
 
     Ok(Json(vec![result]))
@@ -975,13 +1058,15 @@ async fn lookup_by_external_id(
 /// Fetch anime detail from AniList or Jikan, returning None on failure.
 async fn fetch_anime_detail(ids: &anibridge::AnimeIds) -> Option<anilist::AnimeDetail> {
     if let Some(al_id) = ids.anilist_id
-        && let Ok(d) = anilist::get_anime_detail(al_id).await {
-            return Some(d);
-        }
+        && let Ok(d) = anilist::get_anime_detail(al_id).await
+    {
+        return Some(d);
+    }
     if let Some(mal_id) = ids.mal_id
-        && let Ok(d) = crate::services::jikan::get_anime_detail_cached(mal_id).await {
-            return Some(d);
-        }
+        && let Ok(d) = crate::services::jikan::get_anime_detail_cached(mal_id).await
+    {
+        return Some(d);
+    }
     None
 }
 
@@ -1038,7 +1123,11 @@ fn build_sonarr_series_from_search(
                 episode_count: total_eps,
                 total_episode_count: total_eps,
                 size_on_disk: 0,
-                percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
+                percent_of_episodes: if total_eps > 0 {
+                    (on_disk as f64 / total_eps as f64) * 100.0
+                } else {
+                    0.0
+                },
             },
         }],
         year: r.season_year.unwrap_or(0),
@@ -1054,14 +1143,19 @@ fn build_sonarr_series_from_search(
         tv_maze_id: 0,
         first_aired: String::new(),
         series_type: "anime".to_string(),
-        clean_title: title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""),
+        clean_title: title
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), ""),
         imdb_id: String::new(),
         title_slug: format!("ryokan-{}", r.id),
         certification: String::new(),
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: String::new(),
-        ratings: SonarrRatings { votes: 0, value: 0.0 },
+        ratings: SonarrRatings {
+            votes: 0,
+            value: 0.0,
+        },
         quality_profile_id: 1,
         root_folder_path: cfg.media_root.clone(),
         statistics: SonarrStatistics {
@@ -1070,7 +1164,11 @@ fn build_sonarr_series_from_search(
             episode_count: total_eps,
             total_episode_count: total_eps,
             size_on_disk: 0,
-            percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
+            percent_of_episodes: if total_eps > 0 {
+                (on_disk as f64 / total_eps as f64) * 100.0
+            } else {
+                0.0
+            },
         },
     }
 }
@@ -1091,7 +1189,11 @@ fn build_sonarr_series_from_tracked(
         format!("{}/{}", cfg.media_root, s.folder_name)
     };
 
-    let title = if !s.title.is_empty() { &s.title } else { &s.title_romaji };
+    let title = if !s.title.is_empty() {
+        &s.title
+    } else {
+        &s.title_romaji
+    };
 
     SonarrSeries {
         id: s.id,
@@ -1114,7 +1216,11 @@ fn build_sonarr_series_from_tracked(
                 episode_count: total_eps,
                 total_episode_count: total_eps,
                 size_on_disk: 0,
-                percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
+                percent_of_episodes: if total_eps > 0 {
+                    (on_disk as f64 / total_eps as f64) * 100.0
+                } else {
+                    0.0
+                },
             },
         }],
         year: s.season_year.unwrap_or(0),
@@ -1130,14 +1236,19 @@ fn build_sonarr_series_from_tracked(
         tv_maze_id: 0,
         first_aired: String::new(),
         series_type: "anime".to_string(),
-        clean_title: title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""),
+        clean_title: title
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), ""),
         imdb_id: String::new(),
         title_slug: format!("ryokan-{}", s.anilist_id),
         certification: String::new(),
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: String::new(),
-        ratings: SonarrRatings { votes: 0, value: 0.0 },
+        ratings: SonarrRatings {
+            votes: 0,
+            value: 0.0,
+        },
         quality_profile_id: 1,
         root_folder_path: cfg.media_root.clone(),
         statistics: SonarrStatistics {
@@ -1146,7 +1257,11 @@ fn build_sonarr_series_from_tracked(
             episode_count: total_eps,
             total_episode_count: total_eps,
             size_on_disk: 0,
-            percent_of_episodes: if total_eps > 0 { (on_disk as f64 / total_eps as f64) * 100.0 } else { 0.0 },
+            percent_of_episodes: if total_eps > 0 {
+                (on_disk as f64 / total_eps as f64) * 100.0
+            } else {
+                0.0
+            },
         },
     }
 }
@@ -1209,7 +1324,10 @@ fn build_stub_series(tvdb_id: i64, cfg: &config::Config) -> SonarrSeries {
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: String::new(),
-        ratings: SonarrRatings { votes: 0, value: 0.0 },
+        ratings: SonarrRatings {
+            votes: 0,
+            value: 0.0,
+        },
         quality_profile_id: 1,
         root_folder_path: cfg.media_root.clone(),
         statistics: SonarrStatistics {
@@ -1222,4 +1340,3 @@ fn build_stub_series(tvdb_id: i64, cfg: &config::Config) -> SonarrSeries {
         },
     }
 }
-

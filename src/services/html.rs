@@ -30,13 +30,20 @@ pub fn sanitize_rich_description(raw: &str, treat_as_html: bool) -> String {
     };
 
     let tags: HashSet<&str> = [
-        "br", "p", "b", "strong", "i", "em", "u", "ul", "ol", "li", "blockquote",
+        "br",
+        "p",
+        "b",
+        "strong",
+        "i",
+        "em",
+        "u",
+        "ul",
+        "ol",
+        "li",
+        "blockquote",
     ]
     .into_iter()
     .collect();
 
-    Builder::default()
-        .tags(tags)
-        .clean(&fragment)
-        .to_string()
+    Builder::default().tags(tags).clean(&fragment).to_string()
 }

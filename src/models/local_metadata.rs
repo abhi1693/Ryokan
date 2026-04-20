@@ -88,8 +88,7 @@ async fn replace_relations_table(
         if rel.id == owner_id {
             continue;
         }
-        if !owner_identity.is_empty()
-            && relation_identity_key(rel.id, rel.id_mal) == owner_identity
+        if !owner_identity.is_empty() && relation_identity_key(rel.id, rel.id_mal) == owner_identity
         {
             continue;
         }
@@ -116,39 +115,40 @@ async fn replace_relations_table(
     }
 
     if table == "provider_relations_cache"
-        && let Some(owner) = owner_detail {
-            for rel in relations.iter().filter(|r| relation_is_cacheable(r)) {
-                let Some(reverse_type) = reverse_relation_type(&rel.relation_type) else {
-                    continue;
-                };
-                // Skip self-references — the owner shouldn't point back to itself.
-                if rel.id == owner_id {
-                    continue;
-                }
-                // Also skip if the identity keys match (catches MAL ID overlap).
-                if relation_identity_key(rel.id, rel.id_mal)
-                    == relation_identity_key(owner.id, owner.id_mal)
-                {
-                    continue;
-                }
-                sqlx::query(&insert_sql)
-                    .bind(rel.id)
-                    .bind(owner.id)
-                    .bind(owner.id_mal)
-                    .bind(&owner.title_romaji)
-                    .bind(&owner.title_english)
-                    .bind(&owner.title_native)
-                    .bind(&owner.cover_url)
-                    .bind(&owner.format)
-                    .bind(&owner.status)
-                    .bind(owner.episodes)
-                    .bind(reverse_type)
-                    .bind(owner.season_year)
-                    .bind("ANIME")
-                    .execute(&mut *tx)
-                    .await?;
+        && let Some(owner) = owner_detail
+    {
+        for rel in relations.iter().filter(|r| relation_is_cacheable(r)) {
+            let Some(reverse_type) = reverse_relation_type(&rel.relation_type) else {
+                continue;
+            };
+            // Skip self-references — the owner shouldn't point back to itself.
+            if rel.id == owner_id {
+                continue;
             }
+            // Also skip if the identity keys match (catches MAL ID overlap).
+            if relation_identity_key(rel.id, rel.id_mal)
+                == relation_identity_key(owner.id, owner.id_mal)
+            {
+                continue;
+            }
+            sqlx::query(&insert_sql)
+                .bind(rel.id)
+                .bind(owner.id)
+                .bind(owner.id_mal)
+                .bind(&owner.title_romaji)
+                .bind(&owner.title_english)
+                .bind(&owner.title_native)
+                .bind(&owner.cover_url)
+                .bind(&owner.format)
+                .bind(&owner.status)
+                .bind(owner.episodes)
+                .bind(reverse_type)
+                .bind(owner.season_year)
+                .bind("ANIME")
+                .execute(&mut *tx)
+                .await?;
         }
+    }
 
     tx.commit().await?;
     Ok(())
@@ -220,7 +220,10 @@ pub async fn get_incoming_relations_for_provider(
             let reverse = reverse_relation_type(&rel_type)?;
             let source_id: i64 = row.get("source_provider_id");
             let source_mal: Option<i64> = row.get::<Option<i64>, _>("source_mal_id");
-            let key = (relation_identity_key(source_id, source_mal), reverse.to_string());
+            let key = (
+                relation_identity_key(source_id, source_mal),
+                reverse.to_string(),
+            );
             if !seen.insert(key) {
                 return None;
             }
@@ -261,19 +264,49 @@ fn row_to_related(row: sqlx::sqlite::SqliteRow) -> RelatedEntry {
     }
 }
 
-pub async fn replace_relations_for_series(db: &SqlitePool, series_id: i64, detail: &AnimeDetail) -> Result<(), sqlx::Error> {
-    replace_relations_table(db, "series_relations_cache", "series_id", series_id, Some(detail), &detail.relations).await
+pub async fn replace_relations_for_series(
+    db: &SqlitePool,
+    series_id: i64,
+    detail: &AnimeDetail,
+) -> Result<(), sqlx::Error> {
+    replace_relations_table(
+        db,
+        "series_relations_cache",
+        "series_id",
+        series_id,
+        Some(detail),
+        &detail.relations,
+    )
+    .await
 }
 
-pub async fn replace_relations_for_provider(db: &SqlitePool, provider_id: i64, detail: &AnimeDetail) -> Result<(), sqlx::Error> {
-    replace_relations_table(db, "provider_relations_cache", "provider_id", provider_id, Some(detail), &detail.relations).await
+pub async fn replace_relations_for_provider(
+    db: &SqlitePool,
+    provider_id: i64,
+    detail: &AnimeDetail,
+) -> Result<(), sqlx::Error> {
+    replace_relations_table(
+        db,
+        "provider_relations_cache",
+        "provider_id",
+        provider_id,
+        Some(detail),
+        &detail.relations,
+    )
+    .await
 }
 
-pub async fn get_relations_for_series(db: &SqlitePool, series_id: i64) -> Result<Vec<RelatedEntry>, sqlx::Error> {
+pub async fn get_relations_for_series(
+    db: &SqlitePool,
+    series_id: i64,
+) -> Result<Vec<RelatedEntry>, sqlx::Error> {
     get_relations_table(db, "series_relations_cache", "series_id", series_id).await
 }
 
-pub async fn get_relations_for_provider(db: &SqlitePool, provider_id: i64) -> Result<Vec<RelatedEntry>, sqlx::Error> {
+pub async fn get_relations_for_provider(
+    db: &SqlitePool,
+    provider_id: i64,
+) -> Result<Vec<RelatedEntry>, sqlx::Error> {
     get_relations_table(db, "provider_relations_cache", "provider_id", provider_id).await
 }
 
@@ -290,10 +323,7 @@ pub async fn get_relations_for_provider(db: &SqlitePool, provider_id: i64) -> Re
 /// `provider_metadata_cache.detail_json` so they match what
 /// `collect_aliases` would produce for that entry if it were fetched
 /// directly.
-pub async fn resolve_franchise_aliases(
-    db: &SqlitePool,
-    root_provider_id: i64,
-) -> Vec<String> {
+pub async fn resolve_franchise_aliases(db: &SqlitePool, root_provider_id: i64) -> Vec<String> {
     const MAX_DEPTH: usize = 20;
 
     if root_provider_id == 0 {
@@ -379,10 +409,7 @@ pub async fn resolve_franchise_aliases(
 /// - Small cap on walk depth (20 hops) and a `visited` set. Relation
 ///   graphs have no legitimate reason to cycle, but a bad cache row
 ///   could in principle form a loop.
-pub async fn compute_cumulative_prior_episodes(
-    db: &SqlitePool,
-    root_provider_id: i64,
-) -> i32 {
+pub async fn compute_cumulative_prior_episodes(db: &SqlitePool, root_provider_id: i64) -> i32 {
     const MAX_DEPTH: usize = 20;
 
     if root_provider_id == 0 {
@@ -431,7 +458,10 @@ async fn replace_episode_table(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     let delete_sql = format!("DELETE FROM {table} WHERE {key_col} = ?");
-    sqlx::query(&delete_sql).bind(owner_id).execute(&mut *tx).await?;
+    sqlx::query(&delete_sql)
+        .bind(owner_id)
+        .execute(&mut *tx)
+        .await?;
     let insert_sql = format!(
         "INSERT INTO {table} ({key_col}, episode_number, title, title_romaji, title_english, title_native, aired, source, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)"
     );
@@ -478,19 +508,47 @@ async fn get_episode_table(
     Ok(out)
 }
 
-pub async fn replace_episode_metadata(db: &SqlitePool, series_id: i64, episodes: &[CachedEpisodeMetadata]) -> Result<(), sqlx::Error> {
-    replace_episode_table(db, "series_episode_metadata", "series_id", series_id, episodes).await
+pub async fn replace_episode_metadata(
+    db: &SqlitePool,
+    series_id: i64,
+    episodes: &[CachedEpisodeMetadata],
+) -> Result<(), sqlx::Error> {
+    replace_episode_table(
+        db,
+        "series_episode_metadata",
+        "series_id",
+        series_id,
+        episodes,
+    )
+    .await
 }
 
-pub async fn replace_episode_metadata_for_provider(db: &SqlitePool, provider_id: i64, episodes: &[CachedEpisodeMetadata]) -> Result<(), sqlx::Error> {
-    replace_episode_table(db, "provider_episode_metadata", "provider_id", provider_id, episodes).await
+pub async fn replace_episode_metadata_for_provider(
+    db: &SqlitePool,
+    provider_id: i64,
+    episodes: &[CachedEpisodeMetadata],
+) -> Result<(), sqlx::Error> {
+    replace_episode_table(
+        db,
+        "provider_episode_metadata",
+        "provider_id",
+        provider_id,
+        episodes,
+    )
+    .await
 }
 
-pub async fn get_episode_map_for_series(db: &SqlitePool, series_id: i64) -> Result<HashMap<i32, CachedEpisodeMetadata>, sqlx::Error> {
+pub async fn get_episode_map_for_series(
+    db: &SqlitePool,
+    series_id: i64,
+) -> Result<HashMap<i32, CachedEpisodeMetadata>, sqlx::Error> {
     get_episode_table(db, "series_episode_metadata", "series_id", series_id).await
 }
 
-pub async fn get_episode_map_for_provider(db: &SqlitePool, provider_id: i64) -> Result<HashMap<i32, CachedEpisodeMetadata>, sqlx::Error> {
+pub async fn get_episode_map_for_provider(
+    db: &SqlitePool,
+    provider_id: i64,
+) -> Result<HashMap<i32, CachedEpisodeMetadata>, sqlx::Error> {
     get_episode_table(db, "provider_episode_metadata", "provider_id", provider_id).await
 }
 
@@ -619,7 +677,14 @@ mod tests {
         let db = test_pool().await;
         insert_prequel(&db, 3, 2, Some(23), "TV").await;
         insert_prequel(&db, 2, 1, Some(24), "TV").await;
-        insert_provider_titles(&db, 2, "Jujutsu Kaisen 2nd Season", "JUJUTSU KAISEN Season 2", "呪術廻戦 2期").await;
+        insert_provider_titles(
+            &db,
+            2,
+            "Jujutsu Kaisen 2nd Season",
+            "JUJUTSU KAISEN Season 2",
+            "呪術廻戦 2期",
+        )
+        .await;
         insert_provider_titles(&db, 1, "Jujutsu Kaisen", "JUJUTSU KAISEN", "呪術廻戦").await;
 
         let aliases = resolve_franchise_aliases(&db, 3).await;
@@ -628,7 +693,9 @@ mod tests {
         // key so the case-insensitive dedupe can legitimately fold one
         // into the other, but the franchise-base alias must appear.
         assert!(
-            aliases.iter().any(|a| a.eq_ignore_ascii_case("Jujutsu Kaisen")),
+            aliases
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("Jujutsu Kaisen")),
             "franchise-root base title must appear, got {aliases:?}"
         );
         // Native title has a distinct lowercase key, so it must appear
@@ -641,7 +708,9 @@ mod tests {
         // similar might use S2-era aliases on pack titles during the
         // cross-cour transition.
         assert!(
-            aliases.iter().any(|a| a.contains("2nd Season") || a.contains("Season 2")),
+            aliases
+                .iter()
+                .any(|a| a.contains("2nd Season") || a.contains("Season 2")),
             "intermediate S2 title should appear, got {aliases:?}"
         );
     }
@@ -661,7 +730,11 @@ mod tests {
         insert_prequel(&db, 2, 1, Some(12), "TV").await;
         insert_provider_titles(&db, 1, "Same Title", "SAME TITLE", "").await;
         let aliases = resolve_franchise_aliases(&db, 2).await;
-        assert_eq!(aliases.len(), 1, "expected case-insensitive dedupe, got {aliases:?}");
+        assert_eq!(
+            aliases.len(),
+            1,
+            "expected case-insensitive dedupe, got {aliases:?}"
+        );
     }
 
     #[tokio::test]

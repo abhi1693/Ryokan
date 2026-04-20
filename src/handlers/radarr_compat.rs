@@ -4,19 +4,19 @@
 //! requests into Ryokan's internal data model. Mounted under `/radarr/api/v3/`.
 
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::{Request, StatusCode},
     middleware::Next,
     response::Response,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::AppState;
+use crate::models::log::LogCategory;
 use crate::models::{config, monitoring, series};
 use crate::services::{anibridge, anilist, logger, media, monitoring as monitoring_service};
-use crate::models::log::LogCategory;
-use crate::AppState;
 
 // ── Authentication middleware ──────────────────────────────────────────────
 
@@ -256,9 +256,7 @@ pub async fn quality_profiles() -> Json<Vec<RadarrQualityProfile>> {
 }
 
 /// GET /radarr/api/v3/rootfolder
-pub async fn root_folders(
-    State(state): State<AppState>,
-) -> Json<Vec<RadarrRootFolder>> {
+pub async fn root_folders(State(state): State<AppState>) -> Json<Vec<RadarrRootFolder>> {
     let media_root = config::get_config(&state.db)
         .await
         .ok()
@@ -266,7 +264,11 @@ pub async fn root_folders(
         .map(|c| c.media_root)
         .unwrap_or_default();
 
-    let path = if media_root.is_empty() { "/media".to_string() } else { media_root };
+    let path = if media_root.is_empty() {
+        "/media".to_string()
+    } else {
+        media_root
+    };
 
     Json(vec![RadarrRootFolder {
         id: 1,
@@ -283,9 +285,7 @@ pub async fn list_tags() -> Json<Vec<RadarrTag>> {
 }
 
 /// POST /radarr/api/v3/tag
-pub async fn create_tag(
-    Json(body): Json<RadarrTagBody>,
-) -> Json<RadarrTag> {
+pub async fn create_tag(Json(body): Json<RadarrTagBody>) -> Json<RadarrTag> {
     Json(RadarrTag {
         id: 1,
         label: body.label.unwrap_or_default(),
@@ -327,10 +327,18 @@ pub async fn movie_lookup(
             .flatten();
 
         let tmdb_id = anibridge::resolve_tmdb_id(r.id, r.id_mal).await;
-        let title = if !r.title_english.is_empty() { &r.title_english } else { &r.title_romaji };
+        let title = if !r.title_english.is_empty() {
+            &r.title_english
+        } else {
+            &r.title_romaji
+        };
 
         movies.push(build_radarr_movie_from_search(
-            &r, title, tmdb_id, db_series.as_ref(), &cfg,
+            &r,
+            title,
+            tmdb_id,
+            db_series.as_ref(),
+            &cfg,
         ));
     }
 
@@ -390,7 +398,10 @@ pub async fn add_movie(
     anibridge::ensure_loaded().await;
     let anime_ids = anibridge::lookup_by_tmdb(tmdb_id, None).await;
 
-    let detail = if let Some(ids) = anime_ids.first().filter(|a| a.anilist_id.is_some() || a.mal_id.is_some()) {
+    let detail = if let Some(ids) = anime_ids
+        .first()
+        .filter(|a| a.anilist_id.is_some() || a.mal_id.is_some())
+    {
         if let Some(al_id) = ids.anilist_id {
             match anilist::get_anime_detail(al_id).await {
                 Ok(d) => d,
@@ -406,29 +417,45 @@ pub async fn add_movie(
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
         } else {
-            return Err((StatusCode::BAD_GATEWAY, "No AniList or MAL ID available for TMDB mapping".to_string()));
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "No AniList or MAL ID available for TMDB mapping".to_string(),
+            ));
         }
     } else {
         // No anibridge mapping — fall back to AniList title search.
         let search_title = body.title.as_deref().unwrap_or("");
         if search_title.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, format!("No mapping for TMDB ID {} and no title provided", tmdb_id)));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("No mapping for TMDB ID {} and no title provided", tmdb_id),
+            ));
         }
-        tracing::info!("No anibridge mapping for TMDB {}; searching AniList for '{}'", tmdb_id, search_title);
+        tracing::info!(
+            "No anibridge mapping for TMDB {}; searching AniList for '{}'",
+            tmdb_id,
+            search_title
+        );
 
         let results = anilist::search_anime(search_title)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
-        let best = results.first()
-            .ok_or((StatusCode::NOT_FOUND, format!("No AniList results for '{}'", search_title)))?;
+        let best = results.first().ok_or((
+            StatusCode::NOT_FOUND,
+            format!("No AniList results for '{}'", search_title),
+        ))?;
 
         anilist::get_anime_detail(best.id)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
     };
 
-    let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+    let title = if !detail.title_english.is_empty() {
+        &detail.title_english
+    } else {
+        &detail.title_romaji
+    };
 
     let (id, _created) = series::upsert(
         &state.db,
@@ -462,10 +489,12 @@ pub async fn add_movie(
         LogCategory::Library,
         &format!("Added via Seerr (Radarr): {}", title),
         &format!("tmdb_id={}, provider_id={}, id={}", tmdb_id, detail.id, id),
-    ).await;
+    )
+    .await;
 
     // Auto-search if requested.
-    if body.add_options
+    if body
+        .add_options
         .as_ref()
         .and_then(|o| o.search_for_movie)
         .unwrap_or(false)
@@ -477,7 +506,8 @@ pub async fn add_movie(
                 axum::extract::State(state_clone),
                 axum::extract::Path(id),
                 axum::extract::Query(super::library::search::AutoSearchQuery::default()),
-            ).await;
+            )
+            .await;
         });
     }
 
@@ -490,7 +520,10 @@ pub async fn add_movie(
     let s = series::get_by_id(&state.db, id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Movie not found after insert".to_string()))?;
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Movie not found after insert".to_string(),
+        ))?;
 
     Ok(Json(build_radarr_movie_from_tracked(&s, tmdb_id, &cfg)))
 }
@@ -520,7 +553,8 @@ pub async fn update_movie(
         LogCategory::Library,
         &format!("Updated via Seerr (Radarr): {}", s.title),
         &format!("id={}, monitored={:?}", s.id, body.monitored),
-    ).await;
+    )
+    .await;
 
     let cfg = config::get_config(&state.db)
         .await
@@ -540,18 +574,20 @@ pub async fn execute_command(
     let name = body.name.unwrap_or_default();
 
     if name == "MoviesSearch"
-        && let Some(movie_ids) = body.movie_ids {
-            for movie_id in movie_ids {
-                let state_clone = state.clone();
-                tokio::spawn(async move {
-                    let _ = super::library::search::auto_search_series(
-                        axum::extract::State(state_clone),
-                        axum::extract::Path(movie_id),
-                        axum::extract::Query(super::library::search::AutoSearchQuery::default()),
-                    ).await;
-                });
-            }
+        && let Some(movie_ids) = body.movie_ids
+    {
+        for movie_id in movie_ids {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                let _ = super::library::search::auto_search_series(
+                    axum::extract::State(state_clone),
+                    axum::extract::Path(movie_id),
+                    axum::extract::Query(super::library::search::AutoSearchQuery::default()),
+                )
+                .await;
+            });
         }
+    }
 
     Json(serde_json::json!({
         "id": 1,
@@ -573,7 +609,10 @@ async fn lookup_by_tmdb_id(
     let anime_ids = anibridge::lookup_by_tmdb(tmdb_id, None).await;
 
     if anime_ids.is_empty() {
-        tracing::warn!("No anibridge mapping for TMDB ID {}; returning stub movie for Seerr", tmdb_id);
+        tracing::warn!(
+            "No anibridge mapping for TMDB ID {}; returning stub movie for Seerr",
+            tmdb_id
+        );
         return Ok(Json(vec![build_stub_movie(tmdb_id, cfg)]));
     }
 
@@ -588,9 +627,7 @@ async fn lookup_by_tmdb_id(
     if !prefetch_ids.is_empty()
         && let Err(e) = anilist::get_anime_details_batch(&prefetch_ids).await
     {
-        tracing::debug!(
-            "Radarr fan-out: AL batch prefetch failed (per-id loop will retry): {e}"
-        );
+        tracing::debug!("Radarr fan-out: AL batch prefetch failed (per-id loop will retry): {e}");
     }
 
     let mut results = Vec::new();
@@ -599,7 +636,8 @@ async fn lookup_by_tmdb_id(
             match anilist::get_anime_detail(al_id).await {
                 Ok(d) => d,
                 Err(_) if ids.mal_id.is_some() => {
-                    match crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap()).await {
+                    match crate::services::jikan::get_anime_detail_cached(ids.mal_id.unwrap()).await
+                    {
                         Ok(d) => d,
                         Err(_) => continue,
                     }
@@ -616,12 +654,19 @@ async fn lookup_by_tmdb_id(
         };
 
         let db_series = if detail.id > 0 {
-            series::get_by_anilist_id(&state.db, detail.id).await.ok().flatten()
+            series::get_by_anilist_id(&state.db, detail.id)
+                .await
+                .ok()
+                .flatten()
         } else {
             None
         };
 
-        let title = if !detail.title_english.is_empty() { &detail.title_english } else { &detail.title_romaji };
+        let title = if !detail.title_english.is_empty() {
+            &detail.title_english
+        } else {
+            &detail.title_romaji
+        };
 
         let search_result = anilist::AnimeEntry {
             id: detail.id,
@@ -639,7 +684,11 @@ async fn lookup_by_tmdb_id(
         };
 
         results.push(build_radarr_movie_from_search(
-            &search_result, title, tmdb_id, db_series.as_ref(), cfg,
+            &search_result,
+            title,
+            tmdb_id,
+            db_series.as_ref(),
+            cfg,
         ));
     }
 
@@ -700,12 +749,18 @@ fn build_radarr_movie_from_search(
         certification: String::new(),
         genres: vec!["Anime".to_string()],
         tags: vec![],
-        added: if is_in_library { "2024-01-01T00:00:00Z".to_string() } else { String::new() },
+        added: if is_in_library {
+            "2024-01-01T00:00:00Z".to_string()
+        } else {
+            String::new()
+        },
         ratings: default_ratings(),
         has_file,
         is_available: true,
         folder_name: folder_name.clone(),
-        clean_title: title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""),
+        clean_title: title
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), ""),
         root_folder_path: cfg.media_root.clone(),
         movie_file: None,
     }
@@ -726,7 +781,11 @@ fn build_radarr_movie_from_tracked(
         format!("{}/{}", cfg.media_root, s.folder_name)
     };
 
-    let title = if !s.title.is_empty() { &s.title } else { &s.title_romaji };
+    let title = if !s.title.is_empty() {
+        &s.title
+    } else {
+        &s.title_romaji
+    };
 
     RadarrMovie {
         id: s.id,
@@ -757,7 +816,9 @@ fn build_radarr_movie_from_tracked(
         has_file,
         is_available: true,
         folder_name: s.folder_name.clone(),
-        clean_title: title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""),
+        clean_title: title
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), ""),
         root_folder_path: cfg.media_root.clone(),
         movie_file: None,
     }
@@ -773,8 +834,16 @@ fn map_status(anilist_status: &str) -> String {
 
 fn default_ratings() -> RadarrRatings {
     RadarrRatings {
-        imdb: RadarrRatingValue { votes: 0, value: 0.0, rating_type: "user".to_string() },
-        tmdb: RadarrRatingValue { votes: 0, value: 0.0, rating_type: "user".to_string() },
+        imdb: RadarrRatingValue {
+            votes: 0,
+            value: 0.0,
+            rating_type: "user".to_string(),
+        },
+        tmdb: RadarrRatingValue {
+            votes: 0,
+            value: 0.0,
+            rating_type: "user".to_string(),
+        },
     }
 }
 

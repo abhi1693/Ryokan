@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::services::html::sanitize_rich_description;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -8,12 +8,12 @@ use tokio::sync::RwLock;
 use crate::services::jikan;
 
 mod rate_limit;
-pub use rate_limit::{anilist_cooldown_active, is_rate_limit_error};
 use rate_limit::{
-    classify_anilist_failure, cooldown_from_headers, excerpt, extract_graphql_error,
-    record_rate_limit_headers, set_anilist_cooldown, set_cooldown_until_now_plus,
-    throttle_before_anilist_request, AniListFailureKind, ANILIST_COOLDOWN_DEFAULT,
+    ANILIST_COOLDOWN_DEFAULT, AniListFailureKind, classify_anilist_failure, cooldown_from_headers,
+    excerpt, extract_graphql_error, record_rate_limit_headers, set_anilist_cooldown,
+    set_cooldown_until_now_plus, throttle_before_anilist_request,
 };
+pub use rate_limit::{anilist_cooldown_active, is_rate_limit_error};
 
 const ANILIST_API: &str = "https://graphql.anilist.co";
 
@@ -84,9 +84,10 @@ fn search_cache_get(key: &str) -> Option<Vec<AnimeEntry>> {
     let now = Instant::now();
     let mut cache = SEARCH_CACHE.lock().ok()?;
     if let Some((fetched_at, results)) = cache.get(key)
-        && now.duration_since(*fetched_at) <= SEARCH_CACHE_TTL {
-            return Some(results.clone());
-        }
+        && now.duration_since(*fetched_at) <= SEARCH_CACHE_TTL
+    {
+        return Some(results.clone());
+    }
     cache.remove(key);
     None
 }
@@ -128,7 +129,10 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
     search_anime_with_options(query, false).await
 }
 
-pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) -> Result<Vec<AnimeEntry>, String> {
+pub async fn search_anime_with_options(
+    query: &str,
+    force_mal_fallback: bool,
+) -> Result<Vec<AnimeEntry>, String> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(Vec::new());
@@ -137,7 +141,11 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
     // 1. Cache lookup — skip all upstream work for repeat queries within the TTL.
     let cache_key = normalize_search_key(force_mal_fallback, query);
     if let Some(cached) = search_cache_get(&cache_key) {
-        tracing::debug!("anilist search cache hit for {:?} ({} results)", query, cached.len());
+        tracing::debug!(
+            "anilist search cache hit for {:?} ({} results)",
+            query,
+            cached.len()
+        );
         return Ok(cached);
     }
 
@@ -160,7 +168,8 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
         let results = fallback_jikan(
             query,
             Some("AniList rate-limited (skipped during cooldown)".to_string()),
-        ).await?;
+        )
+        .await?;
         search_cache_put(cache_key, results.clone());
         return Ok(results);
     }
@@ -207,12 +216,11 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
         Err(e) => {
             tracing::warn!(
                 "AniList request failed for query {:?}: {}; falling back to Jikan/MAL",
-                query, e
-            );
-            let results = fallback_jikan(
                 query,
-                Some(format!("AniList unreachable: {}", e)),
-            ).await?;
+                e
+            );
+            let results =
+                fallback_jikan(query, Some(format!("AniList unreachable: {}", e))).await?;
             search_cache_put(cache_key, results.clone());
             return Ok(results);
         }
@@ -238,7 +246,9 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
             .and_then(|s| s.parse::<u64>().ok());
         tracing::warn!(
             "AniList search HTTP {} for query {:?} (retry-after={:?}); falling back to Jikan/MAL",
-            status, query, retry_after_secs
+            status,
+            query,
+            retry_after_secs
         );
         // Start a cooldown so subsequent searches in this window skip
         // AL entirely. 403 (Cloudflare challenge) is the most common
@@ -280,7 +290,11 @@ pub async fn search_anime_with_options(query: &str, force_mal_fallback: bool) ->
         Err(parse_err) => {
             if !status.is_success() {
                 let snippet: String = body_text.chars().take(200).collect();
-                return Err(format!("AniList search failed (HTTP {}): {}", status, snippet.trim()));
+                return Err(format!(
+                    "AniList search failed (HTTP {}): {}",
+                    status,
+                    snippet.trim()
+                ));
             }
             return Err(format!("Failed to parse AniList response: {}", parse_err));
         }
@@ -370,7 +384,10 @@ fn compose_search_error(anilist_reason: Option<&str>, jikan_err: &str) -> String
             })
             .map(|s| format!(" Try again in ~{}.", s))
             .unwrap_or_else(|| " Try again in a minute.".to_string());
-        return format!("Both AniList and Jikan/MAL are rate-limited right now.{}", hint);
+        return format!(
+            "Both AniList and Jikan/MAL are rate-limited right now.{}",
+            hint
+        );
     }
 
     match anilist_reason {
@@ -378,8 +395,6 @@ fn compose_search_error(anilist_reason: Option<&str>, jikan_err: &str) -> String
         None => format!("MAL/Jikan search failed: {}", jikan_err),
     }
 }
-
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RelatedEntry {
@@ -449,7 +464,10 @@ impl AnimeDetail {
     /// episodes, which breaks the episode list and the monitoring UI.
     pub fn effective_episode_count(&self) -> i32 {
         match self.episodes.unwrap_or(0) {
-            0 => self.next_airing_episode.map(|n| (n - 1).max(0)).unwrap_or(0),
+            0 => self
+                .next_airing_episode
+                .map(|n| (n - 1).max(0))
+                .unwrap_or(0),
             n => n,
         }
     }
@@ -513,31 +531,38 @@ pub async fn cached_anime_detail(id: i64) -> Option<AnimeDetail> {
     })
 }
 
-pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, force_mal_fallback: bool) -> Result<AnimeDetail, String> {
+pub async fn get_anime_detail_with_options(
+    id: i64,
+    mal_id_hint: Option<i64>,
+    force_mal_fallback: bool,
+) -> Result<AnimeDetail, String> {
     if id < 0 {
         return jikan::get_anime_detail_cached(-id).await;
     }
-    if force_mal_fallback
-        && let Some(mid) = mal_id_hint {
-            return jikan::get_anime_detail_cached(mid).await;
-        }
+    if force_mal_fallback && let Some(mid) = mal_id_hint {
+        return jikan::get_anime_detail_cached(mid).await;
+    }
 
     {
         let cache = DETAIL_CACHE.read().await;
         if let Some(entry) = cache.get(&id)
-            && entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS {
-                return Ok(entry.detail.clone());
-            }
+            && entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS
+        {
+            return Ok(entry.detail.clone());
+        }
     }
 
     let detail = fetch_anime_detail(id).await?;
 
     {
         let mut cache = DETAIL_CACHE.write().await;
-        cache.insert(id, CacheEntry {
-            detail: detail.clone(),
-            fetched_at: Instant::now(),
-        });
+        cache.insert(
+            id,
+            CacheEntry {
+                detail: detail.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
         // Evict stale/oldest entries when the cache grows too large.
         if cache.len() > DETAIL_CACHE_MAX_ENTRIES {
             let expired: Vec<i64> = cache
@@ -550,9 +575,10 @@ pub async fn get_anime_detail_with_options(id: i64, mal_id_hint: Option<i64>, fo
             }
             // If still over limit, drop the oldest entry.
             if cache.len() > DETAIL_CACHE_MAX_ENTRIES
-                && let Some((&oldest_key, _)) = cache.iter().min_by_key(|(_, e)| e.fetched_at) {
-                    cache.remove(&oldest_key);
-                }
+                && let Some((&oldest_key, _)) = cache.iter().min_by_key(|(_, e)| e.fetched_at)
+            {
+                cache.remove(&oldest_key);
+            }
         }
     }
 
@@ -583,7 +609,9 @@ async fn fetch_anime_detail(id: i64) -> Result<AnimeDetail, String> {
 /// the variables map (sent as undefined), not sent as JSON null.
 /// Verified live 2026-04-19: `{id: 1, idMal: null}` → "Not Found";
 /// `{id: 1}` → Cowboy Bebop. Tested in `media_selector_omits_unused_var`.
-fn build_media_selector_variables(selector: MediaSelector) -> serde_json::Map<String, serde_json::Value> {
+fn build_media_selector_variables(
+    selector: MediaSelector,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut variables = serde_json::Map::new();
     match selector {
         MediaSelector::Id(v) => {
@@ -710,7 +738,10 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Option<AnimeDetai
                     e
                 ));
             }
-            return Err(format!("AniList unavailable: failed to read response: {}", e));
+            return Err(format!(
+                "AniList unavailable: failed to read response: {}",
+                e
+            ));
         }
     };
 
@@ -736,8 +767,13 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Option<AnimeDetai
         return Err(msg);
     }
 
-    let body: serde_json::Value = serde_json::from_str(&body_text)
-        .map_err(|e| format!("AniList unavailable: parse error: {} (body: {})", e, excerpt(&body_text)))?;
+    let body: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+        format!(
+            "AniList unavailable: parse error: {} (body: {})",
+            e,
+            excerpt(&body_text)
+        )
+    })?;
 
     if extract_graphql_error(&body).is_some() {
         // Run the classifier even on 2xx responses: AL has been observed
@@ -794,11 +830,17 @@ fn parse_media_node(m: &serde_json::Value) -> AnimeDetail {
                         title_romaji: node["title"]["romaji"].as_str().unwrap_or("").to_string(),
                         title_english: node["title"]["english"].as_str().unwrap_or("").to_string(),
                         title_native: node["title"]["native"].as_str().unwrap_or("").to_string(),
-                        cover_url: node["coverImage"]["large"].as_str().unwrap_or("").to_string(),
+                        cover_url: node["coverImage"]["large"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
                         format: node["format"].as_str().unwrap_or("").to_string(),
                         status: node["status"].as_str().unwrap_or("").to_string(),
                         status_display: prettify_status(node["status"].as_str().unwrap_or("")),
-                        episodes: node["episodes"].as_i64().filter(|&n| n > 0).map(|e| e as i32),
+                        episodes: node["episodes"]
+                            .as_i64()
+                            .filter(|&n| n > 0)
+                            .map(|e| e as i32),
                         relation_type: edge["relationType"].as_str().unwrap_or("").to_string(),
                         season_year: node["seasonYear"].as_i64().map(|y| y as i32),
                         media_type: node["type"].as_str().unwrap_or("").to_string(),
@@ -830,7 +872,11 @@ fn parse_media_node(m: &serde_json::Value) -> AnimeDetail {
         description: sanitize_rich_description(m["description"].as_str().unwrap_or(""), true),
         genres: m["genres"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|g| g.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|g| g.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default(),
         average_score: m["averageScore"].as_i64().map(|s| s as i32),
         average_score_display: m["averageScore"].as_i64().map(|s| format!("{}%", s)),
@@ -841,7 +887,11 @@ fn parse_media_node(m: &serde_json::Value) -> AnimeDetail {
         next_airing_at: m["nextAiringEpisode"]["airingAt"].as_i64(),
         synonyms: m["synonyms"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|v| v.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|v| v.to_string()))
+                    .collect()
+            })
             .unwrap_or_default(),
         streaming_episodes,
         relations,
@@ -914,9 +964,7 @@ const ANILIST_BATCH_SIZE: usize = 25;
 ///   remaining chunks would just bounce immediately anyway.
 /// - Negative-result ids (AL had no Media for them) simply don't
 ///   appear in the output map — callers must check `map.get(id)`.
-pub async fn get_anime_details_batch(
-    ids: &[i64],
-) -> Result<HashMap<i64, AnimeDetail>, String> {
+pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDetail>, String> {
     // Dedup + drop non-positive ids (negative ids are MAL-fallback
     // synthetic markers and should hit the Jikan path, not AniList).
     let unique_ids: Vec<i64> = ids
@@ -935,9 +983,7 @@ pub async fn get_anime_details_batch(
 
     for chunk in unique_ids.chunks(ANILIST_BATCH_SIZE) {
         if anilist_cooldown_active() {
-            return Err(
-                "AniList rate-limit cooldown active; skipping AniList request".to_string(),
-            );
+            return Err("AniList rate-limit cooldown active; skipping AniList request".to_string());
         }
 
         let gql = serde_json::json!({
@@ -1023,14 +1069,13 @@ pub async fn get_anime_details_batch(
             return Err(msg);
         }
 
-        let body: serde_json::Value = serde_json::from_str(&body_text)
-            .map_err(|e| {
-                format!(
-                    "AniList batch parse error: {} (body: {})",
-                    e,
-                    excerpt(&body_text)
-                )
-            })?;
+        let body: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+            format!(
+                "AniList batch parse error: {} (body: {})",
+                e,
+                excerpt(&body_text)
+            )
+        })?;
 
         if extract_graphql_error(&body).is_some() {
             let (kind, msg) = classify_anilist_failure(status, &body_text);
@@ -1068,17 +1113,14 @@ pub async fn get_anime_details_batch(
             if cache.len() > DETAIL_CACHE_MAX_ENTRIES {
                 let expired: Vec<i64> = cache
                     .iter()
-                    .filter(|(_, e)| {
-                        e.fetched_at.elapsed().as_secs() >= DETAIL_CACHE_TTL_SECS
-                    })
+                    .filter(|(_, e)| e.fetched_at.elapsed().as_secs() >= DETAIL_CACHE_TTL_SECS)
                     .map(|(k, _)| *k)
                     .collect();
                 for k in &expired {
                     cache.remove(k);
                 }
                 if cache.len() > DETAIL_CACHE_MAX_ENTRIES
-                    && let Some((&oldest_key, _)) =
-                        cache.iter().min_by_key(|(_, e)| e.fetched_at)
+                    && let Some((&oldest_key, _)) = cache.iter().min_by_key(|(_, e)| e.fetched_at)
                 {
                     cache.remove(&oldest_key);
                 }
@@ -1120,10 +1162,7 @@ mod tests {
             normalize_search_key(false, "  Jojo  Part  3 "),
             "al::jojo part 3"
         );
-        assert_eq!(
-            normalize_search_key(true, "\tFrieren\n"),
-            "mal::frieren"
-        );
+        assert_eq!(normalize_search_key(true, "\tFrieren\n"), "mal::frieren");
     }
 
     #[test]
@@ -1140,7 +1179,11 @@ mod tests {
             Some("AniList rate-limited (retry in 28s)"),
             "Jikan rate-limited (HTTP 429): You are being rate-limited",
         );
-        assert!(msg.contains("Both AniList and Jikan/MAL are rate-limited"), "msg was: {}", msg);
+        assert!(
+            msg.contains("Both AniList and Jikan/MAL are rate-limited"),
+            "msg was: {}",
+            msg
+        );
         assert!(msg.contains("28s"), "retry hint lost: {}", msg);
     }
 
@@ -1151,14 +1194,26 @@ mod tests {
             "Jikan unreachable: connection refused",
         );
         assert!(msg.starts_with("AniList rate-limited"), "msg was: {}", msg);
-        assert!(msg.contains("connection refused"), "jikan detail lost: {}", msg);
-        assert!(!msg.contains("Both AniList and Jikan/MAL"), "wrong branch: {}", msg);
+        assert!(
+            msg.contains("connection refused"),
+            "jikan detail lost: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("Both AniList and Jikan/MAL"),
+            "wrong branch: {}",
+            msg
+        );
     }
 
     #[test]
     fn compose_error_without_anilist_reason_uses_mal_prefix() {
         let msg = compose_search_error(None, "Jikan HTTP 500: upstream down");
-        assert!(msg.starts_with("MAL/Jikan search failed"), "msg was: {}", msg);
+        assert!(
+            msg.starts_with("MAL/Jikan search failed"),
+            "msg was: {}",
+            msg
+        );
         assert!(msg.contains("upstream down"));
     }
 
@@ -1190,5 +1245,4 @@ mod tests {
         let other = normalize_search_key(false, "completely different");
         assert!(search_cache_get(&other).is_none());
     }
-
 }

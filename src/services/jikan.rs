@@ -56,11 +56,7 @@ fn jikan_cooldown_remaining() -> Option<Duration> {
     let guard = JIKAN_COOLDOWN_UNTIL.lock().ok()?;
     let until = (*guard)?;
     let now = Instant::now();
-    if now < until {
-        Some(until - now)
-    } else {
-        None
-    }
+    if now < until { Some(until - now) } else { None }
 }
 
 fn set_jikan_cooldown(retry_after_secs: Option<u64>) {
@@ -77,14 +73,15 @@ fn set_jikan_cooldown(retry_after_secs: Option<u64>) {
 /// into a human-readable one-liner. Falls back to a short snippet if parsing fails.
 fn parse_jikan_error(status: reqwest::StatusCode, body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
-        && let Some(msg) = v["message"].as_str() {
-            // Take just the first sentence; the rest is usually a docs link.
-            let short = msg.split('.').next().unwrap_or(msg).trim();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return format!("Jikan rate-limited (HTTP 429): {}", short);
-            }
-            return format!("Jikan HTTP {}: {}", status.as_u16(), short);
+        && let Some(msg) = v["message"].as_str()
+    {
+        // Take just the first sentence; the rest is usually a docs link.
+        let short = msg.split('.').next().unwrap_or(msg).trim();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return format!("Jikan rate-limited (HTTP 429): {}", short);
         }
+        return format!("Jikan HTTP {}: {}", status.as_u16(), short);
+    }
     let snippet: String = body.chars().take(120).collect();
     format!("Jikan HTTP {}: {}", status.as_u16(), snippet.trim())
 }
@@ -94,7 +91,6 @@ pub struct EpisodeInfo {
     pub title: String,
     pub aired: String,
 }
-
 
 fn is_rate_limited(status: reqwest::StatusCode, body: &str) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS
@@ -159,7 +155,10 @@ async fn get_text_with_retry(client: &reqwest::Client, url: &str) -> Result<Stri
     Err(last_err)
 }
 
-async fn get_json_with_retry<T: for<'de> serde::Deserialize<'de>>(client: &reqwest::Client, url: &str) -> Result<T, String> {
+async fn get_json_with_retry<T: for<'de> serde::Deserialize<'de>>(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<T, String> {
     let text = get_text_with_retry(client, url).await?;
     serde_json::from_str(&text).map_err(|e| format!("Failed to parse Jikan response: {}", e))
 }
@@ -302,7 +301,9 @@ struct AiredInfo {
 /// Layer 4 temporal inference can distinguish "finished last year" from
 /// "started years ago, still airing."
 fn parse_air_year(value: Option<&str>) -> Option<i32> {
-    value.and_then(|s| s.get(0..4)).and_then(|y| y.parse::<i32>().ok())
+    value
+        .and_then(|s| s.get(0..4))
+        .and_then(|y| y.parse::<i32>().ok())
 }
 
 pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
@@ -485,10 +486,8 @@ async fn enrich_relations(groups: Vec<RelationGroupResponse>) -> Vec<RelatedEntr
                 break 'outer;
             }
             if request_count > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    RELATION_FETCH_INTERVAL_MS,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(RELATION_FETCH_INTERVAL_MS))
+                    .await;
             }
             request_count += 1;
 
@@ -500,28 +499,35 @@ async fn enrich_relations(groups: Vec<RelationGroupResponse>) -> Vec<RelatedEntr
     out
 }
 
-
 fn non_empty(value: &str, fallback: &str) -> String {
-    if value.trim().is_empty() { fallback.to_string() } else { value.to_string() }
+    if value.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 pub async fn get_anime_detail_cached(mal_id: i64) -> Result<AnimeDetail, String> {
     {
         let cache = DETAIL_CACHE.read().await;
         if let Some(entry) = cache.get(&mal_id)
-            && entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS {
-                return Ok(entry.detail.clone());
-            }
+            && entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS
+        {
+            return Ok(entry.detail.clone());
+        }
     }
 
     let detail = get_anime_detail(mal_id).await?;
 
     {
         let mut cache = DETAIL_CACHE.write().await;
-        cache.insert(mal_id, DetailCacheEntry {
-            detail: detail.clone(),
-            fetched_at: Instant::now(),
-        });
+        cache.insert(
+            mal_id,
+            DetailCacheEntry {
+                detail: detail.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
         // Cap the cache so a long-running process can't accumulate
         // every MAL ID it ever touched. Mirrors anilist::DETAIL_CACHE
         // eviction (drop expired first, then drop oldest if still
@@ -568,7 +574,10 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
 
     let description = build_description(&anime.synopsis, &anime.background);
     let duration = parse_duration_minutes(anime.duration.as_deref());
-    let next_airing = estimate_next_airing(&anime.status, anime.aired.as_ref().and_then(|a| a.from.as_deref()));
+    let next_airing = estimate_next_airing(
+        &anime.status,
+        anime.aired.as_ref().and_then(|a| a.from.as_deref()),
+    );
     let end_year = parse_air_year(anime.aired.as_ref().and_then(|a| a.to.as_deref()));
     let (format, _) = normalize_enum_label(anime.anime_type.clone());
     let (status, status_display) = normalize_enum_label(anime.status.clone());
@@ -609,12 +618,14 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
         streaming_episodes: anime
             .trailer
             .and_then(|t| t.url)
-            .map(|url| vec![StreamingEpisode {
-                title: "Trailer".to_string(),
-                thumbnail: String::new(),
-                url,
-                site: "Trailer".to_string(),
-            }])
+            .map(|url| {
+                vec![StreamingEpisode {
+                    title: "Trailer".to_string(),
+                    thumbnail: String::new(),
+                    url,
+                    site: "Trailer".to_string(),
+                }]
+            })
             .unwrap_or_default(),
         relations,
     })
@@ -623,7 +634,11 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
 async fn fetch_relation_groups_raw(mal_id: i64) -> Vec<RelationGroupResponse> {
     let client = &*HTTP_CLIENT;
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
-    let url = format!("{}/anime/{}/relations", api_base.trim_end_matches('/'), mal_id);
+    let url = format!(
+        "{}/anime/{}/relations",
+        api_base.trim_end_matches('/'),
+        mal_id
+    );
     match get_json_with_retry::<RelationsResponse>(client, &url).await {
         Ok(body) => body.data,
         Err(_) => Vec::new(),
@@ -643,7 +658,9 @@ async fn fetch_sequel_chain_ids(start_mal_id: i64, max_extra: usize) -> Vec<i64>
             .find(|g| g.relation.eq_ignore_ascii_case("Sequel"))
             .and_then(|g| {
                 g.entry.into_iter().find_map(|entry| {
-                    if entry.media_type.eq_ignore_ascii_case("anime") && !seen.contains(&entry.mal_id) {
+                    if entry.media_type.eq_ignore_ascii_case("anime")
+                        && !seen.contains(&entry.mal_id)
+                    {
                         Some(entry.mal_id)
                     } else {
                         None
@@ -651,7 +668,9 @@ async fn fetch_sequel_chain_ids(start_mal_id: i64, max_extra: usize) -> Vec<i64>
                 })
             });
 
-        let Some(next_id) = next_id else { break; };
+        let Some(next_id) = next_id else {
+            break;
+        };
         seen.insert(next_id);
         out.push(next_id);
         current = next_id;
@@ -660,10 +679,7 @@ async fn fetch_sequel_chain_ids(start_mal_id: i64, max_extra: usize) -> Vec<i64>
     out
 }
 
-pub async fn fetch_episode_titles(
-    db: &SqlitePool,
-    mal_id: i64,
-) -> HashMap<i32, EpisodeInfo> {
+pub async fn fetch_episode_titles(db: &SqlitePool, mal_id: i64) -> HashMap<i32, EpisodeInfo> {
     if let Ok(Some(cached)) = get_cached_episodes(db, mal_id).await {
         return cached;
     }
@@ -841,7 +857,12 @@ async fn fetch_from_jikan(mal_id: i64) -> HashMap<i32, EpisodeInfo> {
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
 
     loop {
-        let url = format!("{}/anime/{}/episodes?page={}", api_base.trim_end_matches('/'), mal_id, page);
+        let url = format!(
+            "{}/anime/{}/episodes?page={}",
+            api_base.trim_end_matches('/'),
+            mal_id,
+            page
+        );
 
         let body: JikanResponse = match get_json_with_retry(client, &url).await {
             Ok(b) => b,
@@ -900,13 +921,25 @@ fn build_description(synopsis: &Option<String>, background: &Option<String>) -> 
 
 fn first_image_url(images: Option<&SearchImages>) -> String {
     images
-        .and_then(|imgs| imgs.webp.as_ref().and_then(|set| set.large_image_url.clone().or(set.image_url.clone())))
-        .or_else(|| images.and_then(|imgs| imgs.jpg.as_ref().and_then(|set| set.large_image_url.clone().or(set.image_url.clone()))))
+        .and_then(|imgs| {
+            imgs.webp
+                .as_ref()
+                .and_then(|set| set.large_image_url.clone().or(set.image_url.clone()))
+        })
+        .or_else(|| {
+            images.and_then(|imgs| {
+                imgs.jpg
+                    .as_ref()
+                    .and_then(|set| set.large_image_url.clone().or(set.image_url.clone()))
+            })
+        })
         .unwrap_or_default()
 }
 
 fn first_trailer_image_url(images: &TrailerImages) -> String {
-    images.maximum_image_url.clone()
+    images
+        .maximum_image_url
+        .clone()
         .or(images.large_image_url.clone())
         .or(images.medium_image_url.clone())
         .or(images.image_url.clone())
@@ -930,16 +963,20 @@ fn parse_duration_minutes(duration: Option<&str>) -> Option<i32> {
                 saw = true;
             }
         } else if let Some(num) = part.strip_suffix(" min")
-            && let Ok(minutes) = num.trim().parse::<i32>() {
-                total += minutes;
-                saw = true;
-            }
+            && let Ok(minutes) = num.trim().parse::<i32>()
+        {
+            total += minutes;
+            saw = true;
+        }
     }
 
     if saw { Some(total) } else { None }
 }
 
-fn estimate_next_airing(status: &Option<String>, aired_from: Option<&str>) -> Option<(Option<i32>, Option<i64>)> {
+fn estimate_next_airing(
+    status: &Option<String>,
+    aired_from: Option<&str>,
+) -> Option<(Option<i32>, Option<i64>)> {
     let status = status.as_deref()?.to_ascii_lowercase();
     if !status.contains("currently") {
         return None;

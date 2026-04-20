@@ -268,9 +268,7 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 /// imported (`import`) rows are left untouched — that's the whole
 /// point of the origin column. Does NOT commit — the caller owns
 /// transaction lifecycle. Returns the number of rows that were dropped.
-pub async fn delete_defaults_with_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-) -> Result<u64, sqlx::Error> {
+pub async fn delete_defaults_with_tx(tx: &mut Transaction<'_, Sqlite>) -> Result<u64, sqlx::Error> {
     let res = sqlx::query("DELETE FROM custom_formats WHERE origin = ?")
         .bind(ORIGIN_DEFAULTS)
         .execute(&mut **tx)

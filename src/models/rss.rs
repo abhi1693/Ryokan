@@ -59,12 +59,10 @@ pub struct RssDecision {
 }
 
 pub async fn start_run(db: &SqlitePool, trigger_source: &str) -> Result<i64, sqlx::Error> {
-    let result = sqlx::query(
-        "INSERT INTO rss_runs (trigger_source, status) VALUES (?, 'running')",
-    )
-    .bind(trigger_source)
-    .execute(db)
-    .await?;
+    let result = sqlx::query("INSERT INTO rss_runs (trigger_source, status) VALUES (?, 'running')")
+        .bind(trigger_source)
+        .execute(db)
+        .await?;
     Ok(result.last_insert_rowid())
 }
 
@@ -189,21 +187,37 @@ pub async fn latest_run(db: &SqlitePool) -> Result<Option<RssRun>, sqlx::Error> 
     .fetch_optional(db)
     .await?;
 
-    Ok(row.map(|(id, started_at, finished_at, trigger_source, status, items_seen, matched, grabbed, skipped, detail)| RssRun {
-        id,
-        started_at,
-        finished_at: finished_at.unwrap_or_default(),
-        trigger_source,
-        status,
-        items_seen: items_seen as i32,
-        matched: matched as i32,
-        grabbed: grabbed as i32,
-        skipped: skipped as i32,
-        detail,
-    }))
+    Ok(row.map(
+        |(
+            id,
+            started_at,
+            finished_at,
+            trigger_source,
+            status,
+            items_seen,
+            matched,
+            grabbed,
+            skipped,
+            detail,
+        )| RssRun {
+            id,
+            started_at,
+            finished_at: finished_at.unwrap_or_default(),
+            trigger_source,
+            status,
+            items_seen: items_seen as i32,
+            matched: matched as i32,
+            grabbed: grabbed as i32,
+            skipped: skipped as i32,
+            detail,
+        },
+    ))
 }
 
-pub async fn recent_decisions(db: &SqlitePool, limit: i64) -> Result<Vec<RssDecision>, sqlx::Error> {
+pub async fn recent_decisions(
+    db: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<RssDecision>, sqlx::Error> {
     let rows: Vec<RssDecisionRow> = sqlx::query_as(
         r#"SELECT id, created_at, title, series_title, group_name, decision, reason, source, is_batch
            FROM rss_seen ORDER BY id DESC LIMIT ?"#,
@@ -212,19 +226,33 @@ pub async fn recent_decisions(db: &SqlitePool, limit: i64) -> Result<Vec<RssDeci
     .fetch_all(db)
     .await?;
 
-    Ok(rows.into_iter().map(|(id, created_at, title, series_title, group_name, decision, reason, source, is_batch)| RssDecision {
-        id,
-        created_at,
-        title,
-        series_title,
-        group_name,
-        decision,
-        reason,
-        source,
-        is_batch: is_batch != 0,
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                created_at,
+                title,
+                series_title,
+                group_name,
+                decision,
+                reason,
+                source,
+                is_batch,
+            )| RssDecision {
+                id,
+                created_at,
+                title,
+                series_title,
+                group_name,
+                decision,
+                reason,
+                source,
+                is_batch: is_batch != 0,
+            },
+        )
+        .collect())
 }
-
 
 pub async fn grabbed_titles(db: &SqlitePool, limit: i64) -> Result<Vec<String>, sqlx::Error> {
     let rows: Vec<(String,)> = sqlx::query_as(
@@ -263,8 +291,6 @@ pub async fn clear_grab_history(db: &SqlitePool) -> Result<u64, sqlx::Error> {
 /// Clear all RSS decision history.
 #[allow(dead_code)]
 pub async fn clear_all_history(db: &SqlitePool) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM rss_seen")
-        .execute(db)
-        .await?;
+    let result = sqlx::query("DELETE FROM rss_seen").execute(db).await?;
     Ok(result.rows_affected())
 }

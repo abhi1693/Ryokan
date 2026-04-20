@@ -1,11 +1,11 @@
 use askama::Template;
 use axum::{
+    Form,
     body::Body,
     extract::{ConnectInfo, State},
-    http::{header, HeaderMap, Method, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
-    Form,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -13,10 +13,10 @@ use std::net::SocketAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::models::{session, user};
-use crate::models::log::LogCategory;
-use crate::services::logger;
 use crate::AppState;
+use crate::models::log::LogCategory;
+use crate::models::{session, user};
+use crate::services::logger;
 
 // ---------- Login rate limiting ----------
 //
@@ -139,12 +139,13 @@ static TRUST_PROXY_HEADERS: LazyLock<bool> = LazyLock::new(|| {
 fn client_ip_from_request(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if *TRUST_PROXY_HEADERS {
         if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
-            && let Some(first) = h.split(',').next() {
-                let trimmed = first.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
-                }
+            && let Some(first) = h.split(',').next()
+        {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
             }
+        }
         if let Some(h) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
             let trimmed = h.trim();
             if !trimmed.is_empty() {
@@ -244,7 +245,10 @@ fn clear_session_cookie() -> String {
     // clear a Secure cookie from a non-Secure response, but the reverse is
     // harmless, so mirror whatever the set path emitted.
     let secure = if *COOKIE_SECURE { "; Secure" } else { "" };
-    format!("session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}", secure)
+    format!(
+        "session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
+        secure
+    )
 }
 
 // ---------- CSRF helpers ----------
@@ -267,7 +271,10 @@ fn url_host(value: &str) -> Option<String> {
     // may not include a port depending on the client, and we want to match
     // either way. An attacker can't spoof Host from a cross-origin browser
     // anyway, so we're comparing hosts for equality as a sanity check.
-    let host_only = host_with_port.split_once(':').map(|(h, _)| h).unwrap_or(host_with_port);
+    let host_only = host_with_port
+        .split_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(host_with_port);
     Some(host_only.to_ascii_lowercase())
 }
 
@@ -291,16 +298,20 @@ fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
         hosts.push(h);
     }
     if *TRUST_PROXY_HEADERS
-        && let Some(raw) = req.headers().get("x-forwarded-host").and_then(|v| v.to_str().ok()) {
-            for part in raw.split(',') {
-                let part = part.trim();
-                if part.is_empty() {
-                    continue;
-                }
-                let host_only = part.split_once(':').map(|(h, _)| h).unwrap_or(part);
-                hosts.push(host_only.to_ascii_lowercase());
+        && let Some(raw) = req
+            .headers()
+            .get("x-forwarded-host")
+            .and_then(|v| v.to_str().ok())
+    {
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
             }
+            let host_only = part.split_once(':').map(|(h, _)| h).unwrap_or(part);
+            hosts.push(host_only.to_ascii_lowercase());
         }
+    }
     hosts
 }
 
@@ -342,7 +353,11 @@ fn verify_same_origin(req: &Request<Body>) -> Result<(), &'static str> {
     // Fall back to Referer when Origin is absent (older clients, some
     // proxies). Reject if neither header is present — on POST from a real
     // browser at least one of them will be set.
-    if let Some(referer) = req.headers().get(header::REFERER).and_then(|v| v.to_str().ok()) {
+    if let Some(referer) = req
+        .headers()
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+    {
         return match url_host(referer) {
             Some(h) if hosts.contains(&h) => Ok(()),
             Some(_) => Err("referer host mismatch"),
@@ -355,7 +370,11 @@ fn verify_same_origin(req: &Request<Body>) -> Result<(), &'static str> {
 
 fn csrf_forbidden(reason: &str) -> Response {
     tracing::warn!("CSRF rejection: {}", reason);
-    (StatusCode::FORBIDDEN, "Forbidden: cross-origin request rejected").into_response()
+    (
+        StatusCode::FORBIDDEN,
+        "Forbidden: cross-origin request rejected",
+    )
+        .into_response()
 }
 
 // ---------- Auth middleware ----------
@@ -379,10 +398,7 @@ pub async fn require_auth(
     // hiccup during the very first request after boot (before `main.rs`
     // primes this flag). The session check below still rejects an
     // unauthenticated user anyway, so nothing bypasses auth.
-    if !state
-        .users_exist
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
+    if !state.users_exist.load(std::sync::atomic::Ordering::Relaxed) {
         match user::has_users(&state.db).await {
             Ok(true) => {
                 state
@@ -481,7 +497,13 @@ pub async fn setup_submit(
 
     match user::create_user(&state.db, form.username.trim(), &form.password).await {
         Ok(user_id) => {
-            logger::info(&state.db, LogCategory::Auth, &format!("Account created: {}", form.username.trim()), "").await;
+            logger::info(
+                &state.db,
+                LogCategory::Auth,
+                &format!("Account created: {}", form.username.trim()),
+                "",
+            )
+            .await;
             let token = session::create_session(&state.db, user_id)
                 .await
                 .unwrap_or_default();
@@ -610,7 +632,13 @@ pub async fn login_submit(
             // mistyped a few times isn't punished for their own typos.
             login_clear(&user_key);
             login_clear(&ip_key);
-            logger::info(&state.db, LogCategory::Auth, &format!("Login: {}", safe_username), "").await;
+            logger::info(
+                &state.db,
+                LogCategory::Auth,
+                &format!("Login: {}", safe_username),
+                "",
+            )
+            .await;
             let token = session::create_session(&state.db, u.id)
                 .await
                 .unwrap_or_default();
@@ -626,7 +654,13 @@ pub async fn login_submit(
         _ => {
             login_record_failure(&user_key);
             login_record_failure(&ip_key);
-            logger::warn(&state.db, LogCategory::Auth, &format!("Failed login attempt: {}", safe_username), "").await;
+            logger::warn(
+                &state.db,
+                LogCategory::Auth,
+                &format!("Failed login attempt: {}", safe_username),
+                "",
+            )
+            .await;
             let template = LoginTemplate {
                 error: Some("Invalid username or password.".into()),
             };

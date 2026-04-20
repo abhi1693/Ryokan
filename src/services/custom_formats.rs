@@ -59,15 +59,26 @@ pub struct CompiledSpec {
 
 #[derive(Debug, Clone)]
 pub enum SpecKind {
-    ReleaseTitle { regex: fancy_regex::Regex },
-    ReleaseGroup { regex: fancy_regex::Regex },
-    Size { min_bytes: i64, max_bytes: i64 },
-    Resolution { value: Resolution },
+    ReleaseTitle {
+        regex: fancy_regex::Regex,
+    },
+    ReleaseGroup {
+        regex: fancy_regex::Regex,
+    },
+    Size {
+        min_bytes: i64,
+        max_bytes: i64,
+    },
+    Resolution {
+        value: Resolution,
+    },
     /// Stores Sonarr's raw `QualitySource` integer (see plan §4.5).
     /// Dispatch happens inside `evaluate_spec_kernel` — one branch per
     /// supported Sonarr int, with `2` (TelevisionRaw) rejected at parse
     /// time.
-    Source { sonarr_value: u8 },
+    Source {
+        sonarr_value: u8,
+    },
     /// Ryokan-only: matches when the candidate's info_hash is in the
     /// SeaDex "best" hash set for the current anilist_id. Namespaced
     /// as `Ryokan.SeaDexBestSpecification` in exported JSON.
@@ -155,8 +166,14 @@ pub fn compile_from_json(raw: &str, score: i32, id: i64) -> Result<CompiledCusto
             .get("implementation")
             .and_then(|i| i.as_str())
             .unwrap_or("");
-        let negate = spec_v.get("negate").and_then(|b| b.as_bool()).unwrap_or(false);
-        let required = spec_v.get("required").and_then(|b| b.as_bool()).unwrap_or(false);
+        let negate = spec_v
+            .get("negate")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+        let required = spec_v
+            .get("required")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
         // Sonarr's CF JSON ships `fields` in two shapes depending on
         // where the dump came from:
         //   - Sonarr UI / API export: array of `{"name": …, "value": …}`
@@ -244,7 +261,11 @@ pub fn compile_from_json(raw: &str, score: i32, id: i64) -> Result<CompiledCusto
             }
         };
 
-        specs.push(CompiledSpec { kind, negate, required });
+        specs.push(CompiledSpec {
+            kind,
+            negate,
+            required,
+        });
     }
 
     // Cross-compat safety: a CF whose intent cannot be preserved must
@@ -263,7 +284,12 @@ pub fn compile_from_json(raw: &str, score: i32, id: i64) -> Result<CompiledCusto
         ));
     }
 
-    Ok(CompiledCustomFormat { id, name, score, specs })
+    Ok(CompiledCustomFormat {
+        id,
+        name,
+        score,
+        specs,
+    })
 }
 
 /// Rewrite a .NET/Sonarr-flavored regex into something fancy-regex
@@ -393,7 +419,10 @@ fn evaluate_spec_kernel(spec: &CompiledSpec, ctx: &EvalContext) -> bool {
         // scraper didn't find a `[Group]` prefix; an empty-string regex
         // still matches it, which is consistent with Sonarr's behavior.
         SpecKind::ReleaseGroup { regex } => regex.is_match(&ctx.result.group).unwrap_or(false),
-        SpecKind::Size { min_bytes, max_bytes } => {
+        SpecKind::Size {
+            min_bytes,
+            max_bytes,
+        } => {
             // Sonarr's SizeSpecification.cs uses strict-greater on the
             // lower bound and ≤ on the upper bound: `size > Min &&
             // size <= Max`. Mirror exactly.
@@ -441,11 +470,7 @@ fn evaluate_spec_kernel(spec: &CompiledSpec, ctx: &EvalContext) -> bool {
 /// kernel directly from there.
 fn evaluate_spec(spec: &CompiledSpec, ctx: &EvalContext) -> bool {
     let raw = evaluate_spec_kernel(spec, ctx);
-    if spec.negate {
-        !raw
-    } else {
-        raw
-    }
+    if spec.negate { !raw } else { raw }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -476,7 +501,10 @@ pub fn evaluate(cf: &CompiledCustomFormat, ctx: &EvalContext) -> bool {
     let mut groups: BTreeMap<u8, Vec<(&CompiledSpec, bool)>> = BTreeMap::new();
     for spec in &cf.specs {
         let matched = evaluate_spec(spec, ctx);
-        groups.entry(spec.kind.type_tag()).or_default().push((spec, matched));
+        groups
+            .entry(spec.kind.type_tag())
+            .or_default()
+            .push((spec, matched));
     }
 
     groups.values().all(|group| {
@@ -586,8 +614,11 @@ pub async fn rebuild_cf_cache(cache: &CompiledCfCache, db: &SqlitePool) {
 /// otherwise a candidate on SeaDex would earn both the CF score and
 /// the hardcoded `SEADEX_SCORE_BOOST` bump, which is double counting.
 pub fn has_seadex_cf(cfs: &[CompiledCustomFormat]) -> bool {
-    cfs.iter()
-        .any(|cf| cf.specs.iter().any(|s| matches!(s.kind, SpecKind::SeaDexBest)))
+    cfs.iter().any(|cf| {
+        cf.specs
+            .iter()
+            .any(|s| matches!(s.kind, SpecKind::SeaDexBest))
+    })
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -694,7 +725,11 @@ mod tests {
             ]
         }"#;
         let cf = compile(json);
-        if let SpecKind::Size { min_bytes, max_bytes } = cf.specs[0].kind {
+        if let SpecKind::Size {
+            min_bytes,
+            max_bytes,
+        } = cf.specs[0].kind
+        {
             const GB: i64 = 1024 * 1024 * 1024;
             assert_eq!(min_bytes, 5 * GB);
             assert_eq!(max_bytes, 20 * GB);
@@ -717,7 +752,9 @@ mod tests {
         let cf = compile(json);
         assert!(matches!(
             cf.specs[0].kind,
-            SpecKind::Resolution { value: Resolution::R1080p }
+            SpecKind::Resolution {
+                value: Resolution::R1080p
+            }
         ));
     }
 
@@ -792,7 +829,10 @@ mod tests {
                 }
             ]
         }"#;
-        assert!(matches!(compile(namespaced).specs[0].kind, SpecKind::SeaDexBest));
+        assert!(matches!(
+            compile(namespaced).specs[0].kind,
+            SpecKind::SeaDexBest
+        ));
         assert!(matches!(compile(bare).specs[0].kind, SpecKind::SeaDexBest));
     }
 
@@ -1174,7 +1214,12 @@ mod tests {
         assert!(!evaluate(&cf, &ctx(&title_miss, &cls, &hashes)));
 
         // Size group fails — CF fails even though title matches.
-        let size_miss = candidate("[MTBB] Show - 01 [BD 1080p x265]", "MTBB", 1_200_000_000, "");
+        let size_miss = candidate(
+            "[MTBB] Show - 01 [BD 1080p x265]",
+            "MTBB",
+            1_200_000_000,
+            "",
+        );
         assert!(!evaluate(&cf, &ctx(&size_miss, &cls, &hashes)));
     }
 
@@ -1290,7 +1335,10 @@ mod tests {
         // MTBB x265: matches x265 (+500), matches anti-noob (-0? no,
         // anti-noob matches → its score -1000 also adds).
         let mtbb = candidate("[MTBB] Show - 01 [x265]", "MTBB", 0, "");
-        let score = total_cf_score(&[cf_x265.clone(), cf_anti_noob.clone()], &ctx(&mtbb, &cls, &hashes));
+        let score = total_cf_score(
+            &[cf_x265.clone(), cf_anti_noob.clone()],
+            &ctx(&mtbb, &cls, &hashes),
+        );
         assert_eq!(score, 500 + (-1000));
 
         // NoobSubs (no x265): anti-noob fires negatively → CF doesn't
@@ -1471,24 +1519,14 @@ mod tests {
         let cls = classification(Source::Unknown, Resolution::Unknown);
 
         // SubsPlease weekly, .mkv container: should NOT match.
-        let sp = candidate(
-            "[SubsPlease] ShowX - 01 (1080p).mkv",
-            "SubsPlease",
-            0,
-            "",
-        );
+        let sp = candidate("[SubsPlease] ShowX - 01 (1080p).mkv", "SubsPlease", 0, "");
         assert!(
             !evaluate(&cf, &ctx(&sp, &cls, &hashes)),
             "SubsPlease mkv must be spared by the 8-bit mp4 penalty"
         );
 
         // NoobSubs-style 8-bit mp4: SHOULD match (hits both specs).
-        let noob = candidate(
-            "[NoobSubs] ShowX - 01 (1080p 8bit).mp4",
-            "NoobSubs",
-            0,
-            "",
-        );
+        let noob = candidate("[NoobSubs] ShowX - 01 (1080p 8bit).mp4", "NoobSubs", 0, "");
         assert!(
             evaluate(&cf, &ctx(&noob, &cls, &hashes)),
             "NoobSubs 8-bit mp4 must be caught by the penalty"
@@ -1630,10 +1668,10 @@ mod tests {
         // Build the flat list of (label, candidate, classification,
         // expected) tuples used for both scoring and ordering checks.
         let fixture: Vec<(&str, &SearchResult, &ClassificationResult, i32)> = vec![
-            ("Tier-S BD",      &tier_s_bd.0,       &tier_s_bd.1,       2250),
-            ("WEB plain",      &web_plain.0,       &web_plain.1,       500),
-            ("WEB HEVC",       &web_hevc.0,        &web_hevc.1,        400),
-            ("WEB neutral",    &web_neutral.0,     &web_neutral.1,     0),
+            ("Tier-S BD", &tier_s_bd.0, &tier_s_bd.1, 2250),
+            ("WEB plain", &web_plain.0, &web_plain.1, 500),
+            ("WEB HEVC", &web_hevc.0, &web_hevc.1, 400),
+            ("WEB neutral", &web_neutral.0, &web_neutral.1, 0),
         ];
 
         // Per-candidate score assertion — each row's total must match
@@ -1655,16 +1693,10 @@ mod tests {
             .map(|(label, cand, cls, _)| (label, score_against_defaults(&cfs, cand, cls)))
             .collect();
         sorted.sort_by_key(|s| std::cmp::Reverse(s.1));
-        let labels_in_score_order: Vec<&str> =
-            sorted.iter().map(|(label, _)| **label).collect();
+        let labels_in_score_order: Vec<&str> = sorted.iter().map(|(label, _)| **label).collect();
         assert_eq!(
             labels_in_score_order,
-            vec![
-                "Tier-S BD",
-                "WEB plain",
-                "WEB HEVC",
-                "WEB neutral",
-            ],
+            vec!["Tier-S BD", "WEB plain", "WEB HEVC", "WEB neutral",],
             "default CF set must produce the expected regression ordering"
         );
     }
@@ -1990,34 +2022,118 @@ mod tests {
     // LanguageSpecification will fail the parse guard on purpose — that is
     // not a bug, that is Ryokan refusing to silently drop a gating spec.
     const TRASH_ANIME_FIXTURES: &[(&str, &str)] = &[
-        ("10bit", include_str!("../../fixtures/trash-guides-anime/10bit.json")),
-        ("anime-bd-tier-01", include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-01.json")),
-        ("anime-bd-tier-02", include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-02.json")),
-        ("anime-bd-tier-03", include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-03.json")),
-        ("anime-bd-tier-04", include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-04.json")),
-        ("anime-bd-tier-05", include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-05.json")),
-        ("anime-bd-tier-06", include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-06.json")),
-        ("anime-bd-tier-07", include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-07.json")),
-        ("anime-bd-tier-08", include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-08.json")),
-        ("anime-dual-audio", include_str!("../../fixtures/trash-guides-anime/anime-dual-audio.json")),
-        ("anime-lq-groups", include_str!("../../fixtures/trash-guides-anime/anime-lq-groups.json")),
-        ("anime-raws", include_str!("../../fixtures/trash-guides-anime/anime-raws.json")),
-        ("anime-web-tier-01", include_str!("../../fixtures/trash-guides-anime/anime-web-tier-01.json")),
-        ("anime-web-tier-02", include_str!("../../fixtures/trash-guides-anime/anime-web-tier-02.json")),
-        ("anime-web-tier-03", include_str!("../../fixtures/trash-guides-anime/anime-web-tier-03.json")),
-        ("anime-web-tier-04", include_str!("../../fixtures/trash-guides-anime/anime-web-tier-04.json")),
-        ("anime-web-tier-05", include_str!("../../fixtures/trash-guides-anime/anime-web-tier-05.json")),
-        ("anime-web-tier-06", include_str!("../../fixtures/trash-guides-anime/anime-web-tier-06.json")),
-        ("bad-dual-groups", include_str!("../../fixtures/trash-guides-anime/bad-dual-groups.json")),
-        ("dubs-only", include_str!("../../fixtures/trash-guides-anime/dubs-only.json")),
-        ("fansub", include_str!("../../fixtures/trash-guides-anime/fansub.json")),
-        ("fastsub", include_str!("../../fixtures/trash-guides-anime/fastsub.json")),
-        ("uncensored", include_str!("../../fixtures/trash-guides-anime/uncensored.json")),
-        ("v0", include_str!("../../fixtures/trash-guides-anime/v0.json")),
-        ("v1", include_str!("../../fixtures/trash-guides-anime/v1.json")),
-        ("v2", include_str!("../../fixtures/trash-guides-anime/v2.json")),
-        ("v3", include_str!("../../fixtures/trash-guides-anime/v3.json")),
-        ("v4", include_str!("../../fixtures/trash-guides-anime/v4.json")),
+        (
+            "10bit",
+            include_str!("../../fixtures/trash-guides-anime/10bit.json"),
+        ),
+        (
+            "anime-bd-tier-01",
+            include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-01.json"),
+        ),
+        (
+            "anime-bd-tier-02",
+            include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-02.json"),
+        ),
+        (
+            "anime-bd-tier-03",
+            include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-03.json"),
+        ),
+        (
+            "anime-bd-tier-04",
+            include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-04.json"),
+        ),
+        (
+            "anime-bd-tier-05",
+            include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-05.json"),
+        ),
+        (
+            "anime-bd-tier-06",
+            include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-06.json"),
+        ),
+        (
+            "anime-bd-tier-07",
+            include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-07.json"),
+        ),
+        (
+            "anime-bd-tier-08",
+            include_str!("../../fixtures/trash-guides-anime/anime-bd-tier-08.json"),
+        ),
+        (
+            "anime-dual-audio",
+            include_str!("../../fixtures/trash-guides-anime/anime-dual-audio.json"),
+        ),
+        (
+            "anime-lq-groups",
+            include_str!("../../fixtures/trash-guides-anime/anime-lq-groups.json"),
+        ),
+        (
+            "anime-raws",
+            include_str!("../../fixtures/trash-guides-anime/anime-raws.json"),
+        ),
+        (
+            "anime-web-tier-01",
+            include_str!("../../fixtures/trash-guides-anime/anime-web-tier-01.json"),
+        ),
+        (
+            "anime-web-tier-02",
+            include_str!("../../fixtures/trash-guides-anime/anime-web-tier-02.json"),
+        ),
+        (
+            "anime-web-tier-03",
+            include_str!("../../fixtures/trash-guides-anime/anime-web-tier-03.json"),
+        ),
+        (
+            "anime-web-tier-04",
+            include_str!("../../fixtures/trash-guides-anime/anime-web-tier-04.json"),
+        ),
+        (
+            "anime-web-tier-05",
+            include_str!("../../fixtures/trash-guides-anime/anime-web-tier-05.json"),
+        ),
+        (
+            "anime-web-tier-06",
+            include_str!("../../fixtures/trash-guides-anime/anime-web-tier-06.json"),
+        ),
+        (
+            "bad-dual-groups",
+            include_str!("../../fixtures/trash-guides-anime/bad-dual-groups.json"),
+        ),
+        (
+            "dubs-only",
+            include_str!("../../fixtures/trash-guides-anime/dubs-only.json"),
+        ),
+        (
+            "fansub",
+            include_str!("../../fixtures/trash-guides-anime/fansub.json"),
+        ),
+        (
+            "fastsub",
+            include_str!("../../fixtures/trash-guides-anime/fastsub.json"),
+        ),
+        (
+            "uncensored",
+            include_str!("../../fixtures/trash-guides-anime/uncensored.json"),
+        ),
+        (
+            "v0",
+            include_str!("../../fixtures/trash-guides-anime/v0.json"),
+        ),
+        (
+            "v1",
+            include_str!("../../fixtures/trash-guides-anime/v1.json"),
+        ),
+        (
+            "v2",
+            include_str!("../../fixtures/trash-guides-anime/v2.json"),
+        ),
+        (
+            "v3",
+            include_str!("../../fixtures/trash-guides-anime/v3.json"),
+        ),
+        (
+            "v4",
+            include_str!("../../fixtures/trash-guides-anime/v4.json"),
+        ),
     ];
 
     /// Every vendored trash-guides anime CF must compile cleanly. A
@@ -2145,9 +2261,8 @@ mod tests {
             let reserialized = serde_json::to_string(&value)
                 .unwrap_or_else(|e| panic!("fixture `{label}` failed to re-serialize: {e}"));
 
-            let second = compile_from_json(&reserialized, 0, 1).unwrap_or_else(|e| {
-                panic!("fixture `{label}` failed round-trip parse: {e}")
-            });
+            let second = compile_from_json(&reserialized, 0, 1)
+                .unwrap_or_else(|e| panic!("fixture `{label}` failed round-trip parse: {e}"));
 
             assert_eq!(
                 first.specs.len(),

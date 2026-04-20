@@ -178,9 +178,10 @@ pub async fn write_series_nfo(
 
         // <runtime>: detail.duration is per-episode minutes from AniList.
         if let Some(duration) = d.duration
-            && duration > 0 {
-                xml.push_str(&format!("  <runtime>{}</runtime>\n", duration));
-            }
+            && duration > 0
+        {
+            xml.push_str(&format!("  <runtime>{}</runtime>\n", duration));
+        }
 
         // Real genre tags. Always include "Animation" as a fallback so the
         // category filter still groups it correctly even when AniList genres
@@ -375,9 +376,10 @@ pub async fn write_episode_nfo(
     );
 
     if let Some(runtime) = runtime_minutes
-        && runtime > 0 {
-            xml.push_str(&format!("  <runtime>{}</runtime>\n", runtime));
-        }
+        && runtime > 0
+    {
+        xml.push_str(&format!("  <runtime>{}</runtime>\n", runtime));
+    }
 
     xml.push_str("</episodedetails>\n");
 
@@ -396,7 +398,10 @@ mod tests {
         // whitespace collapsed. (A trailing tag before punctuation can
         // leave a stray space — see strip_html_tags doc comment — so this
         // test deliberately ends without trailing punctuation.)
-        assert_eq!(out, "First sentence. Second sentence with emphasis and a link");
+        assert_eq!(
+            out,
+            "First sentence. Second sentence with emphasis and a link"
+        );
     }
 
     #[test]
@@ -488,10 +493,7 @@ mod tests {
         render_series_nfo_full(detail, "english", true, true, true).await
     }
 
-    async fn render_series_nfo_with_lang(
-        detail: Option<&AnimeDetail>,
-        lang: &str,
-    ) -> String {
+    async fn render_series_nfo_with_lang(detail: Option<&AnimeDetail>, lang: &str) -> String {
         render_series_nfo_full(detail, lang, true, true, true).await
     }
 
@@ -590,7 +592,9 @@ mod tests {
     #[tokio::test]
     async fn episode_nfo_omits_runtime_when_unknown() {
         let path = unique_temp_path("ep_no_runtime.nfo");
-        write_episode_nfo(&path, "Show", 1, 5, "", "", None).await.expect("write nfo");
+        write_episode_nfo(&path, "Show", 1, 5, "", "", None)
+            .await
+            .expect("write nfo");
         let xml = std::fs::read_to_string(&path).expect("read nfo");
         std::fs::remove_file(&path).ok();
         if let Some(parent) = path.parent() {
