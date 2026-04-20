@@ -1918,7 +1918,7 @@ fieldset legend {
     display: block;
 }
 .monitoring-card details.monitoring-row[open] {
-    padding: 12px 14px 18px;
+    padding: 12px 14px 22px;
 }
 .monitoring-card details.monitoring-row > summary {
     padding: 2px 0;
