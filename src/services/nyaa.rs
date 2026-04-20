@@ -180,12 +180,13 @@ pub struct SearchResponse {
 
 /// Search Nyaa by scraping the HTML results page.
 pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, String> {
+    let sanitized_query = sanitize_query_for_nyaa(&opts.query);
     let mut url = format!(
         "{}/?f={}&c={}&q={}&p={}",
         NYAA_BASE,
         opts.filter,
         opts.category,
-        urlencoding::encode(&opts.query),
+        urlencoding::encode(&sanitized_query),
         page
     );
 
@@ -196,7 +197,7 @@ pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, S
             urlencoding::encode(&opts.user),
             opts.filter,
             opts.category,
-            urlencoding::encode(&opts.query),
+            urlencoding::encode(&sanitized_query),
             page
         );
     }
@@ -492,6 +493,39 @@ pub async fn enrich_results_with_group_map(db: &sqlx::SqlitePool, results: &mut 
     }
 }
 
+/// Strip exclusion-operator hyphens from a Nyaa search query. Nyaa
+/// runs Sphinx full-text search, where a token starting with `-` is
+/// interpreted as **NOT this token** — and Sphinx applies that even
+/// inside double-quoted phrases (verified live 2026-04-20). AniList's
+/// English titles routinely wrap subtitles in decorative hyphens —
+/// `Solo Leveling Season 2 -Arise from the Shadow-`, `Re:Zero
+/// -Starting Life in Another World-`, etc. — and shipping those raw
+/// silently drops every release whose title contains the subtitled
+/// word. The Solo Leveling S2 query that ought to surface the EMBER
+/// batch (`q=Solo+Leveling+Season+2+-Arise+from+the+Shadow-+batch`)
+/// returned zero hits because Sphinx excluded every result containing
+/// "Arise".
+///
+/// We only strip the *operator* form: a `-` that sits at the very
+/// start of the query, immediately after whitespace, or immediately
+/// after an opening quote. Hyphens embedded inside a token
+/// (`X-Files`, `Web-DL`) and trailing hyphens (`Shadow-`) are part of
+/// the word — Sphinx only fires on token-leading `-`.
+fn sanitize_query_for_nyaa(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    let mut at_token_start = true;
+    for ch in query.chars() {
+        if at_token_start && ch == '-' {
+            // Drop. Stay in token-start state so a run of `--`
+            // collapses to nothing.
+            continue;
+        }
+        out.push(ch);
+        at_token_start = ch.is_whitespace() || ch == '"';
+    }
+    out
+}
+
 fn detect_batch(title: &str) -> bool {
     let lower = title.to_lowercase();
 
@@ -717,6 +751,93 @@ fn parse_view_page(html: &str, view_url: &str, opts: &SearchOptions) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── sanitize_query_for_nyaa ──────────────────────────────────────────
+    //
+    // Boundary: a hyphen is stripped only when it sits at the start of a
+    // token (start of string, immediately after whitespace, or
+    // immediately after a `"`). Hyphens *inside* a token stay — they're
+    // part of the word. Trailing hyphens (`Shadow-`) are also part of
+    // the token and stay.
+
+    #[test]
+    fn sanitize_strips_decorative_subtitle_hyphens() {
+        // The bug case: AniList's English title for Solo Leveling S2.
+        let q = "Solo Leveling Season 2 -Arise from the Shadow- batch";
+        assert_eq!(
+            sanitize_query_for_nyaa(q),
+            "Solo Leveling Season 2 Arise from the Shadow- batch"
+        );
+    }
+
+    #[test]
+    fn sanitize_handles_re_zero_subtitle_form() {
+        // Same shape, different series — make sure the fix isn't an
+        // ad-hoc Solo Leveling patch.
+        let q = "Re:Zero -Starting Life in Another World-";
+        assert_eq!(
+            sanitize_query_for_nyaa(q),
+            "Re:Zero Starting Life in Another World-"
+        );
+    }
+
+    #[test]
+    fn sanitize_preserves_internal_hyphens_in_release_groups() {
+        // Erai-raws, X-Files, Web-DL, One-Punch — all tokens with an
+        // internal hyphen should round-trip untouched. Sphinx only treats
+        // a *leading* `-` as the NOT operator.
+        let q = "Erai-raws Yu-Gi-Oh One-Punch Man Web-DL";
+        assert_eq!(
+            sanitize_query_for_nyaa(q),
+            "Erai-raws Yu-Gi-Oh One-Punch Man Web-DL"
+        );
+    }
+
+    #[test]
+    fn sanitize_preserves_trailing_hyphens() {
+        // Trailing `-` is part of the token — Sphinx doesn't treat it as
+        // an operator. Decorative trailing dashes from titles like
+        // `Shadow-` stay intact.
+        let q = "Foo Shadow- batch";
+        assert_eq!(sanitize_query_for_nyaa(q), "Foo Shadow- batch");
+    }
+
+    #[test]
+    fn sanitize_collapses_runs_of_leading_hyphens() {
+        // Defensive: `--foo` (Sphinx exclude double-NOT) collapses
+        // entirely so we don't trip on Unicode dash variants getting
+        // duplicated.
+        let q = "Show --foo bar";
+        assert_eq!(sanitize_query_for_nyaa(q), "Show foo bar");
+    }
+
+    #[test]
+    fn sanitize_drops_token_start_hyphen_inside_quotes() {
+        // The aliased exact-match form `"Solo Leveling -Arise..."` —
+        // Sphinx still treats the `-` as exclusion even inside a
+        // double-quoted phrase (verified live), so we strip it the
+        // same way as outside quotes. Opening quote stays attached
+        // because it isn't a `-`.
+        let q = "\"Solo Leveling -Arise-\"";
+        assert_eq!(sanitize_query_for_nyaa(q), "\"Solo Leveling Arise-\"");
+    }
+
+    #[test]
+    fn sanitize_drops_query_starting_with_hyphen() {
+        // Edge case: a leading `-` at the very start of the query.
+        let q = "-foo bar";
+        assert_eq!(sanitize_query_for_nyaa(q), "foo bar");
+    }
+
+    #[test]
+    fn sanitize_leaves_episode_dash_separator_searchable() {
+        // The `Show - 12` shape that `build_queries_from_aliases`
+        // emits for per-episode queries collapses the standalone `-`
+        // to whitespace — Nyaa tokenizes on whitespace so the search
+        // semantics are unchanged.
+        let q = "Show - 12";
+        assert_eq!(sanitize_query_for_nyaa(q), "Show  12");
+    }
 
     /// Minimal fixture mirroring the real Nyaa view page structure we
     /// saw for the smol Kizumonogatari megapack (`/view/1713886`). This
