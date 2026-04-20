@@ -2208,8 +2208,22 @@ mod tests {
     /// regression that silently restores per-dest writes would burn
     /// on-disk bytes for every import (most visibly on banner +
     /// backdrop, which always share the same blob in the same dir).
-    /// Unix-only because inode identity is the cheap way to assert
-    /// hardlink-ness without relying on filesystem-specific tools.
+    ///
+    /// Unix-only because this assertion leans on
+    /// `std::os::unix::fs::MetadataExt::{ino, nlink}` — the cheapest
+    /// way to prove hardlink-ness without shelling out to `stat`.
+    /// **For Windows support:** the production code path
+    /// ([`copy_artwork`]'s `std::fs::hard_link` call) already works
+    /// cross-platform (Linux/macOS `link(2)`, Windows
+    /// `CreateHardLinkW`) — only this test's assertion is gated.
+    /// To cover Windows, add a mirror test gated on `#[cfg(windows)]`
+    /// using `std::os::windows::fs::MetadataExt::number_of_links()`
+    /// (expect ≥ 2 on the anchor), or check file-index identity via
+    /// `BY_HANDLE_FILE_INFORMATION` through the `windows` crate for
+    /// a direct inode-equivalent comparison. The cross-platform
+    /// `copy_artwork_overwrites_preexisting_dest_files` test below
+    /// already runs on every target and pins *behavior* (both dests
+    /// end up with the new payload) independent of mechanism.
     #[cfg(unix)]
     #[tokio::test]
     async fn copy_artwork_hardlinks_subsequent_dests_to_the_first() {
