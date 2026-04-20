@@ -20,7 +20,7 @@ cargo clippy             # lint
 docker compose up -d --build  # build and run in Docker
 ```
 
-Requires Rust 1.95+ (enforced via `package.rust-version` in Cargo.toml), a C linker, and OpenSSL dev headers for local builds.
+Requires Rust 1.95+ (enforced via `package.rust-version` in Cargo.toml), a C/C++ toolchain (for the vendored anitomy and bundled SQLite), and `cmake` (for aws-lc-sys, reqwest's TLS crypto provider since the 0.13 bump). No OpenSSL headers needed — TLS is pure-Rust rustls.
 
 ## Environment Variables
 
@@ -29,7 +29,7 @@ Requires Rust 1.95+ (enforced via `package.rust-version` in Cargo.toml), a C lin
 | `LISTEN_ADDR` | `0.0.0.0:8978` | Bind address |
 | `DATABASE_URL` | `sqlite://data/ryokan.db?mode=rwc` | SQLite connection string |
 | `RUST_LOG` | `ryokan=debug,tower_http=debug` (local) / `ryokan=info` (Docker) | Log filter |
-| `JIKAN_API_BASE` | `https://api.jikan.moe/v4` | Override for self-hosted Jikan |
+| `JIKAN_API_BASE` | `https://api.jikan.moe/v4` | Override for self-hosted Jikan. If the endpoint is HTTPS-behind-a-private-CA, the CA must be in the system trust store — rustls-platform-verifier does not honor `SSL_CERT_FILE`/`SSL_CERT_DIR` the way native-tls did before reqwest 0.13. |
 | `RYOKAN_MEDIA_CACHE_DIR` | `data/cache/artwork` | Artwork blob cache root (content-addressed) |
 
 ## Architecture
