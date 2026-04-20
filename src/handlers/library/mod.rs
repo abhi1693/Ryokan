@@ -14,10 +14,6 @@ use crate::services::{anilist, artwork, auto_search, jikan, kitsu, logger, media
 use crate::AppState;
 
 pub mod episodes;
-pub use episodes::{
-    cancel_pending_episode, delete_episode_file, episode_download_progress,
-    get_episode_grab_history, mark_episode_failed, series_episodes_json, EpisodeProgress,
-};
 
 #[derive(Template)]
 #[template(path = "index.html")]
@@ -387,7 +383,7 @@ async fn resolve_series_request(db: &SqlitePool, request_id: i64) -> Result<(Opt
 /// internal ID first, then by AniList ID as a fallback) and returns the
 /// row. Callers that don't find a tracked row can treat it as "not in
 /// library" without any further fallback.
-pub(super) async fn resolve_tracked_series(
+async fn resolve_tracked_series(
     db: &SqlitePool,
     request_id: i64,
 ) -> Result<Option<series::Series>, sqlx::Error> {
@@ -468,7 +464,7 @@ async fn maybe_reconcile_mal_entry(
     Some((refreshed, detail))
 }
 
-pub(super) async fn resolve_series_context(
+async fn resolve_series_context(
     db: &SqlitePool,
     request_id: i64,
 ) -> Result<(Option<series::Series>, i64, anilist::AnimeDetail), String> {
@@ -972,7 +968,7 @@ where
     missing > JIKAN_MAL_LAG_TOLERANCE
 }
 
-pub(super) async fn build_episodes(
+async fn build_episodes(
     db: &SqlitePool,
     detail: &anilist::AnimeDetail,
     db_id: Option<i64>,
@@ -2932,7 +2928,7 @@ async fn auto_expand_library_from_pack_with_files(
     added
 }
 
-pub(super) async fn run_auto_search_targets(
+async fn run_auto_search_targets(
     state: &AppState,
     request_id: i64,
     targets: Vec<auto_search::SearchTarget>,

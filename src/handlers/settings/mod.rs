@@ -15,17 +15,6 @@ use crate::services::{
 use crate::AppState;
 
 pub mod custom_formats;
-// Re-exported so existing external paths (`handlers::settings::foo`) keep
-// resolving after the CF handlers moved into the submodule.
-#[allow(unused_imports)]
-pub use custom_formats::{
-    settings_custom_formats_delete, settings_custom_formats_export,
-    settings_custom_formats_import, settings_custom_formats_import_resolve,
-    settings_custom_formats_install_defaults, settings_custom_formats_minimum_score,
-    settings_custom_formats_reset_defaults, settings_custom_formats_upsert,
-    CustomFormatDeleteForm, CustomFormatImportForm, CustomFormatMinScoreForm,
-    CustomFormatUpsertForm,
-};
 use custom_formats::ImportReviewView;
 
 /// View-model wrapper rendered on the Custom Formats tab. Surfaces
@@ -119,7 +108,7 @@ fn extract_trash_description(json: &str) -> Option<String> {
 
 #[derive(Template)]
 #[template(path = "settings.html")]
-pub(super) struct SettingsTemplate {
+struct SettingsTemplate {
     page: String,
     tab: String,
     config: config::Config,
@@ -309,7 +298,7 @@ fn validate_resolution(value: &str, default: &str) -> String {
 /// renderer runs. Callers override the `tab`, `edit_id`, `msg`, `err`,
 /// and optional import-review fields to tailor the resulting page.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn build_settings_template(
+async fn build_settings_template(
     state: &AppState,
     tab: Option<String>,
     edit_id: Option<i64>,
