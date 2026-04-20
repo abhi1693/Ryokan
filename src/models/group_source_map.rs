@@ -52,7 +52,15 @@ pub struct GroupSourceEntry {
 /// detection still fires in `source_filename.rs`; this slice is just
 /// for groups whose filenames omit the token but whose sub-tier is
 /// known. Currently empty — add WebRip-only groups here if needed.
-pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[];
+pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[
+    // EMBER almost exclusively ships re-encoded WebRips, so when the group
+    // prior fires we should resolve to the WebRip sub-tier rather than
+    // leaving it as plain WEB. Confirmed from EMBER's Wajutsushi batch
+    // (released 2024-12-20, four days after the show finished airing on
+    // 2024-12-16) where ffprobe observed E-AC-3 audio (a WEB fingerprint)
+    // on every episode.
+    ("EMBER", WebKind::WebRip),
+];
 
 // ─────────────────────────────────────────────────────────────────────────
 // Seed data
@@ -253,7 +261,15 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("AkihitoSubs", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Arukoru", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("EDGE", Source::BluRay, 0.95, "TRaSH BD tier 08"),
-    ("EMBER", Source::BluRay, 0.95, "TRaSH BD tier 08"),
+    // EMBER was previously seeded as TRaSH BD tier 08, but empirically they
+    // almost exclusively ship re-encoded WebRips. EMBER's Wajutsushi batch
+    // (released 2024-12-20, after the show finished airing on 2024-12-16)
+    // was the trigger — every episode came back from ffprobe as Web
+    // (E-AC-3 audio). Reclassified to WEB and matched into SEED_WEB_KIND
+    // with WebRip above so the prior produces `Web (WebRip)` instead of
+    // `BluRay`. `reconcile_episode_seed_drift` resets existing user rows
+    // that had been stamped under the old BD prior.
+    ("EMBER", Source::Web, 0.95, "WebRip re-encoder"),
     ("GHOST", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     // Judas is TRaSH BD tier 08 but also ships weekly WEB rips during airing,
     // so per the mixed-source rule in the module docs above we leave them out
@@ -420,6 +436,28 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Episode rows to wipe back to "unknown" so the next library_classify
+/// sweep re-runs the full pipeline against them. Used when `SEED_DEFAULTS`
+/// flips a group's source classification (the group_source_map row gets
+/// realigned by [`reconcile_seed_drift`], but `episode_quality_tags` rows
+/// already stamped under the old prior would otherwise stay wrong forever
+/// — `manual_override = 0` rows aren't user-pinned but our #53 sweep skip
+/// rule never re-attempts a non-empty source).
+///
+/// Format: `(group_name, prior_source_to_match)`. A row matches when its
+/// `release_group` equals the group (case-insensitive), its `source`
+/// equals the listed prior, and `manual_override = 0`. Manual overrides
+/// are always preserved.
+const SEED_DRIFT_EPISODE_RESETS: &[(&str, &str)] = &[
+    // EMBER was seeded as BD tier 08 in earlier releases; reclassified
+    // 2026-04-20 to WEB / WebRip after empirical confirmation that they
+    // ship WebRip re-encodes (their Wajutsushi batch released 2024-12-20,
+    // four days after the show finished airing on 2024-12-16). Reset
+    // BluRay-stamped EMBER rows so the next sweep re-runs them under the
+    // corrected prior.
+    ("EMBER", "BluRay"),
+];
+
 /// One-shot corrections for seed rows whose built-in value has changed
 /// since an earlier release. `seed_defaults` uses `INSERT OR IGNORE`, so
 /// an existing row keeps whatever value it was first seeded with — which
@@ -427,9 +465,19 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
 /// confidence before we corrected it) never self-corrects on upgrade.
 ///
 /// This pass realigns non-user-edited rows (`is_user_edit = 0`) to the
-/// current `SEED_DEFAULTS` values. User edits are preserved: anyone who
-/// deliberately set their own confidence for a group keeps it. The
-/// update is idempotent — rows that already match the seed are a no-op.
+/// current `SEED_DEFAULTS` and `SEED_WEB_KIND` values. User edits are
+/// preserved: anyone who deliberately set their own confidence for a
+/// group keeps it. The update is idempotent — rows that already match
+/// the seed are a no-op.
+///
+/// `episode_quality_tags` rows affected by a seed flip are reset later
+/// in `models::mod::migrate` via [`reconcile_episode_seed_drift`], which
+/// runs *after* the Phase 1b `ALTER TABLE` passes that add the `source`
+/// / `resolution` / etc. columns this crate references. Keeping the
+/// episode reset out of this function means [`reconcile_seed_drift`]
+/// stays callable from inside `group_source_map::migrate` (where those
+/// columns may not exist yet on a fresh database) without tripping a
+/// "no such column: source" error on boot.
 pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // See seed_defaults — same fsync-coalesce reason for the tx wrap.
     let mut tx = db.begin().await?;
@@ -443,6 +491,60 @@ pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .bind(*confidence)
         .bind(notes)
         .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // web_kind isn't part of SEED_DEFAULTS — sync it from SEED_WEB_KIND
+    // so a group that flipped from `BluRay` to `Web` (e.g. EMBER) lands
+    // with the right WebRip / WebDl sub-tier instead of an empty string.
+    for (name, web_kind) in SEED_WEB_KIND {
+        sqlx::query(
+            "UPDATE group_source_map
+             SET web_kind = ?
+             WHERE group_name = ? AND is_user_edit = 0",
+        )
+        .bind(web_kind.as_str())
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Companion to [`reconcile_seed_drift`]: wipe `episode_quality_tags`
+/// rows whose group was reclassified by a seed flip so the next library
+/// sweep re-runs the full pipeline against them under the corrected
+/// prior. The #53 sweep skip rule normally leaves a row alone once
+/// `classification_attempted_at` is set, so this reset must clear that
+/// timestamp as well.
+///
+/// Split from `reconcile_seed_drift` because it touches columns added
+/// later in `models::mod::migrate` (`source`, `resolution`,
+/// `classification_attempted_at`, etc.). Call this once, after the
+/// Phase 1b `ALTER TABLE episode_quality_tags ADD COLUMN ...` block
+/// has run. User-edited group_source_map entries and `manual_override`
+/// episode rows are both preserved.
+pub async fn reconcile_episode_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    for (group, prior_source) in SEED_DRIFT_EPISODE_RESETS {
+        sqlx::query(
+            "UPDATE episode_quality_tags
+             SET source = '',
+                 resolution = '',
+                 is_remux = 0,
+                 is_bdmv = 0,
+                 web_kind = '',
+                 classification_confidence = 0,
+                 needs_review = 0,
+                 classification_evidence = '',
+                 classification_attempted_at = NULL
+             WHERE release_group = ? COLLATE NOCASE
+               AND source = ?
+               AND COALESCE(manual_override, 0) = 0",
+        )
+        .bind(group)
+        .bind(prior_source)
         .execute(&mut *tx)
         .await?;
     }

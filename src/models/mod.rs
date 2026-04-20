@@ -1120,6 +1120,15 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Run the seed-drift episode reset *after* the Phase 1b ALTER TABLE
+    // block above. The companion `reconcile_seed_drift` runs earlier
+    // inside `group_source_map::migrate` (where it only touches the
+    // group_source_map table, which is fully migrated by that point),
+    // but the episode reset references columns added immediately above
+    // (`source`, `classification_attempted_at`, etc.) so it must wait
+    // until those exist on a fresh database boot.
+    group_source_map::reconcile_episode_seed_drift(db).await?;
+
     // ── Phase 1b: split quality_profile/quality_cutoff into explicit source
     //             and resolution fields ──────────────────────────────────
     // preferred_resolution already exists and stores a bare resolution
