@@ -2428,4 +2428,282 @@ mod tests {
             "populated cumulative short-circuits the gate"
         );
     }
+
+    /// Issue #45: full-scale JoJo Part 3 case. 48-episode BD megapack
+    /// with absolute continuous numbering (no per-cour arc markers in
+    /// the filenames) and Egypt-hen as a sibling of Stardust Crusaders
+    /// on AniList. Egypt-hen's trailing "subtitle" is a single token
+    /// ("Egypt-hen") so the subtitle path can't match — the
+    /// episode-range fallback picks it up via title-prefix matching.
+    ///
+    /// Verifies that:
+    ///   1. detection fires once (Egypt-hen sibling).
+    ///   2. the sibling route carries files 24..=47 (0-based) = E25..E48.
+    ///   3. episode_offset = 24 (parent_cap) so those map to local 1..=24.
+    ///   4. the sibling gets 24 quality-tag + grab-history rows (not 0).
+    ///   5. the parent route carries files 0..=23 = E01..=E24, offset 0.
+    #[tokio::test]
+    async fn auto_expand_jojo_part3_48ep_pack_maps_all_episodes() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        // Parent: JoJo Stardust Crusaders (24 eps).
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 20899,
+                mal_id: None,
+                title: "JoJo's Bizarre Adventure: Stardust Crusaders",
+                title_romaji: "JoJo no Kimyou na Bouken: Stardust Crusaders",
+                title_english: "JoJo's Bizarre Adventure: Stardust Crusaders",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(24),
+                season_year: Some(2014),
+                end_year: Some(2014),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "jojop3hash00000000000000000000000000000000",
+            "[Group] JoJo's Bizarre Adventure Part 3 - Stardust Crusaders (BD 1080p 48 ep)",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        // Parent AnimeDetail with Egypt-hen as a sibling relation. Use
+        // the real AL title form "... Stardust Crusaders - Egypt-hen";
+        // the trailing single-token subtitle can't be extracted, so
+        // detection falls through to the episode-range + title-prefix
+        // path.
+        let mut parent_detail = empty_anime_detail(
+            20899,
+            "JoJo's Bizarre Adventure: Stardust Crusaders",
+        );
+        parent_detail.episodes = Some(24);
+        parent_detail.relations.push(related_entry(
+            22663,
+            "JoJo's Bizarre Adventure: Stardust Crusaders - Egypt-hen",
+            Some(24),
+        ));
+
+        // 48 absolute-numbered files (E01..E48).
+        let filenames: Vec<String> = (1..=48)
+            .map(|n| {
+                format!(
+                    "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - {:02} [BD 1080p].mkv",
+                    n
+                )
+            })
+            .collect();
+
+        let grab_ctx = test_grab_ctx();
+        let added = auto_expand_library_from_pack_with_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &(1..=48).collect::<Vec<_>>(),
+            grab_id,
+            "[Group] JoJo P3 BD 48ep",
+            &grab_ctx,
+        )
+        .await;
+
+        assert_eq!(added, 1, "one new sibling (Egypt-hen) expected");
+
+        let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(routes.len(), 2, "sibling + parent route expected");
+
+        let sibling_route = routes
+            .iter()
+            .find(|r| r.series_id != parent_id)
+            .expect("sibling route present");
+        let expected_sibling_files: Vec<usize> = (24..=47).collect();
+        assert_eq!(
+            sibling_route.file_indices, expected_sibling_files,
+            "sibling owns files 24..=47 (E25..E48)"
+        );
+        assert_eq!(
+            sibling_route.episode_offset, 24,
+            "absolute numbering → offset = parent_cap = 24"
+        );
+        assert_eq!(
+            sibling_route.episode_numbers,
+            (1..=24).collect::<Vec<_>>(),
+            "sibling's stored ep_nums are effective (post-offset) 1..=24"
+        );
+
+        let parent_route = routes
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route present");
+        let expected_parent_files: Vec<usize> = (0..=23).collect();
+        assert_eq!(parent_route.file_indices, expected_parent_files);
+        assert_eq!(parent_route.episode_offset, 0);
+
+        // Sibling quality-tag + history rows exist for local 1..=24.
+        let sibling_id = sibling_route.series_id;
+        let sibling_tags = episode_tags::get_for_series(&db, sibling_id)
+            .await
+            .expect("sibling quality tags");
+        assert_eq!(
+            sibling_tags.len(),
+            24,
+            "sibling should have 24 quality-tag rows"
+        );
+        for local_ep in 1..=24 {
+            let tag = sibling_tags
+                .get(&local_ep)
+                .unwrap_or_else(|| panic!("sibling tag for local ep {} missing", local_ep));
+            assert_eq!(tag.state, "grabbed");
+        }
+    }
+
+    /// Issue #45: Owarimonogatari BD with an AL/BD episode-count
+    /// disagreement. AL reports S1 = 12 eps (the aired ep 1 was a
+    /// 48-min merged episode) but the [smol] BD splits that back into
+    /// two ~24-min files, so the pack has 13 Owari S1 files + 7 Owari
+    /// S2 files.
+    ///
+    /// This is the case the user flagged as "frustrating" in issue #45.
+    /// Verifies that:
+    ///   1. the sibling side is unaffected by the mismatch — Owari S2
+    ///      gets 7 files mapped to local 1..=7 via offset 13.
+    ///   2. the parent side gets all 13 files (including the "extra"
+    ///      ep 13 that AL doesn't know about), routed with offset 0.
+    ///
+    /// The complementary UI fix lives in `pages::build_episodes` — see
+    /// `build_episodes_surfaces_on_disk_files_beyond_anilist_episode_count`.
+    #[tokio::test]
+    async fn auto_expand_owari_bd_split_with_anilist_count_mismatch() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        // Parent: Owarimonogatari. Use AL's reported count (12), NOT
+        // the BD's file count (13). This is the whole point of the test.
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21860,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "owarialmismatch000000000000000000000000000",
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            parent_id,
+            &[],
+            true,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        let mut parent_detail = empty_anime_detail(21860, "Owarimonogatari");
+        parent_detail.episodes = Some(12); // AL's count, NOT the BD's.
+        parent_detail.relations.push(related_entry(
+            99423,
+            "Owarimonogatari Second Season",
+            Some(7),
+        ));
+
+        // 13 parent files (S07E01..E13) + 7 sibling files (S07E14..E20).
+        // The parent's file 12 (E13) exists despite AL saying S1 has
+        // only 12 episodes — this is the mismatch we're testing.
+        let mut filenames: Vec<String> = Vec::new();
+        for n in 1..=13 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p).mkv",
+                n
+            ));
+        }
+        for n in 14..=20 {
+            filenames.push(format!(
+                "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p).mkv",
+                n
+            ));
+        }
+
+        let grab_ctx = test_grab_ctx();
+        let added = auto_expand_library_from_pack_with_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &(1..=12).collect::<Vec<_>>(),
+            grab_id,
+            "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+            &grab_ctx,
+        )
+        .await;
+
+        assert_eq!(added, 1, "one new sibling (Owari S2) expected");
+
+        let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+            .await
+            .expect("get_series_routes");
+        assert_eq!(routes.len(), 2, "sibling + parent route expected");
+
+        // Sibling route: 7 files (S07E14..E20) mapped to local 1..=7.
+        // `min_ep = 14`, parent_cap = 12 → offset = min_ep - 1 = 13.
+        // Local = raw - offset: 14→1, 15→2, ..., 20→7.
+        let sibling_route = routes
+            .iter()
+            .find(|r| r.series_id != parent_id)
+            .expect("sibling route present");
+        assert_eq!(
+            sibling_route.file_indices,
+            vec![13, 14, 15, 16, 17, 18, 19],
+            "sibling owns E14..=E20 (0-based 13..=19)"
+        );
+        assert_eq!(
+            sibling_route.episode_offset, 13,
+            "min_ep(14) - 1 = 13, correctly larger than parent_cap(12)"
+        );
+        assert_eq!(sibling_route.episode_numbers, vec![1, 2, 3, 4, 5, 6, 7]);
+
+        // Parent route: all 13 files including the "extra" E13 that
+        // AL doesn't know about. Offset stays 0 — parent files use
+        // their own local numbering.
+        let parent_route = routes
+            .iter()
+            .find(|r| r.series_id == parent_id)
+            .expect("parent route present");
+        assert_eq!(
+            parent_route.file_indices,
+            (0..=12).collect::<Vec<_>>(),
+            "parent owns all 13 files (E01..=E13), including the AL-overflow E13"
+        );
+        assert_eq!(parent_route.episode_offset, 0);
+    }
 }

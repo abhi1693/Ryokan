@@ -622,57 +622,89 @@ pub(super) async fn build_episodes(
         });
     }
 
-    if ep_count == 0 && !disk_files.is_empty() {
-        for f in &disk_files {
-            on_disk_count += 1;
-            downloaded_count += 1;
-            total_size += f.size_bytes;
-            let monitored = monitored_lookup.contains(&f.episode_number);
-            if monitored {
-                monitored_count += 1;
-            }
-            let (display_quality, quality_state) = if !f.quality.is_empty() {
-                (f.quality.clone(), "disk".to_string())
-            } else if let Some(tag) = quality_tags.get(&f.episode_number) {
-                (tag.quality_tag.clone(), tag.state.clone())
-            } else {
-                (String::new(), String::new())
-            };
-            let tag = quality_tags.get(&f.episode_number);
-            let class_source = tag.map(|t| t.source.clone()).unwrap_or_default();
-            let class_resolution = tag.map(|t| t.resolution.clone()).unwrap_or_default();
-            let class_is_remux = tag.map(|t| t.is_remux).unwrap_or(false);
-            let class_is_bdmv = tag.map(|t| t.is_bdmv).unwrap_or(false);
-            let class_web_kind = tag.map(|t| t.web_kind.clone()).unwrap_or_default();
-            let needs_review = tag.map(|t| t.needs_review).unwrap_or(false);
-            let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
-            episodes.push(Episode {
-                number: f.episode_number,
-                title: String::new(),
-                title_romaji: String::new(),
-                title_english: String::new(),
-                title_native: String::new(),
-                aired: String::new(),
-                on_disk: true,
-                // This branch only runs when the file already exists
-                // under media_root (on_disk=true), so `downloaded` is
-                // unconditionally true regardless of tag state.
-                downloaded: true,
-                quality: display_quality,
-                quality_state,
-                size_display: f.size_display.clone(),
-                filename: f.filename.clone(),
-                can_auto_search: is_tracked,
-                monitored,
-                class_source,
-                class_resolution,
-                class_is_remux,
-                class_is_bdmv,
-                class_web_kind,
-                manual_override,
-                needs_review,
-            });
+    // Surface on-disk files the main 1..=ep_count loop didn't render.
+    // Two cases:
+    //   1. ep_count == 0 — movies or airing shows with no episodes yet;
+    //      the main loop emits no rows, so every disk file lands here.
+    //   2. ep_count > 0 but a release partitioned the series into more
+    //      files than AniList's reported episode count. Canonical case:
+    //      the [smol] Owarimonogatari BD splits the 48-min aired ep 1
+    //      back into two ~24-min files, so S1 has 13 files on disk vs
+    //      AL's 12 eps. Auto-expand routes the extra file to the parent
+    //      folder at post-process time, but without this branch the UI
+    //      loop only iterated 1..=12 and the 13th file was orphaned
+    //      (on disk, tracked in `grabbed_torrents`, but invisible in
+    //      the episode list). See issue #45.
+    let rendered_eps: std::collections::HashSet<i32> =
+        episodes.iter().map(|e| e.number).collect();
+    for f in &disk_files {
+        // Match the main loop's season filter on the ep_count > 0 path:
+        // only render season 1 / unseasoned files. Specials/ or S02
+        // files under a tracked series folder aren't part of the main
+        // episode list. The ep_count == 0 path historically rendered
+        // every file regardless of season — preserve that behavior to
+        // avoid regressions for movies and airing-with-no-episodes shows.
+        if ep_count > 0
+            && let Some(s) = f.season_number
+            && s != 1
+        {
+            continue;
         }
+        if f.episode_number <= 0 {
+            continue;
+        }
+        if rendered_eps.contains(&f.episode_number) {
+            continue;
+        }
+
+        on_disk_count += 1;
+        downloaded_count += 1;
+        total_size += f.size_bytes;
+        let monitored = monitored_lookup.contains(&f.episode_number);
+        if monitored {
+            monitored_count += 1;
+        }
+        let (display_quality, quality_state) = if !f.quality.is_empty() {
+            (f.quality.clone(), "disk".to_string())
+        } else if let Some(tag) = quality_tags.get(&f.episode_number) {
+            (tag.quality_tag.clone(), tag.state.clone())
+        } else {
+            (String::new(), String::new())
+        };
+        let tag = quality_tags.get(&f.episode_number);
+        let class_source = tag.map(|t| t.source.clone()).unwrap_or_default();
+        let class_resolution = tag.map(|t| t.resolution.clone()).unwrap_or_default();
+        let class_is_remux = tag.map(|t| t.is_remux).unwrap_or(false);
+        let class_is_bdmv = tag.map(|t| t.is_bdmv).unwrap_or(false);
+        let class_web_kind = tag.map(|t| t.web_kind.clone()).unwrap_or_default();
+        let needs_review = tag.map(|t| t.needs_review).unwrap_or(false);
+        let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
+        episodes.push(Episode {
+            number: f.episode_number,
+            title: String::new(),
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            aired: String::new(),
+            on_disk: true,
+            // This branch only runs when the file already exists under
+            // media_root (on_disk=true), so `downloaded` is
+            // unconditionally true regardless of tag state.
+            downloaded: true,
+            quality: display_quality,
+            quality_state,
+            size_display: f.size_display.clone(),
+            filename: f.filename.clone(),
+            can_auto_search: is_tracked,
+            monitored,
+            class_source,
+            class_resolution,
+            class_is_remux,
+            class_is_bdmv,
+            class_web_kind,
+            manual_override,
+            needs_review,
+        });
     }
 
     episodes.sort_by(|a, b| b.number.cmp(&a.number));
@@ -986,5 +1018,185 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} GiB", gb)
     } else {
         format!("{:.0} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::series;
+
+    fn unique_media_root(suffix: &str) -> std::path::PathBuf {
+        let nonce = format!(
+            "ryokan_pages_test_{}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            suffix,
+        );
+        let root = std::env::temp_dir().join(nonce);
+        std::fs::create_dir_all(&root).expect("create media root");
+        root
+    }
+
+    fn empty_anime_detail(id: i64, title_english: &str, episodes: Option<i32>) -> anilist::AnimeDetail {
+        anilist::AnimeDetail {
+            id,
+            id_mal: None,
+            title_romaji: title_english.to_string(),
+            title_english: title_english.to_string(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            banner_url: String::new(),
+            format: "TV".to_string(),
+            status: "FINISHED".to_string(),
+            status_display: "Finished".to_string(),
+            episodes,
+            duration: Some(24),
+            season: String::new(),
+            season_year: Some(2015),
+            end_year: Some(2015),
+            description: String::new(),
+            genres: Vec::new(),
+            average_score: None,
+            average_score_display: None,
+            score_is_ten_point: false,
+            score_class: String::new(),
+            next_airing_episode: None,
+            next_airing_at: None,
+            synonyms: Vec::new(),
+            streaming_episodes: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+
+    /// Issue #45: a BD release can partition a series into more files
+    /// than AniList reports (Owarimonogatari S1 — AL says 12 eps, the
+    /// [smol] BD has 13 files because it splits the 48-min aired ep 1
+    /// back into two halves). Before the fix, `build_episodes` only
+    /// looped 1..=ep_count, so file 13 was routed to disk by
+    /// auto-expand but never rendered in the UI. The fix surfaces
+    /// any on-disk file with ep > ep_count as its own row.
+    #[tokio::test]
+    async fn build_episodes_surfaces_on_disk_files_beyond_anilist_episode_count() {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 21320,
+                mal_id: None,
+                title: "Owarimonogatari",
+                title_romaji: "Owarimonogatari",
+                title_english: "Owarimonogatari",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2015),
+                end_year: Some(2015),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        // Write 13 synthetic episode files — ep 13 exceeds AL's count.
+        let media_root = unique_media_root("surface_beyond_count");
+        let series_folder = media_root.join("Owarimonogatari");
+        std::fs::create_dir_all(&series_folder).expect("create series dir");
+        for ep in 1..=13 {
+            let fname = format!("Owarimonogatari - S01E{:02} - Episode.mkv", ep);
+            std::fs::write(series_folder.join(&fname), b"x").expect("write ep file");
+        }
+
+        // AL reports 12 eps (the on-air ep 1 was a 48-min merged episode).
+        let detail = empty_anime_detail(21320, "Owarimonogatari", Some(12));
+
+        let (episodes, on_disk_count, downloaded_count, _size, _monitored) = build_episodes(
+            &db,
+            &detail,
+            Some(series_id),
+            "Owarimonogatari",
+            media_root.to_str().expect("media root str"),
+        )
+        .await;
+
+        // Sorted desc by number, so ep 13 is first.
+        assert_eq!(
+            episodes.len(),
+            13,
+            "expected 13 rows (1..=12 from AL count + 13 from disk overflow), got {}",
+            episodes.len()
+        );
+        let ep13 = episodes
+            .iter()
+            .find(|e| e.number == 13)
+            .expect("ep 13 row present");
+        assert!(ep13.on_disk, "ep 13 must render as on_disk");
+        assert_eq!(on_disk_count, 13, "on_disk_count must include the overflow");
+        assert_eq!(downloaded_count, 13, "downloaded_count same");
+
+        // Cleanup (best effort).
+        std::fs::remove_dir_all(&media_root).ok();
+    }
+
+    /// Regression guard: when every on-disk file falls within AL's
+    /// ep_count, the surface-beyond-count pass must not duplicate rows
+    /// the main loop already rendered.
+    #[tokio::test]
+    async fn build_episodes_does_not_duplicate_rows_when_disk_matches_count() {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 999,
+                mal_id: None,
+                title: "Test Series",
+                title_romaji: "Test Series",
+                title_english: "Test Series",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2020),
+                end_year: Some(2020),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        let media_root = unique_media_root("no_duplicates");
+        let series_folder = media_root.join("Test Series");
+        std::fs::create_dir_all(&series_folder).expect("create series dir");
+        for ep in 1..=12 {
+            let fname = format!("Test Series - S01E{:02} - Episode.mkv", ep);
+            std::fs::write(series_folder.join(&fname), b"x").expect("write ep file");
+        }
+
+        let detail = empty_anime_detail(999, "Test Series", Some(12));
+
+        let (episodes, _, _, _, _) = build_episodes(
+            &db,
+            &detail,
+            Some(series_id),
+            "Test Series",
+            media_root.to_str().expect("media root str"),
+        )
+        .await;
+
+        assert_eq!(episodes.len(), 12, "no duplicates: exactly 12 rows");
+
+        std::fs::remove_dir_all(&media_root).ok();
     }
 }
