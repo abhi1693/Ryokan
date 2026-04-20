@@ -473,10 +473,10 @@ pub async fn add_movie(
         let state_clone = state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let _ = super::library::auto_search_series(
+            let _ = super::library::search::auto_search_series(
                 axum::extract::State(state_clone),
                 axum::extract::Path(id),
-                axum::extract::Query(super::library::AutoSearchQuery::default()),
+                axum::extract::Query(super::library::search::AutoSearchQuery::default()),
             ).await;
         });
     }
@@ -544,10 +544,10 @@ pub async fn execute_command(
             for movie_id in movie_ids {
                 let state_clone = state.clone();
                 tokio::spawn(async move {
-                    let _ = super::library::auto_search_series(
+                    let _ = super::library::search::auto_search_series(
                         axum::extract::State(state_clone),
                         axum::extract::Path(movie_id),
-                        axum::extract::Query(super::library::AutoSearchQuery::default()),
+                        axum::extract::Query(super::library::search::AutoSearchQuery::default()),
                     ).await;
                 });
             }
