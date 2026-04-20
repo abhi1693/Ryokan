@@ -1119,7 +1119,10 @@ mod tests {
         let webdl = ClassificationResult { web_kind: WebKind::WebDl, ..webrip.clone() };
         assert!(webdl.rank() > webrip.rank());
         assert_eq!(webrip.label(), "WEBRip-1080p");
-        assert_eq!(webdl.label(), "WEBDL-1080p");
+        // WebDl collapses to bare "WEB" at the label layer (issue #48);
+        // the rank tiebreaker above still distinguishes it from
+        // Unknown so CF matching and scoring continue to work.
+        assert_eq!(webdl.label(), "WEB-1080p");
     }
 
     #[test]

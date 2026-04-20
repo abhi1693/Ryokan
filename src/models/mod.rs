@@ -1227,7 +1227,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
                     WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd') THEN 'BD'
                     WHEN LOWER(source) = 'web' THEN
                         CASE
-                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webdl', 'web-dl', 'web.dl') THEN 'WEBDL'
                             WHEN LOWER(COALESCE(web_kind, '')) IN ('webrip', 'web-rip', 'web.rip') THEN 'WEBRip'
                             ELSE 'WEB'
                         END
@@ -1253,7 +1252,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
                     WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd') THEN 'BD'
                     WHEN LOWER(source) = 'web' THEN
                         CASE
-                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webdl', 'web-dl', 'web.dl') THEN 'WEBDL'
                             WHEN LOWER(COALESCE(web_kind, '')) IN ('webrip', 'web-rip', 'web.rip') THEN 'WEBRip'
                             ELSE 'WEB'
                         END
@@ -1298,7 +1296,10 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         ("BluRay BDMV ", "BD-RAW-"),
         ("BluRay Remux ", "BD-Remux-"),
         ("BluRay ", "BD-"),
-        ("WEB-DL ", "WEBDL-"),
+        // WebDl collapses to the bare "WEB" label (issue #48), so
+        // legacy "WEB-DL 1080p" strings rewrite straight to the new
+        // unified form, skipping the old "WEBDL-" intermediate.
+        ("WEB-DL ", "WEB-"),
         ("WEBRip ", "WEBRip-"),
         ("Web ", "WEB-"),
         ("HDTV ", "HDTV-"),
@@ -1317,6 +1318,14 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         ("BD-Remux-2160p", "BD-2160p Remux"),
         // Case-fix stragglers from the intermediate all-caps form.
         ("WEBRIP-", "WEBRip-"),
+        // Issue #48: collapse any stored `WEBDL-<res>` strings
+        // (written by prior builds) to `WEB-<res>`. Needs one entry
+        // per resolution because REPLACE is a dumb substring swap.
+        ("WEBDL-480p", "WEB-480p"),
+        ("WEBDL-576p", "WEB-576p"),
+        ("WEBDL-720p", "WEB-720p"),
+        ("WEBDL-1080p", "WEB-1080p"),
+        ("WEBDL-2160p", "WEB-2160p"),
     ] {
         let like_pat = format!("%{}%", old);
         let _ = sqlx::query(

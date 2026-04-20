@@ -101,18 +101,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subsplease_is_tagged_webdl() {
-        // Motivating case for the web_kind column: SubsPlease filenames
-        // carry no "WEB-DL" / "WEBRip" token, so the filename layer
-        // leaves web_kind Unknown. The group table provides the hint
-        // so the aggregator can label the release as WEBDL-1080p
-        // instead of the generic WEB-1080p.
+    async fn subsplease_has_no_web_kind_hint() {
+        // Issue #48: the SubsPlease / HorribleSubs WebDl seeds were
+        // removed so the UI no longer labels some WEB releases as
+        // "WEBDL" while others are plain "WEB" based on whether the
+        // filename token happened to be present. SubsPlease still
+        // classifies as Source::Web via the SEED_DEFAULTS table, but
+        // web_kind stays Unknown — the aggregator now renders a
+        // unified "WEB-1080p" label regardless of group.
         let db = test_pool().await;
         let cls = classify_group(&db, "SubsPlease")
             .await
-            .expect("SubsPlease should be seeded");
+            .expect("SubsPlease should be seeded as Source::Web");
         assert_eq!(cls.evidence.source, Source::Web);
-        assert_eq!(cls.web_kind, WebKind::WebDl);
+        assert_eq!(cls.web_kind, WebKind::Unknown);
     }
 
     #[tokio::test]
@@ -185,49 +187,4 @@ mod tests {
         assert!((cls.evidence.confidence - 0.80).abs() < f32::EPSILON);
     }
 
-    #[tokio::test]
-    async fn user_edited_row_keeps_web_kind_across_reseed() {
-        // SEED_WEB_KIND's UPDATE is gated on `is_user_edit = 0`, so a
-        // user-edited row should hang onto whatever web_kind it had
-        // before the user edit — including the empty default, which
-        // matters for groups the user wants to *remove* the WEB-DL
-        // hint from (e.g. reclassifying a group we tagged as WEB-DL
-        // that actually ships WEB-Rips).
-        let db = test_pool().await;
-
-        // Seed pass populated SubsPlease → (Web, WebDl).
-        let seeded = classify_group(&db, "SubsPlease")
-            .await
-            .expect("SubsPlease seeded");
-        assert_eq!(seeded.web_kind, WebKind::WebDl);
-
-        // User overrides source → is_user_edit flips to 1.
-        // `upsert_user_edit` doesn't touch `web_kind`, so whatever was
-        // there stays — that's the pin.
-        group_source_map::upsert_user_edit(
-            &db,
-            "SubsPlease",
-            Source::BluRay,
-            0.90,
-            "imaginary override",
-        )
-        .await
-        .expect("upsert user edit");
-
-        // Re-run the migration → seed pass attempts SEED_WEB_KIND
-        // update but the `is_user_edit = 0` filter excludes this row.
-        group_source_map::migrate(&db)
-            .await
-            .expect("re-migrate");
-
-        let after = classify_group(&db, "SubsPlease")
-            .await
-            .expect("user row survives re-migrate");
-        assert_eq!(after.evidence.source, Source::BluRay, "user source wins");
-        assert_eq!(
-            after.web_kind,
-            WebKind::WebDl,
-            "user-edited row's web_kind must survive the re-seed pass"
-        );
-    }
 }

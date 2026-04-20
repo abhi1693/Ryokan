@@ -338,17 +338,21 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
 fn parse_quality(lower: &str) -> String {
     // Source type. Names match `ClassificationResult::label()` in
     // `source.rs` so disk-scanned fallback strings render the same as
-    // classifier-derived ones ("BD-1080p", "WEBDL-1080p", etc.). This
+    // classifier-derived ones ("BD-1080p", "WEB-1080p", etc.). This
     // path can't distinguish BD Remux / BD-RAW from filename tokens
     // alone; the classifier handles those through the structured
     // columns so the quality shown for a properly-classified episode
     // comes from `tag.quality_tag`, not from here.
     let source = if lower.contains("bluray") || lower.contains("blu-ray") || lower.contains("bdrip") || lower.contains("[bd") || lower.contains("(bd") {
         "BD"
-    } else if lower.contains("webdl") || lower.contains("web-dl") || lower.contains("web dl") {
-        "WEBDL"
     } else if lower.contains("webrip") || lower.contains("web-rip") {
         "WEBRip"
+    } else if lower.contains("webdl") || lower.contains("web-dl") || lower.contains("web dl") || lower.contains("web") {
+        // Unified WEB label — matches `ClassificationResult::label()`
+        // which collapses WebDl and bare Web into the same output
+        // (issue #48). WebRip stays distinct above because it's the
+        // lower-quality sub-tier power users want to spot.
+        "WEB"
     } else if lower.contains("hdtv") {
         "HDTV"
     } else if lower.contains("dvdrip") || lower.contains("dvd") {

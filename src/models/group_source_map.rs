@@ -35,18 +35,19 @@ pub struct GroupSourceEntry {
     pub web_kind: WebKind,
 }
 
-/// Known-WEB-DL / -WEB-Rip groups, layered on top of `SEED_DEFAULTS` by
-/// the seed pass. A group only appears here when its output is
-/// consistently one sub-tier — most groups mix (Erai-raws ships both
-/// AVC remuxes and HEVC re-encodes, filename tokens distinguish;
-/// Judas mixes BD and WEB). Those get left as `WebKind::Unknown` so
-/// the filename / ffprobe layers stay authoritative.
-pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[
-    // Direct simulcast stream remuxes — `.mkv` with softsubs overlaid,
-    // video bitstream untouched from the CR/HIDIVE source.
-    ("SubsPlease", WebKind::WebDl),
-    ("HorribleSubs", WebKind::WebDl),
-];
+/// Known-WEB-Rip groups, layered on top of `SEED_DEFAULTS` by the seed
+/// pass. A group only appears here when its output is consistently one
+/// sub-tier.
+///
+/// WebDl seeding was dropped (issue #48): the classifier's output
+/// didn't change behavior enough to justify the UI asymmetry between
+/// "WEBDL-1080p" (for seeded groups) and plain "WEB-1080p" (for
+/// everyone else), and the group-map seeding was the only path that
+/// produced WebDl without an explicit title token. Explicit-token
+/// detection still fires in `source_filename.rs`; this slice is just
+/// for groups whose filenames omit the token but whose sub-tier is
+/// known. Currently empty — add WebRip-only groups here if needed.
+pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[];
 
 // ─────────────────────────────────────────────────────────────────────────
 // Seed data
