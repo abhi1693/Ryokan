@@ -72,6 +72,28 @@ static SEASON_MARKER_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
     regex_lite::Regex::new(r"(?i)\b(s\d{1,2}|season\s*\d+)\b").expect("SEASON_MARKER_RE parses")
 });
 
+/// Bare Roman-numeral season marker: `II`, `III`, `IV`, `VI`, `VII`,
+/// `VIII`, `IX`. Common in anime sequel titles that spell the season
+/// out (`Mob Psycho 100 III`, `Overlord IV`, `KanColle II`) — SeaDex
+/// and many BD groups use this form, so without it the batch heuristic
+/// misses entire season packs.
+///
+/// Multi-character only: bare `I`, `V`, `X` are excluded. `I` alone is
+/// too noisy (pronoun, initialisms). Bare `V` collides with `Volume V`,
+/// `Vol V` and similar; bare `X` collides with franchise names (`Show
+/// X`, `X-Files`-style titles) and volume numbering. Anime rarely go
+/// past season IX, so the coverage loss is negligible and the false-
+/// positive floor drops meaningfully.
+///
+/// Case-sensitive (uppercase only) to avoid matching lowercase letter
+/// sequences like `ix` or `vi` that could appear inside words. Applied
+/// to the raw title, not the lowercased form used by the other batch
+/// checks.
+static ROMAN_SEASON_MARKER_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r"\b(II|III|IV|VI|VII|VIII|IX)\b")
+        .expect("ROMAN_SEASON_MARKER_RE parses")
+});
+
 /// Single-episode indicator. If any of these hit, the release is
 /// scoped to one episode (or a very small multi-ep span) and should
 /// NOT be flagged as a batch even if a season marker is present.
@@ -486,10 +508,15 @@ fn detect_batch(title: &str) -> bool {
 
     // Season marker with no single-episode indicator — the dominant
     // batch form for BD season packs: `Show S1 (BD 1080p)`, `Show
-    // [Season 1] [BD 1080p]`, `Show.S01.1080p.BluRay...`. The
-    // single-ep guard keeps `Show S01E12` / `Show S1 - 12` off the
-    // batch path.
-    if SEASON_MARKER_RE.is_match(&lower) && !SINGLE_EP_RE.is_match(&lower) {
+    // [Season 1] [BD 1080p]`, `Show.S01.1080p.BluRay...`,
+    // `Mob Psycho 100 III (BD 1080p)`. The single-ep guard keeps
+    // `Show S01E12` / `Show S1 - 12` off the batch path.
+    //
+    // The Roman-numeral check runs against the raw title (not `lower`)
+    // because the regex is case-sensitive — see ROMAN_SEASON_MARKER_RE.
+    let has_season_marker = SEASON_MARKER_RE.is_match(&lower)
+        || ROMAN_SEASON_MARKER_RE.is_match(title);
+    if has_season_marker && !SINGLE_EP_RE.is_match(&lower) {
         return true;
     }
 
@@ -784,6 +811,89 @@ mod tests {
         assert!(result.is_batch, "smol pack titled with Season N should be flagged as batch");
         assert_eq!(result.resolution, "1080");
         assert_eq!(result.group, "smol");
+    }
+
+    // ── detect_batch — Roman-numeral season markers ──────────────────────
+    //
+    // SeaDex's curated picks for anime sequels frequently use Roman-numeral
+    // season markers in the title (`Mob Psycho 100 III`, `Overlord IV`,
+    // `KanColle II`). Before these tests were added, detect_batch missed
+    // those entirely because SEASON_MARKER_RE only recognised `S\d+` /
+    // `Season \d+` forms, so the curated pack got silently dropped at the
+    // `candidates.retain(|c| c.is_batch)` filter in
+    // `find_best_batch_for_target`.
+
+    #[test]
+    fn detect_batch_roman_numeral_season_marker_iii() {
+        // The regression case from the PR #47 session: the DIY full-season
+        // BD pack for Mob Psycho 100 III.
+        assert!(detect_batch(
+            "[DIY] Mob Psycho 100 III (BD 1080p HEVC FLAC) [Dual-Audio]"
+        ));
+    }
+
+    #[test]
+    fn detect_batch_roman_numeral_season_marker_ii_and_iv() {
+        assert!(detect_batch("[MTBB] KanColle II (BD 1080p)"));
+        assert!(detect_batch("[smol] Overlord IV (BD 1080p)"));
+    }
+
+    #[test]
+    fn detect_batch_roman_numeral_with_single_ep_is_not_batch() {
+        // Single-ep guard must still fire: a Roman-numeral season marker
+        // paired with a per-episode indicator is an individual episode
+        // release, not a batch.
+        assert!(
+            !detect_batch("[Group] Mob Psycho 100 III - 05 (1080p)"),
+            "Roman season marker + single-ep suffix must not be a batch"
+        );
+        assert!(
+            !detect_batch("[Group] Overlord IV Ep 12 (1080p)"),
+            "Roman season marker + Ep N must not be a batch"
+        );
+    }
+
+    #[test]
+    fn detect_batch_lowercase_roman_numerals_are_not_matched() {
+        // Case-sensitive on purpose: lowercase "ii"/"iii"/"ix" etc. could
+        // appear inside words and would false-positive if we accepted them.
+        // Torrent titles conventionally use uppercase Roman numerals, so
+        // we don't pay for that false-positive risk.
+        assert!(
+            !detect_batch("[Group] some title iii (1080p)"),
+            "lowercase roman numerals must not trigger the batch heuristic"
+        );
+    }
+
+    #[test]
+    fn detect_batch_single_i_does_not_fire() {
+        // `I` alone is excluded from the Roman regex — too ambiguous
+        // (pronoun, initial, etc.). A title with a bare `I` and no other
+        // batch signal must stay off the batch path.
+        assert!(
+            !detect_batch("[Group] Show I vs Y (some subtitle)"),
+            "bare `I` must not be treated as a season marker"
+        );
+    }
+
+    #[test]
+    fn detect_batch_single_letter_roman_v_and_x_do_not_fire() {
+        // Bare `V` and `X` are excluded to avoid colliding with `Volume
+        // V` / `Vol V` volume markers, `X-Files`-style franchise names,
+        // and miscellaneous single-letter tokens. Multi-character
+        // Roman numerals (II/III/IV/VI/VII/VIII/IX) remain supported.
+        assert!(
+            !detect_batch("[Group] Volume V (1080p)"),
+            "`Volume V` with no other batch signal must not fire"
+        );
+        assert!(
+            !detect_batch("[Group] Show V (1080p)"),
+            "bare `V` must not be treated as a season marker"
+        );
+        assert!(
+            !detect_batch("[Group] The X Movie (1080p)"),
+            "bare `X` must not be treated as a season marker"
+        );
     }
 
     #[test]

@@ -66,8 +66,8 @@ pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[];
 /// is only included here if it appears **exclusively** in the BD tiers or
 /// **exclusively** in the WEB tiers — groups that show up in both (sam, FLE,
 /// LYS1TH3A, LostYears, Arg0, Arid, Vodes, MTBB, Okay-Subs, Foxtrot, Pizza,
-/// Reza, SCY, Baws, McBalls, Asakura, Commie, GJM, Chihiro, Dae, …) are
-/// source-ambiguous and are left out so Layer 3 falls through to other
+/// Reza, SCY, Baws, McBalls, Asakura, Commie, GJM, Chihiro, Dae, Judas, …)
+/// are source-ambiguous and are left out so Layer 3 falls through to other
 /// evidence instead of guessing. Groups from TRaSH's `anime-lq-groups`
 /// blocklist (ASW, bonkai77, Trix, …) are intentionally omitted. That list
 /// governs scoring, not source classification.
@@ -75,10 +75,7 @@ pub const SEED_WEB_KIND: &[(&str, WebKind)] = &[];
 /// Confidence is 0.95 for single-source groups: a group's tier ranking
 /// reflects encoding quality, not how reliably the source can be inferred,
 /// but when a group works exclusively in one source the name alone is a
-/// strong signal. A handful of groups (currently just Judas) ship in both
-/// BD and WEB and are held below `CONFLICT_THRESHOLD` (0.70) so the group
-/// signal acts as a soft prior rather than overriding other layers — see
-/// the inline comment on their seed row for the rationale.
+/// strong signal.
 ///
 /// Entries are inserted with `INSERT OR IGNORE`, so user edits (which set
 /// `is_user_edit = 1`) are never overwritten by the seed pass. One-shot
@@ -261,12 +258,9 @@ pub const SEED_DEFAULTS: &[(&str, Source, f32, &str)] = &[
     ("EDGE", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("EMBER", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("GHOST", Source::BluRay, 0.95, "TRaSH BD tier 08"),
-    // Judas ships weekly WEB rips during airing *and* BD encodes post-broadcast,
-    // so they're on TRaSH's BD tier 08 list but also put out a lot of WEB. Held
-    // below STRONG_THRESHOLD (0.90) and CONFLICT_THRESHOLD (0.70) so the group
-    // signal acts as a soft BluRay prior when it's the only evidence, without
-    // overriding filename/ffprobe/temporal when those point at Web.
-    ("Judas", Source::BluRay, 0.60, "TRaSH BD tier 08 (mixed BD/WEB — low confidence)"),
+    // Judas is TRaSH BD tier 08 but also ships weekly WEB rips during airing,
+    // so per the mixed-source rule in the module docs above we leave them out
+    // entirely and let filename/ffprobe/temporal decide per release.
     ("naiyas", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Nep_Blanc", Source::BluRay, 0.95, "TRaSH BD tier 08"),
     ("Prof", Source::BluRay, 0.95, "TRaSH BD tier 08"),
@@ -439,8 +433,8 @@ pub async fn seed_defaults(db: &SqlitePool) -> Result<(), sqlx::Error> {
 /// One-shot corrections for seed rows whose built-in value has changed
 /// since an earlier release. `seed_defaults` uses `INSERT OR IGNORE`, so
 /// an existing row keeps whatever value it was first seeded with — which
-/// means a bad default (e.g. Judas seeded at 0.95 before we realised it
-/// was a mixed BD/WEB group) never self-corrects on upgrade.
+/// means a bad default (e.g. a group seeded with the wrong source or
+/// confidence before we corrected it) never self-corrects on upgrade.
 ///
 /// This pass realigns non-user-edited rows (`is_user_edit = 0`) to the
 /// current `SEED_DEFAULTS` values. User edits are preserved: anyone who

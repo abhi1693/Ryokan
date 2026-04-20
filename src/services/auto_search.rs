@@ -519,7 +519,13 @@ pub async fn collect_scored_batches_for_target(
 
     // Drop non-batches before the classify/rescore pass so we don't pay
     // the classification cost on candidates we're going to throw away.
-    candidates.retain(|c| c.is_batch);
+    // SeaDex-curated candidates are exempt: the curator has already
+    // blessed the release for this entry, and `detect_batch` misses
+    // title forms like Roman-numeral season markers ("Mob Psycho 100
+    // III") which are common in SeaDex picks. Without this exemption,
+    // a curated full-season BD pack gets dropped here before it can be
+    // scored.
+    candidates.retain(|c| c.is_batch || is_seadex_match(&c.info_hash, &seadex_hashes));
 
     let mut scored: Vec<SearchResult> = Vec::with_capacity(candidates.len());
     for mut c in candidates.drain(..) {

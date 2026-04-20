@@ -114,12 +114,11 @@ fn origin_priority(origin: Origin) -> u8 {
 ///    layer origin — the torrent title is the primary source of truth
 ///    and other layers *supplement* it.
 ///
-///    The rule-2 cross-check exists to handle mixed-source groups like
-///    Judas: `group_source_map` seeds Judas at 0.95 BluRay (it's on
-///    TRaSH's BD tier 08), but Judas also ships weekly WEB rips during
-///    airing. If the filename/ffprobe/temporal layers all sub-strongly
-///    point at Web (≈ 0.75–0.85 each) while the group layer strongly
-///    points at BluRay, rule 2's summed evidence clearly favours Web —
+///    The rule-2 cross-check exists to defend against a single strong
+///    layer signal overruling the aggregate weight of the other layers.
+///    If a user manually seeds a mixed-source group at 0.95 BluRay while
+///    filename/ffprobe/temporal all sub-strongly point at Web (≈
+///    0.75–0.85 each), rule 2's summed evidence clearly favours Web —
 ///    so the strong single-signal shortcut would be *wrong* to fire.
 ///    Falling through lets the accumulated sub-strong evidence win the
 ///    rule-2 path, which is the aggregator's designed behaviour.
@@ -192,12 +191,12 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
     // Rule 1: strong single-signal shortcut. Only fires when every
     // strong signal agrees on the same source **and** the rule-2
     // per-source sum picks that source as the leader. The rule-2
-    // cross-check catches mixed-source groups (Judas on TRaSH BD tier
-    // 08 but also a prolific WEB ripper) where one strong group-layer
-    // signal would otherwise override multiple corroborating sub-
-    // strong signals from other layers. If the cross-check fails, we
-    // fall through to rule 2+3+4+5 — the same path disagreeing strong
-    // signals take — so the accumulated sub-strong evidence decides.
+    // cross-check catches cases where one strong single-layer signal
+    // (e.g. a user-seeded group mapping) would otherwise override
+    // multiple corroborating sub-strong signals from other layers. If
+    // the cross-check fails, we fall through to rule 2+3+4+5 — the
+    // same path disagreeing strong signals take — so the accumulated
+    // sub-strong evidence decides.
     let strong: Vec<&SourceEvidence> = evidence
         .iter()
         .filter(|e| e.confidence >= STRONG_THRESHOLD)
@@ -1337,14 +1336,15 @@ mod tests {
 
     #[test]
     fn aggregate_rule_1_yields_to_rule_2_when_sums_overrule_strong_signal() {
-        // The Judas mixed-source case: the group layer fires a strong
-        // BluRay signal (0.95) because Judas is on TRaSH BD tier 08, but
-        // ffprobe and temporal both emit sub-strong Web signals (0.85 +
-        // 0.75 = 1.60 summed). Before the rule-1 cross-check, rule 1
-        // short-circuited on the lone strong signal and returned BluRay
-        // regardless, silently burying the (correct) Web evidence. Now
-        // rule 1 checks rule 2's leader before firing — if rule 2 picks
-        // a different source, rule 1 falls through and rule 2 decides.
+        // The user-seeded mixed-source case: a group layer fires a strong
+        // BluRay signal (0.95) from a user-edited group_source_map row,
+        // but ffprobe and temporal both emit sub-strong Web signals
+        // (0.85 + 0.75 = 1.60 summed). Before the rule-1 cross-check,
+        // rule 1 short-circuited on the lone strong signal and returned
+        // BluRay regardless, silently burying the (correct) Web evidence.
+        // Now rule 1 checks rule 2's leader before firing — if rule 2
+        // picks a different source, rule 1 falls through and rule 2
+        // decides.
         let evidence = vec![
             ev(Source::BluRay, 0.95, Origin::Group),
             ev(Source::Web, 0.85, Origin::Ffprobe),
