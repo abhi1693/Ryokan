@@ -39,25 +39,25 @@ use services::{
     ),
     paths(
         // Library
-        handlers::library::anilist_search,
-        handlers::library::api_series_detail,
-        handlers::library::add_series,
-        handlers::library::remove_series,
-        handlers::library::reconcile_fallbacks,
-        handlers::library::set_folder,
-        handlers::library::set_monitoring,
-        handlers::library::set_episode_monitoring,
-        handlers::library::set_allow_upgrades,
-        handlers::library::set_search_overrides,
-        handlers::library::set_manual_override,
-        handlers::library::list_folders,
-        handlers::library::auto_search_series,
-        handlers::library::auto_search_episode,
-        handlers::library::search_batch_releases,
-        handlers::library::interactive_search_episode,
-        handlers::library::interactive_search_batches,
-        handlers::library::grab_interactive_result,
-        handlers::library::grab_batch_result,
+        handlers::library::search::anilist_search,
+        handlers::library::search::api_series_detail,
+        handlers::library::crud::add_series,
+        handlers::library::crud::remove_series,
+        handlers::library::crud::reconcile_fallbacks,
+        handlers::library::crud::set_folder,
+        handlers::library::crud::set_monitoring,
+        handlers::library::crud::set_episode_monitoring,
+        handlers::library::crud::set_allow_upgrades,
+        handlers::library::crud::set_search_overrides,
+        handlers::library::crud::set_manual_override,
+        handlers::library::crud::list_folders,
+        handlers::library::search::auto_search_series,
+        handlers::library::search::auto_search_episode,
+        handlers::library::search::search_batch_releases,
+        handlers::library::search::interactive_search_episode,
+        handlers::library::search::interactive_search_batches,
+        handlers::library::search::grab_interactive_result,
+        handlers::library::search::grab_batch_result,
         handlers::library::episodes::delete_episode_file,
         handlers::library::episodes::cancel_pending_episode,
         handlers::library::episodes::get_episode_grab_history,
@@ -406,35 +406,35 @@ async fn main() {
 
     // Routes that require auth.
     let protected_routes = Router::new()
-        .route("/", get(handlers::library::index))
-        .route("/library/review", get(handlers::library::needs_review_page))
-        .route("/series/{anilist_id}", get(handlers::library::series_detail))
+        .route("/", get(handlers::library::pages::index))
+        .route("/library/review", get(handlers::library::pages::needs_review_page))
+        .route("/series/{anilist_id}", get(handlers::library::pages::series_detail))
         .route("/search", get(handlers::search::search_page).post(handlers::search::search_submit))
-        .route("/api/anilist/search", get(handlers::library::anilist_search))
-        .route("/api/library/add", post(handlers::library::add_series))
-        .route("/api/library/remove", post(handlers::library::remove_series))
-        .route("/api/library/reconcile-fallbacks", post(handlers::library::reconcile_fallbacks))
-        .route("/api/series/{anilist_id}", get(handlers::library::api_series_detail))
-        .route("/api/library/folder", post(handlers::library::set_folder))
-        .route("/api/library/monitoring", post(handlers::library::set_monitoring))
-        .route("/api/library/episode-monitoring", post(handlers::library::set_episode_monitoring))
-        .route("/api/library/allow-upgrades", post(handlers::library::set_allow_upgrades))
-        .route("/api/library/search-overrides", post(handlers::library::set_search_overrides))
-        .route("/api/library/manual-override", post(handlers::library::set_manual_override))
-        .route("/api/series/{anilist_id}/auto-search", post(handlers::library::auto_search_series))
-        .route("/api/series/{anilist_id}/auto-search/{episode_number}", post(handlers::library::auto_search_episode))
-        .route("/api/series/{anilist_id}/search-batch", post(handlers::library::search_batch_releases))
-        .route("/api/series/{anilist_id}/interactive-search/{episode_number}", get(handlers::library::interactive_search_episode))
-        .route("/api/series/{anilist_id}/interactive-search-batch", get(handlers::library::interactive_search_batches))
-        .route("/api/series/{anilist_id}/grab/{episode_number}", post(handlers::library::grab_interactive_result))
-        .route("/api/series/{anilist_id}/grab-batch", post(handlers::library::grab_batch_result))
+        .route("/api/anilist/search", get(handlers::library::search::anilist_search))
+        .route("/api/library/add", post(handlers::library::crud::add_series))
+        .route("/api/library/remove", post(handlers::library::crud::remove_series))
+        .route("/api/library/reconcile-fallbacks", post(handlers::library::crud::reconcile_fallbacks))
+        .route("/api/series/{anilist_id}", get(handlers::library::search::api_series_detail))
+        .route("/api/library/folder", post(handlers::library::crud::set_folder))
+        .route("/api/library/monitoring", post(handlers::library::crud::set_monitoring))
+        .route("/api/library/episode-monitoring", post(handlers::library::crud::set_episode_monitoring))
+        .route("/api/library/allow-upgrades", post(handlers::library::crud::set_allow_upgrades))
+        .route("/api/library/search-overrides", post(handlers::library::crud::set_search_overrides))
+        .route("/api/library/manual-override", post(handlers::library::crud::set_manual_override))
+        .route("/api/series/{anilist_id}/auto-search", post(handlers::library::search::auto_search_series))
+        .route("/api/series/{anilist_id}/auto-search/{episode_number}", post(handlers::library::search::auto_search_episode))
+        .route("/api/series/{anilist_id}/search-batch", post(handlers::library::search::search_batch_releases))
+        .route("/api/series/{anilist_id}/interactive-search/{episode_number}", get(handlers::library::search::interactive_search_episode))
+        .route("/api/series/{anilist_id}/interactive-search-batch", get(handlers::library::search::interactive_search_batches))
+        .route("/api/series/{anilist_id}/grab/{episode_number}", post(handlers::library::search::grab_interactive_result))
+        .route("/api/series/{anilist_id}/grab-batch", post(handlers::library::search::grab_batch_result))
         .route("/api/series/{anilist_id}/delete-file/{episode_number}", post(handlers::library::episodes::delete_episode_file))
         .route("/api/series/{anilist_id}/cancel-pending/{episode_number}", post(handlers::library::episodes::cancel_pending_episode))
         .route("/api/series/{anilist_id}/grab-history/{episode_number}", get(handlers::library::episodes::get_episode_grab_history))
         .route("/api/series/{anilist_id}/mark-failed/{episode_number}", post(handlers::library::episodes::mark_episode_failed))
         .route("/api/series/{anilist_id}/download-progress", get(handlers::library::episodes::episode_download_progress))
         .route("/api/series/{anilist_id}/episodes", get(handlers::library::episodes::series_episodes_json))
-        .route("/api/library/folders", get(handlers::library::list_folders))
+        .route("/api/library/folders", get(handlers::library::crud::list_folders))
         .route("/api/grab", post(handlers::search::grab_release))
         .route("/api/search/page", get(handlers::search::search_page_api))
         .route("/api/torrents", get(handlers::search::get_torrents))
