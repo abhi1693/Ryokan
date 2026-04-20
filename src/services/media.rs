@@ -808,9 +808,10 @@ mod tests {
             parse_quality("show.s01e01.webdl.1080p.group.mkv"),
             "WEB-1080p"
         );
+        // No WEB token in the filename → source stays blank.
         assert_eq!(
             parse_quality("[subsplease] show - 01 (1080p) [abcd].mkv"),
-            "1080p", // no WEB token in the filename → source stays blank
+            "1080p"
         );
         // A title that has `WEB` as its only source token resolves to
         // the unified WEB label.
