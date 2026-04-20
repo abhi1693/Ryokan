@@ -438,12 +438,24 @@ pub(super) async fn build_episodes(
         HashMap::new()
     };
 
-    // Promote Jikan's aired-episode count up into ep_count for airing
-    // series whose total wasn't known. The downstream render loop
-    // (`for ep_num in 1..=ep_count`), the template's `ep_total > 0`
-    // section gate, and the monitoring counters all key off ep_count,
-    // so without this the fetched episodes stay invisible.
-    let ep_count = ep_count.max(jikan_eps.len() as i32);
+    // Promote the larger of (fresh Jikan fetch, locally-cached episode
+    // map) into ep_count for airing series whose total wasn't known.
+    // The downstream render loop (`for ep_num in 1..=ep_count`), the
+    // template's `ep_total > 0` section gate, and the monitoring
+    // counters all key off ep_count, so without this the fetched
+    // episodes stay invisible.
+    //
+    // Both arms are needed: `jikan_eps` is only populated when
+    // `should_fetch_jikan` fires, which requires `!use_cached_eps`. On
+    // the cached path Jikan was skipped and `jikan_eps` stays empty, so
+    // the promotion from `jikan_eps.len()` alone would be a no-op —
+    // leaving an airing series rendered empty on every revisit after
+    // the initial sync populated the local episode map.
+    let ep_count = ep_count.max(jikan_eps.len() as i32).max(if use_cached_eps {
+        cached_eps.len() as i32
+    } else {
+        0
+    });
 
     let should_try_kitsu = !use_cached_eps
         && ep_count > 1

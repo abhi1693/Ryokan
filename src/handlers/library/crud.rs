@@ -895,6 +895,30 @@ pub async fn reclassify_episode(
         )
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // `record_grab` hardcodes state='grabbed' for both the tag and
+        // history rows. The file is already on disk (checked above), so
+        // flip both rows to 'completed' the same way the scan path does
+        // in `services/post_processing.rs::scan_for_unclassified`.
+        // Without this the UI renders a freshly-reclassified
+        // externally-imported episode as download-in-progress until
+        // the next 6h sweep corrects the state.
+        episode_tags::mark_completed(&state.db, form.series_id, &[form.episode_number])
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let imported_basename = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&classify_title)
+            .to_string();
+        episode_tags::mark_grab_history_completed(
+            &state.db,
+            form.series_id,
+            form.episode_number,
+            &imported_basename,
+            file_size,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
     let label = result.label();

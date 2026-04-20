@@ -526,6 +526,55 @@ pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Schema-migration ledger: one row per one-shot migration that we
+/// need to run exactly once across the installed base. `id` is a
+/// stable string key (e.g. `"seed_drift_episode_v1"`); `applied_at`
+/// records the first successful run. Idempotent by virtue of
+/// `INSERT OR IGNORE` on the primary key — existing rows aren't
+/// touched, and the lookup gate returns `true` as soon as the row
+/// exists.
+///
+/// Kept deliberately minimal (no tooling around it, no CLI) because
+/// one-shot migrations are rare in Ryokan — the usual pattern is
+/// idempotent `ALTER TABLE ADD COLUMN ... .ok()`. This exists solely
+/// so a repeat-on-every-boot migration can guard itself without each
+/// one inventing its own config flag.
+async fn ensure_schema_migrations_table(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+             id TEXT PRIMARY KEY,
+             applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+         )",
+    )
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+async fn migration_already_applied(db: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations WHERE id = ?")
+        .bind(id)
+        .fetch_one(db)
+        .await?;
+    Ok(row > 0)
+}
+
+async fn mark_migration_applied(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Stable ID for the EMBER BluRay→Web seed-drift episode reset. If a
+/// future EMBER recalibration wants to reset rows again, bump the
+/// version suffix (`_v2`) so the new reset runs once.
+const SEED_DRIFT_EPISODE_V1_MIGRATION_ID: &str = "seed_drift_episode_v1";
+
 /// Companion to [`reconcile_seed_drift`]: wipe `episode_quality_tags`
 /// rows whose group was reclassified by a seed flip so the next library
 /// sweep re-runs the full pipeline against them under the corrected
@@ -539,7 +588,23 @@ pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
 /// Phase 1b `ALTER TABLE episode_quality_tags ADD COLUMN ...` block
 /// has run. User-edited group_source_map entries and `manual_override`
 /// episode rows are both preserved.
+///
+/// **Gated on a one-shot migration ID.** This matters because the
+/// reset targets `release_group = X AND source = Y AND
+/// manual_override = 0` — which is *also* the shape of legitimate
+/// ffprobe-stamped rows for groups that ship occasional releases in
+/// their non-default source (e.g. EMBER's rare BD rips, classified
+/// correctly at 0.90 ffprobe confidence out-ranking the 0.85 group
+/// prior). Without a migration gate, every boot would re-wipe those
+/// legit rows and only the next library sweep (≤6h later) would
+/// restore them; a one-shot guard makes the reset fire exactly once
+/// per (install, seed change) pair.
 pub async fn reconcile_episode_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    ensure_schema_migrations_table(db).await?;
+    if migration_already_applied(db, SEED_DRIFT_EPISODE_V1_MIGRATION_ID).await? {
+        return Ok(());
+    }
+
     let mut tx = db.begin().await?;
     for (group, prior_source) in SEED_DRIFT_EPISODE_RESETS {
         sqlx::query(
@@ -569,6 +634,7 @@ pub async fn reconcile_episode_seed_drift(db: &SqlitePool) -> Result<(), sqlx::E
         .execute(&mut *tx)
         .await?;
     }
+    mark_migration_applied(&mut tx, SEED_DRIFT_EPISODE_V1_MIGRATION_ID).await?;
     tx.commit().await?;
     Ok(())
 }

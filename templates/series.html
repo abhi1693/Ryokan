@@ -443,7 +443,12 @@
                         <option value="dvd">DVD</option>
                         <option value="hdtv">HDTV</option>
                         <option value="tv">TV</option>
-                        <option value="unknown">Unknown</option>
+                        {# Unknown deliberately not offered — the handler rejects
+                           Source::Unknown with 400 (pinning "I don't know" has no
+                           useful meaning), so advertising the option was both
+                           misleading (silent BluRay coercion on pre-fill) and
+                           unusable (400 on explicit Apply). Clear override to
+                           un-pin; re-classify to ask the classifier again. #}
                     </select>
                 </label>
                 <label class="form-row">
