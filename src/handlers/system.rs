@@ -309,7 +309,110 @@ pub async fn api_logs_poll(
 pub async fn api_rebuild_cached_metadata(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let (rebuilt, skipped, failed) = metadata_sync::rebuild_cached_metadata_for_all(&state.db).await;
+    // Detach the sweep from the request handler's lifetime. Previously
+    // this was a direct `.await` on the sweep future — so when the
+    // client navigated away mid-rebuild, Axum dropped the handler
+    // future and cancellation propagated into the loop, stopping the
+    // rebuild partway through with no trace other than a browser-side
+    // `NetworkError when attempting to fetch resource.` bubbling back
+    // into the logs via the client's error toast.
+    //
+    // Three layers of `tokio::spawn`:
+    //   - **Outer** task owns `mark_finished` + translates the middle
+    //     task's outcome into the HTTP response. Its body is
+    //     maximally simple — one spawn, one await returning Result,
+    //     one match, one DB update — so the `scheduled_task_runs`
+    //     row is guaranteed to exit `last_status = 'running'` even
+    //     if the middle layer panics in a code path we didn't
+    //     anticipate (bad future arm in a match, a panic inside
+    //     `mark_started`, etc.).
+    //   - **Middle** task owns `mark_started` and the inner rebuild
+    //     orchestration. Any panic here surfaces as `Err(JoinError)`
+    //     on the outer's `.await` and gets translated to a terminal
+    //     `"error"` status by the outer.
+    //   - **Inner** task runs the actual sweep; its JoinError (on
+    //     panic) is caught by the middle task and folded into its
+    //     own result so the outer sees a single combined outcome.
+    //
+    // Distinct task key (`metadata_rebuild`, not the shared
+    // `metadata_refresh`) so the manual full-rebuild doesn't overwrite
+    // the scheduled 12h `refresh_all_series_metadata` status row
+    // when the two overlap — they're semantically different
+    // operations and the audit trail for each should stand alone.
+    let db = state.db.clone();
+    let outer = tokio::spawn(async move {
+        let middle_db = db.clone();
+        let middle = tokio::spawn(async move {
+            let _ = scheduled_tasks::mark_started(
+                &middle_db,
+                "metadata_rebuild",
+                "Manual metadata cache rebuild started",
+            )
+            .await;
+
+            let rebuild_db = middle_db.clone();
+            let inner = tokio::spawn(async move {
+                metadata_sync::rebuild_cached_metadata_for_all(&rebuild_db).await
+            });
+            inner.await // Result<(usize, usize, usize), JoinError>
+        });
+
+        let (status, detail, payload): (&str, String, Option<(usize, usize, usize)>) =
+            match middle.await {
+                Ok(Ok((rebuilt, skipped, failed))) => {
+                    let st = if failed > 0 { "warn" } else { "ok" };
+                    (
+                        st,
+                        format!("rebuilt={rebuilt}, skipped={skipped}, failed={failed}"),
+                        Some((rebuilt, skipped, failed)),
+                    )
+                }
+                Ok(Err(join_err)) => {
+                    // Inner panicked. The middle task caught it and
+                    // bubbled it up cleanly.
+                    let kind = if join_err.is_panic() { "panicked" } else { "join error" };
+                    (
+                        "error",
+                        format!("rebuild sweep {kind}: {join_err}"),
+                        None,
+                    )
+                }
+                Err(join_err) => {
+                    // Middle itself panicked — e.g. `mark_started`
+                    // internals, or something between the nested
+                    // spawns. Still mark the run finished so the
+                    // status row exits `running`.
+                    let kind = if join_err.is_panic() { "panicked" } else { "join error" };
+                    (
+                        "error",
+                        format!("rebuild orchestration task {kind}: {join_err}"),
+                        None,
+                    )
+                }
+            };
+        let _ = scheduled_tasks::mark_finished(&db, "metadata_rebuild", status, &detail).await;
+        payload
+    });
+
+    let payload = outer.await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("rebuild orchestration task failed to join: {}", e),
+        )
+    })?;
+
+    let Some((rebuilt, skipped, failed)) = payload else {
+        // Inner panicked — we already wrote an "error" row into
+        // scheduled_task_runs so operators can see what happened.
+        // Surface a 500 to the client (on the happy path where they
+        // stayed on the page) so they don't think it silently
+        // succeeded.
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Rebuild task panicked; see scheduled tasks for details.".to_string(),
+        ));
+    };
+
     let message = format!(
         "Metadata cache rebuild complete. Rebuilt: {}. Skipped: {}. Failed: {}.",
         rebuilt, skipped, failed

@@ -508,6 +508,18 @@ function forceRunTask(btn, taskKey) {
 // Debug-tab fetch helper: all four buttons share the same toast shape —
 // info toast on start, success/error toast on completion — with the
 // disabled button as the only in-flight indicator. No inline result span.
+//
+// The long-running actions (metadata rebuild, library classify, …) run
+// detached on the server via `tokio::spawn`, so their server-side work
+// continues even if the client navigates away. The browser, however,
+// still aborts its own in-flight fetch on navigation, which used to
+// fire a misleading "Rebuild failed / NetworkError" toast that then
+// got persisted back to the server logs via `/api/logs/client`.
+//
+// Wire up an AbortController to the fetch and trip it on
+// `beforeunload` / `pagehide`: when the catch fires, `signal.aborted`
+// tells us the abort was ours (navigation) vs. a real network/server
+// failure, and we skip the toast on the navigation case.
 function runDebugAction(btn, opts) {
     btn.disabled = true;
     window.ryokanToast({
@@ -515,9 +527,17 @@ function runDebugAction(btn, opts) {
         title: opts.startTitle,
         body: opts.startBody || '',
     });
+    const controller = new AbortController();
+    const onLeaving = () => controller.abort();
+    // `pagehide` is the reliable signal across browsers — `beforeunload`
+    // is deliberately skipped by some (iOS Safari) and blocked by BFCache.
+    // Register both; whichever fires first wins.
+    window.addEventListener('beforeunload', onLeaving, { once: true });
+    window.addEventListener('pagehide', onLeaving, { once: true });
     fetch(opts.url, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
+        signal: controller.signal,
     })
     .then(async r => {
         const data = await r.json();
@@ -529,6 +549,12 @@ function runDebugAction(btn, opts) {
         });
     })
     .catch(err => {
+        if (controller.signal.aborted) {
+            // Browser cancelled our own fetch because the user is
+            // navigating away. The server-side work continues
+            // detached; don't show a misleading failure toast.
+            return;
+        }
         window.ryokanToast({
             kind: 'error',
             title: opts.failureTitle,
@@ -536,6 +562,8 @@ function runDebugAction(btn, opts) {
         });
     })
     .finally(() => {
+        window.removeEventListener('beforeunload', onLeaving);
+        window.removeEventListener('pagehide', onLeaving);
         btn.disabled = false;
     });
 }
