@@ -1185,13 +1185,14 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // Rewrite denormalized `quality_tag` strings on pre-existing
     // `episode_quality_tags` / `episode_grab_history` rows to match the
     // Sonarr-parity label format the classifier now emits:
-    // `BD-1080p`, `BD-1080p Remux`, `BD-1080p RAW`, `WEBDL-1080p`,
-    // `WEBRip-1080p`, `WEB-1080p`, `HDTV-1080p`, `DVD-480p`, etc. This
-    // migration bridges two prior schemas: (1) very old space-joined
-    // rows like "BluRay 1080p" / "WEB-DL 1080p", and (2) the
-    // intermediate dash-joined rename (`BD-Remux-1080p`, `BD-RAW-1080p`,
+    // `BD-1080p`, `BD-1080p Remux`, `BD-1080p RAW`, `WEB-1080p`,
+    // `WEBRip-1080p`, `HDTV-1080p`, `DVD-480p`, etc. This migration
+    // bridges three prior schemas: (1) very old space-joined rows
+    // like "BluRay 1080p" / "WEB-DL 1080p", (2) the intermediate
+    // dash-joined rename (`BD-Remux-1080p`, `BD-RAW-1080p`,
     // `WEBRIP-1080p`) that shipped briefly before the Sonarr-parity
-    // reorder landed.
+    // reorder landed, and (3) the post-#48 `WEBDL-1080p` intermediate
+    // that was subsequently unified into bare `WEB-1080p`.
     //
     // `episode_quality_tags` has the structured source/resolution/
     // web_kind/is_remux/is_bdmv columns, so we regenerate `quality_tag`
@@ -1227,7 +1228,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
                     WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd') THEN 'BD'
                     WHEN LOWER(source) = 'web' THEN
                         CASE
-                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webdl', 'web-dl', 'web.dl') THEN 'WEBDL'
                             WHEN LOWER(COALESCE(web_kind, '')) IN ('webrip', 'web-rip', 'web.rip') THEN 'WEBRip'
                             ELSE 'WEB'
                         END
@@ -1253,7 +1253,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
                     WHEN LOWER(source) IN ('bluray', 'blu-ray', 'bd') THEN 'BD'
                     WHEN LOWER(source) = 'web' THEN
                         CASE
-                            WHEN LOWER(COALESCE(web_kind, '')) IN ('webdl', 'web-dl', 'web.dl') THEN 'WEBDL'
                             WHEN LOWER(COALESCE(web_kind, '')) IN ('webrip', 'web-rip', 'web.rip') THEN 'WEBRip'
                             ELSE 'WEB'
                         END
@@ -1281,7 +1280,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     //
     //   Pass A — normalize legacy space-joined tokens to the
     //            intermediate dash-joined form ("BluRay BDMV 1080p" →
-    //            "BD-RAW-1080p", "WEB-DL 1080p" → "WEBDL-1080p", etc.).
+    //            "BD-RAW-1080p", "WEB-DL 1080p" → "WEB-1080p", etc.).
     //            Only the BluRay BDMV/Remux/plain and WEB variants need
     //            ordering care: the qualified BluRay patterns must fire
     //            before the generic "BluRay " prefix is stripped.
@@ -1291,14 +1290,23 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     //            needs one entry per supported resolution because it
     //            can't swap tokens generically.
     //
-    // The straggler "WEBRIP-" → "WEBRip-" entry at the end fixes the
-    // all-caps intermediate form left by the prior rename pass.
+    // Straggler entries at the end:
+    //  - "WEBRIP-" → "WEBRip-" fixes the all-caps form from the pre-
+    //    Sonarr-parity rename pass.
+    //  - `WEBDL-<res>` → `WEB-<res>` (one per `Resolution::as_str()`
+    //    output: 480p/576p/720p/1080p/2160p) catches DBs that booted
+    //    the intermediate `WEBDL-` build between issue #48's
+    //    unification and this migration. Add a new resolution here
+    //    if the `Resolution` enum ever gains one.
     for (old, new) in [
         // ── Pass A: legacy space-joined → intermediate dash form ──
         ("BluRay BDMV ", "BD-RAW-"),
         ("BluRay Remux ", "BD-Remux-"),
         ("BluRay ", "BD-"),
-        ("WEB-DL ", "WEBDL-"),
+        // WebDl collapses to the bare "WEB" label (issue #48), so
+        // legacy "WEB-DL 1080p" strings rewrite straight to the new
+        // unified form, skipping the old "WEBDL-" intermediate.
+        ("WEB-DL ", "WEB-"),
         ("WEBRip ", "WEBRip-"),
         ("Web ", "WEB-"),
         ("HDTV ", "HDTV-"),
@@ -1317,6 +1325,14 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         ("BD-Remux-2160p", "BD-2160p Remux"),
         // Case-fix stragglers from the intermediate all-caps form.
         ("WEBRIP-", "WEBRip-"),
+        // Issue #48: collapse any stored `WEBDL-<res>` strings
+        // (written by prior builds) to `WEB-<res>`. Needs one entry
+        // per resolution because REPLACE is a dumb substring swap.
+        ("WEBDL-480p", "WEB-480p"),
+        ("WEBDL-576p", "WEB-576p"),
+        ("WEBDL-720p", "WEB-720p"),
+        ("WEBDL-1080p", "WEB-1080p"),
+        ("WEBDL-2160p", "WEB-2160p"),
     ] {
         let like_pat = format!("%{}%", old);
         let _ = sqlx::query(

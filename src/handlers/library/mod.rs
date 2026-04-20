@@ -113,8 +113,8 @@ pub struct Episode {
     pub monitored: bool,
     /// Phase 4 classification columns — exposed to the template so the
     /// manual override picker can pre-select the current values. The
-    /// override dropdown's composite key (e.g. "bluray_remux", "web_dl")
-    /// is derived from this quartet in the template JS.
+    /// override dropdown's composite key (e.g. "bluray_remux", "web",
+    /// "webrip") is derived from this quartet in the template JS.
     pub class_source: String,
     pub class_resolution: String,
     pub class_is_remux: bool,

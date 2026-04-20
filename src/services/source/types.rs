@@ -505,8 +505,8 @@ impl ClassificationResult {
 
     /// Human-readable label for logs and UI. Sonarr-style `SOURCE-RES`
     /// base with an optional space-separated BluRay sub-tier suffix:
-    /// `BD-1080p`, `BD-1080p Remux`, `BD-1080p RAW`, `WEBDL-1080p`,
-    /// `WEBRip-1080p`, `WEB-1080p`, `HDTV-1080p`, `DVD-480p`, etc.
+    /// `BD-1080p`, `BD-1080p Remux`, `BD-1080p RAW`, `WEB-1080p`,
+    /// `WEBRip-1080p`, `HDTV-1080p`, `DVD-480p`, etc.
     ///
     /// Keeping the resolution adjacent to the source (rather than
     /// appending it after the sub-tier) preserves parity with Sonarr's
@@ -514,9 +514,16 @@ impl ClassificationResult {
     /// as the immutable key and bolt any Remux qualifier on afterward.
     ///
     /// Source rendering is variant-aware:
-    /// - `Source::Web` with a known `web_kind` displays as "WEBDL" or
-    ///   "WEBRip" (Sonarr-style, no internal hyphen) instead of the
-    ///   bare "WEB" fallback.
+    /// - `Source::Web` renders as bare `"WEB"` regardless of whether
+    ///   the internal `web_kind` is `WebDl` or `Unknown` — most users
+    ///   don't care about the distinction and seeing `WEBDL-1080p` on
+    ///   some releases but `WEB-1080p` on others (based on whether the
+    ///   filename happened to carry the token) produced more confusion
+    ///   than information (issue #48). The `WebRip` variant DOES render
+    ///   as `"WEBRip"` because that's the lower-quality sub-tier power
+    ///   users want to spot. `web_kind` is still tracked internally so
+    ///   Sonarr Custom Format `SourceSpecification` value 3 (WebDl)
+    ///   still matches releases with explicit `WEB-DL` tokens.
     /// - `Source::BluRay` always renders as `BD` with at most one
     ///   trailing space-separated qualifier, mutually exclusive:
     ///   ` RAW` if `is_bdmv` (highest tier — full disc), else
@@ -526,9 +533,11 @@ impl ClassificationResult {
         let source_label: String = match self.source {
             Source::Unknown => String::new(),
             Source::Web => match self.web_kind {
-                WebKind::WebDl => "WEBDL".to_string(),
                 WebKind::WebRip => "WEBRip".to_string(),
-                WebKind::Unknown => "WEB".to_string(),
+                // WebDl collapses to bare "WEB" at the label layer —
+                // see the docstring above. The enum variant still
+                // exists for CF matching and rank tiebreakers.
+                WebKind::Unknown | WebKind::WebDl => "WEB".to_string(),
             },
             Source::BluRay => "BD".to_string(),
             other => other.as_str().to_string(),

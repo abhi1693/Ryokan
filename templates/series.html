@@ -438,7 +438,7 @@
                         <option value="bluray_bdmv">BD-RAW</option>
                         <option value="bluray_remux">BD-Remux</option>
                         <option value="bluray">BD</option>
-                        <option value="web_dl">WEBDL</option>
+                        <option value="web">WEB</option>
                         <option value="webrip">WEBRIP</option>
                         <option value="dvd">DVD</option>
                         <option value="hdtv">HDTV</option>
@@ -989,7 +989,7 @@ function escHtml(s) {
 //     BDMV/BDISO/BD-Raw → `BD-1080p RAW`  (raw disc image)
 //     Remux             → `BD-1080p Remux`
 //     BluRay/BDRip/BD   → `BD-1080p`      (re-encode)
-//     WEB-DL            → `WEBDL-1080p`
+//     WEB-DL / WEB      → `WEB-1080p`     (unified — issue #48)
 //     WEB-Rip           → `WEBRip-1080p`
 // Note: BDRip is a re-encode and deliberately falls into the BluRay branch,
 // NOT the BDMV branch.
@@ -1003,11 +1003,12 @@ function parseQualityFromTitle(title, resolution) {
         source = 'BD'; suffix = ' Remux';
     } else if (/\b(BluRay|Blu-?Ray|BDRip|BD|\.BD\.|\[BD\])\b/i.test(t)) {
         source = 'BD';
-    } else if (/\bWEB-?DL\b/i.test(t)) {
-        source = 'WEBDL';
     } else if (/\bWEB-?Rip\b/i.test(t)) {
+        // Check WebRip before the bare WEB branch — WebRip is the
+        // lower-quality sub-tier and deserves its own label.
         source = 'WEBRip';
-    } else if (/\bWEB\b/i.test(t)) {
+    } else if (/\bWEB(?:-?DL)?\b/i.test(t)) {
+        // WebDl and bare WEB collapse into a single "WEB" label.
         source = 'WEB';
     } else if (/\bHDTV\b/i.test(t)) {
         source = 'HDTV';
@@ -1438,7 +1439,12 @@ const OVERRIDE_SOURCE_MAP = {
     bluray_bdmv: { source: 'BluRay', is_remux: false, is_bdmv: true,  web_kind: '' },
     bluray_remux:{ source: 'BluRay', is_remux: true,  is_bdmv: false, web_kind: '' },
     bluray:      { source: 'BluRay', is_remux: false, is_bdmv: false, web_kind: '' },
-    web_dl:      { source: 'Web',    is_remux: false, is_bdmv: false, web_kind: 'WEB-DL' },
+    // Issue #48: WebDl and bare WEB collapse into a single user-
+    // selectable option. The backend still tracks `web_kind` for CF
+    // matching, but the manual override picker only offers WEB vs
+    // WEBRip — if the user wants to pin a classification, they
+    // shouldn't have to reason about the WebDl distinction.
+    web:         { source: 'Web',    is_remux: false, is_bdmv: false, web_kind: '' },
     webrip:      { source: 'Web',    is_remux: false, is_bdmv: false, web_kind: 'WEBRip' },
     dvd:         { source: 'DVD',    is_remux: false, is_bdmv: false, web_kind: '' },
     hdtv:        { source: 'HDTV',   is_remux: false, is_bdmv: false, web_kind: '' },
@@ -1458,10 +1464,11 @@ function overrideKeyFromClassification(source, isRemux, isBdmv, webKind) {
         return 'bluray';
     }
     if (src === 'web') {
+        // WebRip gets its own key; everything else (bare WEB, WebDl,
+        // Unknown sub-kind) maps to the unified 'web' key.
         const wk = (webKind || '').toLowerCase();
-        if (wk === 'web-dl' || wk === 'webdl') return 'web_dl';
         if (wk === 'webrip') return 'webrip';
-        return 'web_dl';
+        return 'web';
     }
     if (src === 'dvd') return 'dvd';
     if (src === 'hdtv') return 'hdtv';

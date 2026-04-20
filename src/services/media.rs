@@ -338,17 +338,21 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
 fn parse_quality(lower: &str) -> String {
     // Source type. Names match `ClassificationResult::label()` in
     // `source.rs` so disk-scanned fallback strings render the same as
-    // classifier-derived ones ("BD-1080p", "WEBDL-1080p", etc.). This
+    // classifier-derived ones ("BD-1080p", "WEB-1080p", etc.). This
     // path can't distinguish BD Remux / BD-RAW from filename tokens
     // alone; the classifier handles those through the structured
     // columns so the quality shown for a properly-classified episode
     // comes from `tag.quality_tag`, not from here.
     let source = if lower.contains("bluray") || lower.contains("blu-ray") || lower.contains("bdrip") || lower.contains("[bd") || lower.contains("(bd") {
         "BD"
-    } else if lower.contains("webdl") || lower.contains("web-dl") || lower.contains("web dl") {
-        "WEBDL"
     } else if lower.contains("webrip") || lower.contains("web-rip") {
         "WEBRip"
+    } else if lower.contains("webdl") || lower.contains("web-dl") || lower.contains("web dl") || lower.contains("web") {
+        // Unified WEB label — matches `ClassificationResult::label()`
+        // which collapses WebDl and bare Web into the same output
+        // (issue #48). WebRip stays distinct above because it's the
+        // lower-quality sub-tier power users want to spot.
+        "WEB"
     } else if lower.contains("hdtv") {
         "HDTV"
     } else if lower.contains("dvdrip") || lower.contains("dvd") {
@@ -767,6 +771,53 @@ mod tests {
                 "High School DxD - S00E18 - Holiness Behind the Gym (BD 1080p H.264 FLAC) [Dual Audio] [IK].mkv"
             ),
             Some((Some(0), 18))
+        );
+    }
+
+    // ── parse_quality branch ordering (issue #48) ────────────────────
+    //
+    // The unified-WEB branch in `parse_quality` uses `.contains("web")`
+    // which would swallow a WEBRip filename if evaluated first. These
+    // tests lock in the WebRip-before-unified-Web ordering — any
+    // reshuffle that lets a WebRip filename resolve as plain "WEB"
+    // would silently downgrade the label and potentially mislabel the
+    // release for scoring/upgrade decisions.
+
+    #[test]
+    fn parse_quality_webrip_wins_over_bare_web_branch() {
+        use super::parse_quality;
+        assert_eq!(
+            parse_quality("show.s01e01.web-rip.1080p.group.mkv"),
+            "WEBRip-1080p"
+        );
+        assert_eq!(
+            parse_quality("show.s01e01.webrip.1080p.group.mkv"),
+            "WEBRip-1080p"
+        );
+    }
+
+    #[test]
+    fn parse_quality_webdl_and_bare_web_both_render_as_web() {
+        use super::parse_quality;
+        // Issue #48 unified WebDl and bare-WEB to the same "WEB" label.
+        assert_eq!(
+            parse_quality("show.s01e01.web-dl.1080p.group.mkv"),
+            "WEB-1080p"
+        );
+        assert_eq!(
+            parse_quality("show.s01e01.webdl.1080p.group.mkv"),
+            "WEB-1080p"
+        );
+        // No WEB token in the filename → source stays blank.
+        assert_eq!(
+            parse_quality("[subsplease] show - 01 (1080p) [abcd].mkv"),
+            "1080p"
+        );
+        // A title that has `WEB` as its only source token resolves to
+        // the unified WEB label.
+        assert_eq!(
+            parse_quality("show.s01e01.web.1080p.group.mkv"),
+            "WEB-1080p"
         );
     }
 }

@@ -106,7 +106,7 @@ pub struct SearchResult {
     /// for UI callers that render just the resolution tag; richer callers
     /// should use `quality_label` which encodes source+resolution+sub-tier.
     pub resolution: String,
-    /// Pre-computed Sonarr-parity label (`WEBDL-1080p`, `BD-1080p Remux`,
+    /// Pre-computed Sonarr-parity label (`WEB-1080p`, `BD-1080p Remux`,
     /// etc.) produced from the same [`crate::services::source::ClassificationResult::label`]
     /// logic as the grab-side pipeline, so the value the user sees in
     /// interactive search equals the value persisted once grabbed.
@@ -447,15 +447,16 @@ pub async fn enrich_results_with_group_map(
             } else {
                 Resolution::from_str(&format!("{}p", r.resolution))
             };
-            // Web releases use the group table's web_kind hint (#33) so
-            // SubsPlease / HorribleSubs uploads label as `WEBDL` in
-            // interactive search instead of the generic `WEB`, matching
-            // the post-download classifier's output on the same files.
+            // Web releases unify the WebDl and bare-WEB sub-tiers into
+            // a single "WEB" label (issue #48) — matches
+            // `ClassificationResult::label()`. WebRip stays distinct
+            // because it's the lower-quality sub-tier power users want
+            // to spot.
             let source_label = match src {
                 Source::Web => match web_kind {
-                    crate::services::source::WebKind::WebDl => "WEBDL".to_string(),
                     crate::services::source::WebKind::WebRip => "WEBRip".to_string(),
-                    crate::services::source::WebKind::Unknown => "WEB".to_string(),
+                    crate::services::source::WebKind::Unknown
+                    | crate::services::source::WebKind::WebDl => "WEB".to_string(),
                 },
                 Source::BluRay => "BD".to_string(),
                 other => other.as_str().to_string(),
@@ -859,8 +860,11 @@ mod tests {
         let c = classify_search_result("Show Name - 01 (1080p) [WEB-DL].mkv");
         assert_eq!(c.resolution, "1080");
         assert_eq!(c.source, "Web");
+        // web_kind still tracks WebDl internally so CF value-3 specs
+        // match releases with explicit WEB-DL tokens. The user-facing
+        // label collapses WebDl and bare-WEB into "WEB" (issue #48).
         assert_eq!(c.web_kind, "WEB-DL");
-        assert_eq!(c.quality_label, "WEBDL-1080p");
+        assert_eq!(c.quality_label, "WEB-1080p");
     }
 
     #[test]
@@ -917,11 +921,12 @@ mod tests {
         enrich_results_with_group_map(&pool, &mut results).await;
 
         assert_eq!(results[0].source, "Web");
-        // SubsPlease ships WEB-DL exclusively (direct CR/HIDIVE stream
-        // remuxes) and the group table carries that hint, so the
-        // label resolves to the specific `WEBDL` tier rather than the
-        // generic `WEB` one.
-        assert_eq!(results[0].quality_label, "WEBDL-1080p");
+        // Issue #48: the SubsPlease WebDl seed was dropped — the
+        // distinction between "WEBDL" and "WEB" labels was more
+        // confusing than useful and nothing in the file list said
+        // the release was a stream remux vs a re-encode. The group
+        // map still pins Source::Web; the label unifies to WEB.
+        assert_eq!(results[0].quality_label, "WEB-1080p");
     }
 
     #[tokio::test]
