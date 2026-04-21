@@ -126,6 +126,15 @@ struct DelugeRawTorrent {
     files: Vec<DelugeRawFile>,
     #[serde(default)]
     file_priorities: Vec<i32>,
+    /// Per-file progress as a parallel array aligned to `files`,
+    /// each entry 0.0–1.0 (fraction, NOT percentage). qBit's
+    /// `TorrentFile.progress` uses the same fraction scale; Deluge's
+    /// per-torrent `progress` is 0–100 but `file_progress` is 0–1.
+    /// Post-processing's "is this file complete?" check filters on
+    /// `f.progress >= 1.0`, so this array needs to be populated
+    /// correctly or every Deluge grab stays pending forever.
+    #[serde(default)]
+    file_progress: Vec<f64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -404,7 +413,7 @@ impl DownloadClient for DelugeClient {
             let status: DelugeRawTorrent = serde_json::from_value(
                 self.connected_rpc(
                     "core.get_torrent_status",
-                    json!([hash_lc, ["files", "file_priorities"]]),
+                    json!([hash_lc, ["files", "file_priorities", "file_progress"]]),
                 )
                 .await?,
             )
@@ -501,7 +510,7 @@ impl DownloadClient for DelugeClient {
         let status: DelugeRawTorrent = serde_json::from_value(
             self.connected_rpc(
                 "core.get_torrent_status",
-                json!([info_hash, ["files", "file_priorities"]]),
+                json!([info_hash, ["files", "file_priorities", "file_progress"]]),
             )
             .await?,
         )
@@ -627,10 +636,17 @@ fn to_download_files(raw: &DelugeRawTorrent) -> Vec<DownloadFile> {
                 .copied()
                 .map(|p| p != DELUGE_PRIO_SKIP)
                 .unwrap_or(true);
+            // Deluge's `file_progress` is a parallel array of
+            // 0.0–1.0 fractions, same scale as qBit's per-file
+            // `progress`. Defaulting to 0.0 on index mismatch is
+            // safe: post-processing's completion filter requires
+            // `>= 1.0`, so a missing entry just keeps the file
+            // flagged as "not ready" for one more tick.
+            let progress = raw.file_progress.get(i).copied().unwrap_or(0.0);
             DownloadFile {
                 name: f.path.clone(),
                 size: f.size,
-                progress: 0.0, // Deluge exposes `file_progress` separately; not needed at trait level
+                progress,
                 wanted,
             }
         })
