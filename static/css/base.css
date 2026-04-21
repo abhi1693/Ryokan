@@ -556,24 +556,6 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 
 .cf-section > form:last-child > :last-child { margin-bottom: 0; }
 
-.cf-import-status-badge.cf-import-status-new {
-    background: rgba(140, 204, 151, 0.12);
-    color: #8ccc97;
-    border-color: rgba(140, 204, 151, 0.3);
-}
-
-.cf-import-status-badge.cf-import-status-collision {
-    background: rgba(234, 179, 8, 0.14);
-    color: #e6c86b;
-    border-color: rgba(234, 179, 8, 0.35);
-}
-
-.cf-import-status-badge.cf-import-status-invalid {
-    background: rgba(220, 70, 70, 0.12);
-    color: #e06b6b;
-    border-color: rgba(220, 70, 70, 0.3);
-}
-
 input[type="file"] {
     background: var(--bg-elevated);
     color: var(--text-dim);
@@ -641,12 +623,6 @@ input[type="file"]::file-selector-button:hover {
     opacity: 1;
     background: var(--accent);
 }
-
-.cf-origin-dot-defaults { background: var(--accent); }
-
-.cf-origin-dot-import { background: #8ccc97; }
-
-.cf-origin-dot-manual { background: var(--text-dim); }
 
 .cf-table .cf-name { font-weight: 600; color: var(--text-bright); }
 
@@ -741,22 +717,6 @@ input[type="file"]::file-selector-button:hover {
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-}
-
-.rss-decision-grabbed {
-    background: rgba(125, 211, 147, 0.14);
-    color: var(--green);
-}
-
-.rss-decision-rejected,
-.rss-decision-error {
-    background: rgba(211, 125, 125, 0.12);
-    color: var(--red);
-}
-
-.rss-decision-skipped {
-    background: rgba(125, 174, 211, 0.12);
-    color: var(--blue);
 }
 
 .rss-table-controls {

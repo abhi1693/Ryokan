@@ -300,6 +300,24 @@ fieldset legend {
     color: var(--text-dim);
 }
 
+.cf-import-status-badge.cf-import-status-new {
+    background: rgba(140, 204, 151, 0.12);
+    color: #8ccc97;
+    border-color: rgba(140, 204, 151, 0.3);
+}
+
+.cf-import-status-badge.cf-import-status-collision {
+    background: rgba(234, 179, 8, 0.14);
+    color: #e6c86b;
+    border-color: rgba(234, 179, 8, 0.35);
+}
+
+.cf-import-status-badge.cf-import-status-invalid {
+    background: rgba(220, 70, 70, 0.12);
+    color: #e06b6b;
+    border-color: rgba(220, 70, 70, 0.3);
+}
+
 .cf-import-name {
     font-weight: 500;
     color: var(--text-bright);
@@ -517,6 +535,12 @@ fieldset legend {
     display: inline-block;
     background: var(--text-dim);
 }
+
+.cf-origin-dot-defaults { background: var(--accent); }
+
+.cf-origin-dot-import { background: #8ccc97; }
+
+.cf-origin-dot-manual { background: var(--text-dim); }
 
 .btn-icon-danger {
     width: 20px;

@@ -79,8 +79,6 @@
     letter-spacing: 0.02em;
 }
 
-.log-badge-trace { background: rgba(110, 110, 136, 0.15); color: var(--text-dim); }
-
 .log-badge-debug { background: rgba(125, 174, 211, 0.15); color: var(--blue); }
 
 .log-badge-info { background: rgba(125, 211, 147, 0.15); color: var(--green); }
@@ -88,10 +86,6 @@
 .log-badge-warn { background: rgba(211, 176, 125, 0.15); color: var(--orange); }
 
 .log-badge-error { background: rgba(211, 125, 125, 0.2);  color: var(--red); }
-
-.log-level-error { background: rgba(211, 125, 125, 0.04); }
-
-.log-level-warn { background: rgba(211, 176, 125, 0.03); }
 
 .tag-quality-grabbed {
     background: var(--mauve-bg);
