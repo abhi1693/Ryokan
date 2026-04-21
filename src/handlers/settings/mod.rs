@@ -774,27 +774,50 @@ pub async fn settings_submit(
     }
 
     if active_tab == "integrations" {
-        let (client_label, configured) = match cfg.active_client.as_str() {
-            "deluge" => ("Deluge", !cfg.deluge_url.is_empty()),
-            _ => ("qBittorrent", !cfg.qbit_url.is_empty()),
+        let (client_label, configured, client_url) = match cfg.active_client.as_str() {
+            "deluge" => (
+                "Deluge",
+                !cfg.deluge_url.is_empty(),
+                cfg.deluge_url.as_str(),
+            ),
+            _ => (
+                "qBittorrent",
+                !cfg.qbit_url.is_empty(),
+                cfg.qbit_url.as_str(),
+            ),
         };
         if configured {
             let client = crate::services::download_client::build_download_client(&cfg);
             if let Some(client) = client {
                 match client.test().await {
                     Ok(version) => {
+                        // `LogCategory::QBit` is reused here for
+                        // every download client for now — log
+                        // message body carries the real client name
+                        // in "Connected to X Y.Z", so filtering by
+                        // category still surfaces the events. A
+                        // dedicated `LogCategory::DownloadClient`
+                        // would be cleaner but churns every existing
+                        // qBit log entry's category too; Phase 3
+                        // cleanup.
                         logger::info(
                             &state.db,
                             LogCategory::QBit,
-                            &format!("Connected to {} {}", client_label, version),
-                            &cfg.qbit_url,
+                            &format!("Connected to {client_label} {version}"),
+                            client_url,
                         )
                         .await;
                         notices.push(format!("{client_label} connected ({version})."));
                         *state.download_client.write().await = Some(client);
                     }
                     Err(e) => {
-                        logger::error(&state.db, LogCategory::QBit, "Connection failed", &e).await;
+                        logger::error(
+                            &state.db,
+                            LogCategory::QBit,
+                            &format!("{client_label} connection failed"),
+                            &e,
+                        )
+                        .await;
                         *state.download_client.write().await = None;
                         notices.push(format!("{client_label} connection failed: {e}."));
                     }

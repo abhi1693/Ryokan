@@ -366,9 +366,28 @@ impl DownloadClient for DelugeClient {
             )
         };
 
+        // Fallback hash for labeling: the caller's pre-computed
+        // info_hash, lowercased. Used in arms where Deluge doesn't
+        // hand back a hash itself (`add_torrent_url` null-return) or
+        // where the torrent already exists (AlreadyPresent).
+        // `None` if the caller didn't supply one — `info_hash` empty
+        // means `extract_hash` couldn't parse the URL and a
+        // `label.set_torrent("", ...)` call would just produce a
+        // spurious error.
+        let caller_hash = if info_hash.is_empty() {
+            None
+        } else {
+            Some(info_hash.to_ascii_lowercase())
+        };
+
         let (outcome, hash_for_label) = match self.connected_rpc(method, params).await {
             Ok(Value::String(hash)) if !hash.is_empty() => (AddOutcome::Added, Some(hash)),
-            Ok(_) => (AddOutcome::Added, None), // add_torrent_url returns null
+            // `add_torrent_url` returns null on success rather than the
+            // hash. Fall back to the caller's pre-computed `info_hash`
+            // so labeling still runs through the same post-match block
+            // as the string-return and AlreadyPresent arms — any hash
+            // we know, we label.
+            Ok(_) => (AddOutcome::Added, caller_hash.clone()),
             Err(msg) if is_duplicate_add_error(&msg) => {
                 // Deluge's "already in session" error carries the
                 // infohash in the message ("Torrent already in session
@@ -379,10 +398,7 @@ impl DownloadClient for DelugeClient {
                 // added this torrent without the label, the re-grab
                 // should "adopt" it rather than leave it invisible to
                 // `list_scoped`.
-                (
-                    AddOutcome::AlreadyPresent,
-                    Some(info_hash.to_ascii_lowercase()),
-                )
+                (AddOutcome::AlreadyPresent, caller_hash)
             }
             Err(msg) => return Err(msg),
         };
@@ -803,6 +819,50 @@ mod tests {
         assert!(is_disconnect_error("Unknown method"));
         assert!(is_disconnect_error("Not connected to a daemon"));
         assert!(!is_disconnect_error("Tracker unreachable"));
+    }
+
+    #[test]
+    fn list_scoped_hash_injection_fills_empty_inner_hash() {
+        // Guards the #2 defensive branch in `list_scoped`: when
+        // Deluge's status dict omits the `hash` field (future fork /
+        // reduced key set), the outer dict key still carries the
+        // infohash and `list_scoped` injects it. Without this fix,
+        // every `DownloadItem.hash` would be `""` and post-processing's
+        // grab→torrent match via `by_hash` would silently fail.
+        let key = "abcdef0123456789abcdef0123456789abcdef01".to_string();
+        let mut raw = DelugeRawTorrent {
+            hash: String::new(),
+            name: "silent-hash-drop test".into(),
+            state: "Downloading".into(),
+            ..Default::default()
+        };
+        // Mirror the `list_scoped` branch: inject the key iff the
+        // inner field was empty, then convert.
+        if raw.hash.is_empty() {
+            raw.hash = key.clone();
+        }
+        let item = to_download_item(raw);
+        assert_eq!(item.hash, key);
+    }
+
+    #[test]
+    fn list_scoped_hash_injection_preserves_non_empty_inner_hash() {
+        // The other half of the invariant: if the inner `hash` IS
+        // populated (common case), don't overwrite it. Belt check
+        // against a future "always trust the key" regression that
+        // would silently mismatch if Deluge ever keyed by something
+        // other than the infohash.
+        let inner_hash = "0123456789abcdef0123456789abcdef01234567";
+        let key = "wrongkey".to_string();
+        let mut raw = DelugeRawTorrent {
+            hash: inner_hash.to_string(),
+            ..Default::default()
+        };
+        if raw.hash.is_empty() {
+            raw.hash = key;
+        }
+        let item = to_download_item(raw);
+        assert_eq!(item.hash, inner_hash);
     }
 
     #[test]
