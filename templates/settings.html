@@ -39,6 +39,7 @@
                     <option value="qbittorrent" {% if config.active_client == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
                     <option value="deluge" {% if config.active_client == "deluge" %}selected{% endif %}>Deluge</option>
                     <option value="transmission" {% if config.active_client == "transmission" %}selected{% endif %}>Transmission</option>
+                    <option value="rtorrent" {% if config.active_client == "rtorrent" %}selected{% endif %}>rTorrent</option>
                 </select>
                 <span class="form-hint">Ryokan talks to one client at a time. Switching cancels any pending grabs queued against the previous client.</span>
             </div>
@@ -135,6 +136,39 @@
                 <label for="transmission_download_path">Download Path (as seen by Ryokan)</label>
                 <input type="text" name="transmission_download_path" id="transmission_download_path" value="{{ config.transmission_download_path }}" placeholder="/downloads/complete">
                 <span class="form-hint">The local path where Transmission's completed downloads are accessible to Ryokan. When Transmission runs in Docker with a host volume mount, enter the host-side path. When Transmission runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and Transmission see the exact same paths. <strong>Note:</strong> the <code>linuxserver/transmission</code> image defaults <code>download-dir</code> to <code>/downloads/complete</code> (not <code>/downloads</code>), so point this at the <code>complete</code> subdirectory on the host — or edit Transmission's <code>settings.json</code> to flatten it.</span>
+            </div>
+        </fieldset>
+
+        <fieldset id="rtorrent-fieldset" {% if config.active_client != "rtorrent" %}style="display:none"{% endif %}>
+            <legend>rTorrent <span id="rtorrent-health" class="form-hint"></span></legend>
+            <div class="form-group">
+                <label for="rtorrent_url">XML-RPC URL</label>
+                <input type="text" name="rtorrent_url" id="rtorrent_url" value="{{ config.rtorrent_url }}" placeholder="">
+                <span class="form-hint">Full XML-RPC endpoint URL. Common shapes: <code>http://host:8081/RPC2</code> for a local ruTorrent container, <code>https://seedbox.example.com/rutorrent/RPC2</code> or <code>https://seedbox.example.com/RPC2</code> for a seedbox. Ryokan does not append a default path — use the exact URL the daemon accepts.</span>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="rtorrent_user">Username</label>
+                    <input type="text" name="rtorrent_user" id="rtorrent_user" value="{{ config.rtorrent_user }}">
+                </div>
+                <div class="form-group">
+                    <label for="rtorrent_password">Password</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <input type="password" name="rtorrent_password" id="rtorrent_password" value="{{ config.rtorrent_password }}" style="flex:1">
+                        <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('rtorrent_password', this)" style="white-space:nowrap">Show</button>
+                    </div>
+                    <span class="form-hint">HTTP Basic auth. Leave blank if the endpoint is unauthenticated (e.g. a same-host container on an internal network).</span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="rtorrent_label">Scoping label</label>
+                <input type="text" name="rtorrent_label" id="rtorrent_label" value="{{ config.rtorrent_label }}" placeholder="ryokan">
+                <span class="form-hint">Stored in rtorrent's <code>custom1</code> field (the ruTorrent label convention). Ryokan filters <code>list_scoped</code> by this value.</span>
+            </div>
+            <div class="form-group">
+                <label for="rtorrent_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="rtorrent_download_path" id="rtorrent_download_path" value="{{ config.rtorrent_download_path }}" placeholder="/downloads/completed/ryokan">
+                <span class="form-hint">The local path where rtorrent's completed downloads are accessible to Ryokan. When rtorrent runs in Docker with a host volume mount, enter the host-side path. When rtorrent runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and rtorrent see the exact same paths. <strong>Note:</strong> many <code>rtorrent.rc</code> configs (including the <code>linuxserver/rutorrent</code> image's defaults) move completed torrents into a per-label subdirectory via <code>event.download.finished</code> hooks — e.g. <code>/downloads/completed/ryokan/</code> rather than just <code>/downloads/completed/</code>. If your setup does this, include the label subdirectory in the path here (the scoping label you set above is typically the subdir name).</span>
             </div>
         </fieldset>
 
@@ -1154,9 +1188,11 @@ function toggleClientFieldset(value) {
     const qbit = document.getElementById('qbit-fieldset');
     const deluge = document.getElementById('deluge-fieldset');
     const transmission = document.getElementById('transmission-fieldset');
+    const rtorrent = document.getElementById('rtorrent-fieldset');
     if (qbit) qbit.style.display = value === 'qbittorrent' ? '' : 'none';
     if (deluge) deluge.style.display = value === 'deluge' ? '' : 'none';
     if (transmission) transmission.style.display = value === 'transmission' ? '' : 'none';
+    if (rtorrent) rtorrent.style.display = value === 'rtorrent' ? '' : 'none';
 }
 
 // API-key inputs render as type="password" so the secret isn't visible
@@ -1320,6 +1356,7 @@ function refreshJellyfin(btn) {
         QBittorrent: document.getElementById('qbit-health'),
         Deluge: document.getElementById('deluge-health'),
         Transmission: document.getElementById('transmission-health'),
+        RTorrent: document.getElementById('rtorrent-health'),
     };
     const jellyfinHealth = document.getElementById('jellyfin-health');
     const anyClientBadge = Object.values(badges).some(b => b);

@@ -31,6 +31,11 @@ pub mod qbittorrent;
 /// the real impl.
 pub mod deluge;
 
+/// rtorrent via XML-RPC. See module docs for wire-format quirks
+/// (uppercase hash, `d.update_priorities` flush, silent duplicate-add,
+/// `d.erase` not touching disk, `.meta` sentinel in base_path).
+pub mod rtorrent;
+
 pub mod transmission;
 
 #[async_trait]
@@ -230,6 +235,7 @@ pub fn per_client_download_path(config: &crate::models::config::Config) -> &str 
     match config.active_client.as_str() {
         "deluge" => &config.deluge_download_path,
         "transmission" => &config.transmission_download_path,
+        "rtorrent" => &config.rtorrent_download_path,
         // qBittorrent is the default / unknown fallback.
         _ => &config.qbit_download_path,
     }
@@ -314,6 +320,17 @@ pub fn build_download_client(
                 &config.transmission_user,
                 &config.transmission_password,
                 &config.transmission_label,
+            )))
+        }
+        "rtorrent" => {
+            if config.rtorrent_url.is_empty() {
+                return None;
+            }
+            Some(std::sync::Arc::new(rtorrent::RtorrentClient::new(
+                &config.rtorrent_url,
+                &config.rtorrent_user,
+                &config.rtorrent_password,
+                &config.rtorrent_label,
             )))
         }
         // "qbittorrent" or any unknown value — qBit is the safe

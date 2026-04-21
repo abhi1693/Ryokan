@@ -1174,6 +1174,32 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // #63 Phase 4 — rtorrent credentials + label + download_path.
+    // URL is the full XML-RPC endpoint (e.g. `http://host:8081/RPC2`)
+    // taken verbatim — deployment shape varies too much to infer a
+    // default path suffix. Scoping label stored in rtorrent's
+    // `custom1` field (ruTorrent convention).
+    sqlx::query("ALTER TABLE config ADD COLUMN rtorrent_url TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN rtorrent_user TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN rtorrent_password TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN rtorrent_label TEXT NOT NULL DEFAULT 'ryokan'")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN rtorrent_download_path TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
     // Phase 2.1 — columns added on the initial Phase 2 sketch of a
     // global `remote_path_remote` / `remote_path_local` pair.
     // Retained as dead columns (dropping would force a full-table

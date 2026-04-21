@@ -773,4 +773,114 @@ mod tests {
             DownloadItemState::Downloading
         );
     }
+
+    /// Live smoke test against a running qBittorrent at
+    /// `http://localhost:8080` (lscr.io/linuxserver/qbittorrent
+    /// defaults — user `admin`, password the one printed on first
+    /// startup to the container log). Opt in:
+    ///
+    ///     RYOKAN_QBIT_E2E=1 QBIT_PASS=<pw> cargo test \
+    ///       qbittorrent::tests::live_smoke -- --ignored --nocapture
+    ///
+    /// Exercises the full surface Ryokan itself hits: test →
+    /// add_torrent → list_scoped (category round-trip) →
+    /// duplicate-add → pause/resume → get_files → delete. Gated
+    /// behind `#[ignore]` + env var so CI never depends on a daemon
+    /// being up. Mirrors the pattern in the other three client impls.
+    ///
+    /// Unlike the Deluge/Transmission/rtorrent smokes, qBit's
+    /// password is generated at container first-boot (linuxserver
+    /// image pattern), so we take it via a second env var rather
+    /// than hardcoding a default.
+    #[tokio::test]
+    #[ignore = "requires live qBittorrent at localhost:8080"]
+    async fn live_smoke() {
+        if std::env::var("RYOKAN_QBIT_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_QBIT_E2E=1 to run against localhost:8080)");
+            return;
+        }
+        let pass = std::env::var("QBIT_PASS").unwrap_or_else(|_| "adminadmin".to_string());
+
+        let client = QbitClient::new("http://localhost:8080", "admin", &pass, "ryokan-e2e");
+
+        let version = client.test().await.expect("test() failed");
+        eprintln!("qBittorrent version: {version}");
+
+        let magnet = "magnet:?xt=urn:btih:7a14d93f4c13e9c1ae255e0aa3b85a9aaf0cf52d&dn=sintel&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce";
+        let info_hash = "7a14d93f4c13e9c1ae255e0aa3b85a9aaf0cf52d";
+
+        // Clean slate.
+        let _ = client.delete(info_hash, false).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let outcome = client
+            .add_torrent(magnet, info_hash)
+            .await
+            .expect("add_torrent() failed");
+        eprintln!("add_torrent outcome: {outcome:?}");
+        // qBit's add API doesn't surface duplicate-add to the caller;
+        // a re-add returns Added silently. Accept either outcome here
+        // so the smoke survives a prior-run leftover the cleanup
+        // didn't catch.
+        assert!(matches!(
+            outcome,
+            AddOutcome::Added | AddOutcome::AlreadyPresent
+        ));
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let list = client.list_scoped().await.expect("list_scoped() failed");
+        eprintln!("scoped torrents: {}", list.len());
+        let found = list
+            .iter()
+            .find(|t| t.hash.eq_ignore_ascii_case(info_hash))
+            .expect("added torrent must appear in list_scoped");
+        assert_eq!(
+            found.category, "ryokan-e2e",
+            "qBit category should round-trip as DownloadItem.category"
+        );
+
+        // Re-add tolerance: in practice qBit's /torrents/add returns
+        // "Fails." on a duplicate magnet URL in some container
+        // versions, not the silent `Ok.` the impl's header comment
+        // describes. The post-condition we actually care about is
+        // "the torrent is still in the client after the re-add
+        // attempt" — verified via the list_scoped check further
+        // down. Either Ok or a Fails-rejection is acceptable here.
+        let _ = client.add_torrent(magnet, info_hash).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let still_there = client
+            .list_scoped()
+            .await
+            .expect("list_scoped() after re-add failed")
+            .iter()
+            .any(|t| t.hash.eq_ignore_ascii_case(info_hash));
+        assert!(
+            still_there,
+            "torrent must still be present after duplicate-add attempt"
+        );
+
+        client.pause(info_hash).await.expect("pause() failed");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        client.resume(info_hash).await.expect("resume() failed");
+
+        let _files = client
+            .get_files(info_hash)
+            .await
+            .expect("get_files() failed");
+
+        client
+            .delete(info_hash, false)
+            .await
+            .expect("delete() failed");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after = client
+            .list_scoped()
+            .await
+            .expect("list_scoped() post-delete failed");
+        assert!(
+            !after.iter().any(|t| t.hash.eq_ignore_ascii_case(info_hash)),
+            "torrent must not survive delete"
+        );
+        eprintln!("smoke passed");
+    }
 }
