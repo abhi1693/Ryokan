@@ -191,7 +191,7 @@ use crate::services::auto_expand::{AutoExpandGrabContext, expand_from_files};
 #[allow(clippy::too_many_arguments)]
 async fn auto_expand_library_from_pack(
     db: &SqlitePool,
-    qbit: &crate::services::qbit::QbitClient,
+    client: std::sync::Arc<dyn crate::services::download_client::DownloadClient>,
     info_hash: &str,
     parent_detail: &anilist::AnimeDetail,
     parent_series_id: i64,
@@ -204,9 +204,12 @@ async fn auto_expand_library_from_pack(
         return 0;
     }
 
-    let files = match qbit
-        .wait_for_metadata(info_hash, std::time::Duration::from_secs(180))
-        .await
+    let files = match crate::services::download_client::wait_for_files(
+        &*client,
+        info_hash,
+        std::time::Duration::from_secs(180),
+    )
+    .await
     {
         Ok(files) => files,
         Err(e) => {
@@ -357,11 +360,12 @@ async fn run_auto_search_targets_with_upgrades(
     >,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
     let qbit = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or((
                 axum::http::StatusCode::BAD_REQUEST,
-                "qBittorrent not configured".to_string(),
+                "Download client not configured".to_string(),
             ))?
             .clone()
     };
@@ -527,16 +531,19 @@ async fn run_auto_search_targets_with_upgrades(
                 let selective_outcome: Result<Option<Vec<usize>>, String> = if wants_selective {
                     let detail_clone = detail.clone();
                     let info_hash_clone = result.info_hash.clone();
+                    let mut pick = move |files: &[String]| {
+                        auto_search::pick_wanted_file_indices(files, &detail_clone)
+                    };
                     match qbit
-                        .add_torrent_with_file_filter(&url, &info_hash_clone, move |files| {
-                            auto_search::pick_wanted_file_indices(files, &detail_clone)
-                        })
+                        .add_torrent_with_file_filter(&url, &info_hash_clone, &mut pick)
                         .await
                     {
-                        Ok(crate::services::qbit::SelectiveOutcome::Filtered(kept)) => {
+                        Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
                             Ok(Some(kept))
                         }
-                        Ok(crate::services::qbit::SelectiveOutcome::FullDownload) => Ok(None),
+                        Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
+                            Ok(None)
+                        }
                         Err(e) => {
                             logger::warn(
                                 &state.db,
@@ -548,11 +555,15 @@ async fn run_auto_search_targets_with_upgrades(
                                 &e,
                             )
                             .await;
-                            qbit.add_torrent(&url).await.map(|_| None)
+                            qbit.add_torrent(&url, &result.info_hash)
+                                .await
+                                .map(|_| None)
                         }
                     }
                 } else {
-                    qbit.add_torrent(&url).await.map(|_| None)
+                    qbit.add_torrent(&url, &result.info_hash)
+                        .await
+                        .map(|_| None)
                 };
                 match selective_outcome {
                     Ok(kept) => {
@@ -656,8 +667,8 @@ async fn run_auto_search_targets_with_upgrades(
                             {
                                 // Fire-and-forget so the HTTP handler
                                 // doesn't block up to ~60s waiting on
-                                // qBit to discover metadata (see the
-                                // `wait_for_metadata` call inside
+                                // the client to discover metadata (see
+                                // the `wait_for_files` call inside
                                 // `auto_expand_library_from_pack`).
                                 // Failures here only affect post-
                                 // processing routing, which already
@@ -676,7 +687,7 @@ async fn run_auto_search_targets_with_upgrades(
                                 tokio::spawn(async move {
                                     auto_expand_library_from_pack(
                                         &db_task,
-                                        &qbit_task,
+                                        qbit_task,
                                         &info_hash_task,
                                         &detail_task,
                                         sid,
@@ -1092,21 +1103,28 @@ pub async fn search_batch_releases(
     .await;
 
     let qbit = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or({
                 if let Some(h) = &progress_handle {
                     // Fire-and-forget: we're about to Err-return, so the
                     // toast is the only surface that tells the user why.
                     let h = h.clone();
                     tokio::spawn(async move {
-                        h.emit("error", "error", "qBittorrent not configured", None, true)
-                            .await;
+                        h.emit(
+                            "error",
+                            "error",
+                            "Download client not configured",
+                            None,
+                            true,
+                        )
+                        .await;
                     });
                 }
                 (
                     axum::http::StatusCode::BAD_REQUEST,
-                    "qBittorrent not configured".to_string(),
+                    "Download client not configured".to_string(),
                 )
             })?
             .clone()
@@ -1155,23 +1173,25 @@ pub async fn search_batch_releases(
                 )
                 .await;
             }
-            qbit.add_torrent(&url).await.map_err(|e| {
-                if let Some(h) = &progress_handle {
-                    let h = h.clone();
-                    let err = e.clone();
-                    tokio::spawn(async move {
-                        h.emit(
-                            "error",
-                            "error",
-                            "qBittorrent rejected the torrent",
-                            Some(err),
-                            true,
-                        )
-                        .await;
-                    });
-                }
-                (axum::http::StatusCode::BAD_GATEWAY, e)
-            })?;
+            qbit.add_torrent(&url, &result.info_hash)
+                .await
+                .map_err(|e| {
+                    if let Some(h) = &progress_handle {
+                        let h = h.clone();
+                        let err = e.clone();
+                        tokio::spawn(async move {
+                            h.emit(
+                                "error",
+                                "error",
+                                "qBittorrent rejected the torrent",
+                                Some(err),
+                                true,
+                            )
+                            .await;
+                        });
+                    }
+                    (axum::http::StatusCode::BAD_GATEWAY, e)
+                })?;
             let classification = crate::services::source::classify_release(
                 &state.db,
                 &result.title,
@@ -1410,11 +1430,12 @@ pub async fn grab_batch_result(
     }
 
     let qbit = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or((
                 axum::http::StatusCode::BAD_REQUEST,
-                "qBittorrent not configured".to_string(),
+                "Download client not configured".to_string(),
             ))?
             .clone()
     };
@@ -1428,14 +1449,14 @@ pub async fn grab_batch_result(
         !info_hash.is_empty() && auto_search::has_selective_discriminator(&detail);
     let selective_outcome: Option<Vec<usize>> = if wants_selective {
         let detail_clone = detail.clone();
+        let mut pick =
+            move |files: &[String]| auto_search::pick_wanted_file_indices(files, &detail_clone);
         match qbit
-            .add_torrent_with_file_filter(&url, &info_hash, move |files| {
-                auto_search::pick_wanted_file_indices(files, &detail_clone)
-            })
+            .add_torrent_with_file_filter(&url, &info_hash, &mut pick)
             .await
         {
-            Ok(crate::services::qbit::SelectiveOutcome::Filtered(kept)) => Some(kept),
-            Ok(crate::services::qbit::SelectiveOutcome::FullDownload) => None,
+            Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => Some(kept),
+            Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => None,
             Err(e) => {
                 logger::warn(
                     &state.db,
@@ -1447,14 +1468,14 @@ pub async fn grab_batch_result(
                     &e,
                 )
                 .await;
-                qbit.add_torrent(&url)
+                qbit.add_torrent(&url, &info_hash)
                     .await
                     .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
                 None
             }
         }
     } else {
-        qbit.add_torrent(&url)
+        qbit.add_torrent(&url, &info_hash)
             .await
             .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
         None
@@ -1553,7 +1574,7 @@ pub async fn grab_batch_result(
             tokio::spawn(async move {
                 auto_expand_library_from_pack(
                     &db_task,
-                    &qbit_task,
+                    qbit_task,
                     &info_hash_task,
                     &detail_task,
                     sid,
@@ -1618,11 +1639,12 @@ pub async fn grab_interactive_result(
     }
 
     let qbit = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or((
                 axum::http::StatusCode::BAD_REQUEST,
-                "qBittorrent not configured".to_string(),
+                "Download client not configured".to_string(),
             ))?
             .clone()
     };
@@ -1638,14 +1660,14 @@ pub async fn grab_interactive_result(
         !info_hash.is_empty() && auto_search::has_selective_discriminator(&detail);
     let selective_outcome: Option<Vec<usize>> = if wants_selective {
         let detail_clone = detail.clone();
+        let mut pick =
+            move |files: &[String]| auto_search::pick_wanted_file_indices(files, &detail_clone);
         match qbit
-            .add_torrent_with_file_filter(&url, &info_hash, move |files| {
-                auto_search::pick_wanted_file_indices(files, &detail_clone)
-            })
+            .add_torrent_with_file_filter(&url, &info_hash, &mut pick)
             .await
         {
-            Ok(crate::services::qbit::SelectiveOutcome::Filtered(kept)) => Some(kept),
-            Ok(crate::services::qbit::SelectiveOutcome::FullDownload) => None,
+            Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => Some(kept),
+            Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => None,
             Err(e) => {
                 logger::warn(
                     &state.db,
@@ -1657,14 +1679,14 @@ pub async fn grab_interactive_result(
                     &e,
                 )
                 .await;
-                qbit.add_torrent(&url)
+                qbit.add_torrent(&url, &info_hash)
                     .await
                     .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
                 None
             }
         }
     } else {
-        qbit.add_torrent(&url)
+        qbit.add_torrent(&url, &info_hash)
             .await
             .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
         None

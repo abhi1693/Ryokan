@@ -86,7 +86,7 @@ fn state_badge_class(state: &str) -> &str {
     }
 }
 
-fn torrent_to_view(t: &crate::services::qbit::Torrent) -> QueueTorrentView {
+fn torrent_to_view(t: &crate::services::download_client::DownloadItem) -> QueueTorrentView {
     QueueTorrentView {
         hash: t.hash.clone(),
         name: t.name.clone(),
@@ -131,9 +131,9 @@ pub async fn downloads_page(
     let tab = normalize_tab(params.tab);
 
     let (queue, queue_error) = if tab == "queue" {
-        let client = state.qbit.read().await.clone();
+        let client = state.download_client.read().await.clone();
         match client {
-            Some(c) => match c.get_torrents().await {
+            Some(c) => match c.list_scoped().await {
                 Ok(mut torrents) => {
                     // Sort: downloading first, then by progress descending.
                     torrents.sort_by(|a, b| {
@@ -158,7 +158,7 @@ pub async fn downloads_page(
                 }
                 Err(e) => (Vec::new(), format!("Could not load queue: {}", e)),
             },
-            None => (Vec::new(), "qBittorrent is not configured.".to_string()),
+            None => (Vec::new(), "Download client is not configured.".to_string()),
         }
     } else {
         (Vec::new(), String::new())
@@ -225,16 +225,17 @@ pub async fn api_pause_torrent(
     Json(form): Json<TorrentActionForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let client = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or((
                 axum::http::StatusCode::BAD_REQUEST,
-                "qBittorrent not configured".to_string(),
+                "Download client not configured".to_string(),
             ))?
             .clone()
     };
     client
-        .pause_torrent(&form.hash)
+        .pause(&form.hash)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
@@ -257,16 +258,17 @@ pub async fn api_resume_torrent(
     Json(form): Json<TorrentActionForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let client = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or((
                 axum::http::StatusCode::BAD_REQUEST,
-                "qBittorrent not configured".to_string(),
+                "Download client not configured".to_string(),
             ))?
             .clone()
     };
     client
-        .resume_torrent(&form.hash)
+        .resume(&form.hash)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
@@ -289,16 +291,17 @@ pub async fn api_delete_torrent(
     Json(form): Json<TorrentDeleteForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let client = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or((
                 axum::http::StatusCode::BAD_REQUEST,
-                "qBittorrent not configured".to_string(),
+                "Download client not configured".to_string(),
             ))?
             .clone()
     };
     client
-        .delete_torrent(&form.hash, form.delete_files)
+        .delete(&form.hash, form.delete_files)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({"ok": true})))

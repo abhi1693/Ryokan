@@ -1,9 +1,9 @@
 pub mod anilist;
+pub mod download_client;
 pub mod jikan;
 pub mod kitsu;
 pub mod media;
 pub mod nyaa;
-pub mod qbit;
 pub mod scoring;
 
 pub mod jellyfin;

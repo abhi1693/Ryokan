@@ -332,6 +332,45 @@ pub async fn list_tags() -> Json<Vec<Tag>> {
     Json(vec![])
 }
 
+/// GET /api/v3/downloadclient — fake Sonarr-shaped response reflecting
+/// Ryokan's active download client. Seerr doesn't strictly require this
+/// endpoint today, but filing it alongside the #63 pluggable-client
+/// refactor keeps the shim consistent with the rest of Ryokan: the
+/// `implementation` field varies with the active client rather than
+/// being hardcoded to `QBittorrent`. Returns an empty list when no
+/// client is configured — matches Sonarr's behavior for an unset
+/// download client slot.
+pub async fn list_download_clients(
+    State(state): State<AppState>,
+) -> Json<Vec<DownloadClientEntry>> {
+    let client = state.download_client.read().await.clone();
+    let Some(client) = client else {
+        return Json(vec![]);
+    };
+    let impl_name = client.sonarr_impl_name();
+    Json(vec![DownloadClientEntry {
+        id: 1,
+        name: "Ryokan".to_string(),
+        enable: true,
+        protocol: "torrent".to_string(),
+        implementation: impl_name.to_string(),
+        config_contract: format!("{impl_name}Settings"),
+        priority: 1,
+    }])
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadClientEntry {
+    pub id: i32,
+    pub name: String,
+    pub enable: bool,
+    pub protocol: String,
+    pub implementation: String,
+    pub config_contract: String,
+    pub priority: i32,
+}
+
 /// POST /api/v3/tag
 pub async fn create_tag(Json(body): Json<TagBody>) -> Json<Tag> {
     Json(Tag {

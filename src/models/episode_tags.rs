@@ -91,13 +91,18 @@ pub struct GrabHistoryEntry {
     pub is_batch: bool,
     pub grabbed_at: String,
     pub state: String,
-    /// qBit-side path of the completed torrent (`grabbed_torrents.qbit_content_path`).
-    /// Empty until the post-processing sweep observes the torrent as
-    /// complete. Sourced via a correlated subquery on this row's
-    /// `release_title` + `series_id` so each grab history row shows the
-    /// qBit path of *its* torrent, not the most recent one. Sonarr-parity
-    /// dual-path tracking: this is the "DownloadClientItem.OutputPath"
-    /// side; the `file_name` column above is the library path.
+    /// Client-side path of the completed torrent
+    /// (`grabbed_torrents.client_content_path`). Empty until the
+    /// post-processing sweep observes the torrent as complete. Sourced
+    /// via a correlated subquery on this row's `release_title` +
+    /// `series_id` so each grab history row shows the client path of
+    /// *its* torrent, not the most recent one. Sonarr-parity dual-path
+    /// tracking: this is the "DownloadClientItem.OutputPath" side;
+    /// the `file_name` column above is the library path.
+    ///
+    /// Field name kept as `qbit_content_path` for now so the series
+    /// modal template reads the same JSON key it did pre-#63; renaming
+    /// can happen later when the UI generalizes past qBit.
     #[serde(default)]
     #[sqlx(default)]
     pub qbit_content_path: String,
@@ -310,11 +315,11 @@ pub async fn get_grab_history(
                 egh.grabbed_at,
                 egh.state,
                 COALESCE((
-                    SELECT gt.qbit_content_path
+                    SELECT gt.client_content_path
                       FROM grabbed_torrents gt
                      WHERE gt.series_id = egh.series_id
                        AND gt.torrent_name = egh.release_title
-                       AND COALESCE(gt.qbit_content_path, '') <> ''
+                       AND COALESCE(gt.client_content_path, '') <> ''
                      ORDER BY gt.grabbed_at DESC
                      LIMIT 1
                 ), '') AS qbit_content_path

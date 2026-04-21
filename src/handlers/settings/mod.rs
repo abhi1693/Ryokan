@@ -10,7 +10,10 @@ use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, custom_formats as cf_model, group_source_map};
 use crate::services::{
-    custom_formats as cf_service, jellyfin::JellyfinClient, logger, qbit::QbitClient,
+    custom_formats as cf_service,
+    download_client::{DownloadClient, qbittorrent::QbitClient},
+    jellyfin::JellyfinClient,
+    logger,
     source::Source,
 };
 
@@ -557,13 +560,13 @@ pub async fn settings_submit(
 
     if active_tab == "integrations" {
         if !cfg.qbit_url.is_empty() {
-            let client = QbitClient::new(
+            let client: std::sync::Arc<dyn DownloadClient> = std::sync::Arc::new(QbitClient::new(
                 &cfg.qbit_url,
                 &cfg.qbit_user,
                 &cfg.qbit_pass,
                 &cfg.qbit_category,
-            );
-            match client.test_connection().await {
+            ));
+            match client.test().await {
                 Ok(version) => {
                     logger::info(
                         &state.db,
@@ -573,16 +576,16 @@ pub async fn settings_submit(
                     )
                     .await;
                     notices.push(format!("qBittorrent connected ({}).", version));
-                    *state.qbit.write().await = Some(client);
+                    *state.download_client.write().await = Some(client);
                 }
                 Err(e) => {
                     logger::error(&state.db, LogCategory::QBit, "Connection failed", &e).await;
-                    *state.qbit.write().await = None;
+                    *state.download_client.write().await = None;
                     notices.push(format!("qBittorrent connection failed: {}.", e));
                 }
             }
         } else {
-            *state.qbit.write().await = None;
+            *state.download_client.write().await = None;
         }
 
         if !cfg.jellyfin_url.is_empty() && !cfg.jellyfin_api_key.is_empty() {
@@ -759,14 +762,14 @@ pub async fn settings_groups_delete(
 pub async fn qbit_test(
     Json(form): Json<QbitTestForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = QbitClient::new(
+    let client: std::sync::Arc<dyn DownloadClient> = std::sync::Arc::new(QbitClient::new(
         form.qbit_url.trim(),
         form.qbit_user.trim(),
         &form.qbit_pass,
         form.qbit_category.as_deref().unwrap_or(""),
-    );
+    ));
 
-    match client.test_connection().await {
+    match client.test().await {
         Ok(version) => Ok(Json(
             serde_json::json!({"ok": true, "message": format!("Connected to qBittorrent {}", version)}),
         )),
@@ -822,11 +825,16 @@ pub async fn jellyfin_test(
 )]
 pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let qbit_status = {
-        let client = state.qbit.read().await.clone();
+        let client = state.download_client.read().await.clone();
         match client {
-            Some(c) => match c.test_connection().await {
+            Some(c) => match c.test().await {
                 Ok(version) => {
-                    serde_json::json!({"ok": true, "message": format!("qBittorrent {}", version)})
+                    let impl_name = c.sonarr_impl_name();
+                    serde_json::json!({
+                        "ok": true,
+                        "message": format!("{} {}", impl_name, version),
+                        "type": impl_name,
+                    })
                 }
                 Err(e) => serde_json::json!({"ok": false, "message": e}),
             },

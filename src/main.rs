@@ -25,9 +25,9 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use services::{
     custom_formats::{self, CompiledCfCache},
+    download_client::{DownloadClient, qbittorrent::QbitClient},
     jellyfin::JellyfinClient,
     progress::ProgressRegistry,
-    qbit::QbitClient,
 };
 
 #[derive(OpenApi)]
@@ -109,7 +109,7 @@ use services::{
         services::anilist::StreamingEpisode,
         services::nyaa::SearchResult,
         services::nyaa::SearchResponse,
-        services::qbit::Torrent,
+        services::download_client::DownloadItem,
         services::auto_search::AutoSearchReport,
         services::auto_search::AutoSearchHit,
         services::progress::ProgressEvent,
@@ -152,7 +152,7 @@ struct ApiDoc;
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
-    pub qbit: Arc<RwLock<Option<QbitClient>>>,
+    pub download_client: Arc<RwLock<Option<Arc<dyn DownloadClient>>>>,
     pub jellyfin: Arc<RwLock<Option<JellyfinClient>>>,
     /// Compiled Custom Formats, loaded once at startup and rebuilt on
     /// CF create/update/delete via `custom_formats::rebuild_cf_cache`.
@@ -366,23 +366,25 @@ async fn main() {
     // Build shared state.
     let state = AppState {
         db: db.clone(),
-        qbit: Arc::new(RwLock::new(None)),
+        download_client: Arc::new(RwLock::new(None)),
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
         progress: ProgressRegistry::new(),
         users_exist,
     };
 
-    // Initialize qBittorrent client from saved config if available.
+    // Initialize download client from saved config if available.
+    // Phase 1: only qBittorrent is a concrete impl; Phase 2+ will
+    // branch on `config.active_client` once the config migration lands.
     if let Ok(Some(config)) = models::config::get_config(&db).await {
         if !config.qbit_url.is_empty() {
-            let client = QbitClient::new(
+            let client: Arc<dyn DownloadClient> = Arc::new(QbitClient::new(
                 &config.qbit_url,
                 &config.qbit_user,
                 &config.qbit_pass,
                 &config.qbit_category,
-            );
-            *state.qbit.write().await = Some(client);
+            ));
+            *state.download_client.write().await = Some(client);
         }
         if !config.jellyfin_url.is_empty() && !config.jellyfin_api_key.is_empty() {
             let client = JellyfinClient::new(&config.jellyfin_url, &config.jellyfin_api_key);
@@ -701,6 +703,10 @@ async fn main() {
             "/api/v3/tag",
             get(handlers::sonarr_compat::list_tags).post(handlers::sonarr_compat::create_tag),
         )
+        .merge(aliased(
+            &["/api/v3/downloadclient", "/api/v3/downloadClient"],
+            get(handlers::sonarr_compat::list_download_clients),
+        ))
         .route(
             "/api/v3/series",
             get(handlers::sonarr_compat::list_series)
@@ -746,6 +752,13 @@ async fn main() {
             "/radarr/api/v3/tag",
             get(handlers::radarr_compat::list_tags).post(handlers::radarr_compat::create_tag),
         )
+        .merge(aliased(
+            &[
+                "/radarr/api/v3/downloadclient",
+                "/radarr/api/v3/downloadClient",
+            ],
+            get(handlers::radarr_compat::list_download_clients),
+        ))
         .route(
             "/radarr/api/v3/movie",
             get(handlers::radarr_compat::list_movies)

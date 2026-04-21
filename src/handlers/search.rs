@@ -215,29 +215,34 @@ pub async fn grab_release(
     Json(form): Json<GrabForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let client = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or((
                 axum::http::StatusCode::BAD_REQUEST,
-                "qBittorrent not configured".to_string(),
+                "Download client not configured".to_string(),
             ))?
             .clone()
     };
 
-    client.add_torrent(&form.url).await.map_err(|e| {
-        // Fire-and-forget log — don't block on it in the error path.
-        let db = state.db.clone();
-        let err_msg = e.clone();
-        tokio::spawn(async move {
-            logger::error(&db, LogCategory::QBit, "Manual grab failed", &err_msg).await;
-        });
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e)
-    })?;
+    let info_hash = crate::services::nyaa::extract_hash(&form.url);
+    client
+        .add_torrent(&form.url, &info_hash)
+        .await
+        .map_err(|e| {
+            // Fire-and-forget log — don't block on it in the error path.
+            let db = state.db.clone();
+            let err_msg = e.clone();
+            tokio::spawn(async move {
+                logger::error(&db, LogCategory::QBit, "Manual grab failed", &err_msg).await;
+            });
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e)
+        })?;
 
     logger::info(
         &state.db,
         LogCategory::Grab,
-        "Manual grab sent to qBittorrent",
+        "Manual grab sent to download client",
         &form.url,
     )
     .await;
@@ -252,25 +257,29 @@ pub async fn grab_release(
     summary = "List active torrents",
     description = "Returns all torrents currently in qBittorrent's queue.",
     responses(
-        (status = 200, description = "Torrent list", body = Vec<crate::services::qbit::Torrent>),
-        (status = 400, description = "qBittorrent not configured"),
+        (status = 200, description = "Torrent list", body = Vec<crate::services::download_client::DownloadItem>),
+        (status = 400, description = "Download client not configured"),
     ),
 )]
 pub async fn get_torrents(
     State(state): State<AppState>,
-) -> Result<Json<Vec<crate::services::qbit::Torrent>>, (axum::http::StatusCode, String)> {
+) -> Result<
+    Json<Vec<crate::services::download_client::DownloadItem>>,
+    (axum::http::StatusCode, String),
+> {
     let client = {
-        let qbit = state.qbit.read().await;
-        qbit.as_ref()
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
             .ok_or((
                 axum::http::StatusCode::BAD_REQUEST,
-                "qBittorrent not configured".to_string(),
+                "Download client not configured".to_string(),
             ))?
             .clone()
     };
 
     let torrents = client
-        .get_torrents()
+        .list_scoped()
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 

@@ -556,7 +556,7 @@ fn detect_batch(title: &str) -> bool {
     false
 }
 
-fn extract_hash(magnet: &str) -> String {
+pub(crate) fn extract_hash(magnet: &str) -> String {
     // BTIH URN is case-insensitive (`urn:btih:` and `urn:BTIH:` both
     // occur in the wild) — match on the lowercased copy.
     //
@@ -601,7 +601,7 @@ fn extract_hash(magnet: &str) -> String {
 /// Decode a 32-char RFC 4648 base32 info-hash to 20 raw bytes.
 /// Case-insensitive (accepts both `ABCDEF…` and `abcdef…`). Returns
 /// None for any input that isn't exactly 32 chars of A-Z/a-z/2-7.
-fn base32_decode_infohash(s: &str) -> Option<[u8; 20]> {
+pub(crate) fn base32_decode_infohash(s: &str) -> Option<[u8; 20]> {
     if s.len() != 32 {
         return None;
     }

@@ -289,12 +289,13 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     for row in &tracked {
         let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
     }
-    let qbit = state.qbit.read().await.clone();
+    let client = state.download_client.read().await.clone();
 
     let whitelist = quality::parse_group_list(&cfg.preferred_groups);
     let blacklist = quality::parse_group_list(&cfg.blocked_groups);
     let all_meta: Vec<SeriesMeta> = tracked.iter().map(SeriesMeta::from_series).collect();
-    let mut canonical_history = load_canonical_history(&state.db, qbit.as_ref(), &all_meta).await;
+    let mut canonical_history =
+        load_canonical_history(&state.db, client.as_deref(), &all_meta).await;
 
     // Cache on-disk episode scans per folder to avoid repeated filesystem walks.
     let mut disk_cache: HashMap<String, Vec<media::EpisodeFile>> = HashMap::new();
@@ -568,11 +569,11 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         }
     }
 
-    let Some(client) = qbit.as_ref() else {
+    let Some(client) = client.as_ref() else {
         for cand in pending {
             skipped += 1;
             let reason = format!(
-                "qBittorrent is not configured | {}",
+                "Download client is not configured | {}",
                 build_match_diag(&cand.item, Some(&cand.found), cand.score)
             );
             let _ = rss::record_decision(
@@ -641,7 +642,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             cand.item.link.clone()
         };
 
-        match client.add_torrent(&grab_url).await {
+        let info_hash = crate::services::nyaa::extract_hash(&grab_url);
+        match client.add_torrent(&grab_url, &info_hash).await {
             Ok(_) => {
                 grabbed += 1;
                 let action = if cand.is_upgrade { "upgrade" } else { "new" };
@@ -767,7 +769,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
 
 async fn load_canonical_history(
     db: &sqlx::SqlitePool,
-    qbit: Option<&crate::services::qbit::QbitClient>,
+    client: Option<&dyn crate::services::download_client::DownloadClient>,
     all_meta: &[SeriesMeta],
 ) -> HashSet<String> {
     let mut keys = HashSet::new();
@@ -780,8 +782,8 @@ async fn load_canonical_history(
         }
     }
 
-    if let Some(client) = qbit
-        && let Ok(torrents) = client.get_torrents().await
+    if let Some(client) = client
+        && let Ok(torrents) = client.list_scoped().await
     {
         for torrent in torrents {
             if let Some(key) = canonical_key_for_title(&torrent.name, all_meta) {

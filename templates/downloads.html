@@ -28,7 +28,7 @@
         {% if !queue_error.is_empty() %}
         <div class="logs-empty">{{ queue_error }}</div>
         {% else if queue.is_empty() %}
-        <div class="logs-empty">No active torrents in qBittorrent.</div>
+        <div class="logs-empty">No active downloads.</div>
         {% else %}
         <div class="rss-table-wrap"><table class="rss-table"><thead><tr>
             <th>Name</th><th>Size</th><th>Progress</th><th>Speed</th><th>ETA</th><th>Status</th><th>Actions</th>
@@ -110,7 +110,7 @@ function escapeHtml(s) {
 function renderQueue(torrents) {
     const container = document.getElementById('queue-container');
     if (!torrents || torrents.length === 0) {
-        container.innerHTML = '<div class="logs-empty">No active torrents in qBittorrent.</div>';
+        container.innerHTML = '<div class="logs-empty">No active downloads.</div>';
         return;
     }
     torrents.sort((a, b) => {

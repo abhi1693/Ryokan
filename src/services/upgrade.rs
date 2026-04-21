@@ -42,13 +42,13 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let qbit = state.qbit.read().await.clone();
-    let Some(client) = qbit.as_ref() else {
+    let client_opt = state.download_client.read().await.clone();
+    let Some(client) = client_opt.as_ref() else {
         return Ok(UpgradeSummary {
             series_checked: 0,
             episodes_checked: 0,
             upgrades_grabbed: 0,
-            detail: "qBittorrent not configured; skipping upgrade search".to_string(),
+            detail: "Download client not configured; skipping upgrade search".to_string(),
         });
     };
 
@@ -230,7 +230,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 continue;
             }
 
-            match client.add_torrent(&url).await {
+            match client.add_torrent(&url, &result.info_hash).await {
                 Ok(_) => {
                     total_upgrades_grabbed += 1;
                     logger::info(

@@ -286,19 +286,19 @@ pub async fn remove_series(
         };
 
         if !hashes.is_empty() {
-            let qbit_opt = state.qbit.read().await.clone();
-            if let Some(qbit) = qbit_opt {
+            let client_opt = state.download_client.read().await.clone();
+            if let Some(client) = client_opt {
                 for (_id, hash) in &hashes {
                     if hash.is_empty() {
                         continue;
                     }
-                    match qbit.delete_torrent(hash, true).await {
+                    match client.delete(hash, true).await {
                         Ok(()) => torrents_removed += 1,
                         Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
                     }
                 }
             } else {
-                torrent_failures.push("qBittorrent client not configured".to_string());
+                torrent_failures.push("Download client not configured".to_string());
             }
         }
 
@@ -490,7 +490,7 @@ pub async fn set_monitoring(
     if form.auto_grab.unwrap_or(false)
         && mode != monitoring::MonitorMode::None
         && summary.monitored_count > 0
-        && state.qbit.read().await.is_some()
+        && state.download_client.read().await.is_some()
     {
         let auto_grab_on_add = config::get_config(&state.db)
             .await
