@@ -281,6 +281,24 @@ async fn load_suggestions(db: &sqlx::SqlitePool) -> Vec<group_source_map::GroupS
         .unwrap_or_default()
 }
 
+/// Sanitize a user-entered download-client scoping label: trim
+/// surrounding whitespace, strip any control characters (newlines,
+/// tabs, NUL, etc.) that could otherwise survive through to the
+/// client's own command parsers (rtorrent's `d.custom1.set="..."`
+/// inline command string is the most vulnerable — a literal newline
+/// in the label would terminate the command early and let the rest
+/// be re-parsed as a separate command). Falls back to `"ryokan"` if
+/// the sanitized value is empty.
+fn sanitize_label(raw: &str) -> String {
+    let filtered: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = filtered.trim();
+    if trimmed.is_empty() {
+        "ryokan".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Validate a form-submitted source string by round-tripping through
 /// `Source::from_str`. Returns the canonical lowercase form on success, or
 /// the supplied default when the value is unrecognized.
@@ -442,14 +460,7 @@ pub async fn settings_submit(
             .to_string(),
         deluge_url: form.deluge_url.trim().trim_end_matches('/').to_string(),
         deluge_password: form.deluge_password,
-        deluge_label: {
-            let trimmed = form.deluge_label.trim();
-            if trimmed.is_empty() {
-                "ryokan".to_string()
-            } else {
-                trimmed.to_string()
-            }
-        },
+        deluge_label: sanitize_label(&form.deluge_label),
         deluge_download_path: form
             .deluge_download_path
             .trim()
@@ -462,14 +473,7 @@ pub async fn settings_submit(
             .to_string(),
         transmission_user: form.transmission_user.trim().to_string(),
         transmission_password: form.transmission_password,
-        transmission_label: {
-            let trimmed = form.transmission_label.trim();
-            if trimmed.is_empty() {
-                "ryokan".to_string()
-            } else {
-                trimmed.to_string()
-            }
-        },
+        transmission_label: sanitize_label(&form.transmission_label),
         transmission_download_path: form
             .transmission_download_path
             .trim()
@@ -478,14 +482,7 @@ pub async fn settings_submit(
         rtorrent_url: form.rtorrent_url.trim().trim_end_matches('/').to_string(),
         rtorrent_user: form.rtorrent_user.trim().to_string(),
         rtorrent_password: form.rtorrent_password,
-        rtorrent_label: {
-            let trimmed = form.rtorrent_label.trim();
-            if trimmed.is_empty() {
-                "ryokan".to_string()
-            } else {
-                trimmed.to_string()
-            }
-        },
+        rtorrent_label: sanitize_label(&form.rtorrent_label),
         rtorrent_download_path: form
             .rtorrent_download_path
             .trim()
@@ -1223,6 +1220,33 @@ pub async fn jellyfin_refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_label_strips_control_chars() {
+        // A label with an embedded newline would survive through to
+        // rtorrent's `d.custom1.set="..."` inline command and could
+        // terminate the command early. sanitize_label strips any
+        // control character before it can reach the wire.
+        assert_eq!(sanitize_label("ryokan\nmalicious"), "ryokanmalicious");
+        assert_eq!(sanitize_label("ry\tokan"), "ryokan");
+        assert_eq!(sanitize_label("ryokan\0"), "ryokan");
+        assert_eq!(sanitize_label("  ryokan  "), "ryokan");
+    }
+
+    #[test]
+    fn sanitize_label_defaults_to_ryokan_when_empty_or_only_control() {
+        assert_eq!(sanitize_label(""), "ryokan");
+        assert_eq!(sanitize_label("   "), "ryokan");
+        assert_eq!(sanitize_label("\n\t\r"), "ryokan");
+    }
+
+    #[test]
+    fn sanitize_label_preserves_unicode_and_spaces() {
+        // Only control characters are stripped — internal spaces and
+        // non-ASCII characters (users' native-script labels) survive.
+        assert_eq!(sanitize_label("anime batch"), "anime batch");
+        assert_eq!(sanitize_label("アニメ"), "アニメ");
+    }
 
     /// A Sonarr/Trash Guides CF that carries a `trash_description`
     /// should be surfaced verbatim so the edit drawer can render it.

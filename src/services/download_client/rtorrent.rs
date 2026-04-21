@@ -232,10 +232,30 @@ impl DownloadClient for RtorrentClient {
         // need to detect them ourselves. The cost is one extra
         // multicall, which is cheap relative to the magnet load that
         // follows.
+        // NOTE: hash_exists is O(all-daemon-torrents). Typical Ryokan
+        // deployments stay under the ≤100 assumption in list_scoped's
+        // comment; a shared seedbox with thousands of torrents would
+        // pay this cost per add_torrent. Server-side filter-view is
+        // heavier code; defer until a real user hits it.
         let already = if info_hash.is_empty() {
             false
         } else {
-            self.hash_exists(info_hash).await.unwrap_or(false)
+            match self.hash_exists(info_hash).await {
+                Ok(b) => b,
+                Err(e) => {
+                    // Swallow and fall through to load.start_verbose —
+                    // rtorrent's silent dup-add means the torrent ends
+                    // up added once either way. If the underlying issue
+                    // (network / auth) persists, the load.start_verbose
+                    // that follows will surface a clearer error.
+                    tracing::debug!(
+                        target: "ryokan::download_client::rtorrent",
+                        error = %e,
+                        "hash_exists pre-check failed; falling through to load.start_verbose"
+                    );
+                    false
+                }
+            }
         };
         if already {
             // Re-apply the scoping label in case the user (or a prior
@@ -290,18 +310,19 @@ impl DownloadClient for RtorrentClient {
         // least 1 even pre-metadata (the sentinel file), so the
         // plan-doc-proposed `size_bytes > 0` heuristic doesn't work
         // in practice.
+        let hash_uc = info_hash.to_ascii_uppercase();
+        // Hoisted out of the poll loop — params are invariant across
+        // iterations and there's no reason to rebuild on every tick.
+        let poll_params = vec![
+            XmlValue::String(String::new()),
+            XmlValue::String("main".into()),
+            XmlValue::String("d.hash=".into()),
+            XmlValue::String("d.base_path=".into()),
+        ];
         let start = Instant::now();
         let mut delay = Duration::from_millis(500);
         let files: Vec<FileRow> = loop {
-            // Is metadata in?
-            let hash_uc = info_hash.to_ascii_uppercase();
-            let params = vec![
-                XmlValue::String(String::new()),
-                XmlValue::String("main".into()),
-                XmlValue::String("d.hash=".into()),
-                XmlValue::String("d.base_path=".into()),
-            ];
-            let rows_resp = self.call("d.multicall2", &params).await?;
+            let rows_resp = self.call("d.multicall2", &poll_params).await?;
             let rows = rows_resp
                 .into_array()
                 .ok_or("d.multicall2 did not return an array")?;
@@ -345,7 +366,6 @@ impl DownloadClient for RtorrentClient {
         // leave existing unwanted files alone.
         let already_narrowed = files.iter().any(|f| f.priority == 0);
 
-        let hash_uc = info_hash.to_ascii_uppercase();
         for (i, f) in files.iter().enumerate() {
             let target_prio = if already_narrowed {
                 if keep_indices.contains(&i) && f.priority == 0 {
@@ -511,36 +531,19 @@ impl DownloadClient for RtorrentClient {
 
         self.call_on_torrent("d.erase", info_hash, &[]).await?;
 
-        if let Some((base_path, directory, name)) = paths {
-            // Two safety rails:
-            //   1. Don't touch disk if base_path == directory — the
-            //      torrent dumped its files at the save root and
-            //      removing that root would delete the user's entire
-            //      download folder, including other torrents.
-            //   2. Don't touch disk if base_path ends with .meta —
-            //      metadata never arrived, there's nothing to remove
-            //      beyond what rtorrent already cleaned up.
-            //   3. Fall back to directory+name if base_path is empty
-            //      (common on closed/stopped torrents).
-            let effective = if !base_path.is_empty() && !base_path.ends_with(".meta") {
-                base_path
-            } else if !directory.is_empty() && !name.is_empty() {
-                format!("{}/{}", directory.trim_end_matches('/'), name)
-            } else {
-                String::new()
-            };
-            if !effective.is_empty() && effective != directory {
-                tokio::task::spawn_blocking(move || {
-                    let p = std::path::Path::new(&effective);
-                    if p.is_dir() {
-                        let _ = std::fs::remove_dir_all(p);
-                    } else if p.exists() {
-                        let _ = std::fs::remove_file(p);
-                    }
-                })
-                .await
-                .map_err(|e| format!("rtorrent delete: spawn_blocking failed: {e}"))?;
-            }
+        if let Some((base_path, directory, name)) = paths
+            && let Some(effective) = safe_delete_target(&base_path, &directory, &name)
+        {
+            tokio::task::spawn_blocking(move || {
+                let p = std::path::Path::new(&effective);
+                if p.is_dir() {
+                    let _ = std::fs::remove_dir_all(p);
+                } else if p.exists() {
+                    let _ = std::fs::remove_file(p);
+                }
+            })
+            .await
+            .map_err(|e| format!("rtorrent delete: spawn_blocking failed: {e}"))?;
         }
         Ok(())
     }
@@ -573,6 +576,51 @@ impl DownloadClient for RtorrentClient {
     }
 }
 
+/// Resolve a filesystem path to remove for `delete(delete_files=true)`,
+/// applying three safety rails:
+///
+///   1. **Empty ends → no-op.** Nothing reliable to delete.
+///   2. **`.meta` sentinel → no-op.** Pre-metadata torrent; rtorrent
+///      handles its own cleanup and there's no real content to remove.
+///   3. **Never delete the save root or any ancestor of it.**
+///      Normalization of trailing slashes prevents a
+///      `base_path = "/downloads/"` vs `directory = "/downloads"`
+///      mismatch from bypassing the guard. The ancestor check is
+///      belt-and-braces against a misconfigured rtorrent that reports
+///      a `base_path` *above* the `directory` — a bug we shouldn't
+///      paper over by wiping the user's entire download tree.
+///
+/// Returns `None` if no safe removal target exists. Callers treat
+/// `None` as "client-side erase already happened; disk unchanged."
+fn safe_delete_target(base_path: &str, directory: &str, name: &str) -> Option<String> {
+    let effective = if !base_path.is_empty() && !base_path.ends_with(".meta") {
+        base_path.to_string()
+    } else if !directory.is_empty() && !name.is_empty() {
+        format!("{}/{}", directory.trim_end_matches('/'), name)
+    } else {
+        return None;
+    };
+
+    let norm = |p: &str| p.trim_end_matches('/').to_string();
+    let e = norm(&effective);
+    let d = norm(directory);
+    if e.is_empty() || d.is_empty() {
+        return None;
+    }
+    // Equal-after-normalization: dumped at save root. Refuse.
+    if e == d {
+        return None;
+    }
+    // Effective is an ancestor of directory (or IS a root `/`).
+    // `d.starts_with(format!("{e}/"))` catches cases like
+    // effective="/downloads", directory="/downloads/anime".
+    let e_prefix = format!("{e}/");
+    if d.starts_with(&e_prefix) || e == "/" {
+        return None;
+    }
+    Some(effective)
+}
+
 fn content_path(base_path: &str, directory: &str, name: &str) -> String {
     // Base path is rtorrent's authoritative content location when
     // populated and not the .meta sentinel. When empty (closed /
@@ -592,6 +640,16 @@ fn content_path(base_path: &str, directory: &str, name: &str) -> String {
 /// UI states than qBit; the Paused/PausedComplete and Checking
 /// distinctions are preserved but stalled-vs-active isn't exposed
 /// natively so we collapse it into Downloading/Seeding.
+///
+/// **Errored is intentionally conservative.** We only surface Errored
+/// when the torrent is entirely stopped (`!is_active && !hashing &&
+/// !is_open`) with a non-empty `d.message`. An active torrent that's
+/// seeing a persistent tracker 410 won't flag as Errored here — it'll
+/// show Downloading/Seeding with the raw message still available in
+/// `DownloadItem.state` for the UI. This matches the rest of the
+/// trait's "prefer false negatives over false positives" error
+/// semantics: transient tracker hiccups on running torrents are
+/// normal and Ryokan shouldn't panic every time a tracker burps.
 fn map_state(
     complete: bool,
     is_active: bool,
@@ -863,8 +921,10 @@ fn decode_value(p: &mut Parser) -> Result<XmlValue, String> {
         }
         _ => {
             // Implicit-string case: raw text until </value>.
+            // `read_text_until` consumes the marker, so the closing
+            // `</value>` has already been swallowed — no additional
+            // expect_close call below.
             let s = p.read_text_until("</value>")?;
-            p.expect_close("value")?;
             return Ok(XmlValue::String(xml_text_unescape(s.trim())));
         }
     };
@@ -1185,6 +1245,114 @@ mod tests {
 </methodResponse>"#;
         let v = decode_response(xml1).unwrap();
         assert_eq!(v.as_string(), Some(""));
+    }
+
+    #[test]
+    fn decode_implicit_string_value_without_inner_tag() {
+        // XML-RPC spec allows bare `<value>text</value>` as equivalent
+        // to `<value><string>text</string></value>`. rtorrent rarely
+        // emits this but it's legal; guard against a future regression.
+        let xml = r#"<?xml version="1.0"?>
+<methodResponse>
+<params><param><value>plain</value></param></params>
+</methodResponse>"#;
+        let v = decode_response(xml).unwrap();
+        assert_eq!(v.as_string(), Some("plain"));
+    }
+
+    #[test]
+    fn decode_fault_with_escaped_chars() {
+        // Fault strings may contain XML-escaped characters (`&lt;`,
+        // `&amp;`, `&quot;`). fault_message() unescapes them so the
+        // error surfaced to the user reads naturally.
+        let xml = r#"<?xml version="1.0"?>
+<methodResponse>
+<fault>
+<value><struct>
+<member><name>faultCode</name><value><i4>-503</i4></value></member>
+<member><name>faultString</name><value><string>Method &quot;foo&lt;bar&gt;&amp;baz&quot; missing.</string></value></member>
+</struct></value>
+</fault>
+</methodResponse>"#;
+        let err = decode_response(xml).unwrap_err();
+        assert!(
+            err.contains(r#"Method "foo<bar>&baz" missing."#),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn safe_delete_target_populated_base_path() {
+        // Normal case: base_path points at the real content location,
+        // different from the save root.
+        assert_eq!(
+            safe_delete_target("/downloads/sintel", "/downloads", "sintel"),
+            Some("/downloads/sintel".into())
+        );
+    }
+
+    #[test]
+    fn safe_delete_target_refuses_save_root() {
+        // base_path == directory: save-root collision. Must return None.
+        assert_eq!(
+            safe_delete_target("/downloads", "/downloads", "sintel"),
+            None
+        );
+    }
+
+    #[test]
+    fn safe_delete_target_refuses_trailing_slash_divergence() {
+        // base_path="/downloads/", directory="/downloads" — normalize
+        // both before comparing, still collides, still refuse.
+        assert_eq!(
+            safe_delete_target("/downloads/", "/downloads", "sintel"),
+            None
+        );
+        assert_eq!(
+            safe_delete_target("/downloads", "/downloads/", "sintel"),
+            None
+        );
+    }
+
+    #[test]
+    fn safe_delete_target_refuses_ancestor() {
+        // base_path is an ancestor of directory — even more dangerous
+        // than equality. Refuse.
+        assert_eq!(
+            safe_delete_target("/downloads", "/downloads/anime/airing", "sintel"),
+            None
+        );
+    }
+
+    #[test]
+    fn safe_delete_target_refuses_root() {
+        // `effective = "/"` would spawn `remove_dir_all("/")` — no.
+        assert_eq!(safe_delete_target("/", "/downloads", "sintel"), None);
+    }
+
+    #[test]
+    fn safe_delete_target_refuses_meta_sentinel() {
+        // Pre-metadata .meta sentinel: nothing real to delete yet.
+        assert_eq!(
+            safe_delete_target("/downloads/incoming/ABC.meta", "/downloads", "sintel"),
+            Some("/downloads/sintel".into())
+        );
+    }
+
+    #[test]
+    fn safe_delete_target_falls_back_to_directory_plus_name() {
+        // Closed/stopped torrent: base_path is empty. Reconstruct.
+        assert_eq!(
+            safe_delete_target("", "/downloads", "sintel"),
+            Some("/downloads/sintel".into())
+        );
+    }
+
+    #[test]
+    fn safe_delete_target_none_when_no_inputs() {
+        assert_eq!(safe_delete_target("", "", ""), None);
+        assert_eq!(safe_delete_target("", "/downloads", ""), None);
+        assert_eq!(safe_delete_target("", "", "sintel"), None);
     }
 
     /// Live smoke test against a running rtorrent at

@@ -31,6 +31,9 @@ pub mod qbittorrent;
 /// the real impl.
 pub mod deluge;
 
+/// rtorrent via XML-RPC. See module docs for wire-format quirks
+/// (uppercase hash, `d.update_priorities` flush, silent duplicate-add,
+/// `d.erase` not touching disk, `.meta` sentinel in base_path).
 pub mod rtorrent;
 
 pub mod transmission;
