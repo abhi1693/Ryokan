@@ -172,6 +172,16 @@ pub struct SettingsForm {
     deluge_label: String,
     #[serde(default)]
     deluge_download_path: String,
+    #[serde(default)]
+    transmission_url: String,
+    #[serde(default)]
+    transmission_user: String,
+    #[serde(default)]
+    transmission_password: String,
+    #[serde(default)]
+    transmission_label: String,
+    #[serde(default)]
+    transmission_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -403,6 +413,7 @@ pub async fn settings_submit(
     let cfg = config::Config {
         active_client: match form.active_client.trim() {
             "deluge" => "deluge".to_string(),
+            "transmission" => "transmission".to_string(),
             // Any other value (including empty from pre-Phase-2 form
             // submissions) collapses to qbittorrent — preserves the
             // Phase 1 default and avoids accidentally switching users
@@ -430,6 +441,26 @@ pub async fn settings_submit(
         },
         deluge_download_path: form
             .deluge_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        transmission_url: form
+            .transmission_url
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        transmission_user: form.transmission_user.trim().to_string(),
+        transmission_password: form.transmission_password,
+        transmission_label: {
+            let trimmed = form.transmission_label.trim();
+            if trimmed.is_empty() {
+                "ryokan".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        },
+        transmission_download_path: form
+            .transmission_download_path
             .trim()
             .trim_end_matches('/')
             .to_string(),
@@ -780,6 +811,11 @@ pub async fn settings_submit(
                 !cfg.deluge_url.is_empty(),
                 cfg.deluge_url.as_str(),
             ),
+            "transmission" => (
+                "Transmission",
+                !cfg.transmission_url.is_empty(),
+                cfg.transmission_url.as_str(),
+            ),
             _ => (
                 "qBittorrent",
                 !cfg.qbit_url.is_empty(),
@@ -1059,26 +1095,35 @@ pub async fn jellyfin_test(
     path = "/api/health",
     tag = "System",
     summary = "Health check",
-    description = "Returns connection status of qBittorrent and Jellyfin integrations.",
+    description = "Returns connection status of the active download client and Jellyfin.",
     responses(
         (status = 200, description = "Health status", body = serde_json::Value),
     ),
 )]
 pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let qbit_status = {
+    let download_client_status = {
         let client = state.download_client.read().await.clone();
         match client {
-            Some(c) => match c.test().await {
-                Ok(version) => {
-                    let impl_name = c.sonarr_impl_name();
-                    serde_json::json!({
+            Some(c) => {
+                // Emit `type` on both Ok and Err so the template JS
+                // can route the Disconnected badge to the right
+                // fieldset when test() fails (daemon down, wrong
+                // creds). Without this, a configured-but-failing
+                // client renders no badge at all.
+                let impl_name = c.sonarr_impl_name();
+                match c.test().await {
+                    Ok(version) => serde_json::json!({
                         "ok": true,
                         "message": format!("{} {}", impl_name, version),
                         "type": impl_name,
-                    })
+                    }),
+                    Err(e) => serde_json::json!({
+                        "ok": false,
+                        "message": e,
+                        "type": impl_name,
+                    }),
                 }
-                Err(e) => serde_json::json!({"ok": false, "message": e}),
-            },
+            }
             None => serde_json::json!({"ok": false, "message": "Not configured"}),
         }
     };
@@ -1102,7 +1147,7 @@ pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value
     };
 
     Json(serde_json::json!({
-        "qbit": qbit_status,
+        "download_client": download_client_status,
         "jellyfin": jellyfin_status,
     }))
 }

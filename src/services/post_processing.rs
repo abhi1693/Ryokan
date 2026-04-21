@@ -761,12 +761,9 @@ async fn import_torrent(
     // per-category case. Fixing would re-introduce the two-field
     // remote-prefix design we abandoned in 4972624; follow-up issue
     // if this bites a user.
-    let per_client_download_path = match cfg.active_client.as_str() {
-        "deluge" => &cfg.deluge_download_path,
-        _ => &cfg.qbit_download_path,
-    };
+    let per_client_download_path = crate::services::download_client::per_client_download_path(cfg);
     let source_base = if !per_client_download_path.is_empty() {
-        per_client_download_path.clone()
+        per_client_download_path.to_string()
     } else {
         torrent_save_path.to_string()
     };

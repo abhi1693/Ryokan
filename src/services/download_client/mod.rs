@@ -31,6 +31,8 @@ pub mod qbittorrent;
 /// the real impl.
 pub mod deluge;
 
+pub mod transmission;
+
 #[async_trait]
 pub trait DownloadClient: Send + Sync {
     /// Test connection and return the client's version string.
@@ -227,6 +229,7 @@ impl DownloadItemState {
 pub fn per_client_download_path(config: &crate::models::config::Config) -> &str {
     match config.active_client.as_str() {
         "deluge" => &config.deluge_download_path,
+        "transmission" => &config.transmission_download_path,
         // qBittorrent is the default / unknown fallback.
         _ => &config.qbit_download_path,
     }
@@ -300,6 +303,17 @@ pub fn build_download_client(
                 &config.deluge_url,
                 &config.deluge_password,
                 &config.deluge_label,
+            )))
+        }
+        "transmission" => {
+            if config.transmission_url.is_empty() {
+                return None;
+            }
+            Some(std::sync::Arc::new(transmission::TransmissionClient::new(
+                &config.transmission_url,
+                &config.transmission_user,
+                &config.transmission_password,
+                &config.transmission_label,
             )))
         }
         // "qbittorrent" or any unknown value — qBit is the safe

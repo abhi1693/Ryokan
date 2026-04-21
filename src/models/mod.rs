@@ -1147,6 +1147,33 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // #63 Phase 3 — Transmission credentials + label + download_path.
+    // Transmission uses HTTP Basic auth (user + password) rather than
+    // Deluge's password-only model. Native 4.x `labels: [String]` on
+    // `torrent-add`/`torrent-get` is our scoping mechanism.
+    sqlx::query("ALTER TABLE config ADD COLUMN transmission_url TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN transmission_user TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN transmission_password TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN transmission_label TEXT NOT NULL DEFAULT 'ryokan'")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN transmission_download_path TEXT NOT NULL DEFAULT ''",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     // Phase 2.1 — columns added on the initial Phase 2 sketch of a
     // global `remote_path_remote` / `remote_path_local` pair.
     // Retained as dead columns (dropping would force a full-table
