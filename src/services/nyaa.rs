@@ -1078,7 +1078,6 @@ mod tests {
     /// Test-only base32 encoder used for round-trip verification of
     /// `extract_hash`'s canonicalization. RFC 4648 alphabet, no padding
     /// (20 bytes → 32 chars exactly, no padding needed).
-    #[cfg(test)]
     fn base32_encode_for_test(bytes: &[u8]) -> String {
         const ALPHA: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
         let mut out = String::new();
