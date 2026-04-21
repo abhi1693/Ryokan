@@ -1,0 +1,51 @@
+/* pages/downloads.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
+
+/* --- Downloads page --- */
+.dl-torrent-name {
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.dl-progress-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 120px;
+}
+
+.dl-progress-bar {
+    flex: 1;
+    height: 6px;
+    background: var(--bg-elevated);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.dl-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.dl-progress-text {
+    font-size: 11px;
+    color: var(--text-dim);
+    min-width: 40px;
+    text-align: right;
+}
+
+.dl-actions {
+    white-space: nowrap;
+}
+
+.ep-dl-progress {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    margin-top: 4px;
+}

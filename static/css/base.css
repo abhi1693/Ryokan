@@ -1,0 +1,604 @@
+/* base.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
+
+:root {
+    --bg: #0f0f13;
+    --bg-card: #16161d;
+    --bg-elevated: #1e1e28;
+    --border: #2a2a3a;
+    --border-accent: #3a3a4f;
+    --text: #d4d4e0;
+    --text-bright: #e8e8f0;
+    --text-dim: #7a7a96;
+    --accent: #cba6f7;
+    --accent-hover: #d9bfff;
+    --green: #7dd393;
+    --green-bg: rgba(125, 211, 147, 0.1);
+    --blue: #7daed3;
+    --blue-bg: rgba(125, 174, 211, 0.1);
+    --purple: #cba6f7;
+    --purple-bg: rgba(203, 166, 247, 0.1);
+    --red: #d37d7d;
+    --orange: #d3b07d;
+    --yellow: #e0c97d;
+    --mauve: #cba6f7;
+    --mauve-bg: rgba(203, 166, 247, 0.12);
+    --lavender: #b4a0ff;
+    --font-body: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+    --radius: 6px;
+    --radius-lg: 10px;
+    /* #20 — Breakpoint system. Exposed as custom properties so JS that
+     * needs to know "am I on mobile" can read them via getComputedStyle
+     * instead of duplicating pixel values. The @media queries throughout
+     * the stylesheet still hardcode these numbers because `@media
+     * (max-width: var(--bp-phone))` is only supported in very recent
+     * browsers; a comment at each @media block references which
+     * breakpoint it's targeting. */
+    --bp-phone: 640px;
+    --bp-tablet: 900px;
+    --bp-desktop: 1100px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* #20 — Mobile reset. Below --bp-phone iOS Safari will auto-zoom on
+ * any form input whose font-size is < 16px, so everything that accepts
+ * keyboard input gets bumped to 16px. Also scale body font-size up
+ * slightly so copy is legible at phone widths without the browser's
+ * own text-zoom fallback kicking in. */
+@media (max-width: 640px) {
+    /* Pin html + body at the viewport width. Firefox mobile honors
+     * `overflow-x: hidden` on body only if the element establishes a
+     * containing block that doesn't get stretched by descendants;
+     * setting max-width: 100vw on html forces that. Both html and
+     * body get overflow-x: hidden + max-width: 100vw so a descendant
+     * with intrinsic width > viewport (a select with long option
+     * text, a wide nav anchor, etc.) gets clipped rather than
+     * forcing the whole page to h-scroll. */
+    html, body {
+        overflow-x: hidden;
+        max-width: 100vw;
+    }
+    body {
+        font-size: 16px;
+        /* Padding so the fixed bottom tab bar (56px tall + safe-area
+         * inset for iOS home indicator) doesn't overlap page content. */
+        padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    }
+    input[type="text"],
+    input[type="search"],
+    input[type="number"],
+    input[type="password"],
+    input[type="email"],
+    input[type="url"],
+    input[type="tel"],
+    select,
+    textarea {
+        font-size: 16px;
+    }
+    /* Forms fill their parent on mobile. Without this, `<input>` keeps
+     * its user-agent default width (~173px for 20ch) and wanders out
+     * of its fieldset instead of filling the column. `max-width: 100%`
+     * belt-and-suspenders against inline-style widths. */
+    .form-group input,
+    .form-group select,
+    .form-group textarea,
+    .settings-form input,
+    .settings-form select,
+    .settings-form textarea {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+    /* Fieldset padding is 24px on desktop; shrink on phone so the
+     * input grid has more usable horizontal space.
+     *
+     * `min-width: 0` works around a long-standing browser quirk where
+     * <fieldset> defaults to `min-width: min-content`, so a wide child
+     * (like the group-source-table before its scroll wrap caught it)
+     * would force the fieldset past the viewport and cut the page off.
+     * Without this, the Release Groups tab renders fine horizontally
+     * but the fieldset's computed height clips below the real content. */
+    fieldset {
+        padding: 16px;
+        min-width: 0;
+    }
+    /* Content container padding tightens from 24px to 14px side-padding
+     * so forms don't get squeezed on both sides. */
+    .content {
+        padding: 24px 14px calc(80px + env(safe-area-inset-bottom, 0px));
+    }
+
+    /* Wide data tables (Groups, CF import collision review) that live
+     * directly in their section need a scrolling parent on mobile. The
+     * template wraps them in a `<div class="table-scroll-wrap">` so
+     * the table can keep its native <table> layout (display:block on
+     * the table itself broke the internal row layout in some contexts).
+     * `-webkit-overflow-scrolling: touch` preserves inertial scrolling
+     * on iOS. */
+    .table-scroll-wrap {
+        overflow-x: auto;
+        max-width: 100%;
+        -webkit-overflow-scrolling: touch;
+    }
+    /* Pre-wrap form-hint so it doesn't get dragged wider when a
+     * sibling (e.g. a wide table below) temporarily forces the
+     * parent container past viewport during layout. */
+    .form-hint {
+        overflow-wrap: anywhere;
+    }
+
+    /* Specific overflow culprits identified during phone testing.
+     * Each of these set a fixed/min width that forced their parent
+     * past the viewport at ~500px widths. */
+
+    /* RSS-decisions "Reason" column had `min-width: 420px` which
+     * alone exceeds a 412px viewport. Let the cell shrink to its
+     * share of the table width; the text wraps via .rss-reason-text
+     * `white-space: pre-wrap` so long reasons stay readable. */
+    .rss-reason-cell {
+        min-width: 0;
+    }
+
+    /* RSS-decisions filter-row text input had `flex: 1 1 320px` so
+     * its natural size pushed siblings off-screen. Shrink to zero
+     * basis so the flex container can honor the viewport. */
+    .rss-table-controls input,
+    .rss-table-controls select {
+        flex: 1 1 0;
+        min-width: 0;
+    }
+
+    /* Logs-table fixed-width columns collectively exceed 500px
+     * (160 + 70 + 100 + content = 330+ reserved). Drop the
+     * hard widths on mobile and let content dictate width; the
+     * table wrapper keeps overflow-x: auto as a fallback. */
+    .log-col-time,
+    .log-col-level,
+    .log-col-cat {
+        width: auto;
+        min-width: 0;
+    }
+    .log-col-time {
+        font-size: 11px;
+        white-space: nowrap;
+    }
+
+    /* Password/API-key/download-path rows use inline `display: flex;
+     * gap: 8px;` with `white-space: nowrap` buttons that refuse to
+     * shrink. Allow the row to wrap so Show/Copy can drop below the
+     * input rather than fighting it for width. */
+    .form-group > div[style*="display: flex"] {
+        flex-wrap: wrap;
+    }
+
+    /* Logs: the desktop table uses `table-layout: fixed` with per-cell
+     * `overflow: hidden`, which at phone widths collapses columns into
+     * equal-split boxes that then clip the message to a few characters
+     * (often to nothing visible). On phone, convert the table into a
+     * stacked card per row: top metadata strip (level + timestamp +
+     * category) over a full-width wrapped message and detail block.
+     * There's no :hover on touch, so always show detail fully. */
+    .log-table {
+        table-layout: auto;
+        display: block;
+    }
+    .log-table thead { display: none; }
+    .log-table tbody { display: block; }
+    .log-table tr.log-row {
+        display: block;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(42, 42, 58, 0.4);
+        background: var(--bg-card);
+    }
+    .log-table td {
+        display: block;
+        padding: 0;
+        border: none;
+        overflow: visible;
+        text-overflow: clip;
+        background: transparent;
+    }
+    .log-table td.log-col-time,
+    .log-table td.log-col-level,
+    .log-table td.log-col-cat {
+        display: inline-block;
+        vertical-align: middle;
+        margin-right: 8px;
+        font-size: 11px;
+    }
+    .log-table td.log-col-time { white-space: nowrap; }
+    .log-table td.log-col-msg { margin-top: 6px; }
+    .log-row .log-message {
+        display: block;
+        overflow-wrap: break-word;
+        word-break: normal;
+        color: var(--text);
+    }
+    .log-row .log-detail {
+        display: block;
+        white-space: normal;
+        overflow-wrap: break-word;
+        word-break: normal;
+        margin-top: 4px;
+    }
+
+    /* Series detail: strip the outer season-section card on phone so
+     * the rounded-border container doesn't nest around the already-
+     * carded episode rows (created duplicated visible lines around
+     * the table). Season header stays as a flat header; episodes sit
+     * directly below it as independent cards. */
+    .season-section {
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        overflow: visible;
+        margin-bottom: 20px;
+    }
+    .season-header { padding: 10px 0; }
+    .season-body { border-top: none; padding-top: 6px; }
+}
+
+/* --- Content --- */
+.content {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+}
+
+.page-header { margin-bottom: 28px; }
+.page-header h2 { font-size: 24px; color: var(--text-bright); margin-bottom: 4px; }
+.page-desc { color: var(--text-dim); font-size: 14px; }
+
+/* --- Empty state --- */
+.empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-dim);
+}
+
+.empty-state .btn { margin-top: 16px; }
+
+/* --- Help --- */
+.help-content { max-width: 700px; }
+
+.help-section {
+    margin-bottom: 32px;
+}
+
+.help-section h3 {
+    font-size: 17px;
+    color: var(--text-bright);
+    margin-bottom: 8px;
+}
+
+.help-section p {
+    color: var(--text);
+    margin-bottom: 12px;
+    font-size: 14px;
+    line-height: 1.7;
+}
+
+.help-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 8px;
+}
+
+.help-table th {
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+}
+
+.help-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+}
+
+.help-table td:last-child {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    text-align: right;
+    white-space: nowrap;
+}
+
+/* --- Responsive --- */
+@media (max-width: 640px) {
+    .nav { padding: 0 16px; }
+    .nav-links { gap: 4px; }
+    .nav-links a { padding: 6px 10px; font-size: 13px; }
+    .content { padding: 20px 16px 60px; }
+    .search-bar { flex-direction: column; }
+    .search-user { max-width: none; }
+    .form-row { grid-template-columns: 1fr; }
+    .results-table { font-size: 12px; }
+    .col-leech, .col-dl { display: none; }
+    .detail-header { flex-direction: column; gap: 16px; }
+    .detail-cover { width: 120px; }
+    .detail-title { font-size: 20px; }
+    .detail-banner { height: 160px; margin-bottom: -40px; }
+    .ep-filename { max-width: 180px; }
+    .ep-col-size { display: none; }
+    .folder-row { flex-wrap: wrap; }
+    .folder-select { max-width: none; width: 100%; }
+    .season-header { padding: 12px 14px; }
+
+    /* #20 — Episode table on phone. Keep the table shape but break the
+     * actions cell onto its own line underneath the primary row — at
+     * phone widths there's no room for three 34px icons after status/
+     * num/mon/title/quality without squeezing title to nothing.
+     *
+     * Done by turning each <tr> into a CSS grid with two template
+     * rows: primary data on top, actions spanning full width below.
+     * No card border — just a separator line between rows so it still
+     * reads like a table, not a stack of cards. */
+    .episode-table { font-size: 12px; }
+    .episode-table thead { display: none; }
+    .episode-table tbody,
+    .episode-table { display: block; width: 100%; }
+    .episode-table tr {
+        display: grid;
+        grid-template-columns: auto auto auto 1fr auto;
+        grid-template-areas:
+            "status num mon title quality"
+            "actions actions actions actions actions";
+        align-items: center;
+        gap: 4px 8px;
+        padding: 8px 4px;
+        border-bottom: 1px solid var(--border);
+    }
+    .episode-table td {
+        padding: 0;
+        border: none;
+        vertical-align: middle;
+    }
+    .ep-col-status { grid-area: status; width: auto; }
+    .ep-col-num { grid-area: num; width: auto; text-align: left; }
+    .ep-col-monitor { grid-area: mon; width: auto; }
+    .ep-col-title {
+        grid-area: title;
+        min-width: 0;
+        overflow-wrap: break-word;
+        word-break: normal;
+    }
+    .ep-col-aired { display: none; }
+    .ep-col-size { display: none; }
+    .ep-col-quality {
+        grid-area: quality;
+        width: auto;
+        min-width: 0;
+        text-align: right;
+        white-space: nowrap;
+    }
+    .tag-quality { padding: 1px 5px; font-size: 9px; }
+    /* Two-class selector so this wins over the later `.ep-col-actions`
+     * desktop rule (width: 84px; white-space: nowrap) that would
+     * otherwise pin the cell to 84px inside its full-width grid slot
+     * and push the buttons left. */
+    .episode-table .ep-col-actions {
+        grid-area: actions;
+        width: auto;
+        text-align: right;
+        padding-top: 6px;
+        white-space: normal;
+        justify-self: stretch;
+    }
+    .episode-table .ep-col-actions .icon-btn {
+        display: inline-flex;
+        min-width: 40px;
+        min-height: 40px;
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        margin: 0 0 0 6px;
+    }
+    .ep-filename { max-width: none; }
+    .ep-mon-btn { padding: 3px 8px; min-height: 28px; font-size: 11px; }
+}
+
+
+.btn-secondary {
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border);
+}
+
+.btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+.btn-success { background: var(--green); color: var(--bg); }
+.btn-danger { background: var(--red); color: var(--bg); }
+
+.settings-inline-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.text-success { color: var(--green); }
+.text-error { color: var(--red); }
+
+.title-option { display: none; }
+
+.season-subtitle {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-top: 2px;
+}
+
+.nav-links-right {
+    align-items: center;
+}
+
+.nav-title-select {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 13px;
+}
+
+/* --- Overrides for restored nav/detail layout --- */
+.nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+}
+
+.content {
+    padding-top: 88px;
+}
+
+.nav-links {
+    margin-left: auto;
+    align-items: center;
+}
+
+.title-option {
+    display: none;
+}
+
+/* Title visibility is driven by the `data-title-language` attribute set on
+   <html> by the inline script at the top of base.html, which runs *before*
+   any body content parses. This means the first paint already shows the
+   correct language — no flash-of-english followed by a JS-driven swap. */
+html[data-title-language="english"] .title-switcher .title-option[data-title-lang="english"],
+html[data-title-language="romaji"] .title-switcher .title-option[data-title-lang="romaji"],
+html[data-title-language="native"] .title-switcher .title-option[data-title-lang="native"] {
+    display: inline;
+}
+
+/* Fallback: if the head script somehow failed to set the attribute (e.g.
+   localStorage access threw), default to english so titles still render. */
+html:not([data-title-language]) .title-switcher .title-option[data-title-lang="english"] {
+    display: inline;
+}
+
+.season-body {
+    border-top: 1px solid var(--border);
+}
+
+.detail-subtitle.title-switcher {
+    min-height: 1.4em;
+}
+
+/* #20 commit 9 — Touch-target minimums. Below --bp-phone every tappable
+ * button gets bumped to at least a 40x40 hit area (WCAG 2.5.5
+ * recommends 44x44; .btn-sm at 40 is our compromise for density).
+ * Icon-only buttons get the full 44x44 since the visible control
+ * is already small and fingers are imprecise. Checkbox rows gain
+ * vertical padding so the whole row is tappable, not just the 16px
+ * checkbox square. */
+@media (max-width: 640px) {
+    .btn-sm {
+        min-height: 40px;
+        padding: 8px 14px;
+        font-size: 14px;
+    }
+    .btn-ghost,
+    .btn-icon,
+    .btn-icon-sm,
+    .btn-icon-danger {
+        min-width: 44px;
+        min-height: 44px;
+    }
+    .checkbox-row,
+    .checkbox-label {
+        padding: 8px 0;
+    }
+    /* Card-level action clusters (Grab button, etc.) go full-width so
+     * the thumb has the whole row to aim at. */
+    .result-card-footer .btn-grab {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+}
+
+/* #20 follow-up — .rss-table tables (downloads, RSS decisions,
+ * scheduled tasks) keep their real table shape on mobile. An
+ * earlier attempt to reshape them as cards via display:block broke
+ * more than it fixed (form layouts overflowed, RSS status stat
+ * rows collapsed into illegible stacks). `.rss-table-wrap` already
+ * has `overflow: auto`, so content wider than the viewport scrolls
+ * naturally within the wrapper — the right UX for data tables at
+ * small widths. Dedicated dual-markup card lists live only where
+ * the table shape doesn't carry its weight (search results,
+ * episode table — see 8ca7fca and 3fc9d17). */
+
+.rss-decision-rejected,
+.rss-decision-error {
+    background: rgba(211, 125, 125, 0.12);
+    color: var(--red);
+}
+
+.rss-decision-skipped {
+    background: rgba(125, 174, 211, 0.12);
+    color: var(--blue);
+}
+
+
+.rss-table-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin: 0 0 12px;
+}
+
+.rss-table-controls input,
+.rss-table-controls select {
+    background: rgba(18, 21, 33, 0.9);
+    border: 1px solid rgba(178, 160, 255, 0.16);
+    color: var(--text-primary);
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+
+.rss-table-controls input {
+    flex: 1 1 320px;
+}
+
+
+/* ── Utility blocks duplicated from pages/ for cross-page reuse ── */
+/* .page-header-row — originally in pages/index.css; copy kept here
+   for needs_review.html which does not override page_css. */
+.page-header-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+/* .folder-select — originally in pages/series.css; copy kept here
+   for needs_review.html which uses .folder-select on its table rows. */
+.folder-select {
+    padding: 5px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 12px;
+    font-family: var(--font-body);
+    max-width: 260px;
+}
+
+.folder-select:focus { outline: none; border-color: var(--accent); }
+

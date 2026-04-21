@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block page_css %}<link rel="stylesheet" href="/static/css/pages/series.css">{% endblock %}
 
 {% block title %} - {% if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_native }}{% endif %}{% endblock %}
 

@@ -1,0 +1,422 @@
+/* pages/system.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
+
+/* --- System Page --- */
+.system-tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.system-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 20px;
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    margin-bottom: -1px;
+}
+
+.system-tab:hover { color: var(--text); }
+.system-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* #20 commit 7 — On phone the tab strip wraps to 2-3 lines (Connections
+ * / Preferred Quality & Releases / Custom Formats / Release Groups /
+ * General at 412px is way too much for one row). Convert to a
+ * horizontally-scrolling strip with snap points so each tab lands
+ * cleanly at the left edge. Same treatment for .settings-tabs and
+ * .system-tabs since they share the same class. */
+@media (max-width: 640px) {
+    .system-tabs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scroll-snap-type: x proximity;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+    .system-tabs::-webkit-scrollbar {
+        display: none;
+    }
+    .system-tab {
+        flex-shrink: 0;
+        scroll-snap-align: start;
+        padding: 10px 14px;
+        font-size: 13px;
+    }
+}
+
+.settings-tabs {
+    margin-bottom: 24px;
+}
+
+.settings-tab-panel {
+    display: none;
+}
+
+.settings-tab-panel.active {
+    display: block;
+}
+
+.debug-panel {
+    max-width: 980px;
+}
+
+
+.settings-tabs {
+    margin-bottom: 24px;
+}
+
+/* Logs Toolbar */
+.logs-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.logs-filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.log-filter-select {
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--font-body);
+    cursor: pointer;
+}
+
+.log-filter-select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.log-filter-input {
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--font-body);
+    width: 200px;
+}
+
+.log-filter-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.log-filter-input::placeholder { color: var(--text-dim); }
+
+.logs-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.log-count {
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.log-poll-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.log-poll-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    appearance: none;
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    background: var(--bg);
+    border: 2px solid var(--border-accent);
+    border-radius: 3px;
+    box-sizing: border-box;
+    cursor: pointer;
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    vertical-align: middle;
+    margin: 0;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.log-poll-toggle input[type="checkbox"]:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.log-poll-toggle input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 4px;
+    height: 8px;
+    border: solid var(--bg);
+    border-width: 0 2px 2px 0;
+    transform: translate(-50%, -58%) rotate(45deg);
+}
+
+.log-poll-label { user-select: none; }
+
+.btn-sm {
+    padding: 5px 10px;
+    font-size: 13px;
+}
+
+/* Log Table */
+.logs-container {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    max-height: calc(100vh - 260px);
+    overflow-y: auto;
+}
+
+.log-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    font-family: var(--font-mono);
+    table-layout: fixed;
+}
+
+.log-table thead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+
+.log-table th {
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-body);
+}
+
+.log-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid rgba(42, 42, 58, 0.4);
+    vertical-align: top;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: var(--bg-card);
+}
+
+.log-col-time { width: 160px; white-space: nowrap; color: var(--text-dim); font-size: 12px; }
+.log-col-level { width: 70px; }
+.log-col-cat { width: 100px; color: var(--text-dim); font-size: 12px; }
+.log-col-msg { }
+
+.log-message { color: var(--text); }
+
+.log-detail {
+    display: block;
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+/* Log Level Badges */
+.log-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-body);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.log-badge-trace { background: rgba(110, 110, 136, 0.15); color: var(--text-dim); }
+.log-badge-debug { background: rgba(125, 174, 211, 0.15); color: var(--blue); }
+.log-badge-info  { background: rgba(125, 211, 147, 0.15); color: var(--green); }
+.log-badge-warn  { background: rgba(211, 176, 125, 0.15); color: var(--orange); }
+.log-badge-error { background: rgba(211, 125, 125, 0.2);  color: var(--red); }
+
+/* Log Row Highlighting */
+.log-level-error { background: rgba(211, 125, 125, 0.04); }
+.log-level-warn  { background: rgba(211, 176, 125, 0.03); }
+
+.log-row-new {
+    animation: log-flash 2s ease-out;
+}
+
+@keyframes log-flash {
+    0%   { background: rgba(203, 166, 247, 0.12); }
+    100% { background: transparent; }
+}
+
+.logs-empty {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 14px;
+}
+
+/* Log table hover */
+.log-row:hover {
+    background: rgba(203, 166, 247, 0.04);
+}
+
+/* Expand the wrapped detail on hover (desktop only — touch targets
+ * get fully wrapped detail via the phone-width override). */
+.log-row:hover .log-detail {
+    white-space: normal;
+    word-break: break-word;
+}
+
+/* RSS */
+.rss-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.rss-stat-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.rss-stat-row span {
+    color: var(--text-dim);
+}
+
+.rss-stat-row strong {
+    color: var(--text);
+    text-align: right;
+}
+
+.rss-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.rss-table-wrap {
+    max-height: 680px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+}
+
+.rss-table-wrap .rss-table th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-elevated);
+    z-index: 1;
+}
+
+.rss-reason-cell {
+    min-width: 420px;
+}
+
+.rss-reason-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.45;
+}
+
+
+.rss-table th,
+.rss-table td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+.rss-table td {
+    background: var(--bg-card);
+}
+
+.rss-table td a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.rss-table td a:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
+}
+
+.rss-table th {
+    color: var(--text-dim);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.rss-release-meta {
+    margin-top: 4px;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.rss-decision-grabbed {
+    background: rgba(125, 211, 147, 0.14);
+    color: var(--green);
+}
+
+/* Wrapper for Debug-tab checkbox rows. Deliberately NOT `.form-group`
+ * because `.form-group label` (0,1,1) overrode `.checkbox-row` (0,1,0)
+ * on specificity, forcing checkbox labels uppercase/dimmed. Keeping a
+ * separate wrapper lets `.checkbox-row` apply cleanly. (#18) */
+.form-check {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+
+/* --- Debug action rows --- */
+.debug-actions-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.debug-action-row {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+}
+
