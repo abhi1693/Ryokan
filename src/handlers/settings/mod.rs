@@ -603,16 +603,134 @@ pub async fn settings_submit(
 
     // #63 Phase 2 — client-switch handling. If the user changed
     // `active_client` on this save, any `grabbed_torrents` rows still
-    // in `state='pending'` point at the OLD client, which Ryokan is
-    // about to stop talking to. Mark them `failed` so they drop out
-    // of the partial UNIQUE index on (hash) and the user can re-grab
-    // cleanly in the new client. See the plan's "client-switch
-    // handling" section for why we chose the destructive path over
-    // per-hash cross-client reconciliation.
+    // in `state='pending'` point at the OLD client (Ryokan is about
+    // to stop talking to it). Three things need to happen, in order:
+    //
+    //   1. **Delete only the in-flight torrents from the OLD client.**
+    //      An `state='pending'` row at this point is either
+    //      mid-download OR complete-but-not-yet-imported. Deleting
+    //      the mid-download ones is the user's intent ("cancel my
+    //      in-flight grabs"). Deleting the completed-but-not-yet-
+    //      imported ones would wipe finished files the user almost
+    //      certainly wants to keep — they're identical to an already-
+    //      imported torrent from the user's perspective; the only
+    //      difference is post-processing didn't happen to run yet.
+    //      So we gate the delete on `!is_complete()` from the old
+    //      client's view.
+    //
+    //   2. **Mark ALL pending rows as `failed` regardless of delete
+    //      outcome.** The old client is about to disappear from
+    //      AppState; Ryokan can't track these grabs anymore. They
+    //      need to drop out of the partial UNIQUE index on `(hash)
+    //      WHERE state IN ('pending','imported')` so a re-grab in
+    //      the new client can't dedupe against them. Completed
+    //      torrents the user wants to keep stay on the old client's
+    //      disk; Ryokan just forgets about them. The user can still
+    //      see the files manually.
+    //
+    //   3. **Swap the AppState Arc** (further down in the
+    //      `active_tab == "integrations"` block).
+    //
+    // Delete happens BEFORE the Arc swap because the read lock still
+    // holds the OLD client's Arc at this point.
     if active_tab == "integrations"
         && let Some(old) = existing_cfg.as_ref()
         && old.active_client != cfg.active_client
     {
+        let pending = crate::models::grabbed_torrents::get_all_pending(&state.db)
+            .await
+            .unwrap_or_default();
+
+        if !pending.is_empty()
+            && let Some(old_client) = state.download_client.read().await.clone()
+        {
+            // Build a hash → state_kind map from the old client's
+            // current view. `list_scoped` returns only Ryokan-owned
+            // torrents, which is a superset of our pending grabs in
+            // the steady state. Failure to fetch == treat as empty
+            // map (can't determine completion); we'll skip deletion
+            // to be safe and let the user clean up manually.
+            let states: std::collections::HashMap<
+                String,
+                crate::services::download_client::DownloadItemState,
+            > = old_client
+                .list_scoped()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| (t.hash.to_lowercase(), t.state_kind))
+                .collect();
+
+            let mut deleted = 0usize;
+            let mut skipped_complete = 0usize;
+            let mut delete_failures: Vec<String> = Vec::new();
+            for grab in &pending {
+                if grab.hash.is_empty() {
+                    continue;
+                }
+                let hash_lc = grab.hash.to_lowercase();
+                // Only delete the torrent if the old client reports
+                // it's NOT complete. Missing from the map (e.g. user
+                // already deleted it manually in the old client, or
+                // `list_scoped` failed) also skips deletion — we'd
+                // rather leave a dangling download-client row than
+                // delete a completed file the user wanted to keep.
+                match states.get(&hash_lc) {
+                    Some(state) if !state.is_complete() => {
+                        match old_client.delete(&hash_lc, true).await {
+                            Ok(()) => deleted += 1,
+                            Err(e) => delete_failures.push(format!("{}: {}", grab.torrent_name, e)),
+                        }
+                    }
+                    Some(_) => skipped_complete += 1,
+                    None => {
+                        // Not in the old client's list. Could be
+                        // already manually removed, could be that
+                        // list_scoped failed. Either way, skip
+                        // deletion — no action we can take that's
+                        // safer than leaving it alone.
+                    }
+                }
+            }
+            if deleted > 0 {
+                logger::info(
+                    &state.db,
+                    LogCategory::System,
+                    &format!(
+                        "Cancelled {deleted} in-flight grab(s) from {} during client switch",
+                        old.active_client
+                    ),
+                    "",
+                )
+                .await;
+            }
+            if skipped_complete > 0 {
+                logger::info(
+                    &state.db,
+                    LogCategory::System,
+                    &format!(
+                        "Left {skipped_complete} completed grab(s) on {} intact during client switch — files preserved",
+                        old.active_client
+                    ),
+                    "",
+                )
+                .await;
+            }
+            if !delete_failures.is_empty() {
+                logger::warn(
+                    &state.db,
+                    LogCategory::System,
+                    &format!(
+                        "{} in-flight grab(s) could not be deleted from {} — DB state still flipped",
+                        delete_failures.len(),
+                        old.active_client
+                    ),
+                    &delete_failures.join("; "),
+                )
+                .await;
+            }
+        }
+
         let n = crate::models::grabbed_torrents::mark_all_pending_failed(
             &state.db,
             &format!(
@@ -631,10 +749,11 @@ pub async fn settings_submit(
             )
             .await;
             notices.push(format!(
-                "Client changed from {} to {}; {n} pending grab{} cancelled.",
+                "Client changed from {} to {}; {n} pending grab{} released (in-flight downloads cancelled on {}; any completed files preserved).",
                 old.active_client,
                 cfg.active_client,
                 if n == 1 { "" } else { "s" },
+                old.active_client,
             ));
         }
     }
