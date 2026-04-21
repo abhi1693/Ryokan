@@ -1,6 +1,6 @@
 # Ryokan
 
-A self-hosted anime PVR written in Rust. Searches Nyaa for releases, scores them by quality, and sends them to qBittorrent from a single web UI.
+A self-hosted anime PVR written in Rust. Searches Nyaa for releases, scores them by quality, and sends them to your torrent client from a single web UI. Supports qBittorrent, Deluge, Transmission, and rTorrent/ruTorrent.
 
 I built this because Sonarr doesn't always work well for anime. The RSS sync for currently airing shows works just fine, but downloading season batches of shows that've finished airing almost always hangs the interactive search. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named.
 
@@ -25,10 +25,10 @@ This project's being actively developed. Expect some occasional bugs. See [Relea
 - **Manual classification override** and a **Needs Review** queue (`/library/review`) for episodes where the classifier wasn't confident. Pins propagate into a "suggested group→source mapping" panel so repeat overrides can teach the release-group identity map
 - **Blocklist** completed/bad releases from the Downloads page or from an episode's grab history, so the upgrade sweep and RSS sync won't re-grab them
 - Per-series **Allow Upgrades** toggle to opt specific titles out of the upgrade sweep without disabling it globally
-- Integrates with qBittorrent for downloads and Jellyfin for library refresh; writes Jellyfin-compatible NFO sidecars during post-processing
+- Integrates with qBittorrent, Deluge, Transmission, and rTorrent for downloads (one active client at a time) and Jellyfin for library refresh; writes Jellyfin-compatible NFO sidecars during post-processing
 - Post-processes completed downloads in **hardlink** (default, seed-safe), **copy**, or **move** mode. Hardlink automatically falls back to copy when the download and media root are on different filesystems
 - Caches all metadata and artwork locally (content-addressed blob store) so pages load instantly after initial setup
-- Cookie-based auth with first-run admin setup, a **System** page for live logs, scheduled-task inspection/force-run, RSS grab history, and a debug tab, plus an OpenAPI/Swagger UI at `/api-docs` for everything the web UI calls
+- Cookie-based auth with first-run admin setup, a **System** page for live logs, scheduled-task inspection/force-run, RSS grab history, a scoring inspector, and a debug tab, plus an OpenAPI/Swagger UI at `/api-docs` for everything the web UI calls
 
 ## Running with Docker
 
@@ -40,18 +40,18 @@ Listens on port `8978`. On first run, go to `http://localhost:8978` to create an
 
 ### Enabling post-processing
 
-Ryokan's post-processor reads completed torrents from qBittorrent and imports them into your anime library. For that to work, both paths have to be visible inside the container at the same paths you configure in **Settings**:
+Ryokan's post-processor reads completed torrents from your download client and imports them into your anime library. For that to work, both paths have to be visible inside the container at the same paths you configure in **Settings**:
 
 1. Uncomment the two optional volume lines in `docker-compose.yml`:
-   - `/srv/downloads:/downloads` (host path where qBit writes completed torrents)
+   - `/srv/downloads:/downloads` (host path where your download client writes completed torrents)
    - `/srv/media/anime:/media/anime` (host path to your anime library root)
-2. In **Settings → qBittorrent**, set *Download path (as Ryokan sees it)* to the right-hand side (e.g. `/downloads`).
+2. In **Settings → Connections**, open the field for your active download client (qBittorrent / Deluge / Transmission / rTorrent) and set *Download Path (as seen by Ryokan)* to the right-hand side (e.g. `/downloads`). Note that some clients write to a subdirectory — the `linuxserver/transmission` image defaults to `/downloads/complete`, and many `rtorrent.rc` setups move finished torrents into a per-label subdirectory like `/downloads/completed/ryokan/`.
 3. In **Settings → Media**, set *Media root* to the right-hand side (e.g. `/media/anime`).
-4. Set `PUID` / `PGID` in `docker-compose.yml` to the UID/GID that owns those host directories (run `id -u` / `id -g` on the host to find them). Ryokan drops privileges to that user at startup so imported files end up with the right ownership for Jellyfin and the rest of your *arr stack to read.
+4. For Docker: set `PUID` / `PGID` in `docker-compose.yml` to the UID/GID that owns those host directories (run `id -u` / `id -g` on the host to find them). Ryokan drops privileges to that user at startup so imported files end up with the right ownership for Jellyfin and the rest of your *arr stack to read.
 
 ## Running locally
 
-Requires Rust 1.95+, a C/C++ toolchain, and `cmake`. No OpenSSL headers needed — TLS is pure-Rust rustls.
+Requires Rust 1.95+, a C/C++ toolchain, and `cmake`.
 
 ```bash
 cargo run
@@ -75,7 +75,7 @@ Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 
 ## Configuration
 
-All runtime settings are managed through the web UI under **Settings**: qBittorrent and Jellyfin connections, quality profiles and cutoffs, preferred/blocked release groups, media root path, and title language preference.
+All runtime settings are managed through the web UI under **Settings**: download client (qBittorrent, Deluge, Transmission, or rTorrent) and Jellyfin connections, quality profiles and cutoffs, preferred/blocked release groups, media root path, and title language preference.
 
 ## Seerr integration
 
@@ -124,7 +124,7 @@ Ryokan wipes the `users` and `sessions` tables on startup, so the browser redire
 sqlite3 data/ryokan.db "DELETE FROM users; DELETE FROM sessions;"
 ```
 
-Start Ryokan and create a new admin account. Config (Jellyfin / qBit credentials, media root, CFs) survives either recovery path — only the admin account and active sessions get wiped.
+Start Ryokan and create a new admin account. Config (Jellyfin / download-client credentials, media root, CFs) survives either recovery path — only the admin account and active sessions get wiped.
 
 ## Self-hosting Jikan
 
