@@ -331,12 +331,16 @@ fn is_disconnect_error(msg: &str) -> bool {
 impl DownloadClient for DelugeClient {
     async fn test(&self) -> Result<String, String> {
         self.connect().await?;
-        // `daemon.info` returns the daemon version string. It's the
-        // cheapest post-connect RPC that proves the daemon is
-        // actually responding, not just the web proxy.
+        // `daemon.get_version` returns the Deluge daemon version
+        // string ("2.2.0" etc.). Picked over `daemon.info` — the
+        // latter is NOT exposed through the web-proxy's `/json`
+        // endpoint (only the raw daemon RPC on port 58846), so
+        // calling it here returns "Unknown method" post-connect
+        // and the settings page shows "Connection failed" despite
+        // the handshake working. Live-probed 2026-04-21.
         let version: String =
-            serde_json::from_value(self.connected_rpc("daemon.info", json!([])).await?)
-                .map_err(|e| format!("Deluge daemon.info parse failed: {e}"))?;
+            serde_json::from_value(self.connected_rpc("daemon.get_version", json!([])).await?)
+                .map_err(|e| format!("Deluge daemon.get_version parse failed: {e}"))?;
         Ok(version)
     }
 
