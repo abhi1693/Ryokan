@@ -1214,15 +1214,6 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await;
-    let _ = sqlx::query(
-        "UPDATE config
-         SET transmission_download_path = remote_path_local
-         WHERE active_client = 'transmission'
-           AND remote_path_local <> ''
-           AND transmission_download_path = ''",
-    )
-    .execute(db)
-    .await;
 
     // Rename `qbit_content_path` → `client_content_path` so the field
     // name reflects the trait abstraction. Uses the same state-matrix

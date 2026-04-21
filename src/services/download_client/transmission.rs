@@ -308,7 +308,11 @@ impl DownloadClient for TransmissionClient {
                 }),
             )
             .await?;
-        let was_duplicate = add_args.get("torrent-duplicate").is_some();
+        // Duplicate-add is fine here: the torrent's already in the
+        // client (possibly already running), we still apply the file
+        // filter and emit torrent-start below — for a running torrent
+        // that's a no-op, for a paused one it unpauses.
+        let _ = add_args;
 
         // Poll for metadata readiness.
         let start = Instant::now();
@@ -379,11 +383,9 @@ impl DownloadClient for TransmissionClient {
             self.send("torrent-set", patch).await?;
         }
 
-        // Unpause unless we were a duplicate of an already-running
-        // torrent (the torrent-add paused:true flag is ignored for
-        // duplicates, so starting it is a no-op but still safe).
+        // Unpause — no-op on an already-running duplicate, unpauses
+        // the fresh add.
         let _ = self.send("torrent-start", json!({"ids": [hash_lc]})).await;
-        let _ = was_duplicate;
 
         Ok(SelectiveOutcome::Filtered(keep_indices))
     }

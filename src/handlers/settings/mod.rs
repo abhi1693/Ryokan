@@ -1095,7 +1095,7 @@ pub async fn jellyfin_test(
     path = "/api/health",
     tag = "System",
     summary = "Health check",
-    description = "Returns connection status of qBittorrent and Jellyfin integrations.",
+    description = "Returns connection status of the active download client and Jellyfin.",
     responses(
         (status = 200, description = "Health status", body = serde_json::Value),
     ),
@@ -1104,17 +1104,26 @@ pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value
     let download_client_status = {
         let client = state.download_client.read().await.clone();
         match client {
-            Some(c) => match c.test().await {
-                Ok(version) => {
-                    let impl_name = c.sonarr_impl_name();
-                    serde_json::json!({
+            Some(c) => {
+                // Emit `type` on both Ok and Err so the template JS
+                // can route the Disconnected badge to the right
+                // fieldset when test() fails (daemon down, wrong
+                // creds). Without this, a configured-but-failing
+                // client renders no badge at all.
+                let impl_name = c.sonarr_impl_name();
+                match c.test().await {
+                    Ok(version) => serde_json::json!({
                         "ok": true,
                         "message": format!("{} {}", impl_name, version),
                         "type": impl_name,
-                    })
+                    }),
+                    Err(e) => serde_json::json!({
+                        "ok": false,
+                        "message": e,
+                        "type": impl_name,
+                    }),
                 }
-                Err(e) => serde_json::json!({"ok": false, "message": e}),
-            },
+            }
             None => serde_json::json!({"ok": false, "message": "Not configured"}),
         }
     };
