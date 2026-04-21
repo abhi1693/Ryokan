@@ -1101,7 +1101,7 @@ pub async fn jellyfin_test(
     ),
 )]
 pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let qbit_status = {
+    let download_client_status = {
         let client = state.download_client.read().await.clone();
         match client {
             Some(c) => match c.test().await {
@@ -1138,7 +1138,7 @@ pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value
     };
 
     Json(serde_json::json!({
-        "qbit": qbit_status,
+        "download_client": download_client_status,
         "jellyfin": jellyfin_status,
     }))
 }
