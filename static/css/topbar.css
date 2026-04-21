@@ -1,4 +1,4 @@
-/* topbar.css — auto-split from style.css on 2026-04-21 (Phase 7). */
+/* topbar.css — auto-split from style.css. */
 
 .mobile-tabbar {
     display: none;
@@ -108,6 +108,15 @@
 
 .nav-links-right {
     align-items: center;
+}
+
+.nav-title-select {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 13px;
 }
 
 .nav {

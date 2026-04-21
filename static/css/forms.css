@@ -1,17 +1,6 @@
-/* forms.css — auto-split from style.css on 2026-04-21 (Phase 7). */
+/* forms.css — auto-split from style.css. */
 
 @media (max-width: 640px) {
-    input[type="text"],
-    input[type="search"],
-    input[type="number"],
-    input[type="password"],
-    input[type="email"],
-    input[type="url"],
-    input[type="tel"],
-    select,
-    textarea {
-        font-size: 16px;
-    }
     .form-group input,
     .form-group select,
     .form-group textarea,
@@ -24,11 +13,6 @@
     }
     .form-hint {
         overflow-wrap: anywhere;
-    }
-    .rss-table-controls input,
-    .rss-table-controls select {
-        flex: 1 1 0;
-        min-width: 0;
     }
     .form-group > div[style*="display: flex"] {
         flex-wrap: wrap;
@@ -223,22 +207,6 @@
     color: var(--bg);
 }
 
-.btn-add {
-    flex-shrink: 0;
-    padding: 6px 16px;
-    font-size: 13px;
-}
-
-.btn-add.btn-success {
-    background: var(--green);
-    color: var(--bg);
-}
-
-.btn-add.btn-error {
-    background: var(--red);
-    color: #fff;
-}
-
 .btn-secondary {
     background: var(--bg-elevated);
     color: var(--text);
@@ -268,19 +236,6 @@
     color: var(--bg);
 }
 
-.folder-select {
-    padding: 5px 10px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--text);
-    font-size: 12px;
-    font-family: var(--font-body);
-    max-width: 260px;
-}
-
-.folder-select:focus { outline: none; border-color: var(--accent); }
-
 .btn-icon-sm {
     display: flex;
     align-items: center;
@@ -303,7 +258,6 @@
 @media (max-width: 640px) {
     .search-bar { flex-direction: column; }
     .form-row { grid-template-columns: 1fr; }
-    .folder-select { max-width: none; width: 100%; }
 }
 
 .btn-secondary {
@@ -317,15 +271,6 @@
 .btn-success { background: var(--green); color: var(--bg); }
 
 .btn-danger { background: var(--red); color: var(--bg); }
-
-.nav-title-select {
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    color: var(--text);
-    border-radius: var(--radius);
-    padding: 6px 10px;
-    font-size: 13px;
-}
 
 .form-group-checkbox {
     margin-top: 4px;
@@ -384,10 +329,6 @@
     transform: translate(-50%, -58%) rotate(45deg);
 }
 
-.btn.is-loading {
-    opacity: 0.85;
-}
-
 .cf-section input[type="radio"],
 .settings-form input[type="radio"] {
     appearance: none;
@@ -437,74 +378,6 @@
     margin: 0;
 }
 
-input[type="file"] {
-    background: var(--bg-elevated);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 6px 10px;
-    font-size: 13px;
-    max-width: 100%;
-}
-
-input[type="file"]::file-selector-button {
-    background: var(--bg-card);
-    color: var(--text-bright);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 4px 12px;
-    margin-right: 10px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-}
-
-input[type="file"]::file-selector-button:hover {
-    background: var(--bg-elevated);
-    border-color: var(--border-accent);
-    color: var(--accent);
-}
-
-.settings-input {
-    padding: 10px 12px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--text);
-    font-size: 14px;
-    font-family: var(--font-body);
-    transition: border-color 0.15s;
-}
-
-.settings-input:focus {
-    outline: none;
-    border-color: var(--accent);
-}
-
-.settings-input[type="search"] {
-    -webkit-appearance: none;
-    appearance: none;
-}
-
-.settings-input[type="search"]::-webkit-search-cancel-button {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 14px;
-    height: 14px;
-    margin-left: 6px;
-    background: var(--text-dim);
-    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M18 6L6 18M6 6l12 12' stroke='black' stroke-width='3' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
-    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M18 6L6 18M6 6l12 12' stroke='black' stroke-width='3' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
-    cursor: pointer;
-    opacity: 0.6;
-}
-
-.settings-input[type="search"]::-webkit-search-cancel-button:hover {
-    opacity: 1;
-    background: var(--accent);
-}
-
 .btn-sm {
     padding: 5px 10px;
     font-size: 13px;
@@ -528,32 +401,4 @@ input[type="file"]::file-selector-button:hover {
         padding: 8px 0;
     }
 }
-
-.rss-table-controls input,
-.rss-table-controls select {
-    background: rgba(18, 21, 33, 0.9);
-    border: 1px solid rgba(178, 160, 255, 0.16);
-    color: var(--text-primary);
-    border-radius: 10px;
-    padding: 10px 12px;
-}
-
-.rss-table-controls input {
-    flex: 1 1 320px;
-}
-
-.btn-mark-failed {
-    font-size: 11px;
-    padding: 3px 8px;
-    background: rgba(211, 125, 125, 0.1);
-    color: var(--red);
-    border: 1px solid rgba(211, 125, 125, 0.3);
-    border-radius: var(--radius);
-    cursor: pointer;
-    transition: background 0.15s;
-}
-
-.btn-mark-failed:hover { background: rgba(211, 125, 125, 0.2); }
-
-.btn-mark-failed:disabled { opacity: 0.5; cursor: default; }
 

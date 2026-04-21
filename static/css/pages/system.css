@@ -1,4 +1,4 @@
-/* pages/system.css — auto-split from style.css on 2026-04-21 (Phase 7). */
+/* pages/system.css — auto-split from style.css. */
 
 @media (max-width: 640px) {
     .rss-reason-cell {
@@ -235,6 +235,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 100%;
+}
+
+.log-row-new {
+    animation: log-flash 2s ease-out;
 }
 
 .log-row:hover {
