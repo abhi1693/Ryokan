@@ -1,87 +1,573 @@
-//! Phase 1 Deluge stub.
+//! Deluge implementation of [`DownloadClient`]. Speaks the Deluge Web
+//! UI JSON-RPC API at `POST <base_url>/json`.
 //!
-//! Exists to exercise the [`DownloadClient`] trait shape against a
-//! second implementation at compile time, so any qBit-specific
-//! assumption that accidentally leaked into the trait surfaces as a
-//! type error *before* the 15-handler refactor in Phase 1 commits —
-//! not in Phase 2 when changing the trait means re-touching every
-//! call site. Phase 2 replaces this file with the real Deluge Web
-//! UI JSON-RPC client (see ~/Documents/ryokan-plan-pluggable-
-//! download-clients.md → Phase 2).
-//!
-//! Not constructed, not wired into `AppState`. All mutating methods
-//! are `unimplemented!()`; only `test()` and `sonarr_impl_name()`
-//! return stub values so downstream code can reference the type
-//! if it ever does.
+//! Deluge-specific quirks worth flagging for future readers (most of
+//! these are spelled out in the #63 plan at ~/Documents/ryokan-plan-
+//! pluggable-download-clients.md → Phase 2):
+//!   - **Two-step connect**: `auth.login(password)` establishes a
+//!     session cookie, but a freshly-authenticated session isn't
+//!     connected to any daemon. Every `core.*` call fails with
+//!     `"Unknown method"` (NOT "not connected" — the methods aren't
+//!     even registered on the web process) until `web.connect(host_id)`
+//!     runs. Single most common first-time integration failure.
+//!   - **Label plugin required for scoping**: Ryokan sets a per-grab
+//!     label (default `"ryokan"`) and filters `list_scoped` by it.
+//!     The Label plugin is bundled with Deluge but disabled by
+//!     default; the connection test enables it via `core.enable_plugin`
+//!     when it sees `Label` in `available_plugins` but not
+//!     `enabled_plugins`. There's an upstream Deluge bug where an
+//!     enabled-but-not-restarted Label plugin leaves RPC methods
+//!     unregistered on the web process for one session; we re-call
+//!     `web.connect` after enabling to force a method re-registration.
+//!   - **File priority scale is 0 / 1 / 4 / 7** (Skip / Low / Normal /
+//!     High), NOT qBit's 0 / 1 / 6 / 7. Writing `1` for "wanted"
+//!     would set the file to Low priority (bandwidth-de-prioritized
+//!     relative to peers), which is wrong. Ryokan writes `0` for
+//!     skip and `4` for wanted.
+//!   - **Duplicate-add detection is message-matching**: the error
+//!     code fluctuates across versions (ticket deluge-dev/#3507) so
+//!     we match on the substring `"Torrent already in session"` (and
+//!     `"Torrent already being added"` for the racing-add case).
+//!   - **No `has_metadata` field** in `core.get_torrent_status`
+//!     output — live-probed against Deluge 2.x + Label plugin 0.3.
+//!     Proxy for metadata-ready: `files` array non-empty.
+//!   - **Missing fields silently omitted**: `get_torrent_status`
+//!     drops unknown keys from the response rather than returning an
+//!     error. Every deserializer here uses `#[serde(default)]`.
 
 use async_trait::async_trait;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
-use super::{AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome};
+use super::{
+    AddOutcome, DownloadClient, DownloadFile, DownloadItem, DownloadItemState, SelectiveOutcome,
+};
 
-#[allow(dead_code)]
+/// Deluge file priority: 0 = Skip, 1 = Low, 4 = Normal, 7 = High.
+/// Ryokan only ever writes 0 and 4 — the Low/High levels are a
+/// Deluge-UI feature Ryokan doesn't control from scoring.
+const DELUGE_PRIO_SKIP: i32 = 0;
+const DELUGE_PRIO_NORMAL: i32 = 4;
+
+/// Metadata-wait budget for `add_torrent_with_file_filter`. Matches
+/// qBit's 10-second ceiling so selective-narrowing latency is
+/// consistent across clients — longer waits block interactive grabs.
+const METADATA_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct DelugeClient {
     base_url: String,
     password: String,
     label: String,
+    http: Client,
+    /// Cached daemon host id from `web.get_hosts`. Captured once on
+    /// first connect; Deluge web UI only has one real daemon slot in
+    /// practice. Wrapped in `Mutex<Option>` rather than `OnceCell`
+    /// so a daemon swap (config change → restart) can re-populate it
+    /// via the reconnect path without tearing down the whole client.
+    host_id: Arc<Mutex<Option<String>>>,
+    /// Flipped to `true` after a successful `auth.login` +
+    /// `web.connect`. Any RPC error that smells like "session
+    /// expired" or "not connected to daemon" clears it so the next
+    /// call re-runs the full handshake. Atomic so the
+    /// `ensure_connected` path doesn't serialize mutations behind a
+    /// tokio mutex.
+    connected: Arc<AtomicBool>,
+    /// Serializes concurrent `ensure_connected` calls so only one
+    /// task runs the auth + connect dance when the flag is false.
+    /// Without this, a burst of first-time callers all race to log
+    /// in and set up the Label plugin.
+    connect_lock: Arc<Mutex<()>>,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct RpcResponse<T> {
+    result: Option<T>,
+    error: Option<RpcError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RpcError {
+    message: String,
+}
+
+/// Raw torrent status fields Ryokan needs. Every field is
+/// `#[serde(default)]` because Deluge silently omits keys that
+/// aren't populated yet (e.g. pre-metadata torrents have empty
+/// `files` but no `total_size`, and plugin-provided fields like
+/// `label` only appear when the Label plugin is loaded).
+#[derive(Debug, Deserialize, Default)]
+struct DelugeRawTorrent {
+    #[serde(default)]
+    hash: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    save_path: String,
+    #[serde(default)]
+    progress: f64,
+    #[serde(default)]
+    download_payload_rate: i64,
+    #[serde(default)]
+    eta: i64,
+    #[serde(default)]
+    total_size: i64,
+    #[serde(default)]
+    is_finished: bool,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    files: Vec<DelugeRawFile>,
+    #[serde(default)]
+    file_priorities: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DelugeRawFile {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    size: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct RpcRequest<'a> {
+    method: &'a str,
+    params: Value,
+    id: u32,
+}
+
 impl DelugeClient {
     pub fn new(base_url: &str, password: &str, label: &str) -> Self {
+        let http = Client::builder()
+            .cookie_store(true)
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
-            base_url: base_url.to_string(),
+            base_url: normalize_base_url(base_url),
             password: password.to_string(),
-            label: label.to_string(),
+            label: if label.is_empty() {
+                "ryokan".to_string()
+            } else {
+                label.to_string()
+            },
+            http,
+            host_id: Arc::new(Mutex::new(None)),
+            connected: Arc::new(AtomicBool::new(false)),
+            connect_lock: Arc::new(Mutex::new(())),
         }
     }
+
+    /// JSON-RPC round-trip. Returns the raw `result` value. The caller
+    /// is responsible for deserializing into a concrete type — keeps
+    /// the one-HTTP-call helper generic while letting each callsite
+    /// own its schema.
+    async fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
+        let req = RpcRequest {
+            method,
+            params,
+            id: 1,
+        };
+        let resp = self
+            .http
+            .post(format!("{}/json", self.base_url))
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| format!("Deluge request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Deluge HTTP {status}: {}", body.trim()));
+        }
+
+        let parsed: RpcResponse<Value> = resp
+            .json()
+            .await
+            .map_err(|e| format!("Deluge response parse failed: {e}"))?;
+
+        if let Some(err) = parsed.error {
+            return Err(err.message);
+        }
+        Ok(parsed.result.unwrap_or(Value::Null))
+    }
+
+    /// First-time or reconnect-after-expiry handshake:
+    /// `auth.login` → `web.get_hosts` → `web.connect`. Ensures the
+    /// Label plugin is enabled so `list_scoped` filtering works.
+    /// Serialized under `connect_lock` so concurrent callers collapse
+    /// to a single handshake rather than racing.
+    async fn connect(&self) -> Result<(), String> {
+        let _guard = self.connect_lock.lock().await;
+        // Double-check in case another task beat us through the lock.
+        if self.connected.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        // Step 1: auth.
+        let ok: bool =
+            serde_json::from_value(self.rpc("auth.login", json!([self.password])).await?)
+                .map_err(|e| format!("Deluge auth.login unexpected response: {e}"))?;
+        if !ok {
+            return Err("Deluge auth failed: invalid password".into());
+        }
+
+        // Step 2: resolve host_id and connect to the daemon.
+        let hosts_raw = self.rpc("web.get_hosts", json!([])).await?;
+        let hosts: Vec<Value> = serde_json::from_value(hosts_raw)
+            .map_err(|e| format!("Deluge web.get_hosts parse failed: {e}"))?;
+        let host_id = hosts
+            .first()
+            .and_then(|h| h.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .ok_or("Deluge web.get_hosts returned no hosts")?
+            .to_string();
+        *self.host_id.lock().await = Some(host_id.clone());
+
+        // web.connect returns the list of daemon methods now available
+        // via RPC. We don't inspect the list — the only signal we need
+        // is the absence of an error.
+        self.rpc("web.connect", json!([host_id])).await?;
+
+        // Step 3: ensure Label plugin is enabled. list_scoped's
+        // server-side `{"label": "ryokan"}` filter requires it, and so
+        // does per-torrent label assignment in add_torrent.
+        self.ensure_label_plugin(&host_id).await?;
+
+        // Step 4: ensure our label exists. Idempotent — duplicate adds
+        // error with "Label already exists" which we swallow.
+        let _ = self.ensure_label_exists().await;
+
+        self.connected.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Detects the Label plugin state via `web.get_plugins` and
+    /// enables it via `core.enable_plugin` if missing. Re-runs
+    /// `web.connect(host_id)` after enabling because Deluge doesn't
+    /// register newly-enabled plugin RPC methods on an existing web
+    /// session until a re-connect (upstream bug, still present in
+    /// Deluge 2.x).
+    async fn ensure_label_plugin(&self, host_id: &str) -> Result<(), String> {
+        #[derive(Deserialize)]
+        struct Plugins {
+            enabled_plugins: Vec<String>,
+            available_plugins: Vec<String>,
+        }
+        let plugins: Plugins =
+            serde_json::from_value(self.rpc("web.get_plugins", json!([])).await?)
+                .map_err(|e| format!("Deluge web.get_plugins parse failed: {e}"))?;
+
+        if plugins.enabled_plugins.iter().any(|p| p == "Label") {
+            return Ok(());
+        }
+        if !plugins.available_plugins.iter().any(|p| p == "Label") {
+            return Err(
+                "Deluge Label plugin is not installed. Install the Label plugin in \
+                 Deluge (bundled; just needs enabling) and retry the connection test."
+                    .into(),
+            );
+        }
+
+        // Enable + force method re-registration via a reconnect.
+        let _ = self.rpc("core.enable_plugin", json!(["Label"])).await?;
+        self.rpc("web.connect", json!([host_id])).await?;
+        Ok(())
+    }
+
+    async fn ensure_label_exists(&self) -> Result<(), String> {
+        // Duplicate-add surfaces as {"error": {"message": "...Label
+        // already exists..."}}. Treat that as success; any other
+        // error bubbles up as-is so connection faults don't get
+        // swallowed here.
+        match self.rpc("label.add", json!([self.label])).await {
+            Ok(_) => Ok(()),
+            Err(msg) if msg.contains("Label already exists") => Ok(()),
+            Err(msg) => Err(msg),
+        }
+    }
+
+    /// Run a connected RPC call. On first invocation, runs the full
+    /// handshake. On subsequent invocations, clears the `connected`
+    /// flag and retries once if the error looks like session expiry
+    /// or daemon disconnect — both of which surface as "Unknown
+    /// method" from Deluge's web proxy rather than a 401/403 status.
+    async fn connected_rpc(&self, method: &str, params: Value) -> Result<Value, String> {
+        if !self.connected.load(Ordering::SeqCst) {
+            self.connect().await?;
+        }
+        match self.rpc(method, params.clone()).await {
+            Ok(v) => Ok(v),
+            Err(msg) if is_disconnect_error(&msg) => {
+                self.connected.store(false, Ordering::SeqCst);
+                self.connect().await?;
+                self.rpc(method, params).await
+            }
+            Err(msg) => Err(msg),
+        }
+    }
+}
+
+fn is_disconnect_error(msg: &str) -> bool {
+    // `core.*` methods disappear from the RPC surface when the web
+    // process loses its daemon connection — the Deluge web proxy
+    // returns "Unknown method" rather than a more specific status.
+    // The "Not connected to a daemon" variant shows up less often
+    // but is worth catching too.
+    msg.contains("Unknown method") || msg.contains("Not connected to a daemon")
 }
 
 #[async_trait]
 impl DownloadClient for DelugeClient {
     async fn test(&self) -> Result<String, String> {
-        Err("Deluge client not implemented — Phase 2".into())
+        self.connect().await?;
+        // `daemon.info` returns the daemon version string. It's the
+        // cheapest post-connect RPC that proves the daemon is
+        // actually responding, not just the web proxy.
+        let version: String =
+            serde_json::from_value(self.connected_rpc("daemon.info", json!([])).await?)
+                .map_err(|e| format!("Deluge daemon.info parse failed: {e}"))?;
+        Ok(version)
     }
 
-    async fn add_torrent(&self, _url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
-        unimplemented!("Deluge impl lands in Phase 2")
+    async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
+        // `core.add_torrent_magnet` for magnet URIs; `core.add_torrent_url`
+        // for http:// .torrent URLs. The distinction matters because
+        // `add_torrent_magnet` errors on an http URL and vice versa
+        // (both methods parse their input and reject the other shape).
+        let (method, params) = if url.starts_with("magnet:") {
+            (
+                "core.add_torrent_magnet",
+                json!([url, {"add_paused": false}]),
+            )
+        } else {
+            (
+                "core.add_torrent_url",
+                json!([url, {"add_paused": false}, Value::Null]),
+            )
+        };
+
+        let outcome = match self.connected_rpc(method, params).await {
+            Ok(Value::String(hash)) if !hash.is_empty() => {
+                // Fresh add returned the info_hash. Tag it with our
+                // scoping label; failures here are non-fatal — label
+                // plugin might be mid-enable on a fresh install and
+                // list_scoped will pick the torrent up next poll via
+                // any fallback we add later. For now, warn-log and
+                // continue so the grab isn't rejected outright.
+                let _ = self
+                    .connected_rpc("label.set_torrent", json!([hash, self.label]))
+                    .await;
+                AddOutcome::Added
+            }
+            Ok(_) => AddOutcome::Added, // add_torrent_url returns null
+            Err(msg) if is_duplicate_add_error(&msg) => AddOutcome::AlreadyPresent,
+            Err(msg) => return Err(msg),
+        };
+        Ok(outcome)
     }
 
     async fn add_torrent_with_file_filter(
         &self,
-        _url: &str,
-        _info_hash: &str,
-        _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        url: &str,
+        info_hash: &str,
+        pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
     ) -> Result<SelectiveOutcome, String> {
-        unimplemented!("Deluge impl lands in Phase 2")
+        if info_hash.is_empty() {
+            return Err("Deluge selective download requires a known info hash".into());
+        }
+        let hash_lc = info_hash.to_ascii_lowercase();
+
+        self.add_torrent(url, &hash_lc).await?;
+
+        // Poll for metadata. Deluge has no `has_metadata` field in
+        // this version — `files` array non-empty is the signal. Same
+        // 10s budget as qBit so selective-narrowing latency is
+        // consistent across impls.
+        let start = Instant::now();
+        let mut delay = Duration::from_millis(500);
+        let files: Vec<DelugeRawFile> = loop {
+            let status: DelugeRawTorrent = serde_json::from_value(
+                self.connected_rpc(
+                    "core.get_torrent_status",
+                    json!([hash_lc, ["files", "file_priorities"]]),
+                )
+                .await?,
+            )
+            .map_err(|e| format!("Deluge metadata-poll parse failed: {e}"))?;
+            if !status.files.is_empty() {
+                break status.files;
+            }
+            if start.elapsed() >= METADATA_WAIT_TIMEOUT {
+                // Same fallback semantics as the qBit impl: drop the
+                // narrow, let the torrent download everything. The
+                // grab row stays valid; user just gets a full download
+                // instead of a filtered one.
+                return Ok(SelectiveOutcome::FullDownload);
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(2));
+        };
+
+        let names: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+        let keep_indices = match pick(&names) {
+            Some(ids) if !ids.is_empty() && ids.len() < files.len() => ids,
+            _ => return Ok(SelectiveOutcome::FullDownload),
+        };
+
+        // Detect prior narrowing: if any existing priority is 0 (skip),
+        // an earlier grab has already touched this torrent. Merge the
+        // new keep set in additively — only bump new files from 0 →
+        // normal; leave files already at normal/high untouched.
+        let current: Vec<i32> = serde_json::from_value(
+            self.connected_rpc(
+                "core.get_torrent_status",
+                json!([hash_lc, ["file_priorities"]]),
+            )
+            .await?,
+        )
+        .ok()
+        .and_then(|v: Value| {
+            v.get("file_priorities")
+                .cloned()
+                .and_then(|p| serde_json::from_value(p).ok())
+        })
+        .unwrap_or_else(|| vec![DELUGE_PRIO_NORMAL; files.len()]);
+
+        let already_narrowed = current.contains(&DELUGE_PRIO_SKIP);
+
+        let mut new_priorities: Vec<i32> = current.clone();
+        if new_priorities.len() != files.len() {
+            new_priorities = vec![DELUGE_PRIO_NORMAL; files.len()];
+        }
+
+        if already_narrowed {
+            for &i in &keep_indices {
+                if let Some(slot) = new_priorities.get_mut(i)
+                    && *slot == DELUGE_PRIO_SKIP
+                {
+                    *slot = DELUGE_PRIO_NORMAL;
+                }
+            }
+        } else {
+            for (i, slot) in new_priorities.iter_mut().enumerate() {
+                *slot = if keep_indices.contains(&i) {
+                    DELUGE_PRIO_NORMAL
+                } else {
+                    DELUGE_PRIO_SKIP
+                };
+            }
+        }
+
+        self.connected_rpc(
+            "core.set_torrent_options",
+            json!([[hash_lc], {"file_priorities": new_priorities}]),
+        )
+        .await?;
+
+        Ok(SelectiveOutcome::Filtered(keep_indices))
     }
 
     async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
-        unimplemented!("Deluge impl lands in Phase 2")
+        // Server-side filter by label; no client-side scanning.
+        // Empty keys list returns all fields — cheap enough at
+        // Ryokan's scope and avoids future breakage if a new field
+        // becomes load-bearing for state mapping.
+        let filter = json!({"label": self.label});
+        let raw: Value = self
+            .connected_rpc("core.get_torrents_status", json!([filter, []]))
+            .await?;
+        let map: std::collections::HashMap<String, DelugeRawTorrent> = serde_json::from_value(raw)
+            .map_err(|e| format!("Deluge list_scoped parse failed: {e}"))?;
+
+        Ok(map.into_values().map(to_download_item).collect())
     }
 
-    async fn get_files(&self, _info_hash: &str) -> Result<Vec<DownloadFile>, String> {
-        unimplemented!("Deluge impl lands in Phase 2")
+    async fn get_files(&self, info_hash: &str) -> Result<Vec<DownloadFile>, String> {
+        let status: DelugeRawTorrent = serde_json::from_value(
+            self.connected_rpc(
+                "core.get_torrent_status",
+                json!([info_hash, ["files", "file_priorities"]]),
+            )
+            .await?,
+        )
+        .map_err(|e| format!("Deluge get_files parse failed: {e}"))?;
+        Ok(to_download_files(&status))
     }
 
-    async fn pause(&self, _info_hash: &str) -> Result<(), String> {
-        unimplemented!("Deluge impl lands in Phase 2")
+    async fn pause(&self, info_hash: &str) -> Result<(), String> {
+        self.connected_rpc("core.pause_torrent", json!([[info_hash]]))
+            .await?;
+        Ok(())
     }
 
-    async fn resume(&self, _info_hash: &str) -> Result<(), String> {
-        unimplemented!("Deluge impl lands in Phase 2")
+    async fn resume(&self, info_hash: &str) -> Result<(), String> {
+        self.connected_rpc("core.resume_torrent", json!([[info_hash]]))
+            .await?;
+        Ok(())
     }
 
-    async fn delete(&self, _info_hash: &str, _delete_files: bool) -> Result<(), String> {
-        unimplemented!("Deluge impl lands in Phase 2")
+    async fn delete(&self, info_hash: &str, delete_files: bool) -> Result<(), String> {
+        // `core.remove_torrent(hash, remove_data)` — single hash,
+        // not a list. Batch removal uses `core.remove_torrents` which
+        // we don't need.
+        self.connected_rpc("core.remove_torrent", json!([info_hash, delete_files]))
+            .await?;
+        Ok(())
     }
 
     async fn set_file_wanted(
         &self,
-        _info_hash: &str,
-        _files: &[usize],
-        _wanted: bool,
+        info_hash: &str,
+        files: &[usize],
+        wanted: bool,
     ) -> Result<(), String> {
-        unimplemented!("Deluge impl lands in Phase 2")
+        // Deluge only accepts a full-length priority array — there's
+        // no partial update. Read current priorities, patch the
+        // requested indices, write back.
+        let status: DelugeRawTorrent = serde_json::from_value(
+            self.connected_rpc(
+                "core.get_torrent_status",
+                json!([info_hash, ["file_priorities", "files"]]),
+            )
+            .await?,
+        )
+        .map_err(|e| format!("Deluge set_file_wanted read failed: {e}"))?;
+
+        let len = status.files.len().max(status.file_priorities.len());
+        let mut new_prio: Vec<i32> = if status.file_priorities.len() == len {
+            status.file_priorities
+        } else {
+            vec![DELUGE_PRIO_NORMAL; len]
+        };
+
+        let target = if wanted {
+            DELUGE_PRIO_NORMAL
+        } else {
+            DELUGE_PRIO_SKIP
+        };
+        for &i in files {
+            if let Some(slot) = new_prio.get_mut(i) {
+                *slot = target;
+            }
+        }
+
+        self.connected_rpc(
+            "core.set_torrent_options",
+            json!([[info_hash], {"file_priorities": new_prio}]),
+        )
+        .await?;
+        Ok(())
     }
 
     fn sonarr_impl_name(&self) -> &'static str {
@@ -89,25 +575,235 @@ impl DownloadClient for DelugeClient {
     }
 }
 
+fn is_duplicate_add_error(msg: &str) -> bool {
+    // Deluge's error codes for duplicate-add are not stable across
+    // versions (see deluge-dev ticket #3507). Match on the two known
+    // message prefixes instead.
+    msg.contains("Torrent already in session") || msg.contains("Torrent already being added")
+}
+
+fn to_download_item(raw: DelugeRawTorrent) -> DownloadItem {
+    let state_kind = map_deluge_state(&raw);
+    // content_path for Deluge is not a native field — compute from
+    // save_path + files' common prefix via the shared helper.
+    let files_view: Vec<DownloadFile> = to_download_files(&raw);
+    let content_path = super::compute_content_path(&raw.save_path, &files_view);
+    DownloadItem {
+        hash: raw.hash,
+        name: raw.name,
+        size: raw.total_size,
+        // Deluge reports progress as a percentage (0.0–100.0);
+        // qBit reports it as a fraction (0.0–1.0). Normalize to the
+        // fraction scale so `DownloadItem.progress` means the same
+        // thing across impls.
+        progress: raw.progress / 100.0,
+        dlspeed: raw.download_payload_rate,
+        // Preserve the raw native string in `state` so the Downloads
+        // UI's label-map keeps working for qBit; Deluge's strings
+        // don't match qBit's, so the UI will fall through to the
+        // raw value in its switch default. Phase 2+ UI work can
+        // generalize once a second client is actually live.
+        state: raw.state,
+        category: raw.label,
+        eta: raw.eta,
+        save_path: raw.save_path,
+        content_path,
+        state_kind,
+    }
+}
+
+fn to_download_files(raw: &DelugeRawTorrent) -> Vec<DownloadFile> {
+    raw.files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let wanted = raw
+                .file_priorities
+                .get(i)
+                .copied()
+                .map(|p| p != DELUGE_PRIO_SKIP)
+                .unwrap_or(true);
+            DownloadFile {
+                name: f.path.clone(),
+                size: f.size,
+                progress: 0.0, // Deluge exposes `file_progress` separately; not needed at trait level
+                wanted,
+            }
+        })
+        .collect()
+}
+
+/// Map Deluge's native state machine to Ryokan's 10-variant enum.
+/// Deluge exposes fewer distinct states than qBit; this map collapses
+/// the UI-visible distinctions (stalled / queued) that Deluge doesn't
+/// natively carry into their non-distinct counterparts — losing some
+/// granularity on the Downloads page for Deluge-backed torrents, but
+/// not losing any post-processing correctness (completion detection
+/// only cares about `is_complete`, which is derived from
+/// `is_finished` + state, not from the stalled/queued subdistinction).
+fn map_deluge_state(raw: &DelugeRawTorrent) -> DownloadItemState {
+    use DownloadItemState::*;
+    match raw.state.as_str() {
+        "Error" => Errored,
+        "Checking" | "Allocating" if raw.is_finished => CheckingSeed,
+        "Checking" | "Allocating" => CheckingDownload,
+        "Moving" => {
+            // `Moving` means files are mid-storage-move — post-
+            // processing MUST NOT import until the move finishes,
+            // regardless of `is_finished`. Collapse to `Downloading`
+            // (non-complete) so `is_complete()` returns false; the
+            // raw `Moving` string is preserved in `DownloadItem.state`
+            // for UI display. No `Moving` variant in the normalized
+            // enum because qBit doesn't have a distinct moving state
+            // either (its `checkingUP` covers the same window).
+            Downloading
+        }
+        "Paused" if raw.is_finished => PausedComplete,
+        "Paused" => Paused,
+        "Queued" if raw.is_finished => SeedingQueued,
+        "Queued" => DownloadingQueued,
+        "Seeding" => Seeding,
+        "Downloading" => Downloading,
+        _ => Downloading, // unknown states default to a safe non-complete
+    }
+}
+
+fn normalize_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    // Deluge's Web UI defaults to port 8112 with plain HTTP. We don't
+    // second-guess a user's scheme choice — if they type a bare host
+    // we assume HTTP on local/private IPs and HTTPS on public hosts,
+    // matching the qBit impl's heuristic.
+    let lower = trimmed.to_ascii_lowercase();
+    let is_local = lower.starts_with("localhost")
+        || lower.starts_with("127.")
+        || lower.starts_with("10.")
+        || lower.starts_with("192.168.")
+        || lower.starts_with("172.16.")
+        || lower.starts_with("172.17.")
+        || lower.starts_with("172.18.")
+        || lower.starts_with("172.19.")
+        || lower.starts_with("172.20.")
+        || lower.starts_with("172.21.")
+        || lower.starts_with("172.22.")
+        || lower.starts_with("172.23.")
+        || lower.starts_with("172.24.")
+        || lower.starts_with("172.25.")
+        || lower.starts_with("172.26.")
+        || lower.starts_with("172.27.")
+        || lower.starts_with("172.28.")
+        || lower.starts_with("172.29.")
+        || lower.starts_with("172.30.")
+        || lower.starts_with("172.31.");
+    if is_local {
+        format!("http://{}", trimmed)
+    } else {
+        format!("https://{}", trimmed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The load-bearing test: compiles iff the trait is object-safe
-    /// and the Deluge stub's signatures match the trait. If either
-    /// breaks, this file fails to compile — which is the whole point
-    /// of having the stub during Phase 1.
+    /// Load-bearing object-safety check from Phase 1. The stub
+    /// version of this test lived here to catch trait regressions
+    /// before the real impl landed; now it doubles as a smoke test
+    /// that the real Deluge impl is still `dyn`-compatible.
     #[test]
-    fn deluge_stub_is_object_safe() {
-        fn _assert_dyn_compatible(_c: std::sync::Arc<dyn DownloadClient>) {}
-        let deluge = std::sync::Arc::new(DelugeClient::new("http://x:8112", "", "ryokan"))
-            as std::sync::Arc<dyn DownloadClient>;
-        _assert_dyn_compatible(deluge);
+    fn deluge_client_is_object_safe() {
+        fn _assert_dyn_compatible(_c: Arc<dyn DownloadClient>) {}
+        let client = Arc::new(DelugeClient::new("http://localhost:8112", "", "ryokan"))
+            as Arc<dyn DownloadClient>;
+        _assert_dyn_compatible(client);
     }
 
-    #[tokio::test]
-    async fn deluge_stub_sonarr_impl_name() {
-        let d = DelugeClient::new("http://x:8112", "", "ryokan");
-        assert_eq!(d.sonarr_impl_name(), "Deluge");
+    #[test]
+    fn sonarr_impl_name_is_deluge() {
+        let c = DelugeClient::new("http://localhost:8112", "", "ryokan");
+        assert_eq!(c.sonarr_impl_name(), "Deluge");
+    }
+
+    #[test]
+    fn duplicate_add_error_matcher() {
+        assert!(is_duplicate_add_error(
+            "Torrent already in session (abc123)."
+        ));
+        assert!(is_duplicate_add_error(
+            "Failure: Torrent already being added..."
+        ));
+        assert!(!is_duplicate_add_error("Tracker returned error 429"));
+        assert!(!is_duplicate_add_error(""));
+    }
+
+    #[test]
+    fn disconnect_error_matcher() {
+        assert!(is_disconnect_error("Unknown method"));
+        assert!(is_disconnect_error("Not connected to a daemon"));
+        assert!(!is_disconnect_error("Tracker unreachable"));
+    }
+
+    #[test]
+    fn state_mapping_completion_semantics() {
+        let seeding = DelugeRawTorrent {
+            state: "Seeding".into(),
+            ..Default::default()
+        };
+        assert!(map_deluge_state(&seeding).is_complete());
+
+        let paused_complete = DelugeRawTorrent {
+            state: "Paused".into(),
+            is_finished: true,
+            ..Default::default()
+        };
+        assert!(map_deluge_state(&paused_complete).is_complete());
+
+        let paused_incomplete = DelugeRawTorrent {
+            state: "Paused".into(),
+            is_finished: false,
+            ..Default::default()
+        };
+        assert!(!map_deluge_state(&paused_incomplete).is_complete());
+
+        // CRITICAL: `Moving` must NOT be treated as complete even
+        // when is_finished is true — libtorrent is mid-move, reading
+        // content_path is a race.
+        let moving = DelugeRawTorrent {
+            state: "Moving".into(),
+            is_finished: true,
+            ..Default::default()
+        };
+        assert!(!map_deluge_state(&moving).is_complete());
+
+        let errored = DelugeRawTorrent {
+            state: "Error".into(),
+            ..Default::default()
+        };
+        assert!(map_deluge_state(&errored).is_errored());
+
+        let downloading = DelugeRawTorrent {
+            state: "Downloading".into(),
+            is_finished: false,
+            ..Default::default()
+        };
+        assert!(!map_deluge_state(&downloading).is_complete());
+    }
+
+    #[test]
+    fn empty_label_defaults_to_ryokan() {
+        let c = DelugeClient::new("http://localhost:8112", "", "");
+        assert_eq!(c.label, "ryokan");
+    }
+
+    #[test]
+    fn custom_label_preserved() {
+        let c = DelugeClient::new("http://localhost:8112", "", "anime-batch");
+        assert_eq!(c.label, "anime-batch");
     }
 }

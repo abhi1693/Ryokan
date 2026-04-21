@@ -154,11 +154,26 @@ pub struct SettingsQuery {
 #[derive(Deserialize)]
 pub struct SettingsForm {
     tab: Option<String>,
+    /// #63 Phase 2 — which download client is active. Accepted
+    /// values: "qbittorrent" | "deluge". Settings save branches on
+    /// this to construct the concrete trait impl.
+    #[serde(default)]
+    active_client: String,
     qbit_url: String,
     qbit_user: String,
     qbit_pass: String,
     qbit_category: String,
     qbit_download_path: String,
+    #[serde(default)]
+    deluge_url: String,
+    #[serde(default)]
+    deluge_password: String,
+    #[serde(default)]
+    deluge_label: String,
+    #[serde(default)]
+    remote_path_remote: String,
+    #[serde(default)]
+    remote_path_local: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -388,12 +403,40 @@ pub async fn settings_submit(
         .unwrap_or(false);
 
     let cfg = config::Config {
+        active_client: match form.active_client.trim() {
+            "deluge" => "deluge".to_string(),
+            // Any other value (including empty from pre-Phase-2 form
+            // submissions) collapses to qbittorrent — preserves the
+            // Phase 1 default and avoids accidentally switching users
+            // onto a client they haven't configured.
+            _ => "qbittorrent".to_string(),
+        },
         qbit_url: form.qbit_url.trim().to_string(),
         qbit_user: form.qbit_user.trim().to_string(),
         qbit_pass: form.qbit_pass,
         qbit_category: form.qbit_category.trim().to_string(),
         qbit_download_path: form
             .qbit_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        deluge_url: form.deluge_url.trim().trim_end_matches('/').to_string(),
+        deluge_password: form.deluge_password,
+        deluge_label: {
+            let trimmed = form.deluge_label.trim();
+            if trimmed.is_empty() {
+                "ryokan".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        },
+        remote_path_remote: form
+            .remote_path_remote
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        remote_path_local: form
+            .remote_path_local
             .trim()
             .trim_end_matches('/')
             .to_string(),
@@ -558,31 +601,72 @@ pub async fn settings_submit(
     logger::info(&state.db, LogCategory::System, "Settings saved", "").await;
     let mut notices: Vec<String> = vec!["Settings saved.".to_string()];
 
-    if active_tab == "integrations" {
-        if !cfg.qbit_url.is_empty() {
-            let client: std::sync::Arc<dyn DownloadClient> = std::sync::Arc::new(QbitClient::new(
-                &cfg.qbit_url,
-                &cfg.qbit_user,
-                &cfg.qbit_pass,
-                &cfg.qbit_category,
+    // #63 Phase 2 — client-switch handling. If the user changed
+    // `active_client` on this save, any `grabbed_torrents` rows still
+    // in `state='pending'` point at the OLD client, which Ryokan is
+    // about to stop talking to. Mark them `failed` so they drop out
+    // of the partial UNIQUE index on (hash) and the user can re-grab
+    // cleanly in the new client. See the plan's "client-switch
+    // handling" section for why we chose the destructive path over
+    // per-hash cross-client reconciliation.
+    if active_tab == "integrations"
+        && let Some(old) = existing_cfg.as_ref()
+        && old.active_client != cfg.active_client
+    {
+        let n = crate::models::grabbed_torrents::mark_all_pending_failed(
+            &state.db,
+            &format!(
+                "client switched: {} → {}",
+                old.active_client, cfg.active_client
+            ),
+        )
+        .await
+        .unwrap_or(0);
+        if n > 0 {
+            logger::info(
+                &state.db,
+                LogCategory::System,
+                &format!("Marked {n} pending grabs as failed after client switch"),
+                &format!("old={}, new={}", old.active_client, cfg.active_client),
+            )
+            .await;
+            notices.push(format!(
+                "Client changed from {} to {}; {n} pending grab{} cancelled.",
+                old.active_client,
+                cfg.active_client,
+                if n == 1 { "" } else { "s" },
             ));
-            match client.test().await {
-                Ok(version) => {
-                    logger::info(
-                        &state.db,
-                        LogCategory::QBit,
-                        &format!("Connected to qBittorrent {}", version),
-                        &cfg.qbit_url,
-                    )
-                    .await;
-                    notices.push(format!("qBittorrent connected ({}).", version));
-                    *state.download_client.write().await = Some(client);
+        }
+    }
+
+    if active_tab == "integrations" {
+        let (client_label, configured) = match cfg.active_client.as_str() {
+            "deluge" => ("Deluge", !cfg.deluge_url.is_empty()),
+            _ => ("qBittorrent", !cfg.qbit_url.is_empty()),
+        };
+        if configured {
+            let client = crate::services::download_client::build_download_client(&cfg);
+            if let Some(client) = client {
+                match client.test().await {
+                    Ok(version) => {
+                        logger::info(
+                            &state.db,
+                            LogCategory::QBit,
+                            &format!("Connected to {} {}", client_label, version),
+                            &cfg.qbit_url,
+                        )
+                        .await;
+                        notices.push(format!("{client_label} connected ({version})."));
+                        *state.download_client.write().await = Some(client);
+                    }
+                    Err(e) => {
+                        logger::error(&state.db, LogCategory::QBit, "Connection failed", &e).await;
+                        *state.download_client.write().await = None;
+                        notices.push(format!("{client_label} connection failed: {e}."));
+                    }
                 }
-                Err(e) => {
-                    logger::error(&state.db, LogCategory::QBit, "Connection failed", &e).await;
-                    *state.download_client.write().await = None;
-                    notices.push(format!("qBittorrent connection failed: {}.", e));
-                }
+            } else {
+                *state.download_client.write().await = None;
             }
         } else {
             *state.download_client.write().await = None;

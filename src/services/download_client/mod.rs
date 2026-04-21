@@ -220,6 +220,80 @@ impl DownloadItemState {
     }
 }
 
+/// Apply a remote → local path prefix rewrite. Used in post-processing
+/// to translate paths from the download client's (possibly remote)
+/// filesystem into paths Ryokan can read on its own host.
+///
+/// Modeled on Sonarr's Remote Path Mappings: when the download client
+/// runs on a different host (seedbox), the `content_path` it reports
+/// points at its own filesystem (e.g. `/downloads/…` inside the
+/// seedbox). The user mounts that path locally via SSHFS/NFS/rclone
+/// at a different prefix (e.g. `/mnt/seedbox/…`), and this function
+/// performs the prefix swap before any filesystem op runs.
+///
+/// Both prefixes are trimmed of trailing `/` so `/downloads` and
+/// `/downloads/` map identically. If `remote` or `local` is empty,
+/// the input is returned unchanged — the "local client, no mapping"
+/// case. If `remote` is set but the path doesn't begin with it,
+/// return the path unchanged too: it's safer to surface a mismatch
+/// than to silently rewrite a path that was never on the remote.
+pub fn apply_remote_path_mapping(path: &str, remote: &str, local: &str) -> String {
+    let r = remote.trim_end_matches('/');
+    let l = local.trim_end_matches('/');
+    if r.is_empty() || l.is_empty() {
+        return path.to_string();
+    }
+    if let Some(rest) = path.strip_prefix(r) {
+        // `rest` starts with `/` or is empty — either way, stitching
+        // onto the trimmed local prefix produces the correct shape.
+        format!("{l}{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Construct the concrete download-client impl dictated by the
+/// config's `active_client` discriminator. Returns `None` if the
+/// active client's credentials are empty (user hasn't configured it
+/// yet) — the caller leaves `AppState.download_client` at `None` and
+/// the grab path surfaces "Download client not configured" errors.
+///
+/// Single construction point: both startup init (`main.rs`) and
+/// settings save (`handlers::settings`) go through this so the
+/// "which impl do we pick" logic lives in one place and the arm for
+/// each client ships alongside its `mod deluge` / `mod qbittorrent`
+/// etc. as Phase 3+ clients land.
+pub fn build_download_client(
+    config: &crate::models::config::Config,
+) -> Option<std::sync::Arc<dyn DownloadClient>> {
+    match config.active_client.as_str() {
+        "deluge" => {
+            if config.deluge_url.is_empty() {
+                return None;
+            }
+            Some(std::sync::Arc::new(deluge::DelugeClient::new(
+                &config.deluge_url,
+                &config.deluge_password,
+                &config.deluge_label,
+            )))
+        }
+        // "qbittorrent" or any unknown value — qBit is the safe
+        // default to preserve pre-Phase-2 behavior for unrecognized
+        // discriminators.
+        _ => {
+            if config.qbit_url.is_empty() {
+                return None;
+            }
+            Some(std::sync::Arc::new(qbittorrent::QbitClient::new(
+                &config.qbit_url,
+                &config.qbit_user,
+                &config.qbit_pass,
+                &config.qbit_category,
+            )))
+        }
+    }
+}
+
 /// Poll `get_files` until non-empty or `timeout` elapses. 500ms
 /// initial interval, doubling up to a 2s cap. Used by callers that
 /// need the file list before proceeding (e.g. the 180s background
@@ -349,6 +423,49 @@ mod tests {
     #[test]
     fn content_path_empty_files_returns_empty() {
         assert_eq!(compute_content_path("/downloads", &[]), "");
+    }
+
+    #[test]
+    fn remote_path_mapping_rewrites_matching_prefix() {
+        assert_eq!(
+            apply_remote_path_mapping("/downloads/anime/file.mkv", "/downloads", "/mnt/seedbox"),
+            "/mnt/seedbox/anime/file.mkv"
+        );
+    }
+
+    #[test]
+    fn remote_path_mapping_trims_trailing_slashes_on_prefixes() {
+        // Trailing-slash normalization on both sides should produce
+        // identical output — prevents the /downloads vs /downloads/
+        // foot-gun that bites every Sonarr remote-path setup.
+        assert_eq!(
+            apply_remote_path_mapping("/downloads/x.mkv", "/downloads/", "/mnt/seedbox/"),
+            "/mnt/seedbox/x.mkv"
+        );
+        assert_eq!(
+            apply_remote_path_mapping("/downloads/x.mkv", "/downloads", "/mnt/seedbox"),
+            "/mnt/seedbox/x.mkv"
+        );
+    }
+
+    #[test]
+    fn remote_path_mapping_empty_prefixes_pass_through() {
+        // No mapping configured = no rewrite. The "local client"
+        // case; both prefixes empty means identity.
+        assert_eq!(
+            apply_remote_path_mapping("/downloads/x.mkv", "", ""),
+            "/downloads/x.mkv"
+        );
+    }
+
+    #[test]
+    fn remote_path_mapping_non_matching_prefix_unchanged() {
+        // If the path isn't under the configured remote prefix,
+        // don't silently rewrite — could indicate user mis-config.
+        assert_eq!(
+            apply_remote_path_mapping("/other/path.mkv", "/downloads", "/mnt/seedbox"),
+            "/other/path.mkv"
+        );
     }
 
     #[test]

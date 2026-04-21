@@ -1491,15 +1491,31 @@ pub async fn run_once(state: &AppState) {
         // Stamp qBit's output path on the grab row before we move/
         // hardlink the file into the library. Done BEFORE import so
         // that even if import errors out mid-way, the UI still has a
-        // record of where qBit left the file.
-        let qbit_path = if !torrent.content_path.is_empty() {
-            torrent.content_path.clone()
-        } else {
-            torrent.save_path.clone()
+        // record of where the client left the file. Apply the
+        // user-configured remote-path mapping (#63 Phase 2) so a
+        // seedbox-reported `/downloads/…` path is translated to the
+        // local mount point (`/mnt/seedbox/downloads/…`) before we
+        // read from disk. Empty mapping = no rewrite.
+        let client_path = {
+            let raw = if !torrent.content_path.is_empty() {
+                torrent.content_path.clone()
+            } else {
+                torrent.save_path.clone()
+            };
+            crate::services::download_client::apply_remote_path_mapping(
+                &raw,
+                &cfg.remote_path_remote,
+                &cfg.remote_path_local,
+            )
         };
-        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &qbit_path).await;
+        let local_save_path = crate::services::download_client::apply_remote_path_mapping(
+            &torrent.save_path,
+            &cfg.remote_path_remote,
+            &cfg.remote_path_local,
+        );
+        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
-        match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
+        match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path).await {
             Ok(true) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
@@ -1588,6 +1604,15 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         return Ok(());
     }
 
+    // Config load is only for the remote-path mapping — we don't
+    // need the full cfg here. A single lookup is cheap; avoiding a
+    // parameter means `run_task` stays unaware of this codepath's
+    // needs.
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|_| ())?
+        .unwrap_or_default();
+
     let client = match state.download_client.read().await.clone() {
         Some(c) => c,
         None => return Ok(()),
@@ -1615,15 +1640,24 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
             continue;
         }
 
-        // Stamp the qBit-side path for the episode detail modal. Prefer
-        // content_path (qBit ≥ 2.6.1 — the actual file or container
-        // folder) and fall back to save_path for older qBit builds.
-        let qbit_path = if !torrent.content_path.is_empty() {
-            torrent.content_path.clone()
-        } else {
-            torrent.save_path.clone()
+        // Stamp the client-side path for the episode detail modal.
+        // Prefer content_path (native on qBit ≥ 2.6.1; computed from
+        // save_path + files' common prefix on Deluge) and fall back
+        // to save_path for pre-2.6.1 qBit. Same remote-path rewrite
+        // as in the main import path above (#63 Phase 2).
+        let client_path = {
+            let raw = if !torrent.content_path.is_empty() {
+                torrent.content_path.clone()
+            } else {
+                torrent.save_path.clone()
+            };
+            crate::services::download_client::apply_remote_path_mapping(
+                &raw,
+                &cfg.remote_path_remote,
+                &cfg.remote_path_local,
+            )
         };
-        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &qbit_path).await;
+        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
         // Mark the grab row as finalized so we stop polling it and the
         // UI stops treating it as in-flight. Use `mark_completed_no_import`

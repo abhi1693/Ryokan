@@ -1114,6 +1114,40 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // #63 Phase 2 — Deluge credentials + label. The label is Deluge's
+    // scoping mechanism (Ryokan sets it per-grab via
+    // `label.set_torrent`) and defaults to "ryokan" at trait-impl
+    // construction when empty here. Same base-URL pattern as qBit
+    // (the `/json` suffix is appended inside the DelugeClient impl).
+    sqlx::query("ALTER TABLE config ADD COLUMN deluge_url TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN deluge_password TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN deluge_label TEXT NOT NULL DEFAULT 'ryokan'")
+        .execute(db)
+        .await
+        .ok();
+
+    // #63 Phase 2 — Remote path mapping for seedbox setups. When the
+    // active download client is on a different host than Ryokan, the
+    // `content_path` the client reports points at the seedbox
+    // filesystem. Post-processing rewrites that path by replacing
+    // `remote_path_remote` prefix with `remote_path_local` before
+    // any filesystem op. Modeled on Sonarr's Remote Path Mapping.
+    // Empty strings = no rewrite (local client or no mapping needed).
+    sqlx::query("ALTER TABLE config ADD COLUMN remote_path_remote TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN remote_path_local TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
     // Rename `qbit_content_path` → `client_content_path` so the field
     // name reflects the trait abstraction. Uses the same state-matrix
     // reconciler as the PR #37 rename so half-migrated DBs survive.

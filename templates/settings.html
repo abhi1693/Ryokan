@@ -32,6 +32,18 @@
 
     <div class="settings-tab-panel {% if tab == "integrations" %}active{% endif %}">
         <fieldset>
+            <legend>Download Client</legend>
+            <div class="form-group">
+                <label for="active_client">Active client</label>
+                <select name="active_client" id="active_client" onchange="toggleClientFieldset(this.value)">
+                    <option value="qbittorrent" {% if config.active_client == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
+                    <option value="deluge" {% if config.active_client == "deluge" %}selected{% endif %}>Deluge</option>
+                </select>
+                <span class="form-hint">Ryokan talks to one client at a time. Switching cancels any pending grabs queued against the previous client.</span>
+            </div>
+        </fieldset>
+
+        <fieldset id="qbit-fieldset" {% if config.active_client != "qbittorrent" %}style="display:none"{% endif %}>
             <legend>qBittorrent <span id="qbit-health" class="form-hint"></span></legend>
             <div class="form-group">
                 <label for="qbit_url">URL</label>
@@ -63,6 +75,47 @@
             <div class="settings-inline-actions">
                 <button type="button" class="btn btn-secondary" onclick="testQbit(this)">Test</button>
                 <span id="qbit-test-result" class="form-hint"></span>
+            </div>
+        </fieldset>
+
+        <fieldset id="deluge-fieldset" {% if config.active_client != "deluge" %}style="display:none"{% endif %}>
+            <legend>Deluge <span id="deluge-health" class="form-hint"></span></legend>
+            <div class="form-group">
+                <label for="deluge_url">URL</label>
+                <input type="text" name="deluge_url" id="deluge_url" value="{{ config.deluge_url }}" placeholder="http://localhost:8112">
+                <span class="form-hint">Deluge Web UI base URL (Ryokan appends <code>/json</code>). Default port is 8112.</span>
+            </div>
+            <div class="form-group">
+                <label for="deluge_password">Web UI password</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="password" name="deluge_password" id="deluge_password" value="{{ config.deluge_password }}" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('deluge_password', this)" style="white-space:nowrap">Show</button>
+                </div>
+                <span class="form-hint">The Web UI password (not the daemon/localclient password). Default on fresh installs is <code>deluge</code>.</span>
+            </div>
+            <div class="form-group">
+                <label for="deluge_label">Scoping label</label>
+                <input type="text" name="deluge_label" id="deluge_label" value="{{ config.deluge_label }}" placeholder="ryokan">
+                <span class="form-hint">Ryokan tags every torrent it adds with this label and filters by it when listing. Requires the Label plugin; Ryokan auto-enables it on first connect.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Remote Path Mapping</legend>
+            <p class="form-hint" style="margin-bottom: 12px;">
+                When your download client runs on a different host (a seedbox), the path it reports for completed files is the path on that remote host. Ryokan needs the equivalent path on its own filesystem (e.g. an SSHFS or NFS mount) to post-process files. Leave blank if the client runs on the same host as Ryokan.
+            </p>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="remote_path_remote">Remote prefix</label>
+                    <input type="text" name="remote_path_remote" id="remote_path_remote" value="{{ config.remote_path_remote }}" placeholder="/downloads">
+                    <span class="form-hint">Path prefix as the download client sees it.</span>
+                </div>
+                <div class="form-group">
+                    <label for="remote_path_local">Local prefix</label>
+                    <input type="text" name="remote_path_local" id="remote_path_local" value="{{ config.remote_path_local }}" placeholder="/mnt/seedbox/downloads">
+                    <span class="form-hint">Path prefix where Ryokan can read the same files.</span>
+                </div>
             </div>
         </fieldset>
 
@@ -1073,6 +1126,16 @@ function generateRadarrApiKey() {
     let key = '';
     for (let i = 0; i < 32; i++) key += chars[buf[i] % chars.length];
     document.getElementById('radarr_api_key').value = key;
+}
+
+// #63 Phase 2 — show/hide the credential fieldset for the selected
+// download client. Both fieldsets stay in the DOM so a user
+// mid-edit doesn't lose form state when they toggle back.
+function toggleClientFieldset(value) {
+    const qbit = document.getElementById('qbit-fieldset');
+    const deluge = document.getElementById('deluge-fieldset');
+    if (qbit) qbit.style.display = value === 'qbittorrent' ? '' : 'none';
+    if (deluge) deluge.style.display = value === 'deluge' ? '' : 'none';
 }
 
 // API-key inputs render as type="password" so the secret isn't visible
