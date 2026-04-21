@@ -80,18 +80,6 @@
     opacity: 1;
 }
 
-.btn-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    border: none;
-    border-radius: var(--radius);
-    cursor: pointer;
-    color: var(--text);
-    transition: background 0.15s;
-}
 
 .btn-search-series {
     background: rgba(0,0,0,0.6);

@@ -1,5 +1,20 @@
 /* pages/settings.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
 
+.settings-tabs {
+    margin-bottom: 24px;
+}
+
+.settings-tab-panel {
+    display: none;
+}
+
+.settings-tab-panel.active {
+    display: block;
+}
+.settings-tabs {
+    margin-bottom: 24px;
+}
+
 /* --- Release Groups settings tab --- */
 .settings-subheading {
     margin: 24px 0 8px;

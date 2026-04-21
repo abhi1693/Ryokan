@@ -578,8 +578,7 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
 
 
 /* ── Utility blocks duplicated from pages/ for cross-page reuse ── */
-/* .page-header-row — originally in pages/index.css; copy kept here
-   for needs_review.html which does not override page_css. */
+/* .page-header-row — also defined in pages/index.css; copy here for needs_review.html. */
 .page-header-row {
     display: flex;
     align-items: flex-start;
@@ -587,8 +586,7 @@ html:not([data-title-language]) .title-switcher .title-option[data-title-lang="e
     gap: 16px;
 }
 
-/* .folder-select — originally in pages/series.css; copy kept here
-   for needs_review.html which uses .folder-select on its table rows. */
+/* .folder-select — also defined in pages/series.css; copy here for needs_review.html. */
 .folder-select {
     padding: 5px 10px;
     background: var(--bg);

@@ -1,37 +1,5 @@
 /* pages/search.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
 
-/* --- Search bar --- */
-.search-bar {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 24px;
-    flex-wrap: wrap;
-}
-
-.search-bar input[type="text"] {
-    flex: 1;
-    min-width: 200px;
-    padding: 10px 14px;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--text);
-    font-size: 14px;
-}
-
-.search-bar input:focus { outline: none; border-color: var(--accent); }
-
-.search-bar select {
-    padding: 10px 12px;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--text);
-    font-size: 14px;
-}
-
-.search-user { max-width: 160px; }
-
 .results-count {
     font-size: 13px;
     color: var(--text-dim);

@@ -50,26 +50,11 @@
     }
 }
 
-.settings-tabs {
-    margin-bottom: 24px;
-}
-
-.settings-tab-panel {
-    display: none;
-}
-
-.settings-tab-panel.active {
-    display: block;
-}
 
 .debug-panel {
     max-width: 980px;
 }
 
-
-.settings-tabs {
-    margin-bottom: 24px;
-}
 
 /* Logs Toolbar */
 .logs-toolbar {
@@ -181,10 +166,6 @@
 
 .log-poll-label { user-select: none; }
 
-.btn-sm {
-    padding: 5px 10px;
-    font-size: 13px;
-}
 
 /* Log Table */
 .logs-container {
@@ -249,23 +230,6 @@
     max-width: 100%;
 }
 
-/* Log Level Badges */
-.log-badge {
-    display: inline-block;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-size: 11px;
-    font-weight: 600;
-    font-family: var(--font-body);
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-}
-
-.log-badge-trace { background: rgba(110, 110, 136, 0.15); color: var(--text-dim); }
-.log-badge-debug { background: rgba(125, 174, 211, 0.15); color: var(--blue); }
-.log-badge-info  { background: rgba(125, 211, 147, 0.15); color: var(--green); }
-.log-badge-warn  { background: rgba(211, 176, 125, 0.15); color: var(--orange); }
-.log-badge-error { background: rgba(211, 125, 125, 0.2);  color: var(--red); }
 
 /* Log Row Highlighting */
 .log-level-error { background: rgba(211, 125, 125, 0.04); }
