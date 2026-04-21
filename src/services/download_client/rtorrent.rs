@@ -589,6 +589,16 @@ impl DownloadClient for RtorrentClient {
 ///      belt-and-braces against a misconfigured rtorrent that reports
 ///      a `base_path` *above* the `directory` — a bug we shouldn't
 ///      paper over by wiping the user's entire download tree.
+///      Note: `effective == "/"` is caught by the empty-after-normalize
+///      branch (`trim_end_matches('/')` on `"/"` yields `""`), not by
+///      an explicit `== "/"` check.
+///
+/// **Out of scope: symlink traversal.** If rtorrent reports a
+/// `base_path` that's a symlink to somewhere else on disk,
+/// `remove_dir_all` follows through the link. The threat model here
+/// assumes a trustworthy daemon; a compromised rtorrent is outside
+/// what this function defends against. Flagged so anyone porting
+/// this logic into a less-trusted context knows the gap.
 ///
 /// Returns `None` if no safe removal target exists. Callers treat
 /// `None` as "client-side erase already happened; disk unchanged."
@@ -604,6 +614,10 @@ fn safe_delete_target(base_path: &str, directory: &str, name: &str) -> Option<St
     let norm = |p: &str| p.trim_end_matches('/').to_string();
     let e = norm(&effective);
     let d = norm(directory);
+    // Empty after normalization catches the `effective = "/"` case
+    // (no explicit root check needed — `trim_end_matches('/')` strips
+    // the single slash leaving "") plus the degenerate empty-input
+    // case.
     if e.is_empty() || d.is_empty() {
         return None;
     }
@@ -611,11 +625,10 @@ fn safe_delete_target(base_path: &str, directory: &str, name: &str) -> Option<St
     if e == d {
         return None;
     }
-    // Effective is an ancestor of directory (or IS a root `/`).
-    // `d.starts_with(format!("{e}/"))` catches cases like
-    // effective="/downloads", directory="/downloads/anime".
+    // Effective is an ancestor of directory. `d.starts_with("e/")`
+    // catches cases like effective="/downloads", directory="/downloads/anime".
     let e_prefix = format!("{e}/");
-    if d.starts_with(&e_prefix) || e == "/" {
+    if d.starts_with(&e_prefix) {
         return None;
     }
     Some(effective)
