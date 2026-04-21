@@ -596,15 +596,15 @@ async fn import_torrent(
     torrent_hash: &str,
     torrent_save_path: &str,
 ) -> Result<bool, String> {
-    let qbit = state
-        .qbit
+    let client = state
+        .download_client
         .read()
         .await
         .clone()
-        .ok_or("qBittorrent not configured")?;
+        .ok_or("Download client not configured")?;
 
-    let files = qbit
-        .get_torrent_files(torrent_hash)
+    let files = client
+        .get_files(torrent_hash)
         .await
         .map_err(|e| format!("get torrent files: {}", e))?;
 
@@ -724,7 +724,7 @@ async fn import_torrent(
     // `enumerate()` applied to the untouched `files` vec yields the
     // same indices that `detect_sibling_entries_in_pack` recorded at
     // grab time.
-    let video_files: Vec<(usize, &crate::services::qbit::TorrentFile)> = files
+    let video_files: Vec<(usize, &crate::services::download_client::DownloadFile)> = files
         .iter()
         .enumerate()
         .filter(|(_, f)| f.progress >= 1.0 && is_video_file(&f.name))
@@ -1047,15 +1047,16 @@ async fn import_torrent(
             )
             .await;
 
-            // Clean up old torrents from qBittorrent and mark old grabs as
-            // replaced. Reuse the `qbit` binding cloned at the top of this
-            // function instead of re-taking `state.qbit.read()` each
-            // iteration — under a big upgrade with many old grabs the
-            // per-iteration lock acquire was serializing against any other
-            // task touching `state.qbit`.
+            // Clean up old torrents from the download client and mark old
+            // grabs as replaced. Reuse the `client` binding cloned at the
+            // top of this function instead of re-taking
+            // `state.download_client.read()` each iteration — under a big
+            // upgrade with many old grabs the per-iteration lock acquire
+            // was serializing against any other task touching
+            // `state.download_client`.
             for old_grab in &old_grabs {
                 if !old_grab.hash.is_empty() {
-                    let _ = qbit.delete_torrent(&old_grab.hash, true).await;
+                    let _ = client.delete(&old_grab.hash, true).await;
                 }
                 let _ = grabbed_torrents::mark_removed(&state.db, old_grab.id).await;
             }
@@ -1399,18 +1400,18 @@ pub async fn run_once(state: &AppState) {
         return;
     }
 
-    let qbit = match state.qbit.read().await.clone() {
+    let client = match state.download_client.read().await.clone() {
         Some(c) => c,
         None => return,
     };
 
-    let torrents = match qbit.get_torrents().await {
+    let torrents = match client.list_scoped().await {
         Ok(t) => t,
         Err(e) => {
             logger::error(
                 &state.db,
                 LogCategory::PostProcess,
-                "Failed to query qBittorrent",
+                "Failed to query download client",
                 &e.to_string(),
             )
             .await;
@@ -1419,12 +1420,12 @@ pub async fn run_once(state: &AppState) {
     };
 
     // Build lookup maps by hash and name for all torrents.
-    let all_by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    let all_by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
         .iter()
         .map(|t| (t.hash.to_lowercase(), t))
         .collect();
 
-    let all_by_name: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    let all_by_name: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
         .iter()
         .map(|t| (t.name.to_lowercase(), t))
         .collect();
@@ -1496,7 +1497,7 @@ pub async fn run_once(state: &AppState) {
         } else {
             torrent.save_path.clone()
         };
-        let _ = grabbed_torrents::stamp_qbit_content_path(&state.db, grab.id, &qbit_path).await;
+        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &qbit_path).await;
 
         match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
             Ok(true) => {
@@ -1587,17 +1588,17 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         return Ok(());
     }
 
-    let qbit = match state.qbit.read().await.clone() {
+    let client = match state.download_client.read().await.clone() {
         Some(c) => c,
         None => return Ok(()),
     };
 
-    let torrents = qbit.get_torrents().await.map_err(|_| ())?;
-    let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    let torrents = client.list_scoped().await.map_err(|_| ())?;
+    let by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
         .iter()
         .map(|t| (t.hash.to_lowercase(), t))
         .collect();
-    let by_name: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    let by_name: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
         .iter()
         .map(|t| (t.name.to_lowercase(), t))
         .collect();
@@ -1622,7 +1623,7 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         } else {
             torrent.save_path.clone()
         };
-        let _ = grabbed_torrents::stamp_qbit_content_path(&state.db, grab.id, &qbit_path).await;
+        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &qbit_path).await;
 
         // Mark the grab row as finalized so we stop polling it and the
         // UI stops treating it as in-flight. Use `mark_completed_no_import`

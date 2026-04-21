@@ -1083,6 +1083,97 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // ── #63 Phase 1 — pluggable download clients ───────────────────────
+    //
+    // `client_type` discriminator on each grab row so a future
+    // multi-client config (Phase 2+) can route per-client operations
+    // correctly. Existing rows backfill to 'qbittorrent' since that
+    // was the only option pre-1.2.0. Uses TEXT NOT NULL DEFAULT so
+    // fresh rows and historical rows are both deterministic.
+    sqlx::query(
+        "ALTER TABLE grabbed_torrents ADD COLUMN client_type TEXT NOT NULL DEFAULT 'qbittorrent'",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // `active_client` on config — lowercase-snake discriminator for
+    // the download client currently in use. Phase 1 only has
+    // 'qbittorrent'; Phase 2+ will branch on this at AppState init.
+    // The qBit credential columns (qbit_url, qbit_user, qbit_pass,
+    // qbit_category, qbit_download_path) stay flat on `config` for
+    // now — Phase 2 will namespace them into per-client blocks. The
+    // idempotent DEFAULT ensures existing installs upgrade cleanly:
+    // a fresh row and a pre-upgrade row both end up with
+    // active_client = 'qbittorrent' (the only choice pre-1.2.0).
+    sqlx::query("ALTER TABLE config ADD COLUMN active_client TEXT NOT NULL DEFAULT 'qbittorrent'")
+        .execute(db)
+        .await
+        .ok();
+
+    // Rename `qbit_content_path` → `client_content_path` so the field
+    // name reflects the trait abstraction. Uses the same state-matrix
+    // reconciler as the PR #37 rename so half-migrated DBs survive.
+    reconcile_restrict_to_group_rename(
+        db,
+        "grabbed_torrents",
+        "qbit_content_path",
+        "client_content_path",
+    )
+    .await;
+
+    // ── #63 Phase 0 follow-up — legacy base32 hash backfill ────────────
+    //
+    // Phase 0 canonicalized `extract_hash` to lowercase hex going
+    // forward, but any pre-Phase-0 rows with 32-char base32 values in
+    // `grabbed_torrents.hash` remain as-is. Non-qBit clients normalize
+    // to hex internally, so those legacy rows won't match the client's
+    // reported hash once a non-qBit impl is active. Backfill scans for
+    // 32-char hash rows, decodes via the base32 helper, and rewrites
+    // them to lowercase hex.
+    //
+    // Gated by a `config` flag so a partial run or one-time upgrade
+    // doesn't re-run on every boot. Nyaa magnets are overwhelmingly
+    // hex so the affected row count should be near zero in practice,
+    // but the backfill unifies the partial UNIQUE index on (hash)
+    // once and forever.
+    sqlx::query("ALTER TABLE config ADD COLUMN base32_backfill_done INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    let backfill_done: i64 =
+        sqlx::query_scalar("SELECT COALESCE((SELECT base32_backfill_done FROM config LIMIT 1), 0)")
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+
+    if backfill_done == 0 {
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, hash FROM grabbed_torrents WHERE LENGTH(hash) = 32")
+                .fetch_all(db)
+                .await
+                .unwrap_or_default();
+
+        for (id, b32_hash) in rows {
+            if let Some(bytes) = crate::services::nyaa::base32_decode_infohash(&b32_hash) {
+                let hex_hash = hex::encode(bytes);
+                let _ = sqlx::query("UPDATE grabbed_torrents SET hash = ? WHERE id = ?")
+                    .bind(&hex_hash)
+                    .bind(id)
+                    .execute(db)
+                    .await;
+            }
+        }
+
+        // Mark done whether or not any rows were found — fresh installs
+        // with no legacy base32 rows also get the flag set so we don't
+        // rescan on every boot.
+        let _ = sqlx::query("UPDATE config SET base32_backfill_done = 1")
+            .execute(db)
+            .await;
+    }
+
     sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN web_kind TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await

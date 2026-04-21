@@ -1,0 +1,702 @@
+//! qBittorrent implementation of [`DownloadClient`]. Speaks the
+//! qBit v2 Web API (https://github.com/qbittorrent/qBittorrent/wiki/
+//! WebUI-API-(qBittorrent-4.1)). Authenticates via `/auth/login`
+//! with a session cookie and falls back to a re-login on 403.
+//!
+//! qBit-specific quirks worth flagging for future readers (most of
+//! these are explained in the #63 plan at ~/Documents/ryokan-plan-
+//! pluggable-download-clients.md):
+//!   - `content_path` is exposed natively (≥ 2.6.1); no common-prefix
+//!     computation needed like Deluge/Transmission/rtorrent.
+//!   - `?category=X` is the scoping mechanism — all Ryokan-owned
+//!     torrents are tagged with `config.qbit_category`.
+//!   - File priority scale is 0/1/6/7. Ryokan only writes 0 (skip)
+//!     and 1 (normal); the higher levels are a qBit-only feature.
+//!   - qBit 5.x renamed pause/resume to stop/start. This impl tries
+//!     the new names first and falls back to the old ones so 4.x
+//!     and 5.x both work without a version probe.
+//!   - Short-TTL coalescing cache on `list_scoped` so a burst of UI
+//!     polls collapses to one upstream fetch — the cache mutex is
+//!     never held across the HTTP round trip so mutation calls
+//!     don't serialize behind a hung seedbox's in-flight GET.
+
+use async_trait::async_trait;
+use reqwest::{Client, StatusCode};
+use serde::Deserialize;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, Notify};
+
+use super::{
+    AddOutcome, DownloadClient, DownloadFile, DownloadItem, DownloadItemState, SelectiveOutcome,
+};
+
+/// How long a successful `get_torrents` result is served from the
+/// client-side cache before a fresh HTTP round trip is made. The
+/// downloads page and every open series tab poll this endpoint every
+/// 5s; with a remote qBit (seedbox) each one pays a full network RTT.
+/// Coalescing at 2s means a burst of N concurrent polls collapses to
+/// a single upstream fetch while the UI still refreshes on its own
+/// 5s cadence — the user-visible staleness ceiling is 2s, not 5s.
+const TORRENTS_CACHE_TTL: Duration = Duration::from_secs(2);
+
+/// Stamped cache slot for the `/torrents/info` result. Held under a
+/// `Mutex` on `QbitClient` and read/written only in short critical
+/// sections — never across an await that does I/O. Aliased here so
+/// the struct field and the get/invalidate call sites stay readable
+/// and clippy stops flagging the nested generics.
+type TorrentsCacheSlot = Option<(Instant, Vec<DownloadItem>)>;
+
+/// qBittorrent Web API client with automatic re-authentication.
+pub struct QbitClient {
+    base_url: String,
+    user: String,
+    pass: String,
+    category: String,
+    http: Client,
+    logged_in: Arc<Mutex<bool>>,
+    torrents_cache: Arc<Mutex<TorrentsCacheSlot>>,
+    torrents_fetch_in_flight: Arc<Mutex<bool>>,
+    torrents_fetch_done: Arc<Notify>,
+}
+
+/// Raw torrent shape qBit returns from `/torrents/info`. Deserialized
+/// into `Vec<QbitRawTorrent>`, then each is converted to
+/// [`DownloadItem`] (mapping state strings to the normalized enum).
+#[derive(Debug, Deserialize)]
+struct QbitRawTorrent {
+    hash: String,
+    name: String,
+    size: i64,
+    progress: f64,
+    dlspeed: i64,
+    state: String,
+    category: String,
+    eta: i64,
+    #[serde(default)]
+    save_path: String,
+    #[serde(default)]
+    content_path: String,
+}
+
+/// Raw per-file shape qBit returns from `/torrents/files`. Converted
+/// to [`DownloadFile`] on read (qBit `priority == 0` → `wanted=false`).
+#[derive(Debug, Deserialize)]
+struct QbitRawFile {
+    name: String,
+    size: i64,
+    progress: f64,
+    /// qBit file priority: 0 = skip, 1 = normal, 6 = high, 7 = max.
+    /// Defaulted to `1` (normal) on the off chance qBit omits the
+    /// field — safer than defaulting to 0 "skip", which our
+    /// additive-merge logic interprets as "this torrent has been
+    /// narrowed before".
+    #[serde(default = "default_file_priority")]
+    priority: i32,
+}
+
+fn default_file_priority() -> i32 {
+    1
+}
+
+impl QbitClient {
+    pub fn new(base_url: &str, user: &str, pass: &str, category: &str) -> Self {
+        let http = Client::builder()
+            .cookie_store(true)
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self {
+            base_url: normalize_base_url(base_url),
+            user: user.to_string(),
+            pass: pass.to_string(),
+            category: category.to_string(),
+            http,
+            logged_in: Arc::new(Mutex::new(false)),
+            torrents_cache: Arc::new(Mutex::new(None)),
+            torrents_fetch_in_flight: Arc::new(Mutex::new(false)),
+            torrents_fetch_done: Arc::new(Notify::new()),
+        }
+    }
+
+    async fn invalidate_torrents_cache(&self) {
+        *self.torrents_cache.lock().await = None;
+    }
+
+    async fn login(&self) -> Result<(), String> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v2/auth/login", self.base_url))
+            .form(&[("username", &self.user), ("password", &self.pass)])
+            .send()
+            .await
+            .map_err(|e| format!("qbit login failed: {}", e))?;
+
+        let body = resp.text().await.unwrap_or_default();
+        if body == "Fails." {
+            return Err("qbit auth failed: invalid credentials".into());
+        }
+
+        *self.logged_in.lock().await = true;
+        Ok(())
+    }
+
+    async fn ensure_login(&self) -> Result<(), String> {
+        let logged_in = *self.logged_in.lock().await;
+        if !logged_in {
+            self.login().await?;
+        }
+        Ok(())
+    }
+
+    async fn do_get(&self, endpoint: &str) -> Result<reqwest::Response, String> {
+        self.ensure_login().await?;
+
+        let url = format!("{}{}", self.base_url, endpoint);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {}", e))?;
+
+        if resp.status() == StatusCode::FORBIDDEN {
+            *self.logged_in.lock().await = false;
+            self.login().await?;
+            self.http
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("retry failed: {}", e))
+        } else {
+            Ok(resp)
+        }
+    }
+
+    async fn do_post_form(
+        &self,
+        endpoint: &str,
+        form: &[(&str, &str)],
+    ) -> Result<reqwest::Response, String> {
+        self.ensure_login().await?;
+
+        let url = format!("{}{}", self.base_url, endpoint);
+        let resp = self
+            .http
+            .post(&url)
+            .form(form)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {}", e))?;
+
+        if resp.status() == StatusCode::FORBIDDEN {
+            *self.logged_in.lock().await = false;
+            self.login().await?;
+            self.http
+                .post(&url)
+                .form(form)
+                .send()
+                .await
+                .map_err(|e| format!("retry failed: {}", e))
+        } else {
+            Ok(resp)
+        }
+    }
+
+    /// Set per-file priority (qBit's native 0/1/6/7 scale). Ryokan
+    /// only uses 0 and 1 internally; higher levels are untouched.
+    async fn set_file_priority(
+        &self,
+        hash: &str,
+        file_ids: &[usize],
+        priority: i32,
+    ) -> Result<(), String> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        let id_str = file_ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("|");
+        let prio_str = priority.to_string();
+        let form = [
+            ("hash", hash),
+            ("id", id_str.as_str()),
+            ("priority", prio_str.as_str()),
+        ];
+        let resp = self
+            .do_post_form("/api/v2/torrents/filePrio", &form)
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("qbit filePrio failed: {} {}", status, body.trim()));
+        }
+        Ok(())
+    }
+
+    /// Wait for qBit to finish pulling metadata for a magnet. Returns
+    /// the file list once available. Used internally by
+    /// `add_torrent_with_file_filter` for the narrow-after-metadata
+    /// flow; external callers use the free [`super::wait_for_files`].
+    async fn wait_for_metadata(
+        &self,
+        hash: &str,
+        timeout: Duration,
+    ) -> Result<Vec<QbitRawFile>, String> {
+        let start = Instant::now();
+        let mut delay = Duration::from_millis(500);
+        loop {
+            match self.get_torrent_files_raw(hash).await {
+                Ok(files) if !files.is_empty() => return Ok(files),
+                Ok(_) => {}
+                Err(e) => {
+                    if start.elapsed() >= timeout {
+                        return Err(format!(
+                            "qbit metadata fetch error after {:?}: {}",
+                            timeout, e
+                        ));
+                    }
+                }
+            }
+            if start.elapsed() >= timeout {
+                return Err(format!("qbit metadata fetch timed out after {:?}", timeout));
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(2));
+        }
+    }
+
+    /// Raw `/torrents/files?hash=X` fetch. qBit 5.x returns **404
+    /// with `"Not Found"` body** for this endpoint while the torrent
+    /// is still fetching metadata — not an empty JSON array. We
+    /// translate 404 → `Ok(vec![])` so the wait loop's "empty →
+    /// retry" arm drives the poll correctly.
+    async fn get_torrent_files_raw(&self, hash: &str) -> Result<Vec<QbitRawFile>, String> {
+        let endpoint = format!("/api/v2/torrents/files?hash={}", hash);
+        let resp = self.do_get(&endpoint).await?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "qbit torrent files fetch failed: {} {}",
+                status,
+                body.trim()
+            ));
+        }
+        let files: Vec<QbitRawFile> = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse torrent files: {}", e))?;
+        Ok(files)
+    }
+
+    async fn list_scoped_uncached(&self) -> Result<Vec<DownloadItem>, String> {
+        let endpoint = if self.category.is_empty() {
+            "/api/v2/torrents/info".to_string()
+        } else {
+            format!("/api/v2/torrents/info?category={}", self.category)
+        };
+
+        let resp = self.do_get(&endpoint).await?;
+        let raw: Vec<QbitRawTorrent> = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse torrents: {}", e))?;
+
+        Ok(raw.into_iter().map(to_download_item).collect())
+    }
+}
+
+#[async_trait]
+impl DownloadClient for QbitClient {
+    async fn test(&self) -> Result<String, String> {
+        let resp = self.do_get("/api/v2/app/version").await?;
+        let version = resp.text().await.unwrap_or_default();
+        Ok(version)
+    }
+
+    async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
+        let form = [("urls", url), ("category", &self.category)];
+        let resp = self.do_post_form("/api/v2/torrents/add", &form).await?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(format!("qbit add failed (HTTP {status}): {body}"));
+        }
+        // qBit returns 200 OK with body "Fails." when it couldn't parse
+        // the URL or otherwise refused to add the torrent.
+        if body.trim() == "Fails." {
+            return Err(format!(
+                "qbit add rejected url={url}: qBit returned 'Fails.'"
+            ));
+        }
+        self.invalidate_torrents_cache().await;
+        // qBit is silent about duplicates — the add is idempotent,
+        // returning 200 "Ok." whether the hash was new or already
+        // present. We can't distinguish here, so always report Added.
+        // Non-qBit impls detect and return AlreadyPresent explicitly.
+        Ok(AddOutcome::Added)
+    }
+
+    /// Add a torrent, wait for metadata, invoke `pick`, and mark the
+    /// rest as skip.
+    ///
+    /// Notably: we do **not** add paused. qBit 5.x renamed pause/resume
+    /// to stop/start and — more importantly — a torrent added in
+    /// stopped state doesn't publish its file list through
+    /// `/torrents/files`, so the old "add paused → wait metadata →
+    /// set priorities → resume" flow hangs forever on 5.x. Instead
+    /// we add unpaused and race `filePrio` against qBit's
+    /// peer-discovery startup; for a `.torrent` URL qBit parses the
+    /// file list within a couple seconds — well before real data
+    /// transfer — so the window where unwanted pieces might be
+    /// requested is small and bounded.
+    ///
+    /// An explicit `resume` call after the add handles the dedup case
+    /// where qBit already has the same info hash sitting in stopped
+    /// state from an earlier failed grab.
+    ///
+    /// **Additive merge**: when a second selective grab lands on a
+    /// torrent that's already been narrowed, we only bump the *new*
+    /// wanted files from skip → normal. Files already at normal/high
+    /// stay untouched so previous grabs on this megapack keep
+    /// downloading. Detection via per-file priority readback: any
+    /// file at priority 0 means the torrent was narrowed before.
+    async fn add_torrent_with_file_filter(
+        &self,
+        url: &str,
+        info_hash: &str,
+        pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+    ) -> Result<SelectiveOutcome, String> {
+        if info_hash.is_empty() {
+            return Err("selective download requires a known info hash".into());
+        }
+        let hash_lc = info_hash.to_ascii_lowercase();
+
+        self.add_torrent(url, &hash_lc).await?;
+
+        // If qBit already had this hash sitting in stopped state,
+        // the add above is a dedup no-op and the torrent is still
+        // stopped. Explicitly start it so metadata flows.
+        self.resume(&hash_lc).await?;
+
+        let files = match self
+            .wait_for_metadata(&hash_lc, Duration::from_secs(10))
+            .await
+        {
+            Ok(files) => files,
+            Err(_) => return Ok(SelectiveOutcome::FullDownload),
+        };
+
+        let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+        let keep = pick(&names);
+
+        let new_keep_ids = match keep {
+            Some(ids) if !ids.is_empty() && ids.len() < files.len() => ids,
+            _ => return Ok(SelectiveOutcome::FullDownload),
+        };
+
+        let already_narrowed = files.iter().any(|f| f.priority == 0);
+
+        if already_narrowed {
+            let to_bump: Vec<usize> = new_keep_ids
+                .iter()
+                .copied()
+                .filter(|&i| files.get(i).map(|f| f.priority == 0).unwrap_or(false))
+                .collect();
+            if !to_bump.is_empty() {
+                self.set_file_priority(&hash_lc, &to_bump, 1).await?;
+            }
+        } else {
+            let skip_ids: Vec<usize> = (0..files.len())
+                .filter(|i| !new_keep_ids.contains(i))
+                .collect();
+            self.set_file_priority(&hash_lc, &skip_ids, 0).await?;
+            self.set_file_priority(&hash_lc, &new_keep_ids, 1).await?;
+        }
+        Ok(SelectiveOutcome::Filtered(new_keep_ids))
+    }
+
+    async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+        {
+            let guard = self.torrents_cache.lock().await;
+            if let Some((stamped, torrents)) = guard.as_ref()
+                && stamped.elapsed() < TORRENTS_CACHE_TTL
+            {
+                return Ok(torrents.clone());
+            }
+        }
+
+        let notified = self.torrents_fetch_done.notified();
+        tokio::pin!(notified);
+        let is_fetcher = {
+            let mut flag = self.torrents_fetch_in_flight.lock().await;
+            if *flag {
+                false
+            } else {
+                *flag = true;
+                true
+            }
+        };
+
+        if !is_fetcher {
+            notified.as_mut().await;
+            {
+                let guard = self.torrents_cache.lock().await;
+                if let Some((stamped, torrents)) = guard.as_ref()
+                    && stamped.elapsed() < TORRENTS_CACHE_TTL
+                {
+                    return Ok(torrents.clone());
+                }
+            }
+            return self.list_scoped_uncached().await;
+        }
+
+        let result = self.list_scoped_uncached().await;
+        if let Ok(ref torrents) = result {
+            let mut guard = self.torrents_cache.lock().await;
+            *guard = Some((Instant::now(), torrents.clone()));
+        }
+        {
+            let mut flag = self.torrents_fetch_in_flight.lock().await;
+            *flag = false;
+        }
+        self.torrents_fetch_done.notify_waiters();
+        result
+    }
+
+    async fn get_files(&self, info_hash: &str) -> Result<Vec<DownloadFile>, String> {
+        let raw = self.get_torrent_files_raw(info_hash).await?;
+        Ok(raw
+            .into_iter()
+            .map(|f| DownloadFile {
+                name: f.name,
+                size: f.size,
+                progress: f.progress,
+                wanted: f.priority != 0,
+            })
+            .collect())
+    }
+
+    /// qBit 5.x renamed `/torrents/pause` to `/torrents/stop`. Try
+    /// the new name first and fall back to the old one so both
+    /// generations work without a version probe.
+    async fn pause(&self, info_hash: &str) -> Result<(), String> {
+        let form = [("hashes", info_hash)];
+        let resp = self.do_post_form("/api/v2/torrents/stop", &form).await?;
+        if resp.status().is_success() {
+            self.invalidate_torrents_cache().await;
+            return Ok(());
+        }
+        let resp = self.do_post_form("/api/v2/torrents/pause", &form).await?;
+        if resp.status().is_success() {
+            self.invalidate_torrents_cache().await;
+            return Ok(());
+        }
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("qbit pause failed: {} {}", status, body.trim()))
+    }
+
+    /// qBit 5.x renamed `/torrents/resume` to `/torrents/start`.
+    /// Same dual-path strategy as pause.
+    async fn resume(&self, info_hash: &str) -> Result<(), String> {
+        let form = [("hashes", info_hash)];
+        let resp = self.do_post_form("/api/v2/torrents/start", &form).await?;
+        if resp.status().is_success() {
+            self.invalidate_torrents_cache().await;
+            return Ok(());
+        }
+        let resp = self.do_post_form("/api/v2/torrents/resume", &form).await?;
+        if resp.status().is_success() {
+            self.invalidate_torrents_cache().await;
+            return Ok(());
+        }
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("qbit resume failed: {} {}", status, body.trim()))
+    }
+
+    async fn delete(&self, info_hash: &str, delete_files: bool) -> Result<(), String> {
+        let delete_str = if delete_files { "true" } else { "false" };
+        let form = [("hashes", info_hash), ("deleteFiles", delete_str)];
+        let resp = self.do_post_form("/api/v2/torrents/delete", &form).await?;
+        if !resp.status().is_success() {
+            return Err("Failed to delete torrent".into());
+        }
+        self.invalidate_torrents_cache().await;
+        Ok(())
+    }
+
+    async fn set_file_wanted(
+        &self,
+        info_hash: &str,
+        files: &[usize],
+        wanted: bool,
+    ) -> Result<(), String> {
+        // qBit priority 0 = skip, 1 = normal. The higher levels
+        // (6=high, 7=max) are intentionally unused by Ryokan.
+        let priority = if wanted { 1 } else { 0 };
+        self.set_file_priority(info_hash, files, priority).await
+    }
+
+    fn sonarr_impl_name(&self) -> &'static str {
+        "QBittorrent"
+    }
+}
+
+fn to_download_item(raw: QbitRawTorrent) -> DownloadItem {
+    let state_kind = map_qbit_state(&raw.state);
+    DownloadItem {
+        hash: raw.hash,
+        name: raw.name,
+        size: raw.size,
+        progress: raw.progress,
+        dlspeed: raw.dlspeed,
+        state: raw.state,
+        category: raw.category,
+        eta: raw.eta,
+        save_path: raw.save_path,
+        content_path: raw.content_path,
+        state_kind,
+    }
+}
+
+/// Map qBit's native state strings to the normalized
+/// [`DownloadItemState`] enum. qBit's state machine covers 10+
+/// distinct values; any unknown string falls back to `Downloading`
+/// (generic in-progress) rather than `Errored` so a future qBit
+/// version introducing a new state label doesn't flip active
+/// torrents red in the UI until we update this table.
+fn map_qbit_state(state: &str) -> DownloadItemState {
+    use DownloadItemState::*;
+    match state {
+        "downloading" | "forcedDL" => Downloading,
+        "stalledDL" => DownloadingStalled,
+        "queuedDL" => DownloadingQueued,
+        "checkingDL" => CheckingDownload,
+        "uploading" | "forcedUP" => Seeding,
+        "stalledUP" => SeedingStalled,
+        "queuedUP" => SeedingQueued,
+        "checkingUP" => CheckingSeed,
+        "pausedDL" => Paused,
+        "pausedUP" | "stoppedUP" => PausedComplete,
+        "error" | "missingFiles" => Errored,
+        // `metaDL`, `allocating`, `moving`, `unknown`, and any
+        // future state label all fall back to `Downloading` (generic
+        // in-progress) rather than `Errored` so a new qBit version
+        // with an unseen state doesn't flip active torrents red.
+        _ => Downloading,
+    }
+}
+
+fn normalize_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let is_local = lower.starts_with("localhost")
+        || lower.starts_with("127.")
+        || lower.starts_with("10.")
+        || lower.starts_with("192.168.")
+        || lower.starts_with("172.16.")
+        || lower.starts_with("172.17.")
+        || lower.starts_with("172.18.")
+        || lower.starts_with("172.19.")
+        || lower.starts_with("172.2")
+        || lower.starts_with("172.30.")
+        || lower.starts_with("172.31.");
+
+    if is_local {
+        format!("http://{}", trimmed)
+    } else {
+        format!("https://{}", trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_base_url_preserves_scheme() {
+        assert_eq!(normalize_base_url("http://foo:8080"), "http://foo:8080");
+        assert_eq!(normalize_base_url("https://foo"), "https://foo");
+    }
+
+    #[test]
+    fn normalize_base_url_adds_http_for_local() {
+        assert_eq!(
+            normalize_base_url("localhost:8080"),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            normalize_base_url("127.0.0.1:8080"),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            normalize_base_url("192.168.1.2:8080"),
+            "http://192.168.1.2:8080"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_adds_https_for_remote() {
+        assert_eq!(
+            normalize_base_url("seedbox.example.com"),
+            "https://seedbox.example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_trims_trailing_slash() {
+        assert_eq!(normalize_base_url("http://foo:8080/"), "http://foo:8080");
+    }
+
+    #[test]
+    fn qbit_state_maps_all_seeding_variants_to_complete() {
+        assert!(map_qbit_state("uploading").is_complete());
+        assert!(map_qbit_state("stalledUP").is_complete());
+        assert!(map_qbit_state("queuedUP").is_complete());
+        assert!(map_qbit_state("forcedUP").is_complete());
+        assert!(map_qbit_state("checkingUP").is_complete());
+        assert!(map_qbit_state("pausedUP").is_complete());
+        assert!(map_qbit_state("stoppedUP").is_complete());
+    }
+
+    #[test]
+    fn qbit_state_maps_download_variants_to_incomplete() {
+        assert!(!map_qbit_state("downloading").is_complete());
+        assert!(!map_qbit_state("stalledDL").is_complete());
+        assert!(!map_qbit_state("queuedDL").is_complete());
+        assert!(!map_qbit_state("checkingDL").is_complete());
+        assert!(!map_qbit_state("pausedDL").is_complete());
+    }
+
+    #[test]
+    fn qbit_state_maps_error_states() {
+        assert!(map_qbit_state("error").is_errored());
+        assert!(map_qbit_state("missingFiles").is_errored());
+    }
+
+    #[test]
+    fn qbit_state_unknown_falls_back_to_downloading() {
+        assert_eq!(
+            map_qbit_state("someFutureState"),
+            DownloadItemState::Downloading
+        );
+    }
+}

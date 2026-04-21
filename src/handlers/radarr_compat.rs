@@ -292,6 +292,41 @@ pub async fn create_tag(Json(body): Json<RadarrTagBody>) -> Json<RadarrTag> {
     })
 }
 
+/// GET /radarr/api/v3/downloadclient — Radarr-shim equivalent of the
+/// Sonarr endpoint. See `sonarr_compat::list_download_clients` for the
+/// motivation. Radarr's canonical response shape matches Sonarr's for
+/// this particular endpoint.
+pub async fn list_download_clients(
+    State(state): State<AppState>,
+) -> Json<Vec<RadarrDownloadClientEntry>> {
+    let client = state.download_client.read().await.clone();
+    let Some(client) = client else {
+        return Json(vec![]);
+    };
+    let impl_name = client.sonarr_impl_name();
+    Json(vec![RadarrDownloadClientEntry {
+        id: 1,
+        name: "Ryokan".to_string(),
+        enable: true,
+        protocol: "torrent".to_string(),
+        implementation: impl_name.to_string(),
+        config_contract: format!("{impl_name}Settings"),
+        priority: 1,
+    }])
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RadarrDownloadClientEntry {
+    pub id: i32,
+    pub name: String,
+    pub enable: bool,
+    pub protocol: String,
+    pub implementation: String,
+    pub config_contract: String,
+    pub priority: i32,
+}
+
 /// GET /radarr/api/v3/movie/lookup?term=tmdb:12345
 ///
 /// Seerr sends `term=tmdb:12345` for TMDB ID lookup.

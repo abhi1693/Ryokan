@@ -139,8 +139,8 @@ pub async fn delete_episode_file(
                     .unwrap_or_default();
             let mut qbit_removed: Vec<String> = Vec::new();
             if !imported_grabs.is_empty() {
-                let qbit = state.qbit.read().await.as_ref().cloned();
-                if let Some(qbit) = qbit {
+                let client = state.download_client.read().await.as_ref().cloned();
+                if let Some(client) = client {
                     for grab in &imported_grabs {
                         if grab.is_batch {
                             continue;
@@ -148,7 +148,7 @@ pub async fn delete_episode_file(
                         if grab.hash.is_empty() {
                             continue;
                         }
-                        match qbit.delete_torrent(&grab.hash, true).await {
+                        match client.delete(&grab.hash, true).await {
                             Ok(()) => {
                                 qbit_removed.push(grab.torrent_name.clone());
                                 let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
@@ -158,7 +158,7 @@ pub async fn delete_episode_file(
                                     &state.db,
                                     LogCategory::QBit,
                                     &format!(
-                                        "qBit delete failed for episode {} torrent '{}' — continuing with file delete",
+                                        "Download client delete failed for episode {} torrent '{}' — continuing with file delete",
                                         episode_number, grab.torrent_name
                                     ),
                                     &e,
@@ -327,14 +327,14 @@ pub async fn cancel_pending_episode(
         "cancel_pending_episode: matching grabs"
     );
 
-    let qbit = state.qbit.read().await.as_ref().cloned();
+    let client = state.download_client.read().await.as_ref().cloned();
 
     let mut removed_count = 0;
     let mut torrent_failures: Vec<String> = Vec::new();
     for grab in &pending {
         if !grab.hash.is_empty()
-            && let Some(ref qbit) = qbit
-            && let Err(e) = qbit.delete_torrent(&grab.hash, true).await
+            && let Some(ref client) = client
+            && let Err(e) = client.delete(&grab.hash, true).await
         {
             torrent_failures.push(format!("{}: {}", grab.torrent_name, e));
             logger::warn(
@@ -471,11 +471,11 @@ pub async fn mark_episode_failed(
         grabbed_torrents::find_imported_for_episode(&state.db, series_id, episode_number).await
         && !old_grabs.is_empty()
     {
-        let qbit = { state.qbit.read().await.as_ref().cloned() };
-        if let Some(qbit) = qbit {
+        let client = { state.download_client.read().await.as_ref().cloned() };
+        if let Some(client) = client {
             for old in &old_grabs {
                 if !old.hash.is_empty()
-                    && let Err(e) = qbit.delete_torrent(&old.hash, true).await
+                    && let Err(e) = client.delete(&old.hash, true).await
                 {
                     crate::services::logger::warn(
                         &state.db,
@@ -555,24 +555,24 @@ pub async fn episode_download_progress(
             .await
             .unwrap_or_default();
 
-    let qbit = {
-        let guard = state.qbit.read().await;
+    let client = {
+        let guard = state.download_client.read().await;
         match guard.as_ref() {
             Some(c) => c.clone(),
             None => return Ok(Json(Vec::new())),
         }
     };
 
-    let torrents = match qbit.get_torrents().await {
+    let torrents = match client.list_scoped().await {
         Ok(t) => t,
         Err(err) => {
             return Err((
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                format!("qBittorrent unavailable: {err}"),
+                format!("Download client unavailable: {err}"),
             ));
         }
     };
-    let by_hash: HashMap<String, &crate::services::qbit::Torrent> = torrents
+    let by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
         .iter()
         .map(|t| (t.hash.to_lowercase(), t))
         .collect();

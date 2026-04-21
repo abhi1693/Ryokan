@@ -117,7 +117,7 @@ pub async fn record_grab(
         "UPDATE grabbed_torrents
          SET state = 'pending',
              imported_at = NULL,
-             qbit_content_path = '',
+             client_content_path = '',
              grabbed_at = CURRENT_TIMESTAMP,
              series_id = ?,
              episode_numbers = ?,
@@ -379,9 +379,9 @@ pub async fn mark_completed_no_import(db: &SqlitePool, id: i64) -> Result<(), sq
 /// recorded here; the library-side path lives on
 /// `episode_grab_history.file_name` after post-processing.
 ///
-/// Idempotent: `WHERE COALESCE(qbit_content_path, '') = ''` so a later
-/// completion tick on an already-stamped row is a no-op.
-pub async fn stamp_qbit_content_path(
+/// Idempotent: `WHERE COALESCE(client_content_path, '') = ''` so a
+/// later completion tick on an already-stamped row is a no-op.
+pub async fn stamp_client_content_path(
     db: &SqlitePool,
     id: i64,
     path: &str,
@@ -390,8 +390,8 @@ pub async fn stamp_qbit_content_path(
         return Ok(());
     }
     sqlx::query(
-        "UPDATE grabbed_torrents SET qbit_content_path = ?
-         WHERE id = ? AND COALESCE(qbit_content_path, '') = ''",
+        "UPDATE grabbed_torrents SET client_content_path = ?
+         WHERE id = ? AND COALESCE(client_content_path, '') = ''",
     )
     .bind(path)
     .bind(id)
