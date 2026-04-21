@@ -10,9 +10,8 @@ use std::collections::HashSet;
 
 use crate::services::anilist::AnimeDetail;
 
-use super::{
-    SearchTarget, episode_match, is_pack_candidate_relation, parse_release_numbers, season_mismatch,
-};
+use super::pack_detection::is_pack_candidate_relation;
+use super::{SearchTarget, episode_match, parse_release_numbers, season_mismatch};
 
 pub fn normalize_title(input: &str) -> String {
     let lower = input.to_lowercase();
