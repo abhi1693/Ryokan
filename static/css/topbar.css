@@ -1,15 +1,9 @@
-/* topbar.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
+/* topbar.css — auto-split from style.css on 2026-04-21 (Phase 7). */
 
-/* #20 — Mobile tab bar default (hidden). The actual phone-width swap
- * (hide .nav-links, show tab bar) lives further down after the
- * default `.nav-links { display: flex }` rule so the cascade works
- * out — an earlier media-query rule loses to a later unscoped rule
- * with equal specificity. */
 .mobile-tabbar {
     display: none;
 }
 
-/* --- Nav --- */
 .nav {
     position: sticky;
     top: 0;
@@ -47,13 +41,11 @@
 }
 
 .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
+
 .nav-links a.active { color: var(--accent); background: rgba(203, 166, 247, 0.08); }
+
 .nav-logout { color: var(--text-dim) !important; }
 
-/* #20 — Below --bp-phone, hide the top nav's link strip and show
- * the fixed bottom tab bar declared at the top of the file. This
- * block must live AFTER the default `.nav-links { display: flex }`
- * rule above or the cascade reorders it out of effect. */
 @media (max-width: 640px) {
     .nav-links {
         display: none;
@@ -68,21 +60,12 @@
         background: var(--bg);
         border-top: 1px solid var(--border);
         padding-bottom: env(safe-area-inset-bottom, 0px);
-        /* Promote to its own GPU compositing layer so address-bar
-         * show/hide on iOS Safari doesn't repaint the blurred
-         * backdrop-filter layer on every scroll tick. Combined with
-         * dropping the blur entirely (solid bg above) to prevent the
-         * jitter users were seeing. */
+        
         will-change: transform;
         transform: translateZ(0);
     }
     .mobile-tab {
-        /* Explicit equal-width (1/5) instead of `flex: 1 1 0`. With
-         * flex-basis:0, column-flex children whose natural content
-         * width varies slightly (ICON + short label) can trigger
-         * sub-pixel rounding that makes Library/System feel further
-         * apart than Search/Downloads/Settings. Pinning each tab to
-         * 20% guarantees geometric parity regardless of content. */
+        
         flex: 0 0 20%;
         width: 20%;
         display: flex;
@@ -113,13 +96,30 @@
     .mobile-tab.active:hover {
         color: var(--accent);
     }
-    /* Keyboard focus ring — fires only for keyboard users via
-     * `:focus-visible`, so touch taps don't leave a stuck focus
-     * outline on the previously-tapped tab. */
     .mobile-tab:focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: -2px;
         border-radius: 4px;
     }
+    .nav { padding: 0 16px; }
+    .nav-links { gap: 4px; }
+    .nav-links a { padding: 6px 10px; font-size: 13px; }
+}
+
+.nav-links-right {
+    align-items: center;
+}
+
+.nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+}
+
+.nav-links {
+    margin-left: auto;
+    align-items: center;
 }
 

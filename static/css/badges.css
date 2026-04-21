@@ -1,43 +1,52 @@
-/* badges.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
+/* badges.css — auto-split from style.css on 2026-04-21 (Phase 7). */
 
-/* --- Score badges --- */
-.score-badge {
-    display: inline-block;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 4px;
-}
-
-.score-high { background: rgba(125, 211, 147, 0.15); color: var(--green); }
-.score-mid { background: rgba(203, 166, 247, 0.12); color: var(--accent); }
-.score-low { background: rgba(211, 125, 125, 0.12); color: var(--red); }
-
-/* --- Tags --- */
-.result-tags { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
-
-.tag {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    padding: 2px 6px;
-    border-radius: 3px;
-}
-
-.tag-batch { background: var(--blue-bg); color: var(--blue); }
-.tag-trusted { background: var(--green-bg); color: var(--green); }
-.tag-group { background: rgba(203, 166, 247, 0.1); color: var(--accent); }
 .tag-res { background: var(--bg-elevated); color: var(--text-dim); }
 
-/* --- Seed/leech counts --- */
-.seed-count { color: var(--green); font-family: var(--font-mono); font-weight: 600; }
-.leech-count { color: var(--red); font-family: var(--font-mono); font-weight: 600; }
 .peer-sep { color: var(--text-dim); font-family: var(--font-mono); }
-.dl-count { color: var(--text-dim); font-family: var(--font-mono); }
 
-/* Log Level Badges */
+.tag-score-green {
+    background: rgba(125, 211, 147, 0.15);
+    color: var(--green);
+}
+
+.tag-score-purple {
+    background: var(--purple-bg);
+    color: var(--purple);
+}
+
+.tag-score-yellow {
+    background: rgba(211, 176, 125, 0.15);
+    color: var(--orange);
+}
+
+.tag-score-red {
+    background: rgba(211, 125, 125, 0.12);
+    color: var(--red);
+}
+
+.tag-status-releasing,
+.tag-status-not_yet_released,
+.tag-status-currently_airing,
+.tag-status-not_yet_aired,
+.tag-status-finished,
+.tag-status-finished_airing,
+.tag-status-cancelled,
+.tag-status-hiatus {
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+}
+
+.tag-quality {
+    background: var(--mauve-bg);
+    color: var(--accent);
+    font-size: 10px;
+    padding: 2px 8px;
+}
+
+@media (max-width: 640px) {
+    .tag-quality { padding: 1px 5px; font-size: 9px; }
+}
+
 .log-badge {
     display: inline-block;
     padding: 1px 6px;
@@ -50,7 +59,16 @@
 }
 
 .log-badge-trace { background: rgba(110, 110, 136, 0.15); color: var(--text-dim); }
+
 .log-badge-debug { background: rgba(125, 174, 211, 0.15); color: var(--blue); }
-.log-badge-info  { background: rgba(125, 211, 147, 0.15); color: var(--green); }
-.log-badge-warn  { background: rgba(211, 176, 125, 0.15); color: var(--orange); }
+
+.log-badge-info { background: rgba(125, 211, 147, 0.15); color: var(--green); }
+
+.log-badge-warn { background: rgba(211, 176, 125, 0.15); color: var(--orange); }
+
 .log-badge-error { background: rgba(211, 125, 125, 0.2);  color: var(--red); }
+
+.log-level-error { background: rgba(211, 125, 125, 0.04); }
+
+.log-level-warn { background: rgba(211, 176, 125, 0.03); }
+

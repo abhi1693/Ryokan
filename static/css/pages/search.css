@@ -1,4 +1,6 @@
-/* pages/search.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
+/* pages/search.css — auto-split from style.css on 2026-04-21 (Phase 7). */
+
+.search-user { max-width: 160px; }
 
 .results-count {
     font-size: 13px;
@@ -6,7 +8,6 @@
     margin-bottom: 12px;
 }
 
-/* --- Results table --- */
 .results-table {
     width: 100%;
     border-collapse: collapse;
@@ -39,7 +40,6 @@
     background: var(--bg-elevated);
 }
 
-/* Trusted = green */
 .results-table tbody tr.is-trusted:not(.is-batch) {
     background: var(--green-bg);
     border-left: 3px solid var(--green);
@@ -49,7 +49,6 @@
     background: rgba(125, 211, 147, 0.15);
 }
 
-/* Batch = blue */
 .results-table tbody tr.is-batch:not(.is-trusted) {
     background: var(--blue-bg);
     border-left: 3px solid var(--blue);
@@ -59,7 +58,6 @@
     background: rgba(125, 174, 211, 0.15);
 }
 
-/* Batch + Trusted = purple */
 .results-table tbody tr.is-batch.is-trusted {
     background: var(--purple-bg);
     border-left: 3px solid var(--purple);
@@ -70,17 +68,17 @@
 }
 
 .col-score { width: 55px; text-align: center; }
+
 .col-size { width: 90px; white-space: nowrap; }
+
 .col-seed, .col-leech, .col-dl { width: 50px; text-align: right; }
+
 .col-actions { width: 70px; text-align: right; }
 
-/* #20 — Search results card view (mobile). Dual-markup approach:
- * results-table above renders both desktop and mobile shapes
- * server-side, CSS hides one per viewport. loadMore() appends to
- * both so paginated results stay in sync if the user resizes. */
 .results-cards {
     display: none;
 }
+
 @media (max-width: 640px) {
     .results-table {
         display: none;
@@ -91,6 +89,7 @@
         gap: 10px;
     }
 }
+
 .result-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -100,25 +99,28 @@
     flex-direction: column;
     gap: 10px;
 }
-/* Same batch/trusted tinting as the table rows (blue / green /
- * purple stripes) so color-coding is consistent across viewports. */
+
 .result-card.is-batch {
     border-left: 3px solid var(--blue);
     background: var(--blue-bg);
 }
+
 .result-card.is-trusted {
     border-left: 3px solid var(--green);
     background: var(--green-bg);
 }
+
 .result-card.is-batch.is-trusted {
     border-left: 3px solid var(--purple);
     background: var(--purple-bg);
 }
+
 .result-card-header {
     display: flex;
     align-items: flex-start;
     gap: 10px;
 }
+
 .result-card-title {
     color: var(--text);
     text-decoration: none;
@@ -129,14 +131,17 @@
     overflow-wrap: anywhere;
     font-weight: 500;
 }
+
 .result-card-title:hover {
     color: var(--accent);
 }
+
 .result-card-tags {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
 }
+
 .result-card-footer {
     display: flex;
     flex-wrap: wrap;
@@ -145,11 +150,13 @@
     border-top: 1px solid var(--border);
     padding-top: 10px;
 }
+
 .result-card-meta {
     font-size: 12px;
     color: var(--text-dim);
     white-space: nowrap;
 }
+
 .result-card-footer .btn-grab {
     margin-left: auto;
     padding: 8px 16px;
@@ -163,7 +170,35 @@
 
 .col-name a:hover { color: var(--accent); }
 
-/* --- Load more --- */
+.score-badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.score-high { background: rgba(125, 211, 147, 0.15); color: var(--green); }
+
+.score-mid { background: rgba(203, 166, 247, 0.12); color: var(--accent); }
+
+.score-low { background: rgba(211, 125, 125, 0.12); color: var(--red); }
+
+.result-tags { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+
+.tag-batch { background: var(--blue-bg); color: var(--blue); }
+
+.tag-trusted { background: var(--green-bg); color: var(--green); }
+
+.tag-group { background: rgba(203, 166, 247, 0.1); color: var(--accent); }
+
+.seed-count { color: var(--green); font-family: var(--font-mono); font-weight: 600; }
+
+.leech-count { color: var(--red); font-family: var(--font-mono); font-weight: 600; }
+
+.dl-count { color: var(--text-dim); font-family: var(--font-mono); }
+
 .load-more-area {
     text-align: center;
     padding: 24px 0;
@@ -181,10 +216,21 @@
 }
 
 .btn-load-more:hover { border-color: var(--accent); color: var(--accent); }
+
 .btn-load-more:disabled { opacity: 0.6; cursor: default; }
 
 .load-more-status {
     font-size: 13px;
     color: var(--text-dim);
+}
+
+@media (max-width: 640px) {
+    .search-user { max-width: none; }
+    .results-table { font-size: 12px; }
+    .col-leech, .col-dl { display: none; }
+    .result-card-footer .btn-grab {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
 }
 

@@ -1,6 +1,5 @@
-/* pages/auth.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
+/* pages/auth.css — auto-split from style.css on 2026-04-21 (Phase 7). */
 
-/* --- Auth pages --- */
 .auth-page {
     display: flex;
     align-items: center;
@@ -17,16 +16,6 @@
     border-radius: var(--radius-lg);
 }
 
-/* #39 — Account-recovery container. Dedicated rather than a wider
-   variant of .auth-container because the recovery page's content
-   (numbered list + a <pre> holding `sqlite3 data/ryokan.db "..."`
-   that's ~60 chars wide in a monospace font) needs both a wider
-   shell and an overflow-safe code-block style — a 640px
-   .auth-container-wide was overflowing the sqlite line past the
-   right edge of the card. min-width:0 lets the card shrink below
-   its intrinsic content width on narrow viewports; the pre style
-   then wraps/scrolls the long command instead of pushing the card
-   wider than the viewport. */
 .recovery-container {
     width: 100%;
     max-width: 720px;
@@ -89,17 +78,6 @@
 
 .recovery-container ol li { margin-bottom: 6px; }
 
-/* Mobile: below --bp-phone (640px, see :root) drop the card chrome
-   so the recovery content reads as a plain full-width document.
-   The 40px padding would eat ~half of a 375px viewport after the
-   vertical-centering flex of .auth-page; swapping to 20px
-   horizontal and losing the border lets long monospace lines
-   actually fit on phone without horizontal scroll.
-
-   align-self: flex-start pairs with the .auth-page flex layout so
-   a tall recovery page starts at the top of the viewport on phone
-   rather than being vertically centered and pushing the brand
-   header off-screen on first paint. */
 @media (max-width: 640px) {
     .recovery-container {
         padding: 24px 20px;
@@ -135,16 +113,17 @@
     margin-top: 16px;
     font-size: 13px;
 }
+
 .auth-forgot a {
     color: var(--text-dim);
     text-decoration: none;
 }
+
 .auth-forgot a:hover {
     color: var(--accent);
     text-decoration: underline;
 }
 
-/* ── Error page ───────────────────────────────────────────── */
 .error-page {
     display: flex;
     flex-direction: column;

@@ -1,6 +1,5 @@
-/* modals.css — auto-split from style.css on 2026-04-21 (Phase 7). Load order is load-bearing: see base.html. */
+/* modals.css — auto-split from style.css on 2026-04-21 (Phase 7). */
 
-/* --- Modal --- */
 .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -43,13 +42,6 @@
     flex: 1;
 }
 
-/* #20 commit 8 — Full-screen modals on phone. Below --bp-phone the
- * modal-backdrop padding drops to 0 and the modal fills the viewport
- * edge-to-edge. Improves tap targets and avoids the fiddly
- * floating-card feel on small screens. Applies to the shared
- * .modal / .modal-backdrop primitives so ryokanConfirm / ryokanAlert
- * / ryokanPrompt and the CF editor modal all pick it up
- * automatically. */
 @media (max-width: 640px) {
     .modal-backdrop {
         padding: 0;
@@ -64,166 +56,6 @@
     }
 }
 
-.modal-header .btn-icon {
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: 50%;
-    color: var(--text-dim);
-}
-
-.modal-header .btn-icon:hover {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--bg);
-}
-
-/* --- Remove-from-library destructive confirmation modal ---
-   Dedicated variant of the generic confirm modal. It's wider, fronts a
-   red warning icon, and renders the concrete stakes of the remove
-   (path, episode count, total size) so the user can read exactly what
-   they're about to lose before committing. */
-.remove-series-modal {
-    max-width: 540px;
-}
-
-.remove-series-header {
-    align-items: flex-start;
-    gap: 12px;
-    padding: 24px 28px 20px;
-}
-
-.remove-series-heading {
-    display: flex;
-    gap: 14px;
-    align-items: flex-start;
-    min-width: 0;
-    flex: 1;
-}
-
-.remove-series-icon {
-    flex-shrink: 0;
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    background: rgba(211, 125, 125, 0.12);
-    color: var(--red);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid rgba(211, 125, 125, 0.3);
-}
-
-.remove-series-heading-text {
-    min-width: 0;
-    flex: 1;
-}
-
-.remove-series-heading-text h3 {
-    margin: 0 0 4px 0;
-    font-size: 18px;
-    color: var(--text-bright);
-}
-
-.remove-series-subtitle {
-    margin: 0;
-    color: var(--text-dim);
-    font-size: 13px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.remove-series-body {
-    padding: 24px 28px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-.remove-series-path {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    font-family: var(--font-mono);
-    font-size: 13px;
-    color: var(--text);
-    min-width: 0;
-}
-
-.remove-series-path-icon {
-    color: var(--text-dim);
-    flex-shrink: 0;
-}
-
-.remove-series-path span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    flex: 1;
-}
-
-.remove-series-consequences {
-    margin: 0;
-    padding-left: 20px;
-    color: var(--text);
-    font-size: 14px;
-    line-height: 1.6;
-}
-
-.remove-series-consequences li {
-    margin-bottom: 6px;
-}
-
-.remove-series-consequences li:last-child {
-    margin-bottom: 0;
-}
-
-.remove-series-consequences strong {
-    color: var(--text-bright);
-    font-weight: 600;
-}
-
-.remove-series-final-warning {
-    margin: 0;
-    padding: 10px 12px;
-    background: rgba(211, 125, 125, 0.08);
-    border: 1px solid rgba(211, 125, 125, 0.25);
-    border-radius: var(--radius);
-    color: var(--red);
-    font-weight: 600;
-    font-size: 14px;
-    text-align: center;
-}
-
-.remove-series-footer {
-    padding: 16px 28px;
-    border-top: 1px solid var(--border);
-    gap: 10px;
-    display: flex;
-    justify-content: flex-end;
-}
-
-/* Force the solid-red destructive variant inside this modal regardless
-   of whichever global .btn-danger rule wins the cascade elsewhere.
-   Uses `color: var(--bg)` (near-black) rather than pure white so it
-   matches the existing `.btn-danger` on the series page header. */
-.remove-series-modal .btn-danger {
-    background: var(--red);
-    color: var(--bg);
-    border: 1px solid var(--red);
-}
-
-.remove-series-modal .btn-danger:hover {
-    background: #c46a6a;
-    border-color: #c46a6a;
-}
-
-/* --- Ryokan toast stack --- */
 .ryokan-toast-stack {
     position: fixed;
     top: 72px;
@@ -257,16 +89,6 @@
     animation: ryokan-toast-leave 200ms ease-in forwards;
 }
 
-@keyframes ryokan-toast-enter {
-    from { opacity: 0; transform: translateX(16px); }
-    to   { opacity: 1; transform: translateX(0); }
-}
-
-@keyframes ryokan-toast-leave {
-    from { opacity: 1; transform: translateX(0); }
-    to   { opacity: 0; transform: translateX(16px); }
-}
-
 .ryokan-toast-accent {
     position: absolute;
     left: 0;
@@ -277,8 +99,11 @@
 }
 
 .ryokan-toast-info  .ryokan-toast-accent { background: var(--accent); }
+
 .ryokan-toast-success .ryokan-toast-accent { background: var(--green); }
+
 .ryokan-toast-warn  .ryokan-toast-accent { background: var(--orange); }
+
 .ryokan-toast-error .ryokan-toast-accent { background: var(--red); }
 
 .ryokan-toast-content {
