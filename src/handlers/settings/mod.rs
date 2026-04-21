@@ -740,6 +740,26 @@ pub async fn settings_submit(
         )
         .await
         .unwrap_or(0);
+
+        // Clear the per-episode "grabbed" UI state for every canceled
+        // grab. `grabbed_torrents.state='failed'` alone isn't enough —
+        // the series page reads `episode_quality_tags.state` for the
+        // UI checkmark / badge, and the existing manual-cancel paths
+        // (`handlers::library::episodes::cancel_pending_episode`,
+        // `services::post_processing::run_once_inner` on stale-torrent
+        // reconciliation) both call `episode_tags::clear_tags_for_removal`
+        // alongside their mark-removed calls. The client-switch path
+        // has to mirror that: without this, episodes sit forever in
+        // "grabbed" state with no backing torrent.
+        for grab in &pending {
+            let _ = crate::models::episode_tags::clear_tags_for_removal(
+                &state.db,
+                grab.series_id,
+                &grab.episode_numbers,
+            )
+            .await;
+        }
+
         if n > 0 {
             logger::info(
                 &state.db,
