@@ -557,15 +557,21 @@ fn detect_batch(title: &str) -> bool {
 }
 
 fn extract_hash(magnet: &str) -> String {
-    // Two quirks the prior impl got wrong:
-    //   1. BTIH URN is case-insensitive (`urn:btih:` and `urn:BTIH:`
-    //      both occur in the wild); searching for a lowercase literal
-    //      missed uppercase variants entirely and returned "".
-    //   2. 40-char hex hashes are case-insensitive, but 32-char base32
-    //      hashes (uppercase A-Z + 2-7 only) are case-SENSITIVE.
-    //      Lowercasing base32 corrupts the info-hash, which breaks
-    //      dedup, blocklist re-grab detection, and SeaDex matching for
-    //      any curated release whose magnet happens to use base32.
+    // BTIH URN is case-insensitive (`urn:btih:` and `urn:BTIH:` both
+    // occur in the wild) — match on the lowercased copy.
+    //
+    // 40-char hex hashes: lowercase them, done.
+    //
+    // 32-char base32 hashes (RFC 4648 alphabet A-Z + 2-7,
+    // case-insensitive per the RFC): decode to the 20 raw bytes of
+    // the info-hash and re-emit as lowercase hex. We canonicalize at
+    // the source so `grabbed_torrents.hash` — Ryokan's dedup key — is
+    // one shape regardless of the magnet's encoding. Non-qBit clients
+    // (Deluge, Transmission) normalize hashes to lowercase hex
+    // internally; leaving a base32 string in the DB would mean our
+    // stored hash didn't match the client's reported hash, silently
+    // breaking dedup the first time a base32 magnet landed under a
+    // non-qBit client. See #63 Phase 0.
     let lower = magnet.to_ascii_lowercase();
     let Some(pos) = lower.find("btih:") else {
         return String::new();
@@ -576,16 +582,52 @@ fn extract_hash(magnet: &str) -> String {
 
     match hash.len() {
         40 => hash.to_ascii_lowercase(),
-        32 => hash.to_string(),
+        32 => match base32_decode_infohash(hash) {
+            Some(bytes) => hex::encode(bytes),
+            // Malformed 32-char string — not valid RFC 4648 base32.
+            // Fall through to lowercase so we return *something*
+            // rather than silently swallowing; callers that treat ""
+            // as "no hash" stay unaffected, and a lowercased garbage
+            // string is at least deterministic.
+            None => hash.to_ascii_lowercase(),
+        },
         // Any other length is a malformed BTIH — not a valid
-        // info-hash. The lowercase fallthrough preserves the prior
-        // behaviour of returning *something* to downstream code
-        // rather than silently swallowing the input; a future
-        // stricter version could `return String::new()` here for
-        // defensive rejection without breaking any caller that
-        // already treats "" as "no hash".
+        // info-hash. Lowercase fallthrough preserves the prior
+        // behaviour of returning *something* to downstream code.
         _ => hash.to_ascii_lowercase(),
     }
+}
+
+/// Decode a 32-char RFC 4648 base32 info-hash to 20 raw bytes.
+/// Case-insensitive (accepts both `ABCDEF…` and `abcdef…`). Returns
+/// None for any input that isn't exactly 32 chars of A-Z/a-z/2-7.
+fn base32_decode_infohash(s: &str) -> Option<[u8; 20]> {
+    if s.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut i = 0;
+    for c in s.bytes() {
+        let v: u32 = match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a') as u32,
+            b'2'..=b'7' => (c - b'2') as u32 + 26,
+            _ => return None,
+        };
+        buf = (buf << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out[i] = ((buf >> bits) & 0xff) as u8;
+            i += 1;
+        }
+    }
+    // 32 chars × 5 bits = 160 bits = 20 bytes exactly, no residual.
+    debug_assert_eq!(bits, 0);
+    debug_assert_eq!(i, 20);
+    Some(out)
 }
 
 fn parse_size(s: &str) -> i64 {
@@ -1033,14 +1075,81 @@ mod tests {
         );
     }
 
+    /// Test-only base32 encoder used for round-trip verification of
+    /// `extract_hash`'s canonicalization. RFC 4648 alphabet, no padding
+    /// (20 bytes → 32 chars exactly, no padding needed).
+    #[cfg(test)]
+    fn base32_encode_for_test(bytes: &[u8]) -> String {
+        const ALPHA: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut out = String::new();
+        let mut buf: u32 = 0;
+        let mut bits: u32 = 0;
+        for &b in bytes {
+            buf = (buf << 8) | b as u32;
+            bits += 8;
+            while bits >= 5 {
+                bits -= 5;
+                out.push(ALPHA[((buf >> bits) & 0x1f) as usize] as char);
+            }
+        }
+        if bits > 0 {
+            out.push(ALPHA[((buf << (5 - bits)) & 0x1f) as usize] as char);
+        }
+        out
+    }
+
     #[test]
-    fn extract_hash_preserves_base32_case() {
-        // 32-char base32 info-hashes are case-sensitive. Prior impl
-        // .to_lowercase()'d them, producing a hash that didn't match
-        // what qBit actually stored.
-        let base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    fn extract_hash_canonicalizes_base32_to_hex() {
+        // Base32-encoded magnets must produce the same dedup key as
+        // their hex-encoded siblings. Non-qBit clients (Deluge,
+        // Transmission) normalize to hex internally — storing base32
+        // would break dedupe silently. #63 Phase 0.
+        let hex_hash = "abcdef0123456789abcdef0123456789abcdef01";
+        let bytes = hex::decode(hex_hash).expect("known-good hex");
+        let base32 = base32_encode_for_test(&bytes);
+        assert_eq!(base32.len(), 32, "20 bytes → 32 base32 chars");
         let magnet = format!("magnet:?xt=urn:btih:{base32}&dn=thing");
-        assert_eq!(extract_hash(&magnet), base32);
+        assert_eq!(extract_hash(&magnet), hex_hash);
+    }
+
+    #[test]
+    fn extract_hash_base32_accepts_lowercase() {
+        // RFC 4648 base32 is case-insensitive; some magnet generators
+        // emit lowercase. Decoder must accept both shapes.
+        let hex_hash = "abcdef0123456789abcdef0123456789abcdef01";
+        let bytes = hex::decode(hex_hash).expect("known-good hex");
+        let base32_lower = base32_encode_for_test(&bytes).to_ascii_lowercase();
+        let magnet = format!("magnet:?xt=urn:btih:{base32_lower}&dn=thing");
+        assert_eq!(extract_hash(&magnet), hex_hash);
+    }
+
+    #[test]
+    fn extract_hash_base32_hex_round_trip_agree() {
+        // The hex and base32 forms of the same info-hash must produce
+        // identical `extract_hash` output — this is the invariant that
+        // makes dedupe work across magnet encodings.
+        let hex_hash = "0f8ee3286d768fb53ae593f10155a5077e38e893";
+        let bytes = hex::decode(hex_hash).expect("known-good hex");
+        let base32 = base32_encode_for_test(&bytes);
+        let hex_magnet = format!("magnet:?xt=urn:btih:{hex_hash}&dn=thing");
+        let base32_magnet = format!("magnet:?xt=urn:btih:{base32}&dn=thing");
+        let uc_hex_magnet = format!(
+            "magnet:?xt=urn:btih:{}&dn=thing",
+            hex_hash.to_ascii_uppercase()
+        );
+        assert_eq!(extract_hash(&hex_magnet), hex_hash);
+        assert_eq!(extract_hash(&base32_magnet), hex_hash);
+        assert_eq!(extract_hash(&uc_hex_magnet), hex_hash);
+    }
+
+    #[test]
+    fn extract_hash_malformed_base32_falls_back() {
+        // 32-char payload that fails RFC 4648 decoding (contains '1',
+        // which is not in the base32 alphabet). Callers get a
+        // lowercased string rather than "", matching the defensive
+        // fallthrough behavior for other malformed inputs.
+        let magnet = "magnet:?xt=urn:btih:11111111111111111111111111111111&dn=thing";
+        assert_eq!(extract_hash(magnet), "11111111111111111111111111111111");
     }
 
     #[test]
