@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
@@ -56,8 +57,32 @@ pub struct QbitClient {
     http: Client,
     logged_in: Arc<Mutex<bool>>,
     torrents_cache: Arc<Mutex<TorrentsCacheSlot>>,
-    torrents_fetch_in_flight: Arc<Mutex<bool>>,
+    /// Single-flight election flag for the `/torrents/info` fetch.
+    /// An `AtomicBool` rather than `Mutex<bool>` specifically so the
+    /// RAII `FetchFlightGuard` below can clear it from `Drop` — which
+    /// is sync and can't `.await` a `tokio::sync::Mutex`. The guard
+    /// ensures a panic inside `list_scoped_uncached` can't wedge the
+    /// flag at `true` forever, silently turning every subsequent
+    /// caller into a waiter stuck on `notify_waiters()` that will
+    /// never fire.
+    torrents_fetch_in_flight: Arc<AtomicBool>,
     torrents_fetch_done: Arc<Notify>,
+}
+
+/// RAII guard that clears the in-flight flag and wakes waiters on
+/// drop — on both the happy and panic paths. Constructed only on the
+/// fetcher branch of `list_scoped`, immediately after the
+/// compare-and-swap that claimed leadership.
+struct FetchFlightGuard<'a> {
+    flag: &'a AtomicBool,
+    notify: &'a Notify,
+}
+
+impl Drop for FetchFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
 }
 
 /// Raw torrent shape qBit returns from `/torrents/info`. Deserialized
@@ -115,7 +140,7 @@ impl QbitClient {
             http,
             logged_in: Arc::new(Mutex::new(false)),
             torrents_cache: Arc::new(Mutex::new(None)),
-            torrents_fetch_in_flight: Arc::new(Mutex::new(false)),
+            torrents_fetch_in_flight: Arc::new(AtomicBool::new(false)),
             torrents_fetch_done: Arc::new(Notify::new()),
         }
     }
@@ -435,17 +460,18 @@ impl DownloadClient for QbitClient {
             }
         }
 
+        // Register for the wake-up BEFORE we try to become the fetcher
+        // so a fast fetcher can't complete and wake between our CAS
+        // attempt and our await — that would make us miss the wake-up
+        // and hang until the next mutation.
         let notified = self.torrents_fetch_done.notified();
         tokio::pin!(notified);
-        let is_fetcher = {
-            let mut flag = self.torrents_fetch_in_flight.lock().await;
-            if *flag {
-                false
-            } else {
-                *flag = true;
-                true
-            }
-        };
+
+        // Atomic compare-and-swap elects exactly one fetcher per burst.
+        let is_fetcher = self
+            .torrents_fetch_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
 
         if !is_fetcher {
             notified.as_mut().await;
@@ -457,20 +483,31 @@ impl DownloadClient for QbitClient {
                     return Ok(torrents.clone());
                 }
             }
+            // Leader's fetch errored (cache still empty). Fall through
+            // to an uncoordinated direct fetch so this waiter doesn't
+            // return stale or empty data.
             return self.list_scoped_uncached().await;
         }
+
+        // Fetcher path. `_flight_guard` clears the in-flight flag and
+        // wakes waiters in its `Drop`, so a panic inside
+        // `list_scoped_uncached` can't wedge the flag at `true` and
+        // leave every subsequent caller stuck awaiting a notify that
+        // never fires. Without this, a single panic inside
+        // JSON-parsing would silently brick the downloads queue for
+        // the life of the process.
+        let _flight_guard = FetchFlightGuard {
+            flag: &self.torrents_fetch_in_flight,
+            notify: &self.torrents_fetch_done,
+        };
 
         let result = self.list_scoped_uncached().await;
         if let Ok(ref torrents) = result {
             let mut guard = self.torrents_cache.lock().await;
             *guard = Some((Instant::now(), torrents.clone()));
         }
-        {
-            let mut flag = self.torrents_fetch_in_flight.lock().await;
-            *flag = false;
-        }
-        self.torrents_fetch_done.notify_waiters();
         result
+        // _flight_guard drops here: clears flag + notifies waiters.
     }
 
     async fn get_files(&self, info_hash: &str) -> Result<Vec<DownloadFile>, String> {
@@ -608,6 +645,10 @@ fn normalize_base_url(base_url: &str) -> String {
     }
 
     let lower = trimmed.to_ascii_lowercase();
+    // RFC 1918 + loopback + hostname "localhost". The 172.16.0.0/12
+    // block covers 172.16–172.31; each second octet is listed
+    // explicitly (not as a `172.2` prefix) because `172.2`.starts_with
+    // also matches `172.2.x.x` (public) and `172.200-172.255.x.x`.
     let is_local = lower.starts_with("localhost")
         || lower.starts_with("127.")
         || lower.starts_with("10.")
@@ -616,7 +657,16 @@ fn normalize_base_url(base_url: &str) -> String {
         || lower.starts_with("172.17.")
         || lower.starts_with("172.18.")
         || lower.starts_with("172.19.")
-        || lower.starts_with("172.2")
+        || lower.starts_with("172.20.")
+        || lower.starts_with("172.21.")
+        || lower.starts_with("172.22.")
+        || lower.starts_with("172.23.")
+        || lower.starts_with("172.24.")
+        || lower.starts_with("172.25.")
+        || lower.starts_with("172.26.")
+        || lower.starts_with("172.27.")
+        || lower.starts_with("172.28.")
+        || lower.starts_with("172.29.")
         || lower.starts_with("172.30.")
         || lower.starts_with("172.31.");
 
@@ -658,6 +708,30 @@ mod tests {
         assert_eq!(
             normalize_base_url("seedbox.example.com"),
             "https://seedbox.example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_rfc1918_full_172_range() {
+        // Every octet in 172.16–172.31 should be treated as local. The
+        // old `starts_with("172.2")` check caught 172.20–172.29 but
+        // also (incorrectly) 172.2.x.x — a public IP.
+        for octet in 16..=31 {
+            let host = format!("172.{octet}.0.1:8080");
+            assert_eq!(
+                normalize_base_url(&host),
+                format!("http://{host}"),
+                "172.{octet}.x.x should be treated as local"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_public_172_2_is_not_local() {
+        // 172.2.x.x is public IP space; must get https, not http.
+        assert_eq!(
+            normalize_base_url("172.2.3.4:8080"),
+            "https://172.2.3.4:8080"
         );
     }
 

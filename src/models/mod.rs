@@ -58,7 +58,7 @@ async fn column_exists(db: &SqlitePool, table: &str, column: &str) -> bool {
 /// `legacy` / `new` are hardcoded column-name string literals from
 /// the callers in `migrate()`, so inline interpolation into the SQL
 /// is safe (no user input reaches PRAGMA or ALTER TABLE here).
-async fn reconcile_restrict_to_group_rename(db: &SqlitePool, table: &str, legacy: &str, new: &str) {
+async fn reconcile_column_rename(db: &SqlitePool, table: &str, legacy: &str, new: &str) {
     let legacy_exists = column_exists(db, table, legacy).await;
     let new_exists = column_exists(db, table, new).await;
 
@@ -1068,20 +1068,23 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Sonarr-parity dual-path tracking (#14 follow-up). Stamped from
-    // qBit's `content_path` (API ≥ 2.6.1) or `save_path` fallback the
-    // moment qBit reports the torrent complete, independent of whether
-    // post-processing has moved the file into the library. The episode
-    // detail modal renders this alongside the post-processed library
-    // path so the operator can see both locations when a torrent
-    // finishes (matters with post-proc off, or when hardlinking keeps
-    // both paths valid simultaneously).
-    sqlx::query(
-        "ALTER TABLE grabbed_torrents ADD COLUMN qbit_content_path TEXT NOT NULL DEFAULT ''",
-    )
-    .execute(db)
-    .await
-    .ok();
+    // Sonarr-parity dual-path tracking (#14 follow-up, renamed to
+    // `client_content_path` in #63 Phase 1). Stamped from the download
+    // client's native content path (qBit ≥ 2.6.1) or `save_path`
+    // fallback the moment the client reports the torrent complete,
+    // independent of whether post-processing has moved the file into
+    // the library. The `reconcile_column_rename` call below handles
+    // all four DB states a column-rename can leave behind:
+    //   - fresh install → adds `client_content_path` (empty default)
+    //   - pre-#63 upgrade with only legacy → renames qbit_content_path
+    //   - post-#63 steady state → no-op
+    //   - (rare) both columns present → copy + drop legacy
+    // Note: we deliberately do NOT `ADD COLUMN qbit_content_path` as a
+    // prerequisite. Doing so would tip every post-migration boot into
+    // the `(true, true)` branch, which triggers a SQLite `DROP COLUMN`
+    // — and SQLite ≥ 3.35 implements DROP COLUMN as a full-table
+    // rewrite, so leaving the legacy ADD in place rewrites
+    // `grabbed_torrents` on every startup.
 
     // ── #63 Phase 1 — pluggable download clients ───────────────────────
     //
@@ -1114,7 +1117,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // Rename `qbit_content_path` → `client_content_path` so the field
     // name reflects the trait abstraction. Uses the same state-matrix
     // reconciler as the PR #37 rename so half-migrated DBs survive.
-    reconcile_restrict_to_group_rename(
+    reconcile_column_rename(
         db,
         "grabbed_torrents",
         "qbit_content_path",
@@ -1551,18 +1554,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // column" — leaving the user's uploader value stranded in an
     // orphan legacy column alongside an empty new one).
     //
-    // `reconcile_restrict_to_group_rename` handles the four possible
+    // `reconcile_column_rename` handles the four possible
     // states — legacy-only, new-only, both, neither — in the order
     // that makes each a one-shot forward move without data loss.
-    reconcile_restrict_to_group_rename(
+    reconcile_column_rename(
         db,
         "config",
         "default_restrict_to_group",
         "default_restrict_to_uploader",
     )
     .await;
-    reconcile_restrict_to_group_rename(db, "series", "restrict_to_group", "restrict_to_uploader")
-        .await;
+    reconcile_column_rename(db, "series", "restrict_to_group", "restrict_to_uploader").await;
 
     // #30 — Cumulative episode count of the shortest TV-format PREQUEL
     // chain. Used at search time to accept absolute-numbered Nyaa
@@ -1714,7 +1716,7 @@ mod tests {
         .await
         .expect("seed legacy row");
 
-        reconcile_restrict_to_group_rename(
+        reconcile_column_rename(
             &db,
             "config",
             "default_restrict_to_group",
@@ -1761,7 +1763,7 @@ mod tests {
             .await
             .expect("seed legacy row");
 
-        reconcile_restrict_to_group_rename(
+        reconcile_column_rename(
             &db,
             "config",
             "default_restrict_to_group",
@@ -1806,7 +1808,7 @@ mod tests {
         .await
         .expect("seed row");
 
-        reconcile_restrict_to_group_rename(
+        reconcile_column_rename(
             &db,
             "config",
             "default_restrict_to_group",
@@ -1846,7 +1848,7 @@ mod tests {
             .await
             .expect("seed empty row");
 
-        reconcile_restrict_to_group_rename(
+        reconcile_column_rename(
             &db,
             "config",
             "default_restrict_to_group",

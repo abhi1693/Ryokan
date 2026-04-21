@@ -256,10 +256,6 @@ pub async fn wait_for_files(
 /// list, for clients (Deluge/Transmission/rtorrent) that don't expose
 /// it natively the way qBit ≥ 2.6.1 does. Handles the three cases:
 ///
-/// Phase 1: unused (qBit impl uses its native `content_path` field).
-/// Phase 2+ impls will call this to produce a client-agnostic path.
-#[allow(dead_code)]
-///
 ///   1. **Single-file torrent** (`files.len() == 1`, no `/` in the
 ///      name): `save_path + "/" + files[0].name`. Points at the
 ///      file itself.
@@ -271,6 +267,10 @@ pub async fn wait_for_files(
 ///
 /// Returns an empty string if `files` is empty (metadata not yet
 /// known) — caller should check and retry.
+///
+/// Phase 1: unused (qBit impl uses its native `content_path` field).
+/// Phase 2+ impls will call this to produce a client-agnostic path.
+#[allow(dead_code)]
 pub fn compute_content_path(save_path: &str, files: &[DownloadFile]) -> String {
     if files.is_empty() {
         return String::new();
