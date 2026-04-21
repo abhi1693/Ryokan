@@ -505,6 +505,25 @@ mod tests {
     }
 
     #[test]
+    fn translate_client_path_exact_match_collapses_to_local() {
+        // `path == client_save_path` is the common case when
+        // post-processing asks for the translated save_path itself
+        // (not a content_path under it). `strip_prefix` returns
+        // `Some("")`, so the concatenation becomes `local + ""` —
+        // we just return `local`.
+        assert_eq!(
+            translate_client_path("/downloads", "/downloads", "/mnt/seedbox"),
+            "/mnt/seedbox"
+        );
+        // Trailing slash on input is also handled — trimmed to the
+        // same canonical form.
+        assert_eq!(
+            translate_client_path("/downloads/", "/downloads", "/mnt/seedbox"),
+            "/mnt/seedbox/"
+        );
+    }
+
+    #[test]
     fn state_is_complete_catches_all_seed_variants() {
         use DownloadItemState::*;
         assert!(Seeding.is_complete());

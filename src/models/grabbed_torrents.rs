@@ -418,11 +418,10 @@ pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 /// collision. Returns the number of rows updated so the caller can
 /// surface "N pending grabs cancelled" in the UI notice.
 ///
-/// `reason` is stored in the `torrent_name`-adjacent notes? — no,
-/// there's no free-text failure_reason column today. Accepted as a
-/// parameter for forward-compat (and logged by the caller); the SQL
-/// just flips state.
-pub async fn mark_all_pending_failed(db: &SqlitePool, _reason: &str) -> Result<u64, sqlx::Error> {
+/// No reason string is stored — `grabbed_torrents` has no free-text
+/// failure_reason column today. Callers log the reason separately
+/// at `info` level if they want it on the trail.
+pub async fn mark_all_pending_failed(db: &SqlitePool) -> Result<u64, sqlx::Error> {
     let result =
         sqlx::query("UPDATE grabbed_torrents SET state = 'failed' WHERE state = 'pending'")
             .execute(db)

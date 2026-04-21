@@ -749,6 +749,18 @@ async fn import_torrent(
     // from its own filesystem namespace (container-internal for
     // Docker, seedbox-internal for remote setups) and isn't
     // reachable from Ryokan's process without translation.
+    //
+    // **Known limitation**: when the client uses per-category /
+    // per-label save paths (Deluge "Move completed on label", qBit
+    // per-category save paths), each torrent reports a different
+    // `save_path` extending a common base (`/downloads/anime` vs
+    // `/downloads/movies`). The single-field `<client>_download_path`
+    // can't preserve that subdir — every torrent lands under the
+    // same local base, flattening the category subdir. Covers the
+    // common case (one shared save dir) at the cost of the
+    // per-category case. Fixing would re-introduce the two-field
+    // remote-prefix design we abandoned in 4972624; follow-up issue
+    // if this bites a user.
     let per_client_download_path = match cfg.active_client.as_str() {
         "deluge" => &cfg.deluge_download_path,
         _ => &cfg.qbit_download_path,

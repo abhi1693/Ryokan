@@ -642,17 +642,25 @@ pub async fn settings_submit(
             // torrents, which is a superset of our pending grabs in
             // the steady state. Failure to fetch == treat as empty
             // map (can't determine completion); we'll skip deletion
-            // to be safe and let the user clean up manually.
+            // to be safe and let the user clean up manually, and
+            // surface that in the UI notice so they know to look.
+            let list_scoped_result = old_client.list_scoped().await;
+            let list_scoped_failed = list_scoped_result.is_err();
             let states: std::collections::HashMap<
                 String,
                 crate::services::download_client::DownloadItemState,
-            > = old_client
-                .list_scoped()
-                .await
+            > = list_scoped_result
                 .unwrap_or_default()
                 .into_iter()
                 .map(|t| (t.hash.to_lowercase(), t.state_kind))
                 .collect();
+
+            if list_scoped_failed {
+                notices.push(format!(
+                    "Couldn't reach {} to cancel in-flight torrents — verify and clean up manually if any were still downloading.",
+                    old.active_client,
+                ));
+            }
 
             let mut deleted = 0usize;
             let mut skipped_complete = 0usize;
@@ -724,15 +732,9 @@ pub async fn settings_submit(
             }
         }
 
-        let n = crate::models::grabbed_torrents::mark_all_pending_failed(
-            &state.db,
-            &format!(
-                "client switched: {} → {}",
-                old.active_client, cfg.active_client
-            ),
-        )
-        .await
-        .unwrap_or(0);
+        let n = crate::models::grabbed_torrents::mark_all_pending_failed(&state.db)
+            .await
+            .unwrap_or(0);
 
         // Clear the per-episode "grabbed" UI state for every canceled
         // grab. `grabbed_torrents.state='failed'` alone isn't enough —

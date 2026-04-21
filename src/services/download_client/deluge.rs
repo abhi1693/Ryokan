@@ -64,12 +64,6 @@ pub struct DelugeClient {
     password: String,
     label: String,
     http: Client,
-    /// Cached daemon host id from `web.get_hosts`. Captured once on
-    /// first connect; Deluge web UI only has one real daemon slot in
-    /// practice. Wrapped in `Mutex<Option>` rather than `OnceCell`
-    /// so a daemon swap (config change → restart) can re-populate it
-    /// via the reconnect path without tearing down the whole client.
-    host_id: Arc<Mutex<Option<String>>>,
     /// Flipped to `true` after a successful `auth.login` +
     /// `web.connect`. Any RPC error that smells like "session
     /// expired" or "not connected to daemon" clears it so the next
@@ -169,7 +163,6 @@ impl DelugeClient {
                 label.to_string()
             },
             http,
-            host_id: Arc::new(Mutex::new(None)),
             connected: Arc::new(AtomicBool::new(false)),
             connect_lock: Arc::new(Mutex::new(())),
         }
@@ -230,7 +223,11 @@ impl DelugeClient {
             return Err("Deluge auth failed: invalid password".into());
         }
 
-        // Step 2: resolve host_id and connect to the daemon.
+        // Step 2: resolve host_id and connect to the daemon. No need
+        // to cache the host_id across calls — every `connect()`
+        // invocation re-fetches it, which is fine because
+        // `connect()` only runs on initial handshake + session
+        // expiry re-probes (not per-call).
         let hosts_raw = self.rpc("web.get_hosts", json!([])).await?;
         let hosts: Vec<Value> = serde_json::from_value(hosts_raw)
             .map_err(|e| format!("Deluge web.get_hosts parse failed: {e}"))?;
@@ -241,7 +238,6 @@ impl DelugeClient {
             .and_then(|v| v.as_str())
             .ok_or("Deluge web.get_hosts returned no hosts")?
             .to_string();
-        *self.host_id.lock().await = Some(host_id.clone());
 
         // web.connect returns the list of daemon methods now available
         // via RPC. We don't inspect the list — the only signal we need
@@ -353,7 +349,7 @@ impl DownloadClient for DelugeClient {
         Ok(version)
     }
 
-    async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
+    async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
         // `core.add_torrent_magnet` for magnet URIs; `core.add_torrent_url`
         // for http:// .torrent URLs. The distinction matters because
         // `add_torrent_magnet` errors on an http URL and vice versa
@@ -370,23 +366,47 @@ impl DownloadClient for DelugeClient {
             )
         };
 
-        let outcome = match self.connected_rpc(method, params).await {
-            Ok(Value::String(hash)) if !hash.is_empty() => {
-                // Fresh add returned the info_hash. Tag it with our
-                // scoping label; failures here are non-fatal — label
-                // plugin might be mid-enable on a fresh install and
-                // list_scoped will pick the torrent up next poll via
-                // any fallback we add later. For now, warn-log and
-                // continue so the grab isn't rejected outright.
-                let _ = self
-                    .connected_rpc("label.set_torrent", json!([hash, self.label]))
-                    .await;
-                AddOutcome::Added
+        let (outcome, hash_for_label) = match self.connected_rpc(method, params).await {
+            Ok(Value::String(hash)) if !hash.is_empty() => (AddOutcome::Added, Some(hash)),
+            Ok(_) => (AddOutcome::Added, None), // add_torrent_url returns null
+            Err(msg) if is_duplicate_add_error(&msg) => {
+                // Deluge's "already in session" error carries the
+                // infohash in the message ("Torrent already in session
+                // (<hash>)"). We don't bother parsing it out — the
+                // caller pre-computed `info_hash` and passed it in.
+                // Tag the existing torrent with our label too: if the
+                // user (or Ryokan from a prior session) manually
+                // added this torrent without the label, the re-grab
+                // should "adopt" it rather than leave it invisible to
+                // `list_scoped`.
+                (
+                    AddOutcome::AlreadyPresent,
+                    Some(info_hash.to_ascii_lowercase()),
+                )
             }
-            Ok(_) => AddOutcome::Added, // add_torrent_url returns null
-            Err(msg) if is_duplicate_add_error(&msg) => AddOutcome::AlreadyPresent,
             Err(msg) => return Err(msg),
         };
+
+        // Tag the torrent with our scoping label. Failures here are
+        // non-fatal to the grab — the torrent is in the client — but
+        // matter for `list_scoped` visibility: an unlabeled torrent
+        // won't show up in the label-filtered listing and Ryokan will
+        // sit forever waiting for it to "appear." Log so the operator
+        // has a trail when that happens.
+        if let Some(hash) = hash_for_label
+            && let Err(e) = self
+                .connected_rpc("label.set_torrent", json!([hash, self.label]))
+                .await
+        {
+            tracing::warn!(
+                target: "ryokan::download_client::deluge",
+                hash = %hash,
+                label = %self.label,
+                error = %e,
+                "label.set_torrent failed — torrent will be invisible to list_scoped until the Label plugin is working and the label is set"
+            );
+        }
+
         Ok(outcome)
     }
 
@@ -503,7 +523,23 @@ impl DownloadClient for DelugeClient {
         let map: std::collections::HashMap<String, DelugeRawTorrent> = serde_json::from_value(raw)
             .map_err(|e| format!("Deluge list_scoped parse failed: {e}"))?;
 
-        Ok(map.into_values().map(to_download_item).collect())
+        // The dict is keyed by infohash; inject the key into each
+        // `DelugeRawTorrent.hash` before conversion. We don't trust
+        // the inner `hash` field alone: `get_torrent_status` silently
+        // omits unknown keys, and future Deluge builds or forks
+        // aren't guaranteed to include `hash` in the status dict.
+        // Worst case without this: every `DownloadItem.hash` ends up
+        // empty and post-processing's grab→torrent match via
+        // `by_hash` silently fails.
+        Ok(map
+            .into_iter()
+            .map(|(key, mut raw)| {
+                if raw.hash.is_empty() {
+                    raw.hash = key;
+                }
+                to_download_item(raw)
+            })
+            .collect())
     }
 
     async fn get_files(&self, info_hash: &str) -> Result<Vec<DownloadFile>, String> {
