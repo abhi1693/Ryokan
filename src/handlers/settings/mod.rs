@@ -172,6 +172,16 @@ pub struct SettingsForm {
     deluge_label: String,
     #[serde(default)]
     deluge_download_path: String,
+    #[serde(default)]
+    transmission_url: String,
+    #[serde(default)]
+    transmission_user: String,
+    #[serde(default)]
+    transmission_password: String,
+    #[serde(default)]
+    transmission_label: String,
+    #[serde(default)]
+    transmission_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -403,6 +413,7 @@ pub async fn settings_submit(
     let cfg = config::Config {
         active_client: match form.active_client.trim() {
             "deluge" => "deluge".to_string(),
+            "transmission" => "transmission".to_string(),
             // Any other value (including empty from pre-Phase-2 form
             // submissions) collapses to qbittorrent — preserves the
             // Phase 1 default and avoids accidentally switching users
@@ -430,6 +441,26 @@ pub async fn settings_submit(
         },
         deluge_download_path: form
             .deluge_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        transmission_url: form
+            .transmission_url
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        transmission_user: form.transmission_user.trim().to_string(),
+        transmission_password: form.transmission_password,
+        transmission_label: {
+            let trimmed = form.transmission_label.trim();
+            if trimmed.is_empty() {
+                "ryokan".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        },
+        transmission_download_path: form
+            .transmission_download_path
             .trim()
             .trim_end_matches('/')
             .to_string(),
@@ -779,6 +810,11 @@ pub async fn settings_submit(
                 "Deluge",
                 !cfg.deluge_url.is_empty(),
                 cfg.deluge_url.as_str(),
+            ),
+            "transmission" => (
+                "Transmission",
+                !cfg.transmission_url.is_empty(),
+                cfg.transmission_url.as_str(),
             ),
             _ => (
                 "qBittorrent",

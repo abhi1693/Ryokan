@@ -38,6 +38,7 @@
                 <select name="active_client" id="active_client" onchange="toggleClientFieldset(this.value)">
                     <option value="qbittorrent" {% if config.active_client == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
                     <option value="deluge" {% if config.active_client == "deluge" %}selected{% endif %}>Deluge</option>
+                    <option value="transmission" {% if config.active_client == "transmission" %}selected{% endif %}>Transmission</option>
                 </select>
                 <span class="form-hint">Ryokan talks to one client at a time. Switching cancels any pending grabs queued against the previous client.</span>
             </div>
@@ -102,6 +103,38 @@
                 <label for="deluge_download_path">Download Path (as seen by Ryokan)</label>
                 <input type="text" name="deluge_download_path" id="deluge_download_path" value="{{ config.deluge_download_path }}" placeholder="/downloads">
                 <span class="form-hint">The local path where Deluge's completed downloads are accessible to Ryokan. When Deluge runs in Docker with a host volume mount, enter the host-side path. When Deluge runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and Deluge see the exact same paths.</span>
+            </div>
+        </fieldset>
+
+        <fieldset id="transmission-fieldset" {% if config.active_client != "transmission" %}style="display:none"{% endif %}>
+            <legend>Transmission <span id="transmission-health" class="form-hint"></span></legend>
+            <div class="form-group">
+                <label for="transmission_url">URL</label>
+                <input type="text" name="transmission_url" id="transmission_url" value="{{ config.transmission_url }}" placeholder="http://localhost:9091">
+                <span class="form-hint">Transmission RPC base URL (Ryokan appends <code>/transmission/rpc</code>). Default port is 9091.</span>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="transmission_user">Username</label>
+                    <input type="text" name="transmission_user" id="transmission_user" value="{{ config.transmission_user }}">
+                </div>
+                <div class="form-group">
+                    <label for="transmission_password">Password</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <input type="password" name="transmission_password" id="transmission_password" value="{{ config.transmission_password }}" style="flex:1">
+                        <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('transmission_password', this)" style="white-space:nowrap">Show</button>
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="transmission_label">Scoping label</label>
+                <input type="text" name="transmission_label" id="transmission_label" value="{{ config.transmission_label }}" placeholder="ryokan">
+                <span class="form-hint">Ryokan tags every torrent it adds with this label and filters by it when listing. Requires Transmission 4.x for native label support.</span>
+            </div>
+            <div class="form-group">
+                <label for="transmission_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="transmission_download_path" id="transmission_download_path" value="{{ config.transmission_download_path }}" placeholder="/downloads">
+                <span class="form-hint">The local path where Transmission's completed downloads are accessible to Ryokan. When Transmission runs in Docker with a host volume mount, enter the host-side path. When Transmission runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and Transmission see the exact same paths.</span>
             </div>
         </fieldset>
 
@@ -1120,8 +1153,10 @@ function generateRadarrApiKey() {
 function toggleClientFieldset(value) {
     const qbit = document.getElementById('qbit-fieldset');
     const deluge = document.getElementById('deluge-fieldset');
+    const transmission = document.getElementById('transmission-fieldset');
     if (qbit) qbit.style.display = value === 'qbittorrent' ? '' : 'none';
     if (deluge) deluge.style.display = value === 'deluge' ? '' : 'none';
+    if (transmission) transmission.style.display = value === 'transmission' ? '' : 'none';
 }
 
 // API-key inputs render as type="password" so the secret isn't visible
