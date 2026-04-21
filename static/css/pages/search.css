@@ -166,12 +166,6 @@
 
 .col-name a:hover { color: var(--accent); }
 
-.score-high { background: rgba(125, 211, 147, 0.15); color: var(--green); }
-
-.score-mid { background: rgba(203, 166, 247, 0.12); color: var(--accent); }
-
-.score-low { background: rgba(211, 125, 125, 0.12); color: var(--red); }
-
 .result-tags { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
 
 .tag-group { background: rgba(203, 166, 247, 0.1); color: var(--accent); }

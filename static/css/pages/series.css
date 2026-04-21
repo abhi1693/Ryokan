@@ -995,6 +995,14 @@
     white-space: nowrap;
 }
 
+.grab-state-grabbed { color: var(--green); font-weight: 600; }
+
+.grab-state-completed { color: var(--accent); font-weight: 600; }
+
+.grab-state-failed { color: var(--red); font-weight: 600; }
+
+.grab-state-removed { color: var(--text-dim); font-weight: 600; }
+
 .btn-mark-failed {
     font-size: 11px;
     padding: 3px 8px;

@@ -783,14 +783,6 @@ input[type="file"]::file-selector-button:hover {
     to { transform: rotate(360deg); }
 }
 
-.grab-state-grabbed { color: var(--green); font-weight: 600; }
-
-.grab-state-completed { color: var(--accent); font-weight: 600; }
-
-.grab-state-failed { color: var(--red); font-weight: 600; }
-
-.grab-state-removed { color: var(--text-dim); font-weight: 600; }
-
 .dl-progress-wrap {
     display: flex;
     align-items: center;

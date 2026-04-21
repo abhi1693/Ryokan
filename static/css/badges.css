@@ -9,6 +9,12 @@
     border-radius: 4px;
 }
 
+.score-high { background: rgba(125, 211, 147, 0.15); color: var(--green); }
+
+.score-mid { background: rgba(203, 166, 247, 0.12); color: var(--accent); }
+
+.score-low { background: rgba(211, 125, 125, 0.12); color: var(--red); }
+
 .tag-batch { background: var(--blue-bg); color: var(--blue); }
 
 .tag-trusted { background: var(--green-bg); color: var(--green); }
