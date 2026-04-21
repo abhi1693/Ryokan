@@ -13,25 +13,14 @@ use crate::services::{artwork, logger, media, nfo};
 static POST_PROC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// States qBittorrent reports for a fully downloaded torrent.
-fn is_complete(state: &str) -> bool {
-    matches!(
-        state,
-        "uploading"
-            | "stalledUP"
-            | "queuedUP"
-            | "forcedUP"
-            | "pausedUP"
-            | "checkingUP"
-            | "seeding"
-            | "stoppedUP"
-    )
-}
-
-/// States that indicate a torrent has failed or has errors.
-fn is_errored(state: &str) -> bool {
-    matches!(state, "error" | "missingFiles")
-}
+// Completion and error detection goes through the trait's normalized
+// `DownloadItemState` enum (`torrent.state_kind.is_complete()` etc.)
+// rather than matching on the raw `state` string — the string is the
+// client-native label (qBit: `"stalledUP"`; Deluge: `"Seeding"`), and
+// the Phase 1 enum normalizes those into one representation for
+// client-agnostic checks. Pre-refactor this function only knew qBit's
+// string set, which silently skipped Deluge's completed torrents
+// forever (#63 Phase 2 regression).
 
 /// Check if a grab is older than `max_age_secs` seconds.
 pub fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
@@ -1472,7 +1461,7 @@ pub async fn run_once(state: &AppState) {
         };
 
         // Detect failed/error torrents and mark them.
-        if is_errored(&torrent.state) {
+        if torrent.state_kind.is_errored() {
             logger::warn(
                 &state.db,
                 LogCategory::PostProcess,
@@ -1484,7 +1473,7 @@ pub async fn run_once(state: &AppState) {
             continue;
         }
 
-        if !is_complete(&torrent.state) {
+        if !torrent.state_kind.is_complete() {
             continue;
         }
 
@@ -1636,7 +1625,7 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         };
         let Some(torrent) = matched else { continue };
 
-        if !is_complete(&torrent.state) {
+        if !torrent.state_kind.is_complete() {
             continue;
         }
 
