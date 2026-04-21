@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::AppState;
+use crate::handlers::arr_shared::{
+    DownloadClientEntry, LookupQuery, QualityProfile, SystemStatus, Tag, TagBody,
+};
 use crate::models::log::LogCategory;
 use crate::models::{config, monitoring, series};
 use crate::services::{anibridge, anilist, logger, media, monitoring as monitoring_service};
@@ -125,13 +128,6 @@ pub struct SonarrStatistics {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QualityProfile {
-    id: i32,
-    name: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RootFolder {
     id: i32,
     path: String,
@@ -147,51 +143,7 @@ pub struct LanguageProfile {
     name: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Tag {
-    id: i32,
-    label: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SystemStatus {
-    version: String,
-    build_time: String,
-    is_debug: bool,
-    is_production: bool,
-    is_admin: bool,
-    is_user_interactive: bool,
-    startup_path: String,
-    app_data: String,
-    os_name: String,
-    os_version: String,
-    is_net_core: bool,
-    is_mono: bool,
-    is_linux: bool,
-    is_osx: bool,
-    is_windows: bool,
-    is_docker: bool,
-    mode: String,
-    branch: String,
-    authentication: String,
-    sqlite_version: String,
-    migration_version: i32,
-    url_base: String,
-    runtime_version: String,
-    runtime_name: String,
-    start_time: String,
-    package_update_mechanism: String,
-    app_name: String,
-}
-
 // ── Request types ──────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct SeriesLookupQuery {
-    term: String,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -247,44 +199,11 @@ pub struct CommandBody {
     pub series_id: Option<i64>,
 }
 
-#[derive(Deserialize)]
-pub struct TagBody {
-    pub label: Option<String>,
-}
-
 // ── Handlers ───────────────────────────────────────────────────────────────
 
 /// GET /api/v3/system/status
 pub async fn system_status() -> Json<SystemStatus> {
-    Json(SystemStatus {
-        version: "3.0.9.1549".to_string(),
-        build_time: "2024-01-01T00:00:00Z".to_string(),
-        is_debug: false,
-        is_production: true,
-        is_admin: false,
-        is_user_interactive: false,
-        startup_path: String::new(),
-        app_data: String::new(),
-        os_name: "linux".to_string(),
-        os_version: String::new(),
-        is_net_core: true,
-        is_mono: false,
-        is_linux: true,
-        is_osx: false,
-        is_windows: false,
-        is_docker: false,
-        mode: "default".to_string(),
-        branch: "main".to_string(),
-        authentication: "none".to_string(),
-        sqlite_version: String::new(),
-        migration_version: 0,
-        url_base: String::new(),
-        runtime_version: String::new(),
-        runtime_name: String::new(),
-        start_time: "2024-01-01T00:00:00Z".to_string(),
-        package_update_mechanism: "builtIn".to_string(),
-        app_name: "Ryokan".to_string(),
-    })
+    Json(SystemStatus::default_with_name("Ryokan"))
 }
 
 /// GET /api/v3/qualityprofile
@@ -359,18 +278,6 @@ pub async fn list_download_clients(
     }])
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadClientEntry {
-    pub id: i32,
-    pub name: String,
-    pub enable: bool,
-    pub protocol: String,
-    pub implementation: String,
-    pub config_contract: String,
-    pub priority: i32,
-}
-
 /// POST /api/v3/tag
 pub async fn create_tag(Json(body): Json<TagBody>) -> Json<Tag> {
     Json(Tag {
@@ -385,7 +292,7 @@ pub async fn create_tag(Json(body): Json<TagBody>) -> Json<Tag> {
 /// The ID in the `tvdb:` prefix is a real TVDB ID (Sonarr natively uses TVDB).
 pub async fn series_lookup(
     State(state): State<AppState>,
-    Query(params): Query<SeriesLookupQuery>,
+    Query(params): Query<LookupQuery>,
 ) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
     anibridge::ensure_loaded().await;
     let cfg = config::get_config(&state.db)

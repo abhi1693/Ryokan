@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::AppState;
+use crate::handlers::arr_shared::{
+    DownloadClientEntry, LookupQuery, QualityProfile, SystemStatus, Tag, TagBody,
+};
 use crate::models::log::LogCategory;
 use crate::models::{config, monitoring, series};
 use crate::services::{anibridge, anilist, logger, media, monitoring as monitoring_service};
@@ -106,13 +109,6 @@ pub struct RadarrMovieFile {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RadarrQualityProfile {
-    id: i32,
-    name: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RadarrRootFolder {
     id: i32,
     path: String,
@@ -121,51 +117,7 @@ pub struct RadarrRootFolder {
     unmapped_folders: Vec<()>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RadarrTag {
-    id: i32,
-    label: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RadarrSystemStatus {
-    version: String,
-    build_time: String,
-    is_debug: bool,
-    is_production: bool,
-    is_admin: bool,
-    is_user_interactive: bool,
-    startup_path: String,
-    app_data: String,
-    os_name: String,
-    os_version: String,
-    is_net_core: bool,
-    is_mono: bool,
-    is_linux: bool,
-    is_osx: bool,
-    is_windows: bool,
-    is_docker: bool,
-    mode: String,
-    branch: String,
-    authentication: String,
-    sqlite_version: String,
-    migration_version: i32,
-    url_base: String,
-    runtime_version: String,
-    runtime_name: String,
-    start_time: String,
-    package_update_mechanism: String,
-    app_name: String,
-}
-
 // ── Request types ──────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct MovieLookupQuery {
-    term: String,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,49 +159,22 @@ pub struct RadarrCommandBody {
     pub movie_ids: Option<Vec<i64>>,
 }
 
-#[derive(Deserialize)]
-pub struct RadarrTagBody {
-    pub label: Option<String>,
-}
-
 // ── Handlers ───────────────────────────────────────────────────────────────
 
 /// GET /radarr/api/v3/system/status
-pub async fn system_status() -> Json<RadarrSystemStatus> {
-    Json(RadarrSystemStatus {
-        version: "5.2.6.8376".to_string(),
-        build_time: "2024-01-01T00:00:00Z".to_string(),
-        is_debug: false,
-        is_production: true,
-        is_admin: false,
-        is_user_interactive: false,
-        startup_path: String::new(),
-        app_data: String::new(),
-        os_name: "linux".to_string(),
-        os_version: String::new(),
-        is_net_core: true,
-        is_mono: false,
-        is_linux: true,
-        is_osx: false,
-        is_windows: false,
-        is_docker: false,
-        mode: "default".to_string(),
-        branch: "main".to_string(),
-        authentication: "none".to_string(),
-        sqlite_version: String::new(),
-        migration_version: 0,
-        url_base: "/radarr".to_string(),
-        runtime_version: String::new(),
-        runtime_name: String::new(),
-        start_time: "2024-01-01T00:00:00Z".to_string(),
-        package_update_mechanism: "builtIn".to_string(),
-        app_name: "Ryokan".to_string(),
-    })
+pub async fn system_status() -> Json<SystemStatus> {
+    // Radarr reports a different version string (5.x line) and the url_base
+    // is the `/radarr/` prefix this shim is mounted under; everything else
+    // matches the shared default.
+    let mut s = SystemStatus::default_with_name("Ryokan");
+    s.version = "5.2.6.8376".to_string();
+    s.url_base = "/radarr".to_string();
+    Json(s)
 }
 
 /// GET /radarr/api/v3/qualityprofile
-pub async fn quality_profiles() -> Json<Vec<RadarrQualityProfile>> {
-    Json(vec![RadarrQualityProfile {
+pub async fn quality_profiles() -> Json<Vec<QualityProfile>> {
+    Json(vec![QualityProfile {
         id: 1,
         name: "Default".to_string(),
     }])
@@ -280,13 +205,13 @@ pub async fn root_folders(State(state): State<AppState>) -> Json<Vec<RadarrRootF
 }
 
 /// GET /radarr/api/v3/tag
-pub async fn list_tags() -> Json<Vec<RadarrTag>> {
+pub async fn list_tags() -> Json<Vec<Tag>> {
     Json(vec![])
 }
 
 /// POST /radarr/api/v3/tag
-pub async fn create_tag(Json(body): Json<RadarrTagBody>) -> Json<RadarrTag> {
-    Json(RadarrTag {
+pub async fn create_tag(Json(body): Json<TagBody>) -> Json<Tag> {
+    Json(Tag {
         id: 1,
         label: body.label.unwrap_or_default(),
     })
@@ -298,13 +223,13 @@ pub async fn create_tag(Json(body): Json<RadarrTagBody>) -> Json<RadarrTag> {
 /// this particular endpoint.
 pub async fn list_download_clients(
     State(state): State<AppState>,
-) -> Json<Vec<RadarrDownloadClientEntry>> {
+) -> Json<Vec<DownloadClientEntry>> {
     let client = state.download_client.read().await.clone();
     let Some(client) = client else {
         return Json(vec![]);
     };
     let impl_name = client.sonarr_impl_name();
-    Json(vec![RadarrDownloadClientEntry {
+    Json(vec![DownloadClientEntry {
         id: 1,
         name: "Ryokan".to_string(),
         enable: true,
@@ -315,24 +240,12 @@ pub async fn list_download_clients(
     }])
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct RadarrDownloadClientEntry {
-    pub id: i32,
-    pub name: String,
-    pub enable: bool,
-    pub protocol: String,
-    pub implementation: String,
-    pub config_contract: String,
-    pub priority: i32,
-}
-
 /// GET /radarr/api/v3/movie/lookup?term=tmdb:12345
 ///
 /// Seerr sends `term=tmdb:12345` for TMDB ID lookup.
 pub async fn movie_lookup(
     State(state): State<AppState>,
-    Query(params): Query<MovieLookupQuery>,
+    Query(params): Query<LookupQuery>,
 ) -> Result<Json<Vec<RadarrMovie>>, (StatusCode, String)> {
     anibridge::ensure_loaded().await;
     let cfg = config::get_config(&state.db)
