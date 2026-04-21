@@ -182,6 +182,16 @@ pub struct SettingsForm {
     transmission_label: String,
     #[serde(default)]
     transmission_download_path: String,
+    #[serde(default)]
+    rtorrent_url: String,
+    #[serde(default)]
+    rtorrent_user: String,
+    #[serde(default)]
+    rtorrent_password: String,
+    #[serde(default)]
+    rtorrent_label: String,
+    #[serde(default)]
+    rtorrent_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -414,6 +424,7 @@ pub async fn settings_submit(
         active_client: match form.active_client.trim() {
             "deluge" => "deluge".to_string(),
             "transmission" => "transmission".to_string(),
+            "rtorrent" => "rtorrent".to_string(),
             // Any other value (including empty from pre-Phase-2 form
             // submissions) collapses to qbittorrent — preserves the
             // Phase 1 default and avoids accidentally switching users
@@ -461,6 +472,22 @@ pub async fn settings_submit(
         },
         transmission_download_path: form
             .transmission_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        rtorrent_url: form.rtorrent_url.trim().trim_end_matches('/').to_string(),
+        rtorrent_user: form.rtorrent_user.trim().to_string(),
+        rtorrent_password: form.rtorrent_password,
+        rtorrent_label: {
+            let trimmed = form.rtorrent_label.trim();
+            if trimmed.is_empty() {
+                "ryokan".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        },
+        rtorrent_download_path: form
+            .rtorrent_download_path
             .trim()
             .trim_end_matches('/')
             .to_string(),
@@ -815,6 +842,11 @@ pub async fn settings_submit(
                 "Transmission",
                 !cfg.transmission_url.is_empty(),
                 cfg.transmission_url.as_str(),
+            ),
+            "rtorrent" => (
+                "rTorrent",
+                !cfg.rtorrent_url.is_empty(),
+                cfg.rtorrent_url.as_str(),
             ),
             _ => (
                 "qBittorrent",
