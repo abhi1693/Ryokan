@@ -220,6 +220,105 @@ impl DownloadItemState {
     }
 }
 
+/// Return the per-client `<client>_download_path` for whichever
+/// download client is currently active, based on `config.active_client`.
+/// Empty string when the active client has no override configured —
+/// translate_client_path treats that as "no rewrite."
+pub fn per_client_download_path(config: &crate::models::config::Config) -> &str {
+    match config.active_client.as_str() {
+        "deluge" => &config.deluge_download_path,
+        // qBittorrent is the default / unknown fallback.
+        _ => &config.qbit_download_path,
+    }
+}
+
+/// Translate a client-reported path into one Ryokan-on-host can
+/// actually read. Replaces the client's `save_path` prefix with the
+/// user-configured per-client `download_path`.
+///
+/// Examples:
+///   - Deluge in a Docker container sees `/downloads/Show.mkv`; the
+///     host volume is mounted at `/home/user/downloads-deluge`.
+///     User sets `deluge_download_path = /home/user/downloads-deluge`.
+///     Deluge reports `torrent.save_path = /downloads`. Calling this
+///     with `path = /downloads/Show.mkv`, `client_save_path = /downloads`,
+///     `local_download_path = /home/user/downloads-deluge` produces
+///     `/home/user/downloads-deluge/Show.mkv`.
+///   - qBit on the same host as Ryokan with no config override:
+///     `local_download_path` is empty → returns `path` unchanged.
+///
+/// Trailing slashes on either prefix are normalized so
+/// `/downloads` and `/downloads/` behave identically. If
+/// `local_download_path` is empty, the input is returned unchanged
+/// (no-override case). If the path doesn't start with
+/// `client_save_path`, it's also returned unchanged — silently
+/// rewriting an unexpected path is worse than surfacing the
+/// mismatch as a downstream "file not found" error.
+pub fn translate_client_path(
+    path: &str,
+    client_save_path: &str,
+    local_download_path: &str,
+) -> String {
+    let remote = client_save_path.trim_end_matches('/');
+    let local = local_download_path.trim_end_matches('/');
+    if local.is_empty() {
+        return path.to_string();
+    }
+    if remote.is_empty() {
+        // The client didn't tell us a save_path prefix — all we can
+        // do is return the original. Can happen for edge states
+        // (metadata not yet arrived) but not for completed torrents.
+        return path.to_string();
+    }
+    if let Some(rest) = path.strip_prefix(remote) {
+        format!("{local}{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Construct the concrete download-client impl dictated by the
+/// config's `active_client` discriminator. Returns `None` if the
+/// active client's credentials are empty (user hasn't configured it
+/// yet) — the caller leaves `AppState.download_client` at `None` and
+/// the grab path surfaces "Download client not configured" errors.
+///
+/// Single construction point: both startup init (`main.rs`) and
+/// settings save (`handlers::settings`) go through this so the
+/// "which impl do we pick" logic lives in one place and the arm for
+/// each client ships alongside its `mod deluge` / `mod qbittorrent`
+/// etc. as Phase 3+ clients land.
+pub fn build_download_client(
+    config: &crate::models::config::Config,
+) -> Option<std::sync::Arc<dyn DownloadClient>> {
+    match config.active_client.as_str() {
+        "deluge" => {
+            if config.deluge_url.is_empty() {
+                return None;
+            }
+            Some(std::sync::Arc::new(deluge::DelugeClient::new(
+                &config.deluge_url,
+                &config.deluge_password,
+                &config.deluge_label,
+            )))
+        }
+        // "qbittorrent" or any unknown value — qBit is the safe
+        // default to preserve pre-Phase-2 behavior for unrecognized
+        // discriminators.
+        _ => {
+            if config.qbit_url.is_empty() {
+                return None;
+            }
+            Some(std::sync::Arc::new(qbittorrent::QbitClient::new(
+                &config.qbit_url,
+                &config.qbit_user,
+                &config.qbit_pass,
+                &config.qbit_category,
+            )))
+        }
+    }
+}
+
 /// Poll `get_files` until non-empty or `timeout` elapses. 500ms
 /// initial interval, doubling up to a 2s cap. Used by callers that
 /// need the file list before proceeding (e.g. the 180s background
@@ -349,6 +448,79 @@ mod tests {
     #[test]
     fn content_path_empty_files_returns_empty() {
         assert_eq!(compute_content_path("/downloads", &[]), "");
+    }
+
+    #[test]
+    fn translate_client_path_rewrites_matching_prefix() {
+        assert_eq!(
+            translate_client_path("/downloads/anime/file.mkv", "/downloads", "/mnt/seedbox"),
+            "/mnt/seedbox/anime/file.mkv"
+        );
+    }
+
+    #[test]
+    fn translate_client_path_trims_trailing_slashes() {
+        // Trailing-slash normalization on both sides should produce
+        // identical output — prevents the /downloads vs /downloads/
+        // foot-gun that bites every Sonarr remote-path setup.
+        assert_eq!(
+            translate_client_path("/downloads/x.mkv", "/downloads/", "/mnt/seedbox/"),
+            "/mnt/seedbox/x.mkv"
+        );
+        assert_eq!(
+            translate_client_path("/downloads/x.mkv", "/downloads", "/mnt/seedbox"),
+            "/mnt/seedbox/x.mkv"
+        );
+    }
+
+    #[test]
+    fn translate_client_path_empty_local_passes_through() {
+        // No override configured = no rewrite. The "local client,
+        // no Docker, Ryokan reads client's save_path directly" case.
+        assert_eq!(
+            translate_client_path("/downloads/x.mkv", "/downloads", ""),
+            "/downloads/x.mkv"
+        );
+    }
+
+    #[test]
+    fn translate_client_path_non_matching_prefix_unchanged() {
+        // If the path isn't under the client's save_path, don't
+        // silently rewrite — could indicate user mis-config.
+        assert_eq!(
+            translate_client_path("/other/path.mkv", "/downloads", "/mnt/seedbox"),
+            "/other/path.mkv"
+        );
+    }
+
+    #[test]
+    fn translate_client_path_empty_remote_passes_through() {
+        // Client hasn't reported a save_path yet (e.g. metadata not
+        // arrived). Return the input verbatim rather than turning
+        // `path` into `local/path` which would usually be wrong.
+        assert_eq!(
+            translate_client_path("/downloads/x.mkv", "", "/mnt/seedbox"),
+            "/downloads/x.mkv"
+        );
+    }
+
+    #[test]
+    fn translate_client_path_exact_match_collapses_to_local() {
+        // `path == client_save_path` is the common case when
+        // post-processing asks for the translated save_path itself
+        // (not a content_path under it). `strip_prefix` returns
+        // `Some("")`, so the concatenation becomes `local + ""` —
+        // we just return `local`.
+        assert_eq!(
+            translate_client_path("/downloads", "/downloads", "/mnt/seedbox"),
+            "/mnt/seedbox"
+        );
+        // Trailing slash on input is also handled — trimmed to the
+        // same canonical form.
+        assert_eq!(
+            translate_client_path("/downloads/", "/downloads", "/mnt/seedbox"),
+            "/mnt/seedbox/"
+        );
     }
 
     #[test]

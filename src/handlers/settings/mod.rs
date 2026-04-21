@@ -154,11 +154,24 @@ pub struct SettingsQuery {
 #[derive(Deserialize)]
 pub struct SettingsForm {
     tab: Option<String>,
+    /// #63 Phase 2 — which download client is active. Accepted
+    /// values: "qbittorrent" | "deluge". Settings save branches on
+    /// this to construct the concrete trait impl.
+    #[serde(default)]
+    active_client: String,
     qbit_url: String,
     qbit_user: String,
     qbit_pass: String,
     qbit_category: String,
     qbit_download_path: String,
+    #[serde(default)]
+    deluge_url: String,
+    #[serde(default)]
+    deluge_password: String,
+    #[serde(default)]
+    deluge_label: String,
+    #[serde(default)]
+    deluge_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -388,12 +401,35 @@ pub async fn settings_submit(
         .unwrap_or(false);
 
     let cfg = config::Config {
+        active_client: match form.active_client.trim() {
+            "deluge" => "deluge".to_string(),
+            // Any other value (including empty from pre-Phase-2 form
+            // submissions) collapses to qbittorrent — preserves the
+            // Phase 1 default and avoids accidentally switching users
+            // onto a client they haven't configured.
+            _ => "qbittorrent".to_string(),
+        },
         qbit_url: form.qbit_url.trim().to_string(),
         qbit_user: form.qbit_user.trim().to_string(),
         qbit_pass: form.qbit_pass,
         qbit_category: form.qbit_category.trim().to_string(),
         qbit_download_path: form
             .qbit_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        deluge_url: form.deluge_url.trim().trim_end_matches('/').to_string(),
+        deluge_password: form.deluge_password,
+        deluge_label: {
+            let trimmed = form.deluge_label.trim();
+            if trimmed.is_empty() {
+                "ryokan".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        },
+        deluge_download_path: form
+            .deluge_download_path
             .trim()
             .trim_end_matches('/')
             .to_string(),
@@ -558,31 +594,236 @@ pub async fn settings_submit(
     logger::info(&state.db, LogCategory::System, "Settings saved", "").await;
     let mut notices: Vec<String> = vec!["Settings saved.".to_string()];
 
-    if active_tab == "integrations" {
-        if !cfg.qbit_url.is_empty() {
-            let client: std::sync::Arc<dyn DownloadClient> = std::sync::Arc::new(QbitClient::new(
-                &cfg.qbit_url,
-                &cfg.qbit_user,
-                &cfg.qbit_pass,
-                &cfg.qbit_category,
+    // #63 Phase 2 — client-switch handling. If the user changed
+    // `active_client` on this save, any `grabbed_torrents` rows still
+    // in `state='pending'` point at the OLD client (Ryokan is about
+    // to stop talking to it). Three things need to happen, in order:
+    //
+    //   1. **Delete only the in-flight torrents from the OLD client.**
+    //      An `state='pending'` row at this point is either
+    //      mid-download OR complete-but-not-yet-imported. Deleting
+    //      the mid-download ones is the user's intent ("cancel my
+    //      in-flight grabs"). Deleting the completed-but-not-yet-
+    //      imported ones would wipe finished files the user almost
+    //      certainly wants to keep — they're identical to an already-
+    //      imported torrent from the user's perspective; the only
+    //      difference is post-processing didn't happen to run yet.
+    //      So we gate the delete on `!is_complete()` from the old
+    //      client's view.
+    //
+    //   2. **Mark ALL pending rows as `failed` regardless of delete
+    //      outcome.** The old client is about to disappear from
+    //      AppState; Ryokan can't track these grabs anymore. They
+    //      need to drop out of the partial UNIQUE index on `(hash)
+    //      WHERE state IN ('pending','imported')` so a re-grab in
+    //      the new client can't dedupe against them. Completed
+    //      torrents the user wants to keep stay on the old client's
+    //      disk; Ryokan just forgets about them. The user can still
+    //      see the files manually.
+    //
+    //   3. **Swap the AppState Arc** (further down in the
+    //      `active_tab == "integrations"` block).
+    //
+    // Delete happens BEFORE the Arc swap because the read lock still
+    // holds the OLD client's Arc at this point.
+    if active_tab == "integrations"
+        && let Some(old) = existing_cfg.as_ref()
+        && old.active_client != cfg.active_client
+    {
+        let pending = crate::models::grabbed_torrents::get_all_pending(&state.db)
+            .await
+            .unwrap_or_default();
+
+        if !pending.is_empty()
+            && let Some(old_client) = state.download_client.read().await.clone()
+        {
+            // Build a hash → state_kind map from the old client's
+            // current view. `list_scoped` returns only Ryokan-owned
+            // torrents, which is a superset of our pending grabs in
+            // the steady state. Failure to fetch == treat as empty
+            // map (can't determine completion); we'll skip deletion
+            // to be safe and let the user clean up manually, and
+            // surface that in the UI notice so they know to look.
+            let list_scoped_result = old_client.list_scoped().await;
+            let list_scoped_failed = list_scoped_result.is_err();
+            let states: std::collections::HashMap<
+                String,
+                crate::services::download_client::DownloadItemState,
+            > = list_scoped_result
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| (t.hash.to_lowercase(), t.state_kind))
+                .collect();
+
+            if list_scoped_failed {
+                notices.push(format!(
+                    "Couldn't reach {} to cancel in-flight torrents — verify and clean up manually if any were still downloading.",
+                    old.active_client,
+                ));
+            }
+
+            let mut deleted = 0usize;
+            let mut skipped_complete = 0usize;
+            let mut delete_failures: Vec<String> = Vec::new();
+            for grab in &pending {
+                if grab.hash.is_empty() {
+                    continue;
+                }
+                let hash_lc = grab.hash.to_lowercase();
+                // Only delete the torrent if the old client reports
+                // it's NOT complete. Missing from the map (e.g. user
+                // already deleted it manually in the old client, or
+                // `list_scoped` failed) also skips deletion — we'd
+                // rather leave a dangling download-client row than
+                // delete a completed file the user wanted to keep.
+                match states.get(&hash_lc) {
+                    Some(state) if !state.is_complete() => {
+                        match old_client.delete(&hash_lc, true).await {
+                            Ok(()) => deleted += 1,
+                            Err(e) => delete_failures.push(format!("{}: {}", grab.torrent_name, e)),
+                        }
+                    }
+                    Some(_) => skipped_complete += 1,
+                    None => {
+                        // Not in the old client's list. Could be
+                        // already manually removed, could be that
+                        // list_scoped failed. Either way, skip
+                        // deletion — no action we can take that's
+                        // safer than leaving it alone.
+                    }
+                }
+            }
+            if deleted > 0 {
+                logger::info(
+                    &state.db,
+                    LogCategory::System,
+                    &format!(
+                        "Cancelled {deleted} in-flight grab(s) from {} during client switch",
+                        old.active_client
+                    ),
+                    "",
+                )
+                .await;
+            }
+            if skipped_complete > 0 {
+                logger::info(
+                    &state.db,
+                    LogCategory::System,
+                    &format!(
+                        "Left {skipped_complete} completed grab(s) on {} intact during client switch — files preserved",
+                        old.active_client
+                    ),
+                    "",
+                )
+                .await;
+            }
+            if !delete_failures.is_empty() {
+                logger::warn(
+                    &state.db,
+                    LogCategory::System,
+                    &format!(
+                        "{} in-flight grab(s) could not be deleted from {} — DB state still flipped",
+                        delete_failures.len(),
+                        old.active_client
+                    ),
+                    &delete_failures.join("; "),
+                )
+                .await;
+            }
+        }
+
+        let n = crate::models::grabbed_torrents::mark_all_pending_failed(&state.db)
+            .await
+            .unwrap_or(0);
+
+        // Clear the per-episode "grabbed" UI state for every canceled
+        // grab. `grabbed_torrents.state='failed'` alone isn't enough —
+        // the series page reads `episode_quality_tags.state` for the
+        // UI checkmark / badge, and the existing manual-cancel paths
+        // (`handlers::library::episodes::cancel_pending_episode`,
+        // `services::post_processing::run_once_inner` on stale-torrent
+        // reconciliation) both call `episode_tags::clear_tags_for_removal`
+        // alongside their mark-removed calls. The client-switch path
+        // has to mirror that: without this, episodes sit forever in
+        // "grabbed" state with no backing torrent.
+        for grab in &pending {
+            let _ = crate::models::episode_tags::clear_tags_for_removal(
+                &state.db,
+                grab.series_id,
+                &grab.episode_numbers,
+            )
+            .await;
+        }
+
+        if n > 0 {
+            logger::info(
+                &state.db,
+                LogCategory::System,
+                &format!("Marked {n} pending grabs as failed after client switch"),
+                &format!("old={}, new={}", old.active_client, cfg.active_client),
+            )
+            .await;
+            notices.push(format!(
+                "Client changed from {} to {}; {n} pending grab{} released (in-flight downloads cancelled on {}; any completed files preserved).",
+                old.active_client,
+                cfg.active_client,
+                if n == 1 { "" } else { "s" },
+                old.active_client,
             ));
-            match client.test().await {
-                Ok(version) => {
-                    logger::info(
-                        &state.db,
-                        LogCategory::QBit,
-                        &format!("Connected to qBittorrent {}", version),
-                        &cfg.qbit_url,
-                    )
-                    .await;
-                    notices.push(format!("qBittorrent connected ({}).", version));
-                    *state.download_client.write().await = Some(client);
+        }
+    }
+
+    if active_tab == "integrations" {
+        let (client_label, configured, client_url) = match cfg.active_client.as_str() {
+            "deluge" => (
+                "Deluge",
+                !cfg.deluge_url.is_empty(),
+                cfg.deluge_url.as_str(),
+            ),
+            _ => (
+                "qBittorrent",
+                !cfg.qbit_url.is_empty(),
+                cfg.qbit_url.as_str(),
+            ),
+        };
+        if configured {
+            let client = crate::services::download_client::build_download_client(&cfg);
+            if let Some(client) = client {
+                match client.test().await {
+                    Ok(version) => {
+                        // `LogCategory::QBit` is reused here for
+                        // every download client for now — log
+                        // message body carries the real client name
+                        // in "Connected to X Y.Z", so filtering by
+                        // category still surfaces the events. A
+                        // dedicated `LogCategory::DownloadClient`
+                        // would be cleaner but churns every existing
+                        // qBit log entry's category too; Phase 3
+                        // cleanup.
+                        logger::info(
+                            &state.db,
+                            LogCategory::QBit,
+                            &format!("Connected to {client_label} {version}"),
+                            client_url,
+                        )
+                        .await;
+                        notices.push(format!("{client_label} connected ({version})."));
+                        *state.download_client.write().await = Some(client);
+                    }
+                    Err(e) => {
+                        logger::error(
+                            &state.db,
+                            LogCategory::QBit,
+                            &format!("{client_label} connection failed"),
+                            &e,
+                        )
+                        .await;
+                        *state.download_client.write().await = None;
+                        notices.push(format!("{client_label} connection failed: {e}."));
+                    }
                 }
-                Err(e) => {
-                    logger::error(&state.db, LogCategory::QBit, "Connection failed", &e).await;
-                    *state.download_client.write().await = None;
-                    notices.push(format!("qBittorrent connection failed: {}.", e));
-                }
+            } else {
+                *state.download_client.write().await = None;
             }
         } else {
             *state.download_client.write().await = None;

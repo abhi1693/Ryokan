@@ -13,25 +13,14 @@ use crate::services::{artwork, logger, media, nfo};
 static POST_PROC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// States qBittorrent reports for a fully downloaded torrent.
-fn is_complete(state: &str) -> bool {
-    matches!(
-        state,
-        "uploading"
-            | "stalledUP"
-            | "queuedUP"
-            | "forcedUP"
-            | "pausedUP"
-            | "checkingUP"
-            | "seeding"
-            | "stoppedUP"
-    )
-}
-
-/// States that indicate a torrent has failed or has errors.
-fn is_errored(state: &str) -> bool {
-    matches!(state, "error" | "missingFiles")
-}
+// Completion and error detection goes through the trait's normalized
+// `DownloadItemState` enum (`torrent.state_kind.is_complete()` etc.)
+// rather than matching on the raw `state` string — the string is the
+// client-native label (qBit: `"stalledUP"`; Deluge: `"Seeding"`), and
+// the Phase 1 enum normalizes those into one representation for
+// client-agnostic checks. Pre-refactor this function only knew qBit's
+// string set, which silently skipped Deluge's completed torrents
+// forever (#63 Phase 2 regression).
 
 /// Check if a grab is older than `max_age_secs` seconds.
 pub fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
@@ -752,11 +741,32 @@ async fn import_torrent(
         return Ok(false);
     }
 
-    // Determine the source base path. If qbit_download_path is configured, use
-    // that instead of qBit's internal save_path — this handles Docker path
-    // mapping where qBit sees /downloads/ but Ryokan sees a different mount.
-    let source_base = if !cfg.qbit_download_path.is_empty() {
-        cfg.qbit_download_path.clone()
+    // Determine the source base path. Pick the per-client download
+    // path the user configured in Settings ("where Ryokan can read
+    // this client's files"), falling back to whatever the client
+    // itself reported as `save_path` if no override is set. The
+    // override always wins because the client's own save_path is
+    // from its own filesystem namespace (container-internal for
+    // Docker, seedbox-internal for remote setups) and isn't
+    // reachable from Ryokan's process without translation.
+    //
+    // **Known limitation**: when the client uses per-category /
+    // per-label save paths (Deluge "Move completed on label", qBit
+    // per-category save paths), each torrent reports a different
+    // `save_path` extending a common base (`/downloads/anime` vs
+    // `/downloads/movies`). The single-field `<client>_download_path`
+    // can't preserve that subdir — every torrent lands under the
+    // same local base, flattening the category subdir. Covers the
+    // common case (one shared save dir) at the cost of the
+    // per-category case. Fixing would re-introduce the two-field
+    // remote-prefix design we abandoned in 4972624; follow-up issue
+    // if this bites a user.
+    let per_client_download_path = match cfg.active_client.as_str() {
+        "deluge" => &cfg.deluge_download_path,
+        _ => &cfg.qbit_download_path,
+    };
+    let source_base = if !per_client_download_path.is_empty() {
+        per_client_download_path.clone()
     } else {
         torrent_save_path.to_string()
     };
@@ -1472,7 +1482,7 @@ pub async fn run_once(state: &AppState) {
         };
 
         // Detect failed/error torrents and mark them.
-        if is_errored(&torrent.state) {
+        if torrent.state_kind.is_errored() {
             logger::warn(
                 &state.db,
                 LogCategory::PostProcess,
@@ -1484,22 +1494,40 @@ pub async fn run_once(state: &AppState) {
             continue;
         }
 
-        if !is_complete(&torrent.state) {
+        if !torrent.state_kind.is_complete() {
             continue;
         }
 
         // Stamp qBit's output path on the grab row before we move/
         // hardlink the file into the library. Done BEFORE import so
         // that even if import errors out mid-way, the UI still has a
-        // record of where qBit left the file.
-        let qbit_path = if !torrent.content_path.is_empty() {
-            torrent.content_path.clone()
-        } else {
-            torrent.save_path.clone()
+        // record of where the client left the file. Apply the
+        // user-configured per-client download path (#63 Phase 2) so a
+        // seedbox- or container-reported `/downloads/…` path is
+        // rewritten to the local mount point (e.g.
+        // `/mnt/seedbox/downloads/…`) before we read from disk. Empty
+        // download_path = same-host client, no rewrite needed.
+        let local_download_path = crate::services::download_client::per_client_download_path(&cfg);
+        let client_path = {
+            let raw = if !torrent.content_path.is_empty() {
+                torrent.content_path.clone()
+            } else {
+                torrent.save_path.clone()
+            };
+            crate::services::download_client::translate_client_path(
+                &raw,
+                &torrent.save_path,
+                local_download_path,
+            )
         };
-        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &qbit_path).await;
+        let local_save_path = crate::services::download_client::translate_client_path(
+            &torrent.save_path,
+            &torrent.save_path,
+            local_download_path,
+        );
+        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
-        match import_torrent(state, &cfg, grab, &torrent.hash, &torrent.save_path).await {
+        match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path).await {
             Ok(true) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
@@ -1588,6 +1616,15 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         return Ok(());
     }
 
+    // Config load is only for the remote-path mapping — we don't
+    // need the full cfg here. A single lookup is cheap; avoiding a
+    // parameter means `run_task` stays unaware of this codepath's
+    // needs.
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|_| ())?
+        .unwrap_or_default();
+
     let client = match state.download_client.read().await.clone() {
         Some(c) => c,
         None => return Ok(()),
@@ -1611,19 +1648,29 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         };
         let Some(torrent) = matched else { continue };
 
-        if !is_complete(&torrent.state) {
+        if !torrent.state_kind.is_complete() {
             continue;
         }
 
-        // Stamp the qBit-side path for the episode detail modal. Prefer
-        // content_path (qBit ≥ 2.6.1 — the actual file or container
-        // folder) and fall back to save_path for older qBit builds.
-        let qbit_path = if !torrent.content_path.is_empty() {
-            torrent.content_path.clone()
-        } else {
-            torrent.save_path.clone()
+        // Stamp the client-side path for the episode detail modal.
+        // Prefer content_path (native on qBit ≥ 2.6.1; computed from
+        // save_path + files' common prefix on Deluge) and fall back
+        // to save_path for pre-2.6.1 qBit. Same per-client
+        // download-path rewrite as the main import path above.
+        let local_download_path = crate::services::download_client::per_client_download_path(&cfg);
+        let client_path = {
+            let raw = if !torrent.content_path.is_empty() {
+                torrent.content_path.clone()
+            } else {
+                torrent.save_path.clone()
+            };
+            crate::services::download_client::translate_client_path(
+                &raw,
+                &torrent.save_path,
+                local_download_path,
+            )
         };
-        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &qbit_path).await;
+        let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
         // Mark the grab row as finalized so we stop polling it and the
         // UI stops treating it as in-flight. Use `mark_completed_no_import`

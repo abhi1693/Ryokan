@@ -408,6 +408,27 @@ pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Mark every `pending` grab row as `failed`. Used by the #63 Phase 2
+/// client-switch handler: when the user changes `active_client` in
+/// Settings, any grab that was in-flight against the old client is
+/// now orphaned (the new client has never seen that hash). Dropping
+/// them from `pending` means they fall out of the partial UNIQUE
+/// index on `(hash) WHERE state IN ('pending', 'imported')` and the
+/// user can cleanly re-grab in the new client without a dedupe
+/// collision. Returns the number of rows updated so the caller can
+/// surface "N pending grabs cancelled" in the UI notice.
+///
+/// No reason string is stored — `grabbed_torrents` has no free-text
+/// failure_reason column today. Callers log the reason separately
+/// at `info` level if they want it on the trail.
+pub async fn mark_all_pending_failed(db: &SqlitePool) -> Result<u64, sqlx::Error> {
+    let result =
+        sqlx::query("UPDATE grabbed_torrents SET state = 'failed' WHERE state = 'pending'")
+            .execute(db)
+            .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn mark_removed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE grabbed_torrents SET state = 'removed' WHERE id = ?")
         .bind(id)

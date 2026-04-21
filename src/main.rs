@@ -25,7 +25,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use services::{
     custom_formats::{self, CompiledCfCache},
-    download_client::{DownloadClient, qbittorrent::QbitClient},
+    download_client::DownloadClient,
     jellyfin::JellyfinClient,
     progress::ProgressRegistry,
 };
@@ -373,18 +373,15 @@ async fn main() {
         users_exist,
     };
 
-    // Initialize download client from saved config if available.
-    // Phase 1: only qBittorrent is a concrete impl; Phase 2+ will
-    // branch on `config.active_client` once the config migration lands.
+    // Initialize download client from saved config. Branches on
+    // `config.active_client` — the per-client credential columns
+    // (qbit_*, deluge_*) coexist on the same `config` row so a user
+    // can switch between them in Settings without losing the other's
+    // setup. Phase 3+ will add transmission/rtorrent arms here.
     if let Ok(Some(config)) = models::config::get_config(&db).await {
-        if !config.qbit_url.is_empty() {
-            let client: Arc<dyn DownloadClient> = Arc::new(QbitClient::new(
-                &config.qbit_url,
-                &config.qbit_user,
-                &config.qbit_pass,
-                &config.qbit_category,
-            ));
-            *state.download_client.write().await = Some(client);
+        let client = services::download_client::build_download_client(&config);
+        if client.is_some() {
+            *state.download_client.write().await = client;
         }
         if !config.jellyfin_url.is_empty() && !config.jellyfin_api_key.is_empty() {
             let client = JellyfinClient::new(&config.jellyfin_url, &config.jellyfin_api_key);
