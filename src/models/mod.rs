@@ -1132,13 +1132,28 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // #63 Phase 2 — Remote path mapping for seedbox setups. When the
-    // active download client is on a different host than Ryokan, the
-    // `content_path` the client reports points at the seedbox
-    // filesystem. Post-processing rewrites that path by replacing
-    // `remote_path_remote` prefix with `remote_path_local` before
-    // any filesystem op. Modeled on Sonarr's Remote Path Mapping.
-    // Empty strings = no rewrite (local client or no mapping needed).
+    // #63 Phase 2 — Per-client download path, same shape as the
+    // long-standing `qbit_download_path`. Ryokan reads the client's
+    // completed files from `<client>_download_path`; the client's
+    // own reported save_path (container-internal, or on a seedbox)
+    // isn't reachable from Ryokan's process without translation.
+    // Single-field-per-client is simpler than the prefix-pair
+    // `remote_path_remote` / `remote_path_local` design from the
+    // initial Phase 2 sketch — matches user mental model ("where
+    // does Ryokan see Deluge's downloads?") and parallels how
+    // `qbit_download_path` has always worked.
+    sqlx::query("ALTER TABLE config ADD COLUMN deluge_download_path TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // Phase 2.1 — columns added on the initial Phase 2 sketch of a
+    // global `remote_path_remote` / `remote_path_local` pair.
+    // Retained as dead columns (dropping would force a full-table
+    // rewrite on every boot, per the code-review finding that bit
+    // Phase 1 on the qbit_content_path rename). The `Config` struct
+    // no longer reads these fields; they sit unused until a future
+    // DROP COLUMN ever lands.
     sqlx::query("ALTER TABLE config ADD COLUMN remote_path_remote TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
@@ -1147,6 +1162,31 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+
+    // One-time data migration: preserve any `remote_path_local`
+    // values users set under the Phase 2 sketch (only really
+    // reachable on the dev branch pre-merge). Copy into whichever
+    // per-client download_path is active at migration time. Guarded
+    // by target-field-empty so re-running on already-migrated DBs
+    // is a no-op (the per-client field is authoritative once set).
+    let _ = sqlx::query(
+        "UPDATE config
+         SET deluge_download_path = remote_path_local
+         WHERE active_client = 'deluge'
+           AND remote_path_local <> ''
+           AND deluge_download_path = ''",
+    )
+    .execute(db)
+    .await;
+    let _ = sqlx::query(
+        "UPDATE config
+         SET qbit_download_path = remote_path_local
+         WHERE active_client = 'qbittorrent'
+           AND remote_path_local <> ''
+           AND qbit_download_path = ''",
+    )
+    .execute(db)
+    .await;
 
     // Rename `qbit_content_path` → `client_content_path` so the field
     // name reflects the trait abstraction. Uses the same state-matrix

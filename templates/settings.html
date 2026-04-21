@@ -70,7 +70,7 @@
             <div class="form-group">
                 <label for="qbit_download_path">Download Path (as seen by Ryokan)</label>
                 <input type="text" name="qbit_download_path" id="qbit_download_path" value="{{ config.qbit_download_path }}" placeholder="/downloads">
-                <span class="form-hint">The local path where qBittorrent's completed downloads are accessible to Ryokan. When both run in Docker, this is the container-side mount point (e.g. <code>/downloads</code>). When Ryokan runs on the host, use the host path that maps to qBit's download directory.</span>
+                <span class="form-hint">The local path where qBittorrent's completed downloads are accessible to Ryokan. When qBit runs in Docker with a host volume mount, enter the host-side path (e.g. <code>/home/user/downloads</code>). When qBit runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and qBit see the exact same paths.</span>
             </div>
             <div class="settings-inline-actions">
                 <button type="button" class="btn btn-secondary" onclick="testQbit(this)">Test</button>
@@ -98,24 +98,10 @@
                 <input type="text" name="deluge_label" id="deluge_label" value="{{ config.deluge_label }}" placeholder="ryokan">
                 <span class="form-hint">Ryokan tags every torrent it adds with this label and filters by it when listing. Requires the Label plugin; Ryokan auto-enables it on first connect.</span>
             </div>
-        </fieldset>
-
-        <fieldset>
-            <legend>Remote Path Mapping</legend>
-            <p class="form-hint" style="margin-bottom: 12px;">
-                When your download client runs on a different host (a seedbox), the path it reports for completed files is the path on that remote host. Ryokan needs the equivalent path on its own filesystem (e.g. an SSHFS or NFS mount) to post-process files. Leave blank if the client runs on the same host as Ryokan.
-            </p>
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="remote_path_remote">Remote prefix</label>
-                    <input type="text" name="remote_path_remote" id="remote_path_remote" value="{{ config.remote_path_remote }}" placeholder="/downloads">
-                    <span class="form-hint">Path prefix as the download client sees it.</span>
-                </div>
-                <div class="form-group">
-                    <label for="remote_path_local">Local prefix</label>
-                    <input type="text" name="remote_path_local" id="remote_path_local" value="{{ config.remote_path_local }}" placeholder="/mnt/seedbox/downloads">
-                    <span class="form-hint">Path prefix where Ryokan can read the same files.</span>
-                </div>
+            <div class="form-group">
+                <label for="deluge_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="deluge_download_path" id="deluge_download_path" value="{{ config.deluge_download_path }}" placeholder="/downloads">
+                <span class="form-hint">The local path where Deluge's completed downloads are accessible to Ryokan. When Deluge runs in Docker with a host volume mount, enter the host-side path. When Deluge runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and Deluge see the exact same paths.</span>
             </div>
         </fieldset>
 

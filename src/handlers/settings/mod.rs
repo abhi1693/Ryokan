@@ -171,9 +171,7 @@ pub struct SettingsForm {
     #[serde(default)]
     deluge_label: String,
     #[serde(default)]
-    remote_path_remote: String,
-    #[serde(default)]
-    remote_path_local: String,
+    deluge_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -430,13 +428,8 @@ pub async fn settings_submit(
                 trimmed.to_string()
             }
         },
-        remote_path_remote: form
-            .remote_path_remote
-            .trim()
-            .trim_end_matches('/')
-            .to_string(),
-        remote_path_local: form
-            .remote_path_local
+        deluge_download_path: form
+            .deluge_download_path
             .trim()
             .trim_end_matches('/')
             .to_string(),

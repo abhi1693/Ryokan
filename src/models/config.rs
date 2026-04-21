@@ -12,6 +12,11 @@ pub struct Config {
     pub qbit_user: String,
     pub qbit_pass: String,
     pub qbit_category: String,
+    /// Where Ryokan reads qBit's completed files from its own
+    /// filesystem. Overrides whatever qBit itself reports as
+    /// `save_path` — needed when qBit runs in a container (it sees
+    /// `/downloads`, Ryokan-on-host sees e.g. `/home/user/downloads`)
+    /// or on a seedbox (Ryokan reads via SSHFS/NFS mount).
     pub qbit_download_path: String,
     /// Deluge Web UI base URL (e.g. `http://host:8112`). The
     /// DelugeClient impl appends `/json` internally.
@@ -21,10 +26,10 @@ pub struct Config {
     /// Defaults to `"ryokan"`; users can override if running multiple
     /// Ryokan instances against one Deluge.
     pub deluge_label: String,
-    /// Remote → local path prefix rewrite applied in post-processing
-    /// before any filesystem op. Empty = no rewrite (local client).
-    pub remote_path_remote: String,
-    pub remote_path_local: String,
+    /// Per-client counterpart to `qbit_download_path` — where Ryokan
+    /// reads Deluge's completed files from its own filesystem.
+    /// Shape mirrors qbit_download_path exactly.
+    pub deluge_download_path: String,
     pub jellyfin_url: String,
     pub jellyfin_api_key: String,
     pub preferred_groups: String,
@@ -95,8 +100,7 @@ impl Default for Config {
             deluge_url: String::new(),
             deluge_password: String::new(),
             deluge_label: "ryokan".to_string(),
-            remote_path_remote: String::new(),
-            remote_path_local: String::new(),
+            deluge_download_path: String::new(),
             jellyfin_url: String::new(),
             jellyfin_api_key: String::new(),
             preferred_groups: String::new(),
@@ -143,8 +147,7 @@ struct ConfigRow {
     deluge_url: String,
     deluge_password: String,
     deluge_label: String,
-    remote_path_remote: String,
-    remote_path_local: String,
+    deluge_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
     preferred_groups: String,
@@ -181,7 +184,7 @@ struct ConfigRow {
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, remote_path_remote, remote_path_local, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader FROM config WHERE id = 1",
+        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -196,8 +199,7 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         deluge_url: r.deluge_url,
         deluge_password: r.deluge_password,
         deluge_label: r.deluge_label,
-        remote_path_remote: r.remote_path_remote,
-        remote_path_local: r.remote_path_local,
+        deluge_download_path: r.deluge_download_path,
         jellyfin_url: r.jellyfin_url,
         jellyfin_api_key: r.jellyfin_api_key,
         preferred_groups: r.preferred_groups,
@@ -236,8 +238,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, remote_path_remote, remote_path_local, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             active_client = excluded.active_client,
             qbit_url = excluded.qbit_url,
@@ -248,8 +250,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             deluge_url = excluded.deluge_url,
             deluge_password = excluded.deluge_password,
             deluge_label = excluded.deluge_label,
-            remote_path_remote = excluded.remote_path_remote,
-            remote_path_local = excluded.remote_path_local,
+            deluge_download_path = excluded.deluge_download_path,
             jellyfin_url = excluded.jellyfin_url,
             jellyfin_api_key = excluded.jellyfin_api_key,
             preferred_groups = excluded.preferred_groups,
@@ -292,8 +293,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(&config.deluge_url)
     .bind(&config.deluge_password)
     .bind(&config.deluge_label)
-    .bind(&config.remote_path_remote)
-    .bind(&config.remote_path_local)
+    .bind(&config.deluge_download_path)
     .bind(&config.jellyfin_url)
     .bind(&config.jellyfin_api_key)
     .bind(&config.preferred_groups)

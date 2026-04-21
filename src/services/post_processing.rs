@@ -741,28 +741,20 @@ async fn import_torrent(
         return Ok(false);
     }
 
-    // Determine the source base path.
-    //
-    // Precedence (post-#63 Phase 2):
-    //   1. `torrent_save_path` — already remote-path-mapped by
-    //      `run_once_inner` via `apply_remote_path_mapping`, so it's
-    //      a path Ryokan-on-host can read. This is the client-
-    //      agnostic mechanism and works for every impl.
-    //   2. Legacy `cfg.qbit_download_path` — pre-Phase-2 Docker
-    //      path-mapping escape hatch that predates
-    //      `remote_path_mapping`. Used ONLY when active_client is
-    //      qbittorrent AND remote_path_remote is empty (i.e., user
-    //      hasn't migrated to the new mechanism). Applying this for
-    //      Deluge/other clients was the Phase 2 regression that
-    //      surfaced as "File op failed: No such file or directory" —
-    //      it forced the source path to qBit's downloads dir for
-    //      every client, ignoring whatever the Deluge/etc. impl
-    //      actually reported.
-    let source_base = if cfg.active_client == "qbittorrent"
-        && cfg.remote_path_remote.is_empty()
-        && !cfg.qbit_download_path.is_empty()
-    {
-        cfg.qbit_download_path.clone()
+    // Determine the source base path. Pick the per-client download
+    // path the user configured in Settings ("where Ryokan can read
+    // this client's files"), falling back to whatever the client
+    // itself reported as `save_path` if no override is set. The
+    // override always wins because the client's own save_path is
+    // from its own filesystem namespace (container-internal for
+    // Docker, seedbox-internal for remote setups) and isn't
+    // reachable from Ryokan's process without translation.
+    let per_client_download_path = match cfg.active_client.as_str() {
+        "deluge" => &cfg.deluge_download_path,
+        _ => &cfg.qbit_download_path,
+    };
+    let source_base = if !per_client_download_path.is_empty() {
+        per_client_download_path.clone()
     } else {
         torrent_save_path.to_string()
     };
@@ -1498,26 +1490,28 @@ pub async fn run_once(state: &AppState) {
         // hardlink the file into the library. Done BEFORE import so
         // that even if import errors out mid-way, the UI still has a
         // record of where the client left the file. Apply the
-        // user-configured remote-path mapping (#63 Phase 2) so a
-        // seedbox-reported `/downloads/…` path is translated to the
-        // local mount point (`/mnt/seedbox/downloads/…`) before we
-        // read from disk. Empty mapping = no rewrite.
+        // user-configured per-client download path (#63 Phase 2) so a
+        // seedbox- or container-reported `/downloads/…` path is
+        // rewritten to the local mount point (e.g.
+        // `/mnt/seedbox/downloads/…`) before we read from disk. Empty
+        // download_path = same-host client, no rewrite needed.
+        let local_download_path = crate::services::download_client::per_client_download_path(&cfg);
         let client_path = {
             let raw = if !torrent.content_path.is_empty() {
                 torrent.content_path.clone()
             } else {
                 torrent.save_path.clone()
             };
-            crate::services::download_client::apply_remote_path_mapping(
+            crate::services::download_client::translate_client_path(
                 &raw,
-                &cfg.remote_path_remote,
-                &cfg.remote_path_local,
+                &torrent.save_path,
+                local_download_path,
             )
         };
-        let local_save_path = crate::services::download_client::apply_remote_path_mapping(
+        let local_save_path = crate::services::download_client::translate_client_path(
             &torrent.save_path,
-            &cfg.remote_path_remote,
-            &cfg.remote_path_local,
+            &torrent.save_path,
+            local_download_path,
         );
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
@@ -1649,18 +1643,19 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         // Stamp the client-side path for the episode detail modal.
         // Prefer content_path (native on qBit ≥ 2.6.1; computed from
         // save_path + files' common prefix on Deluge) and fall back
-        // to save_path for pre-2.6.1 qBit. Same remote-path rewrite
-        // as in the main import path above (#63 Phase 2).
+        // to save_path for pre-2.6.1 qBit. Same per-client
+        // download-path rewrite as the main import path above.
+        let local_download_path = crate::services::download_client::per_client_download_path(&cfg);
         let client_path = {
             let raw = if !torrent.content_path.is_empty() {
                 torrent.content_path.clone()
             } else {
                 torrent.save_path.clone()
             };
-            crate::services::download_client::apply_remote_path_mapping(
+            crate::services::download_client::translate_client_path(
                 &raw,
-                &cfg.remote_path_remote,
-                &cfg.remote_path_local,
+                &torrent.save_path,
+                local_download_path,
             )
         };
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;

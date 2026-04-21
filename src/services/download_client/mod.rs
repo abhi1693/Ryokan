@@ -220,33 +220,58 @@ impl DownloadItemState {
     }
 }
 
-/// Apply a remote → local path prefix rewrite. Used in post-processing
-/// to translate paths from the download client's (possibly remote)
-/// filesystem into paths Ryokan can read on its own host.
+/// Return the per-client `<client>_download_path` for whichever
+/// download client is currently active, based on `config.active_client`.
+/// Empty string when the active client has no override configured —
+/// translate_client_path treats that as "no rewrite."
+pub fn per_client_download_path(config: &crate::models::config::Config) -> &str {
+    match config.active_client.as_str() {
+        "deluge" => &config.deluge_download_path,
+        // qBittorrent is the default / unknown fallback.
+        _ => &config.qbit_download_path,
+    }
+}
+
+/// Translate a client-reported path into one Ryokan-on-host can
+/// actually read. Replaces the client's `save_path` prefix with the
+/// user-configured per-client `download_path`.
 ///
-/// Modeled on Sonarr's Remote Path Mappings: when the download client
-/// runs on a different host (seedbox), the `content_path` it reports
-/// points at its own filesystem (e.g. `/downloads/…` inside the
-/// seedbox). The user mounts that path locally via SSHFS/NFS/rclone
-/// at a different prefix (e.g. `/mnt/seedbox/…`), and this function
-/// performs the prefix swap before any filesystem op runs.
+/// Examples:
+///   - Deluge in a Docker container sees `/downloads/Show.mkv`; the
+///     host volume is mounted at `/home/user/downloads-deluge`.
+///     User sets `deluge_download_path = /home/user/downloads-deluge`.
+///     Deluge reports `torrent.save_path = /downloads`. Calling this
+///     with `path = /downloads/Show.mkv`, `client_save_path = /downloads`,
+///     `local_download_path = /home/user/downloads-deluge` produces
+///     `/home/user/downloads-deluge/Show.mkv`.
+///   - qBit on the same host as Ryokan with no config override:
+///     `local_download_path` is empty → returns `path` unchanged.
 ///
-/// Both prefixes are trimmed of trailing `/` so `/downloads` and
-/// `/downloads/` map identically. If `remote` or `local` is empty,
-/// the input is returned unchanged — the "local client, no mapping"
-/// case. If `remote` is set but the path doesn't begin with it,
-/// return the path unchanged too: it's safer to surface a mismatch
-/// than to silently rewrite a path that was never on the remote.
-pub fn apply_remote_path_mapping(path: &str, remote: &str, local: &str) -> String {
-    let r = remote.trim_end_matches('/');
-    let l = local.trim_end_matches('/');
-    if r.is_empty() || l.is_empty() {
+/// Trailing slashes on either prefix are normalized so
+/// `/downloads` and `/downloads/` behave identically. If
+/// `local_download_path` is empty, the input is returned unchanged
+/// (no-override case). If the path doesn't start with
+/// `client_save_path`, it's also returned unchanged — silently
+/// rewriting an unexpected path is worse than surfacing the
+/// mismatch as a downstream "file not found" error.
+pub fn translate_client_path(
+    path: &str,
+    client_save_path: &str,
+    local_download_path: &str,
+) -> String {
+    let remote = client_save_path.trim_end_matches('/');
+    let local = local_download_path.trim_end_matches('/');
+    if local.is_empty() {
         return path.to_string();
     }
-    if let Some(rest) = path.strip_prefix(r) {
-        // `rest` starts with `/` or is empty — either way, stitching
-        // onto the trimmed local prefix produces the correct shape.
-        format!("{l}{rest}")
+    if remote.is_empty() {
+        // The client didn't tell us a save_path prefix — all we can
+        // do is return the original. Can happen for edge states
+        // (metadata not yet arrived) but not for completed torrents.
+        return path.to_string();
+    }
+    if let Some(rest) = path.strip_prefix(remote) {
+        format!("{local}{rest}")
     } else {
         path.to_string()
     }
@@ -426,45 +451,56 @@ mod tests {
     }
 
     #[test]
-    fn remote_path_mapping_rewrites_matching_prefix() {
+    fn translate_client_path_rewrites_matching_prefix() {
         assert_eq!(
-            apply_remote_path_mapping("/downloads/anime/file.mkv", "/downloads", "/mnt/seedbox"),
+            translate_client_path("/downloads/anime/file.mkv", "/downloads", "/mnt/seedbox"),
             "/mnt/seedbox/anime/file.mkv"
         );
     }
 
     #[test]
-    fn remote_path_mapping_trims_trailing_slashes_on_prefixes() {
+    fn translate_client_path_trims_trailing_slashes() {
         // Trailing-slash normalization on both sides should produce
         // identical output — prevents the /downloads vs /downloads/
         // foot-gun that bites every Sonarr remote-path setup.
         assert_eq!(
-            apply_remote_path_mapping("/downloads/x.mkv", "/downloads/", "/mnt/seedbox/"),
+            translate_client_path("/downloads/x.mkv", "/downloads/", "/mnt/seedbox/"),
             "/mnt/seedbox/x.mkv"
         );
         assert_eq!(
-            apply_remote_path_mapping("/downloads/x.mkv", "/downloads", "/mnt/seedbox"),
+            translate_client_path("/downloads/x.mkv", "/downloads", "/mnt/seedbox"),
             "/mnt/seedbox/x.mkv"
         );
     }
 
     #[test]
-    fn remote_path_mapping_empty_prefixes_pass_through() {
-        // No mapping configured = no rewrite. The "local client"
-        // case; both prefixes empty means identity.
+    fn translate_client_path_empty_local_passes_through() {
+        // No override configured = no rewrite. The "local client,
+        // no Docker, Ryokan reads client's save_path directly" case.
         assert_eq!(
-            apply_remote_path_mapping("/downloads/x.mkv", "", ""),
+            translate_client_path("/downloads/x.mkv", "/downloads", ""),
             "/downloads/x.mkv"
         );
     }
 
     #[test]
-    fn remote_path_mapping_non_matching_prefix_unchanged() {
-        // If the path isn't under the configured remote prefix,
-        // don't silently rewrite — could indicate user mis-config.
+    fn translate_client_path_non_matching_prefix_unchanged() {
+        // If the path isn't under the client's save_path, don't
+        // silently rewrite — could indicate user mis-config.
         assert_eq!(
-            apply_remote_path_mapping("/other/path.mkv", "/downloads", "/mnt/seedbox"),
+            translate_client_path("/other/path.mkv", "/downloads", "/mnt/seedbox"),
             "/other/path.mkv"
+        );
+    }
+
+    #[test]
+    fn translate_client_path_empty_remote_passes_through() {
+        // Client hasn't reported a save_path yet (e.g. metadata not
+        // arrived). Return the input verbatim rather than turning
+        // `path` into `local/path` which would usually be wrong.
+        assert_eq!(
+            translate_client_path("/downloads/x.mkv", "", "/mnt/seedbox"),
+            "/downloads/x.mkv"
         );
     }
 
