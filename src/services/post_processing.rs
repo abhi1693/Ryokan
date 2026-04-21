@@ -741,10 +741,27 @@ async fn import_torrent(
         return Ok(false);
     }
 
-    // Determine the source base path. If qbit_download_path is configured, use
-    // that instead of qBit's internal save_path — this handles Docker path
-    // mapping where qBit sees /downloads/ but Ryokan sees a different mount.
-    let source_base = if !cfg.qbit_download_path.is_empty() {
+    // Determine the source base path.
+    //
+    // Precedence (post-#63 Phase 2):
+    //   1. `torrent_save_path` — already remote-path-mapped by
+    //      `run_once_inner` via `apply_remote_path_mapping`, so it's
+    //      a path Ryokan-on-host can read. This is the client-
+    //      agnostic mechanism and works for every impl.
+    //   2. Legacy `cfg.qbit_download_path` — pre-Phase-2 Docker
+    //      path-mapping escape hatch that predates
+    //      `remote_path_mapping`. Used ONLY when active_client is
+    //      qbittorrent AND remote_path_remote is empty (i.e., user
+    //      hasn't migrated to the new mechanism). Applying this for
+    //      Deluge/other clients was the Phase 2 regression that
+    //      surfaced as "File op failed: No such file or directory" —
+    //      it forced the source path to qBit's downloads dir for
+    //      every client, ignoring whatever the Deluge/etc. impl
+    //      actually reported.
+    let source_base = if cfg.active_client == "qbittorrent"
+        && cfg.remote_path_remote.is_empty()
+        && !cfg.qbit_download_path.is_empty()
+    {
         cfg.qbit_download_path.clone()
     } else {
         torrent_save_path.to_string()
