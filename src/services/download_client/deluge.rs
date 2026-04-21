@@ -922,4 +922,91 @@ mod tests {
         let c = DelugeClient::new("http://localhost:8112", "", "anime-batch");
         assert_eq!(c.label, "anime-batch");
     }
+
+    /// Live smoke test against a running Deluge Web UI at
+    /// `http://localhost:8112` (lscr.io/linuxserver/deluge defaults —
+    /// Web UI password `deluge`). Opt in by running:
+    ///
+    ///     RYOKAN_DELUGE_E2E=1 cargo test deluge::tests::live_smoke \
+    ///       -- --ignored --nocapture
+    ///
+    /// Exercises the full surface Ryokan itself hits: test →
+    /// add_torrent → list_scoped (with Label plugin round-trip) →
+    /// duplicate-add → pause/resume → get_files → delete. Gated
+    /// behind `#[ignore]` + env var so CI never depends on a daemon
+    /// being up. Mirrors the pattern established by
+    /// `transmission::tests::live_smoke` and
+    /// `rtorrent::tests::live_smoke`.
+    #[tokio::test]
+    #[ignore = "requires live Deluge at localhost:8112"]
+    async fn live_smoke() {
+        if std::env::var("RYOKAN_DELUGE_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_DELUGE_E2E=1 to run against localhost:8112)");
+            return;
+        }
+
+        let client = DelugeClient::new("http://localhost:8112", "deluge", "ryokan-e2e");
+
+        let version = client.test().await.expect("test() failed");
+        eprintln!("Deluge version: {version}");
+
+        let magnet = "magnet:?xt=urn:btih:7a14d93f4c13e9c1ae255e0aa3b85a9aaf0cf52d&dn=sintel&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce";
+        let info_hash = "7a14d93f4c13e9c1ae255e0aa3b85a9aaf0cf52d";
+
+        // Ensure a clean slate in case a prior run left state.
+        let _ = client.delete(info_hash, false).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let outcome = client
+            .add_torrent(magnet, info_hash)
+            .await
+            .expect("add_torrent() failed");
+        eprintln!("add_torrent outcome: {outcome:?}");
+        assert!(matches!(
+            outcome,
+            AddOutcome::Added | AddOutcome::AlreadyPresent
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let list = client.list_scoped().await.expect("list_scoped() failed");
+        eprintln!("scoped torrents: {}", list.len());
+        let found = list
+            .iter()
+            .find(|t| t.hash.eq_ignore_ascii_case(info_hash))
+            .expect("added torrent must appear in list_scoped");
+        assert_eq!(
+            found.category, "ryokan-e2e",
+            "Deluge label should round-trip as DownloadItem.category"
+        );
+
+        let dup = client
+            .add_torrent(magnet, info_hash)
+            .await
+            .expect("duplicate add_torrent() failed");
+        assert_eq!(dup, AddOutcome::AlreadyPresent);
+
+        client.pause(info_hash).await.expect("pause() failed");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        client.resume(info_hash).await.expect("resume() failed");
+
+        let _files = client
+            .get_files(info_hash)
+            .await
+            .expect("get_files() failed");
+
+        client
+            .delete(info_hash, false)
+            .await
+            .expect("delete() failed");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let after = client
+            .list_scoped()
+            .await
+            .expect("list_scoped() post-delete failed");
+        assert!(
+            !after.iter().any(|t| t.hash.eq_ignore_ascii_case(info_hash)),
+            "torrent must not survive delete"
+        );
+        eprintln!("smoke passed");
+    }
 }
