@@ -1,0 +1,109 @@
+    <fieldset>
+        <legend>Release Group Source Map</legend>
+        <p class="form-hint">Maps release groups to their known source. Used by Layer 3 of the classification pipeline when the filename alone doesn't carry source keywords (e.g. SubsPlease is WEB, VCB-Studio is BD). Seeded rows are restored on startup; user-edited rows are preserved.</p>
+
+        {% if !suggestions.is_empty() %}
+        <h3 class="settings-subheading">Suggested Mappings ({{ suggestions.len() }})</h3>
+        <p class="form-hint">Inferred from your manual classification overrides. When you've pinned multiple episodes from the same release group to the same source, Ryokan surfaces it here so you can teach the identity table.</p>
+        <div class="table-scroll-wrap">
+        <table class="group-source-table">
+            <thead>
+                <tr>
+                    <th>Group</th>
+                    <th>Suggested source</th>
+                    <th>Overrides</th>
+                    <th>Currently mapped</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in suggestions %}
+                <tr>
+                    <td>{{ s.group_name }}</td>
+                    <td>{{ s.source.as_str() }}</td>
+                    <td>{{ s.episode_count }} episode{% if s.episode_count != 1 %}s{% endif %}</td>
+                    <td>
+                        {% if let Some(existing) = s.existing_source %}
+                        <span class="tag tag-res" title="Accepting will overwrite the existing mapping">conflicts: {{ existing.as_str() }}</span>
+                        {% else %}
+                        <span class="form-hint">(new)</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <form method="post" action="/settings/groups" class="group-upsert-form">
+                            <input type="hidden" name="group_name" value="{{ s.group_name }}">
+                            <input type="hidden" name="source" value="{{ s.source.as_str()|lowercase }}">
+                            <input type="hidden" name="confidence" value="0.95">
+                            <input type="hidden" name="notes" value="from {{ s.episode_count }} manual override{% if s.episode_count != 1 %}s{% endif %}">
+                            <button type="submit" class="btn btn-primary">Accept</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+        {% endif %}
+
+        <h3 class="settings-subheading">Add or Update Group</h3>
+        <form method="post" action="/settings/groups" class="settings-form group-upsert-form">
+            <div class="form-group">
+                <label for="new_group_name">Group Name</label>
+                <input type="text" name="group_name" id="new_group_name" required placeholder="e.g. SubsPlease">
+                <span class="form-hint">Submitting an existing group name updates that row instead of creating a new one.</span>
+            </div>
+            <div class="form-group">
+                <label for="new_group_source">Source</label>
+                <select name="source" id="new_group_source">
+                    <option value="web">WEB</option>
+                    <option value="bluray">BD</option>
+                    <option value="dvd">DVD</option>
+                    <option value="hdtv">HDTV</option>
+                    <option value="tv">TV</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="new_group_confidence">Confidence (0.0 – 1.0)</label>
+                <input type="number" name="confidence" id="new_group_confidence" min="0" max="1" step="0.05" value="0.95">
+                <span class="form-hint">How strongly this mapping should weigh in classification. Defaults used by seeded groups are around 0.95.</span>
+            </div>
+            <div class="form-group">
+                <label for="new_group_notes">Notes</label>
+                <input type="text" name="notes" id="new_group_notes" placeholder="optional">
+            </div>
+            <button type="submit" class="btn btn-primary">Save Group</button>
+        </form>
+
+        <h3 class="settings-subheading">Current Entries ({{ groups.len() }})</h3>
+        <div class="table-scroll-wrap">
+        <table class="group-source-table">
+            <thead>
+                <tr>
+                    <th>Group</th>
+                    <th>Source</th>
+                    <th>Conf.</th>
+                    <th>Notes</th>
+                    <th>Kind</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for group in groups %}
+                <tr>
+                    <td>{{ group.group_name }}</td>
+                    <td>{{ group.source.as_str() }}</td>
+                    <td>{{ group.confidence }}</td>
+                    <td>{{ group.notes }}</td>
+                    <td>{% if group.is_user_edit %}User{% else %}Seed{% endif %}</td>
+                    <td>
+                        <form method="post" action="/settings/groups/delete" class="group-delete-form">
+                            <input type="hidden" name="group_name" value="{{ group.group_name }}">
+                            <button type="submit" class="btn btn-danger">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </fieldset>

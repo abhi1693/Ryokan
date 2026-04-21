@@ -1,0 +1,57 @@
+        <fieldset>
+            <legend>Media Library</legend>
+            <div class="form-group">
+                <label for="media_root">Media Root Path</label>
+                <input type="text" name="media_root" id="media_root" value="{{ config.media_root }}" placeholder="/srv/media/anime">
+                <span class="form-hint">Root directory where anime series folders are stored. Inside Docker, this must be a mounted volume.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>RSS</legend>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="rss_enabled" id="rss_enabled" {% if config.rss_enabled %}checked{% endif %}>
+                    <span>Enable automatic RSS sync</span>
+                </label>
+                <span class="form-hint">Poll the official Nyaa anime RSS feed on the interval below and auto-grab matching releases.</span>
+            </div>
+            <div class="form-group">
+                <label for="rss_interval_minutes">RSS Sync Interval (minutes)</label>
+                <input type="number" min="1" max="60" name="rss_interval_minutes" id="rss_interval_minutes" value="{{ config.rss_interval_minutes }}">
+                <span class="form-hint">Used by the background RSS poller. Manual sync is available on the System page.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Post-Processing</legend>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="post_processing_enabled" id="post_processing_enabled" {% if config.post_processing_enabled %}checked{% endif %}>
+                    <span>Enable post-processing</span>
+                </label>
+                <span class="form-hint">When enabled, Ryokan will rename and move completed downloads into your media library and write NFO sidecar files for Jellyfin. No external metadata providers are queried; data already in the database is used. Requires a configured media root and qBittorrent.</span>
+            </div>
+            <div class="form-group">
+                <label for="post_processing_mode">File operation mode</label>
+                <select name="post_processing_mode" id="post_processing_mode">
+                    <option value="hardlink" {% if config.post_processing_mode == "hardlink" %}selected{% endif %}>Hardlink (recommended; preserves seeding, no extra disk space)</option>
+                    <option value="copy" {% if config.post_processing_mode == "copy" %}selected{% endif %}>Copy (safe across filesystems, uses extra disk space)</option>
+                    <option value="move" {% if config.post_processing_mode == "move" %}selected{% endif %}>Move (frees download space, breaks seeding)</option>
+                </select>
+                <span class="form-hint">Hardlink is instant and uses no extra disk space, but only works when qBittorrent and the media root are on the same filesystem. Copy is used automatically as a fallback if hardlinking fails.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Display</legend>
+            <div class="form-group">
+                <label for="title_language">Preferred Title Language</label>
+                <select name="title_language" id="title_language" onchange="syncTitleLanguagePreview(this.value)">
+                    <option value="english" {% if config.title_language == "english" %}selected{% endif %}>English</option>
+                    <option value="romaji" {% if config.title_language == "romaji" %}selected{% endif %}>Romaji</option>
+                    <option value="native" {% if config.title_language == "native" %}selected{% endif %}>Native</option>
+                </select>
+                <span class="form-hint">Used on library cards, detail pages, and AniList search results.</span>
+            </div>
+        </fieldset>
