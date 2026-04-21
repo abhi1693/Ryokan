@@ -167,8 +167,8 @@
             </div>
             <div class="form-group">
                 <label for="rtorrent_download_path">Download Path (as seen by Ryokan)</label>
-                <input type="text" name="rtorrent_download_path" id="rtorrent_download_path" value="{{ config.rtorrent_download_path }}" placeholder="/downloads">
-                <span class="form-hint">The local path where rtorrent's completed downloads are accessible to Ryokan. When rtorrent runs in Docker with a host volume mount, enter the host-side path. When rtorrent runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and rtorrent see the exact same paths.</span>
+                <input type="text" name="rtorrent_download_path" id="rtorrent_download_path" value="{{ config.rtorrent_download_path }}" placeholder="/downloads/completed/ryokan">
+                <span class="form-hint">The local path where rtorrent's completed downloads are accessible to Ryokan. When rtorrent runs in Docker with a host volume mount, enter the host-side path. When rtorrent runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and rtorrent see the exact same paths. <strong>Note:</strong> many <code>rtorrent.rc</code> configs (including the <code>linuxserver/rutorrent</code> image's defaults) move completed torrents into a per-label subdirectory via <code>event.download.finished</code> hooks — e.g. <code>/downloads/completed/ryokan/</code> rather than just <code>/downloads/completed/</code>. If your setup does this, include the label subdirectory in the path here (the scoping label you set above is typically the subdir name).</span>
             </div>
         </fieldset>
 
