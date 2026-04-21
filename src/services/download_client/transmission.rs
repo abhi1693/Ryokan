@@ -821,9 +821,7 @@ mod tests {
     #[ignore = "requires live Transmission at localhost:9091"]
     async fn live_smoke() {
         if std::env::var("RYOKAN_TRANSMISSION_E2E").is_err() {
-            eprintln!(
-                "skipping (set RYOKAN_TRANSMISSION_E2E=1 to run against localhost:9091)"
-            );
+            eprintln!("skipping (set RYOKAN_TRANSMISSION_E2E=1 to run against localhost:9091)");
             return;
         }
 
@@ -883,9 +881,7 @@ mod tests {
             .await
             .expect("list_scoped() post-delete failed");
         assert!(
-            !after
-                .iter()
-                .any(|t| t.hash.eq_ignore_ascii_case(info_hash)),
+            !after.iter().any(|t| t.hash.eq_ignore_ascii_case(info_hash)),
             "torrent must not survive delete(_, delete_files=true)"
         );
         eprintln!("smoke passed");
