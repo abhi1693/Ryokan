@@ -268,18 +268,60 @@ function renderScoreBreakdown(r) {
 // dismiss the expander is to click the score badge itself, which is a
 // footgun on the mobile card layout where the score sits in a small
 // target at the card's top-left corner.
+//
+// Scroll-only edge handling: when the panel opens near the viewport
+// edge we apply `position: fixed` with a viewport-aware `max-height` +
+// internal `overflow-y: auto` so long breakdowns scroll inside the
+// panel instead of falling off-screen. Width is capped to the viewport
+// so mobile layouts don't overflow horizontally either. No flip-above
+// logic — one direction is easier to reason about and predictable for
+// both keyboard and touch users.
 (function () {
     function closeAllOpenBreakdowns(except) {
         document.querySelectorAll('details.score-details[open]').forEach(function (d) {
             if (d !== except) d.removeAttribute('open');
+            const panel = d.querySelector('.score-components');
+            if (panel && d !== except) resetPanelPosition(panel);
         });
     }
+    function resetPanelPosition(panel) {
+        panel.style.position = '';
+        panel.style.top = '';
+        panel.style.left = '';
+        panel.style.width = '';
+        panel.style.minWidth = '';
+        panel.style.maxWidth = '';
+        panel.style.maxHeight = '';
+        panel.style.overflowY = '';
+    }
+    function positionPanel(details) {
+        const panel = details.querySelector('.score-components');
+        if (!panel) return;
+        const GAP = 6;
+        const MARGIN = 8;
+        const rect = details.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        const top = rect.bottom + GAP;
+        const maxHeight = Math.max(120, vh - top - MARGIN);
+        const maxWidth = Math.max(240, vw - 2 * MARGIN);
+        const desiredWidth = Math.min(360, maxWidth);
+        let left = rect.left;
+        if (left + desiredWidth + MARGIN > vw) {
+            left = Math.max(MARGIN, vw - desiredWidth - MARGIN);
+        }
+        if (left < MARGIN) left = MARGIN;
+
+        panel.style.position = 'fixed';
+        panel.style.top = top + 'px';
+        panel.style.left = left + 'px';
+        panel.style.minWidth = '240px';
+        panel.style.maxWidth = maxWidth + 'px';
+        panel.style.maxHeight = maxHeight + 'px';
+        panel.style.overflowY = 'auto';
+    }
     document.addEventListener('click', function (evt) {
-        // If the click landed inside any score-details, leave it alone —
-        // the <details> element handles toggling its own state. Only
-        // close *other* open breakdowns (the `name=` attribute on the
-        // <details> already enforces accordion behavior, but this also
-        // covers any unnamed future callers).
         const inside = evt.target.closest('details.score-details');
         closeAllOpenBreakdowns(inside);
     });
@@ -288,6 +330,17 @@ function renderScoreBreakdown(r) {
             closeAllOpenBreakdowns(null);
         }
     });
+    // `toggle` doesn't bubble, so we capture it.
+    document.addEventListener('toggle', function (evt) {
+        const d = evt.target;
+        if (!(d instanceof HTMLDetailsElement)) return;
+        if (!d.classList.contains('score-details')) return;
+        if (d.open) positionPanel(d);
+        else {
+            const panel = d.querySelector('.score-components');
+            if (panel) resetPanelPosition(panel);
+        }
+    }, true);
 })();
 
 // #6a — click-to-sort columns on the results table. Each row carries

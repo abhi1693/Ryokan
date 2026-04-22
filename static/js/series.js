@@ -542,7 +542,11 @@ function renderScoreDetails(r, scoreClass) {
         panel.style.position = '';
         panel.style.top = '';
         panel.style.left = '';
+        panel.style.width = '';
         panel.style.minWidth = '';
+        panel.style.maxWidth = '';
+        panel.style.maxHeight = '';
+        panel.style.overflowY = '';
     }
     function positionPanelIfClipped(details) {
         const panel = details.querySelector('.score-components');
@@ -564,14 +568,38 @@ function renderScoreDetails(r, scoreClass) {
             resetPanelPosition(panel);
             return;
         }
+        // Scrolling-only strategy — no flip-above fallback. The panel
+        // always opens below the badge; vertical fit is handled by
+        // `max-height` + internal scroll, horizontal fit by clamping
+        // `left` and capping width to the viewport. Works the same on
+        // desktop and mobile: narrow viewports just get a narrower
+        // panel with more internal scroll.
+        const GAP = 6;
+        const MARGIN = 8;
         const rect = details.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        const top = rect.bottom + GAP;
+        const maxHeight = Math.max(120, vh - top - MARGIN);
+        const maxWidth = Math.max(240, vw - 2 * MARGIN);
+        // Clamp left edge to stay within the viewport; on phones the
+        // panel's full width often exceeds badge.left + panel.width,
+        // so also cap the width when it would otherwise overflow.
+        let left = rect.left;
+        const desiredWidth = Math.min(360, maxWidth);
+        if (left + desiredWidth + MARGIN > vw) {
+            left = Math.max(MARGIN, vw - desiredWidth - MARGIN);
+        }
+        if (left < MARGIN) left = MARGIN;
+
         panel.style.position = 'fixed';
-        panel.style.top = (rect.bottom + 6) + 'px';
-        panel.style.left = rect.left + 'px';
-        // Constrain the minimum width to avoid flowing off the right
-        // edge of a narrow viewport; the max-width from the shared CSS
-        // still caps it at 360px.
+        panel.style.top = top + 'px';
+        panel.style.left = left + 'px';
         panel.style.minWidth = '240px';
+        panel.style.maxWidth = maxWidth + 'px';
+        panel.style.maxHeight = maxHeight + 'px';
+        panel.style.overflowY = 'auto';
     }
     document.addEventListener('click', function (evt) {
         const inside = evt.target.closest('details.score-details');
