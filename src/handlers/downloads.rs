@@ -130,6 +130,16 @@ pub async fn downloads_page(
 ) -> Html<String> {
     let tab = normalize_tab(params.tab);
 
+    // Load once up-front so history/blocklist queries can honor the
+    // user's title_language preference. Queue doesn't need it — the
+    // torrent client reports the release filename, not the series.
+    let title_language = crate::models::config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.title_language)
+        .unwrap_or_else(|| "english".to_string());
+
     let (queue, queue_error) = if tab == "queue" {
         let client = state.download_client.read().await.clone();
         match client {
@@ -165,7 +175,7 @@ pub async fn downloads_page(
     };
 
     let history = if tab == "history" {
-        grabbed_torrents::get_all_with_series(&state.db, 500)
+        grabbed_torrents::get_all_with_series(&state.db, 500, &title_language)
             .await
             .unwrap_or_default()
     } else {
@@ -173,7 +183,7 @@ pub async fn downloads_page(
     };
 
     let blocklist = if tab == "blocklist" {
-        grabbed_torrents::get_blocked(&state.db)
+        grabbed_torrents::get_blocked(&state.db, &title_language)
             .await
             .unwrap_or_default()
     } else {

@@ -39,7 +39,7 @@
         </tr></thead><tbody>
         {% for t in queue %}
         <tr data-hash="{{ t.hash }}">
-            <td><div class="dl-torrent-name">{{ t.name }}</div></td>
+            <td><div class="dl-torrent-name" title="{{ t.name }}">{{ t.name }}</div></td>
             <td>{{ t.size_display }}</td>
             <td><div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:{{ t.progress_pct }}%"></div></div><span class="dl-progress-text">{{ t.progress_pct }}%</span></div></td>
             <td>{{ t.speed_display }}</td>
@@ -91,8 +91,8 @@
                 {% for entry in history %}
                 <tr data-state="{{ entry.state }}" data-text="{{ entry.series_title }} {{ entry.torrent_name }}">
                     <td><span data-ts="{{ entry.grabbed_at }}">{{ entry.grabbed_at }}</span></td>
-                    <td>{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
-                    <td><div class="dl-torrent-name">{{ entry.torrent_name }}</div></td>
+                    <td title="{{ entry.series_title }}">{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
+                    <td><div class="dl-torrent-name" title="{{ entry.torrent_name }}">{{ entry.torrent_name }}</div></td>
                     <td>{% for ep in entry.episode_numbers %}{% if !loop.first %}, {% endif %}{{ ep }}{% endfor %}</td>
                     <td>
                         {% if entry.state == "imported" %}
@@ -135,8 +135,8 @@
                 {% for entry in blocklist %}
                 <tr id="blocklist-row-{{ entry.id }}">
                     <td><span data-ts="{{ entry.grabbed_at }}">{{ entry.grabbed_at }}</span></td>
-                    <td>{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
-                    <td><div class="dl-torrent-name">{{ entry.torrent_name }}</div></td>
+                    <td title="{{ entry.series_title }}">{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
+                    <td><div class="dl-torrent-name" title="{{ entry.torrent_name }}">{{ entry.torrent_name }}</div></td>
                     <td>{% for ep in entry.episode_numbers %}{% if !loop.first %}, {% endif %}{{ ep }}{% endfor %}</td>
                     <td>
                         <button class="btn btn-ghost btn-sm" onclick="removeFromBlocklist({{ entry.id }})" title="Remove from blocklist">

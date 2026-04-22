@@ -437,23 +437,48 @@ pub async fn mark_removed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Build the `series_title` SELECT expression honoring the user's
+/// `title_language` preference. Mirrors the fallback order in
+/// `services::nfo::title_for_preference` — `NULLIF(col, '')` is needed
+/// because `series` columns are `NOT NULL DEFAULT ''` rather than
+/// nullable, so a plain COALESCE would return the first empty string
+/// instead of skipping to the next field.
+///
+/// Fallback order (must match nfo::title_for_preference):
+/// - `romaji`  → english → native → title
+/// - `native`  → english → romaji → title
+/// - english / anything else → romaji → native → title
+fn title_select_expr(preference: &str) -> &'static str {
+    match preference {
+        "romaji" => {
+            "COALESCE(NULLIF(s.title_romaji, ''), NULLIF(s.title_english, ''), NULLIF(s.title_native, ''), s.title, '') AS series_title"
+        }
+        "native" => {
+            "COALESCE(NULLIF(s.title_native, ''), NULLIF(s.title_english, ''), NULLIF(s.title_romaji, ''), s.title, '') AS series_title"
+        }
+        _ => {
+            "COALESCE(NULLIF(s.title_english, ''), NULLIF(s.title_romaji, ''), NULLIF(s.title_native, ''), s.title, '') AS series_title"
+        }
+    }
+}
+
 /// Get all grabbed torrents with series title, ordered by most recent first.
 pub async fn get_all_with_series(
     db: &SqlitePool,
     limit: i64,
+    title_language: &str,
 ) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
-    let rows = sqlx::query(
+    let sql = format!(
         r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
-                  COALESCE(s.title_english, s.title_romaji, s.title, '') AS series_title,
+                  {title_expr},
                   COALESCE(s.anilist_id, 0) AS anilist_id
            FROM grabbed_torrents g
            LEFT JOIN series s ON s.id = g.series_id
            ORDER BY g.grabbed_at DESC
            LIMIT ?"#,
-    )
-    .bind(limit)
-    .fetch_all(db)
-    .await?;
+        title_expr = title_select_expr(title_language),
+    );
+    let rows = sqlx::query(&sql).bind(limit).fetch_all(db).await?;
 
     Ok(rows
         .iter()
@@ -477,18 +502,21 @@ pub async fn get_all_with_series(
 }
 
 /// Get all failed/blocked torrents.
-pub async fn get_blocked(db: &SqlitePool) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
-    let rows = sqlx::query(
+pub async fn get_blocked(
+    db: &SqlitePool,
+    title_language: &str,
+) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
+    let sql = format!(
         r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
-                  COALESCE(s.title_english, s.title_romaji, s.title, '') AS series_title,
+                  {title_expr},
                   COALESCE(s.anilist_id, 0) AS anilist_id
            FROM grabbed_torrents g
            LEFT JOIN series s ON s.id = g.series_id
            WHERE g.state = 'failed'
            ORDER BY g.grabbed_at DESC"#,
-    )
-    .fetch_all(db)
-    .await?;
+        title_expr = title_select_expr(title_language),
+    );
+    let rows = sqlx::query(&sql).fetch_all(db).await?;
 
     Ok(rows
         .iter()
