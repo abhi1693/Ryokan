@@ -320,17 +320,25 @@
 
 /* Sortable column headers (#6a). Click a header to sort asc, click
    again to flip desc. Arrows rendered via pseudo-elements so they
-   don't steal click targets from the label. */
+   don't steal click targets from the label.
+   `white-space: nowrap` is load-bearing: without it, the pseudo-
+   element arrow on narrow columns like .col-score (55px) wrapped to
+   a second line below the text, which inflated the whole column's
+   <th> height and visually shifted the cells in that column down
+   relative to the other columns — read as "the score badge is
+   higher than the rest of the row." Keeping the label + arrow on
+   one line keeps every column's header the same height. */
 .results-table .sortable {
     cursor: pointer;
     user-select: none;
+    white-space: nowrap;
 }
 .results-table .sortable::after {
     content: "";
     display: inline-block;
     width: 0;
     height: 0;
-    margin-left: 6px;
+    margin-left: 4px;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
     opacity: 0.3;
