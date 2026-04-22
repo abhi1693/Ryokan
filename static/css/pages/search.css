@@ -207,103 +207,15 @@
     }
 }
 
-/* Score breakdown expander (#17). The <details>/<summary> is inside
-   the score column; clicking the score badge expands the panel with
-   per-component deltas. Panel absolutely-positions under the cell
-   so it doesn't push the table layout around, and uses a small z-
-   index so it overlays subsequent rows.
-
-   Score column overrides the td default `vertical-align: top` to
-   `middle` so the badge sits at the same visual height as the
-   effectively-centered single-line metadata columns (size / date /
-   seed / leech / dl / Grab) in rows where the Name column wraps to
-   two lines. Without this the badge pins to the top of the cell
-   while everything else looks centered, which reads as the badge
-   being "higher than" the text rows. */
+/* Keep the results-table column alignment override here — the generic
+   expander styles live in badges.css (shared with the series page's
+   interactive search), but the table td vertical-align override is
+   specific to this page's table layout. Badge needs to sit at the
+   same visual height as the single-line metadata columns; without
+   this override it pins to the top of the cell in rows where the
+   Name column wraps. */
 .results-table .col-score {
     vertical-align: middle;
-}
-.score-details {
-    position: relative;
-    display: inline-block;
-    vertical-align: middle;
-}
-.score-details > summary {
-    cursor: pointer;
-    list-style: none;
-    /* Override the browser default `display: list-item` on <summary>.
-       list-item's baseline behavior interacts awkwardly with the
-       containing td's vertical-align and was keeping the badge
-       pinned high even after the td switched to middle. Forcing
-       inline-block gives us the simple "this sits where I put it"
-       box model. */
-    display: inline-block;
-    vertical-align: middle;
-}
-.score-details > summary::-webkit-details-marker {
-    display: none;
-}
-/* Firefox uses a different pseudo for the disclosure marker. */
-.score-details > summary::marker {
-    display: none;
-    content: "";
-}
-.score-details[open] > summary {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-}
-.score-components {
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 0;
-    min-width: 280px;
-    max-width: 360px;
-    padding: 10px 12px;
-    /* --panel isn't defined in the theme — fell through to transparent,
-       which made the expanded breakdown render as floating text over
-       the rows below. --bg-elevated is the correct overlay surface
-       (same var used by log panels and other popovers). */
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-    z-index: 30;
-    text-align: left;
-    font-size: 12px;
-}
-.score-components-title {
-    font-weight: 600;
-    color: var(--text-dim);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 6px;
-}
-.score-components ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-}
-.score-components li {
-    display: grid;
-    grid-template-columns: 44px 1fr;
-    column-gap: 8px;
-    align-items: baseline;
-    padding: 3px 0;
-}
-.sc-delta {
-    font-family: var(--font-mono);
-    font-weight: 600;
-    text-align: right;
-}
-.sc-delta-pos { color: var(--green); }
-.sc-delta-neg { color: var(--red); }
-.sc-label { color: var(--text); }
-.sc-detail {
-    grid-column: 2;
-    color: var(--text-dim);
-    font-size: 11px;
-    margin-top: 1px;
 }
 
 /* Sticky search-bar (#6c). Keeps the query/filters/submit row

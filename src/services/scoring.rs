@@ -1,9 +1,12 @@
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::services::custom_formats::{self, CompiledCustomFormat, EvalContext};
 use crate::services::nyaa::{SearchOptions, SearchResult};
+use crate::services::source::{ClassificationResult, Resolution, Source, WebKind};
 
 // Word-boundary "dub" / "dubbed" — anchors prevent the prior bare-
 // substring match from false-positiving on "redub", "dubsoon",
@@ -233,6 +236,76 @@ pub fn score_result_with_breakdown(
     (total, parts)
 }
 
+/// Rehydrate a `ClassificationResult` from the already-populated source
+/// fields on a `SearchResult`. The scraper stores `source` / `resolution`
+/// / `web_kind` as display strings plus `is_remux` / `is_bdmv` booleans;
+/// the CF evaluator wants the typed enums. `evidence` / `confidence` /
+/// `needs_review` / `decision_rule` aren't available at manual-search
+/// time, so they default — CF evaluation doesn't read them.
+fn classification_from_search_result(r: &SearchResult) -> ClassificationResult {
+    let web_kind = if r.web_kind.is_empty() {
+        WebKind::Unknown
+    } else {
+        WebKind::from_str(&r.web_kind)
+    };
+    ClassificationResult {
+        source: Source::from_str(&r.source),
+        resolution: Resolution::from_str(&r.resolution),
+        is_remux: r.is_remux,
+        web_kind,
+        is_bdmv: r.is_bdmv,
+        confidence: 1.0,
+        needs_review: false,
+        evidence: Vec::new(),
+        decision_rule: crate::services::source::DecisionRule::Empty,
+    }
+}
+
+/// Evaluate the compiled CF set against each result in `results`,
+/// adding matching CF contributions to both `result.score` and
+/// `result.score_breakdown`. Used by the manual-search path so the
+/// "why this score" expander shows CF deltas alongside the base rules.
+///
+/// `seadex_hashes` can be empty — the manual search has no series
+/// context, so SeaDex specs simply never fire. That's fine for now;
+/// the manual search isn't the SeaDex surface.
+///
+/// Appends one `ScoreComponent` per matching CF with a non-zero score,
+/// labeled `"CF: <name>"` so the UI can distinguish them from the
+/// base-score rules at a glance.
+pub fn apply_cf_breakdown(
+    results: &mut [SearchResult],
+    cfs: &[CompiledCustomFormat],
+    seadex_hashes: &HashSet<String>,
+) {
+    if cfs.is_empty() {
+        return;
+    }
+    for r in results.iter_mut() {
+        let classification = classification_from_search_result(r);
+        // Borrowed ctx needs the result to live for the whole call,
+        // but we're about to mutate the result's score. Capture the
+        // breakdown first with an immutable borrow, drop it, then
+        // mutate.
+        let (cf_total, breakdown) = {
+            let ctx = EvalContext {
+                result: r,
+                classification: &classification,
+                seadex_hashes,
+            };
+            custom_formats::total_cf_score_with_breakdown(cfs, &ctx)
+        };
+        if cf_total == 0 && breakdown.is_empty() {
+            continue;
+        }
+        r.score = r.score.saturating_add(cf_total);
+        for (name, delta) in breakdown {
+            r.score_breakdown
+                .push(ScoreComponent::new(&format!("CF: {name}"), delta, None));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +415,56 @@ mod tests {
         let scalar = score_result_with_sub_pref(&r, &opts, true);
         let (breakdown_total, _) = score_result_with_breakdown(&r, &opts, true);
         assert_eq!(scalar, breakdown_total);
+    }
+
+    #[test]
+    fn apply_cf_breakdown_noop_with_empty_cf_list() {
+        let mut r = result(30, "[Group] Series - 01 (1080p)");
+        r.score = 42;
+        let before_breakdown = r.score_breakdown.len();
+        let mut batch = vec![r];
+        apply_cf_breakdown(&mut batch, &[], &HashSet::new());
+        assert_eq!(batch[0].score, 42);
+        assert_eq!(batch[0].score_breakdown.len(), before_breakdown);
+    }
+
+    #[test]
+    fn apply_cf_breakdown_appends_cf_prefixed_entries_and_bumps_score() {
+        // Compile a tiny CF that matches any release whose title
+        // contains "x265". Using the real parser so this test stays
+        // honest about how CF scoring actually fires.
+        let cf = crate::services::custom_formats::compile_from_json(
+            r#"{
+                "name": "x265 bonus",
+                "specifications": [{
+                    "implementation": "ReleaseTitleSpecification",
+                    "fields": [{"name": "value", "value": "x265"}]
+                }]
+            }"#,
+            50,
+            1,
+        )
+        .expect("test CF compiles");
+
+        let mut hit = result(10, "[Group] Series - 01 (1080p) [x265].mkv");
+        hit.score = 20;
+        let base_breakdown_len = hit.score_breakdown.len();
+
+        let mut miss = result(10, "[Group] Series - 02 (1080p).mkv");
+        miss.score = 20;
+
+        let mut batch = vec![hit, miss];
+        apply_cf_breakdown(&mut batch, std::slice::from_ref(&cf), &HashSet::new());
+
+        // Hit: score bumped, one new "CF: x265 bonus" entry.
+        assert_eq!(batch[0].score, 70);
+        assert_eq!(batch[0].score_breakdown.len(), base_breakdown_len + 1);
+        let added = batch[0].score_breakdown.last().expect("new entry");
+        assert_eq!(added.label, "CF: x265 bonus");
+        assert_eq!(added.delta, 50);
+
+        // Miss: untouched.
+        assert_eq!(batch[1].score, 20);
     }
 
     #[test]

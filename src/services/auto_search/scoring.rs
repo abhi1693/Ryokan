@@ -15,6 +15,7 @@ use crate::models::config::Config;
 use crate::services::custom_formats::{self, CompiledCustomFormat, EvalContext};
 use crate::services::nyaa::SearchResult;
 use crate::services::quality;
+use crate::services::scoring::ScoreComponent;
 use crate::services::seadex;
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
 
@@ -48,6 +49,33 @@ pub(super) fn apply_cf_seadex_overlay(
     seadex_boost_enabled: bool,
     minimum_score: i32,
 ) -> Option<i32> {
+    apply_cf_seadex_overlay_with_breakdown(
+        base,
+        result,
+        classification,
+        cfs,
+        seadex_hashes,
+        seadex_boost_enabled,
+        minimum_score,
+    )
+    .map(|(score, _)| score)
+}
+
+/// Same as [`apply_cf_seadex_overlay`] but also returns the per-CF and
+/// SeaDex breakdown entries so the caller can fold them into the
+/// `SearchResult`'s `score_breakdown` for UI display. Used by the
+/// interactive search path where each candidate's breakdown needs to
+/// stay in sync with its final score.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_cf_seadex_overlay_with_breakdown(
+    base: i32,
+    result: &SearchResult,
+    classification: &ClassificationResult,
+    cfs: &[CompiledCustomFormat],
+    seadex_hashes: &HashSet<String>,
+    seadex_boost_enabled: bool,
+    minimum_score: i32,
+) -> Option<(i32, Vec<ScoreComponent>)> {
     let ctx = EvalContext {
         result,
         classification,
@@ -89,7 +117,27 @@ pub(super) fn apply_cf_seadex_overlay(
         detail
     );
 
-    if below_floor { None } else { Some(final_score) }
+    if below_floor {
+        return None;
+    }
+
+    let mut components: Vec<ScoreComponent> = breakdown
+        .into_iter()
+        .map(|(name, delta)| ScoreComponent {
+            label: format!("CF: {name}"),
+            delta,
+            detail: None,
+        })
+        .collect();
+    if seadex_bonus != 0 {
+        components.push(ScoreComponent {
+            label: "SeaDex Best".to_string(),
+            delta: seadex_bonus,
+            detail: Some("release flagged isBest by releases.moe".to_string()),
+        });
+    }
+
+    Some((final_score, components))
 }
 
 /// Build the structured scoring detail string that lands in the
@@ -144,7 +192,58 @@ pub(super) fn rescore_for_auto_search(
     cutoff_resolution: Resolution,
     absolute_offset: i32,
 ) -> i32 {
+    rescore_for_auto_search_with_breakdown(
+        result,
+        classification,
+        config,
+        aliases,
+        target,
+        expected_season,
+        is_finished,
+        finished_mode,
+        preferred_source,
+        preferred_resolution,
+        cutoff_source,
+        cutoff_resolution,
+        absolute_offset,
+    )
+    .0
+}
+
+/// Same as [`rescore_for_auto_search`] but also returns the list of
+/// score components added on top of the scraper's base score. Used by
+/// the interactive search path so each candidate's breakdown in the UI
+/// stays in sync with its final displayed score.
+#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+pub(super) fn rescore_for_auto_search_with_breakdown(
+    result: &SearchResult,
+    classification: &ClassificationResult,
+    config: &Config,
+    aliases: &[String],
+    target: &SearchTarget,
+    expected_season: i32,
+    is_finished: bool,
+    finished_mode: quality::FinishedSeriesMode,
+    preferred_source: Source,
+    preferred_resolution: Resolution,
+    cutoff_source: Source,
+    cutoff_resolution: Resolution,
+    absolute_offset: i32,
+) -> (i32, Vec<ScoreComponent>) {
     let mut score = result.score;
+    let mut parts: Vec<ScoreComponent> = Vec::new();
+    let mut add =
+        |parts: &mut Vec<ScoreComponent>, label: &str, delta: i32, detail: Option<String>| {
+            if delta == 0 {
+                return;
+            }
+            score += delta;
+            parts.push(ScoreComponent {
+                label: label.to_string(),
+                delta,
+                detail,
+            });
+        };
     let lower = result.title.to_lowercase();
     let normalized_title = normalize_title(&result.title);
     let title_tokens = token_set(&normalized_title);
@@ -160,68 +259,101 @@ pub(super) fn rescore_for_auto_search(
             }
         })
         .fold(0.0f32, f32::max);
-    score += (best_overlap * 40.0) as i32;
+    let overlap_delta = (best_overlap * 40.0) as i32;
+    add(
+        &mut parts,
+        "Title Alias Match",
+        overlap_delta,
+        Some(format!(
+            "{:.0}% of best alias tokens matched",
+            best_overlap * 100.0
+        )),
+    );
 
     // Season mismatch penalty (explicit season markers like S03, "3rd Season")
     if season_mismatch(&result.title, expected_season) {
-        score -= 100;
+        add(
+            &mut parts,
+            "Season Mismatch",
+            -100,
+            Some(format!("release season ≠ expected S{expected_season:02}")),
+        );
     }
 
     match target {
         SearchTarget::Single => {
             if lower.contains("movie") || lower.contains("special") || lower.contains("ova") {
-                score += 8;
+                add(&mut parts, "Movie / Special / OVA", 8, None);
             }
             if result.is_batch {
-                score -= 5;
+                add(&mut parts, "Batch Penalty (single target)", -5, None);
             }
         }
         SearchTarget::Episode(ep) => {
             if result.is_batch {
-                score -= 20;
+                add(
+                    &mut parts,
+                    "Batch Penalty (episode target)",
+                    -20,
+                    Some("single-episode grab preferred".to_string()),
+                );
             } else {
-                score += 10;
+                add(&mut parts, "Single-Episode Target", 10, None);
             }
             let parsed = parse_release_numbers(&result.title);
             let relative_match = parsed.contains(ep);
             let absolute_match =
                 absolute_offset > 0 && parsed.contains(&ep.saturating_add(absolute_offset));
             if relative_match || absolute_match {
-                score += 40;
+                add(
+                    &mut parts,
+                    "Episode Number Match",
+                    40,
+                    Some(format!("release covers episode {ep}")),
+                );
             } else if absolute_offset > 0 && !parsed.is_empty() {
-                // #30 — Phase 2 lets candidates through the franchise-alias
-                // pass even when their parsed number doesn't match either
-                // the relative or the absolute target. Those are false
-                // positives (e.g. "[Asahi-Anime Land] Jujutsu Kaisen 04"
-                // surfacing for a JJK S3 E9 absolute-56 target). Bury
-                // them with a large penalty so they sort to the bottom
-                // of the interactive list and drop below any realistic
-                // auto-search `custom_format_minimum_score` floor,
-                // without hard-rejecting in case the user actually wants
-                // a different episode that the parser mis-reads.
-                score -= 1000;
+                // #30 — franchise-alias fallback surfaces candidates
+                // whose parsed number matches neither target. Bury them.
+                add(
+                    &mut parts,
+                    "Wrong Episode Number",
+                    -1000,
+                    Some("franchise-pass release doesn't match target ep".to_string()),
+                );
             } else if absolute_offset > 0 && parsed.is_empty() {
-                // Unparseable episode number through the franchise pass
-                // ("Jujutsu Kaisen 04" with no dash separator) — smaller
-                // penalty than a wrong-number, since "can't tell" is
-                // less clearly wrong than "explicitly wrong."
-                score -= 500;
+                add(
+                    &mut parts,
+                    "Unparseable Episode Number",
+                    -500,
+                    Some("franchise-pass release with no parseable ep".to_string()),
+                );
             }
         }
     }
 
-    score += quality::preferred_group_bonus(
+    let group_bonus = quality::preferred_group_bonus(
         &result.group,
         &quality::parse_group_list(&config.preferred_groups),
     );
+    add(&mut parts, "Preferred Group (auto)", group_bonus, None);
 
     // Classification-aware quality scoring.
-    score += source::score_classification(
+    let classification_delta = source::score_classification(
         classification,
         preferred_source,
         preferred_resolution,
         cutoff_source,
         cutoff_resolution,
+    );
+    add(
+        &mut parts,
+        "Source / Resolution Fit",
+        classification_delta,
+        Some(format!(
+            "{} {}",
+            classification.source.as_str(),
+            classification.resolution.as_str()
+        )),
     );
 
     // For finished series with BD preference, give BD releases a significant boost.
@@ -229,10 +361,15 @@ pub(super) fn rescore_for_auto_search(
         && finished_mode == quality::FinishedSeriesMode::PreferBd
         && classification.source == Source::BluRay
     {
-        score += 35;
+        add(
+            &mut parts,
+            "Finished Series BD Bonus",
+            35,
+            Some("finished series + prefer_bd + BluRay source".to_string()),
+        );
     }
 
-    score
+    (score, parts)
 }
 
 #[cfg(test)]

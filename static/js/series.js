@@ -483,6 +483,61 @@ function renderPeers(seeders, leechers) {
     return `<span class="seed-count">${s}</span><span class="peer-sep">/</span><span class="leech-count">${l}</span>`;
 }
 
+// #1.3.0 — score breakdown expander for the interactive search tables.
+// Parallel to the server-rendered <details> in templates/search.html, so
+// the UX is identical between the generic Nyaa search and the per-series
+// interactive picker. Panel content lives in a named accordion group so
+// opening a second breakdown auto-closes the first.
+function renderScoreDetails(r, scoreClass) {
+    const parts = r.score_breakdown || [];
+    let inner;
+    if (parts.length === 0) {
+        inner = `<div class="form-hint">No components fired.</div>`;
+    } else {
+        const lis = parts.map(function (c) {
+            const deltaClass = c.delta > 0 ? 'sc-delta-pos' : 'sc-delta-neg';
+            const sign = c.delta > 0 ? '+' : '';
+            const detail = c.detail
+                ? `<span class="sc-detail">${escHtml(c.detail)}</span>`
+                : '';
+            return `<li>
+                <span class="sc-delta ${deltaClass}">${sign}${c.delta}</span>
+                <span class="sc-label">${escHtml(c.label)}</span>
+                ${detail}
+            </li>`;
+        }).join('');
+        inner = `<ul>${lis}</ul>`;
+    }
+    return `<details class="score-details" name="isearch-score-breakdown">
+        <summary class="score-badge ${scoreClass}" title="Click to see breakdown">${r.score}</summary>
+        <div class="score-components">
+            <div class="score-components-title">Score breakdown</div>
+            ${inner}
+        </div>
+    </details>`;
+}
+
+// Close any open <details class="score-details"> when the user clicks
+// outside it or presses Escape. Registered once at module load; applies
+// to both the interactive-search table and the batch table since they
+// share the same markup shape.
+(function () {
+    function closeAllOpenBreakdowns(except) {
+        document.querySelectorAll('details.score-details[open]').forEach(function (d) {
+            if (d !== except) d.removeAttribute('open');
+        });
+    }
+    document.addEventListener('click', function (evt) {
+        const inside = evt.target.closest('details.score-details');
+        closeAllOpenBreakdowns(inside);
+    });
+    document.addEventListener('keydown', function (evt) {
+        if (evt.key === 'Escape') {
+            closeAllOpenBreakdowns(null);
+        }
+    });
+})();
+
 function searchBatchReleases(btn) {
     setBusyButton(btn, true, 'Searching…');
     const pid = window.ryokanNewProgressId();
@@ -555,7 +610,7 @@ function renderInteractiveResults(results, epNum) {
         const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
         const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
         html += `<tr>
-            <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
+            <td class="col-score">${renderScoreDetails(r, scoreClass)}</td>
             <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
             <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
@@ -666,7 +721,7 @@ function renderInteractiveBatchResults(results) {
         const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
         const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
         html += `<tr>
-            <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
+            <td class="col-score">${renderScoreDetails(r, scoreClass)}</td>
             <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
             <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>

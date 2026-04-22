@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
-use crate::services::{logger, nyaa};
+use crate::services::{logger, nyaa, scoring};
 
 #[derive(Template)]
 #[template(path = "search.html")]
@@ -144,7 +144,7 @@ pub async fn search_submit(
     )
     .await;
 
-    let response = match nyaa::search(&opts, 1).await {
+    let mut response = match nyaa::search(&opts, 1).await {
         Ok(resp) => {
             logger::debug(
                 &state.db,
@@ -170,6 +170,19 @@ pub async fn search_submit(
             }
         }
     };
+
+    // #1.3.0 — augment the base-score breakdown with Custom Format
+    // contributions so the search-page expander shows both the base
+    // rules and the CF deltas. SeaDex specs never fire here (no
+    // series context = empty hash set), which is deliberate: the
+    // manual search page is a generic Nyaa search surface, not a
+    // per-series auto-grab path.
+    let cfs = state.custom_formats.read().await.clone();
+    scoring::apply_cf_breakdown(
+        &mut response.results,
+        &cfs,
+        &std::collections::HashSet::new(),
+    );
 
     let template = SearchTemplate {
         page: "search".to_string(),
@@ -207,9 +220,18 @@ pub async fn search_page_api(
     )
     .await;
 
-    let response = nyaa::search(&opts, params.p)
+    let mut response = nyaa::search(&opts, params.p)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // Mirror search_submit — keep the expander/scores consistent across
+    // page 1 (server-rendered) and page 2+ (JSON-appended via loadMore).
+    let cfs = state.custom_formats.read().await.clone();
+    scoring::apply_cf_breakdown(
+        &mut response.results,
+        &cfs,
+        &std::collections::HashSet::new(),
+    );
 
     Ok(Json(response))
 }

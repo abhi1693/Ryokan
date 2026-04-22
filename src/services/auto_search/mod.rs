@@ -42,7 +42,10 @@ pub use release_parse::{
 use release_parse::{
     normalize_subtitle, season_mismatch, trailing_subtitle_of, within_episode_slack,
 };
-use scoring::{apply_cf_seadex_overlay, rescore_for_auto_search};
+use scoring::{
+    apply_cf_seadex_overlay, apply_cf_seadex_overlay_with_breakdown, rescore_for_auto_search,
+    rescore_for_auto_search_with_breakdown,
+};
 pub use search_target::{
     SearchTarget, build_missing_targets, build_monitored_targets, build_upgrade_targets,
 };
@@ -257,7 +260,11 @@ pub async fn find_all_for_target(
             }),
         )
         .await;
-        let base = rescore_for_auto_search(
+        // Interactive search uses the breakdown variants so each
+        // candidate's `score_breakdown` stays in sync with its final
+        // displayed score — the UI expander wants the full trail of
+        // alias match / season penalty / CF contributions visible.
+        let (base, mut auto_parts) = rescore_for_auto_search_with_breakdown(
             &c,
             &classification,
             config,
@@ -273,7 +280,7 @@ pub async fn find_all_for_target(
             series_ctx.absolute_offset,
         );
         // No CF floor on the interactive path — see comment above.
-        if let Some(final_score) = apply_cf_seadex_overlay(
+        if let Some((final_score, cf_parts)) = apply_cf_seadex_overlay_with_breakdown(
             base,
             &c,
             &classification,
@@ -283,6 +290,8 @@ pub async fn find_all_for_target(
             i32::MIN,
         ) {
             c.score = final_score;
+            c.score_breakdown.append(&mut auto_parts);
+            c.score_breakdown.extend(cf_parts);
             scored.push(c);
         }
     }
@@ -492,7 +501,13 @@ pub async fn collect_scored_batches_for_target(
             continue;
         }
 
-        let base = rescore_for_auto_search(
+        // `collect_scored_batches_for_target` feeds both the user-facing
+        // `interactive_search_batches` and the auto-grab
+        // `find_best_batch_for_target`. Populating the breakdown here
+        // costs a small Vec allocation per candidate on the auto path
+        // too, which is cheap enough vs. the classify+network work that
+        // already dominates the per-candidate cost.
+        let (base, mut auto_parts) = rescore_for_auto_search_with_breakdown(
             &c,
             &classification,
             config,
@@ -507,7 +522,7 @@ pub async fn collect_scored_batches_for_target(
             cutoff_resolution_enum,
             series_ctx.absolute_offset,
         );
-        if let Some(final_score) = apply_cf_seadex_overlay(
+        if let Some((final_score, cf_parts)) = apply_cf_seadex_overlay_with_breakdown(
             base,
             &c,
             &classification,
@@ -517,6 +532,8 @@ pub async fn collect_scored_batches_for_target(
             config.custom_format_minimum_score,
         ) {
             c.score = final_score;
+            c.score_breakdown.append(&mut auto_parts);
+            c.score_breakdown.extend(cf_parts);
             scored.push(c);
         }
     }

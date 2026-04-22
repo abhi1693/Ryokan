@@ -103,16 +103,36 @@ function loadMore() {
                 const grabUrl = r.magnet || r.torrent || '';
                 const grabBtn = grabUrl ? `<button class="btn btn-grab" onclick="grabRelease('${escAttr(grabUrl)}', this)">Grab</button>` : '';
 
+                const scoreBreakdownHtml = renderScoreBreakdown(r);
+                const dateCell = r.upload_date
+                    ? `<span data-ts="${escAttr(r.upload_date)}">${escHtml(r.upload_date)}</span>`
+                    : '—';
+
                 // Table row (desktop).
                 const tr = document.createElement('tr');
                 if (rowClass) tr.className = rowClass;
+                // data-* attrs mirror the server-rendered rows so the
+                // client-side column sort picks up paginated rows too.
+                tr.dataset.score = r.score;
+                tr.dataset.name = r.title;
+                tr.dataset.size = r.size_bytes;
+                tr.dataset.date = r.upload_date || '';
+                tr.dataset.seeders = r.seeders;
+                tr.dataset.leechers = r.leechers;
+                tr.dataset.downloads = r.downloads;
                 tr.innerHTML = `
-                    <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
+                    <td class="col-score">
+                        <details class="score-details" name="score-breakdown">
+                            <summary class="score-badge ${scoreClass}" title="Click to see breakdown">${r.score}</summary>
+                            ${scoreBreakdownHtml}
+                        </details>
+                    </td>
                     <td class="col-name">
                         <a href="${escAttr(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>
                         <div class="result-tags">${tags}</div>
                     </td>
                     <td class="col-size">${escHtml(r.size)}</td>
+                    <td class="col-date">${dateCell}</td>
                     <td class="col-seed"><span class="seed-count">${r.seeders}</span></td>
                     <td class="col-leech"><span class="leech-count">${r.leechers}</span></td>
                     <td class="col-dl"><span class="dl-count">${r.downloads}</span></td>
@@ -128,7 +148,10 @@ function loadMore() {
                     card.className = `result-card${rowClass ? ' ' + rowClass : ''}`;
                     card.innerHTML = `
                         <div class="result-card-header">
-                            <span class="score-badge ${scoreClass}">${r.score}</span>
+                            <details class="score-details" name="score-breakdown">
+                                <summary class="score-badge ${scoreClass}" title="Click to see breakdown">${r.score}</summary>
+                                ${scoreBreakdownHtml}
+                            </details>
                             <a class="result-card-title" href="${escAttr(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>
                         </div>
                         <div class="result-card-tags">${tags}</div>
@@ -201,13 +224,71 @@ function grabRelease(url, btn) {
 
 function escHtml(s) {
     const d = document.createElement('div');
-    d.textContent = s;
+    d.textContent = s == null ? '' : s;
     return d.innerHTML;
 }
 
 function escAttr(s) {
-    return s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return String(s == null ? '' : s).replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
+
+// Build the <div class="score-components"> panel content for a result,
+// matching the server-rendered shape in templates/search.html so a row
+// appended via loadMore() behaves identically to a page-1 row. Keeping
+// the two paths in lockstep is load-bearing for the sort+expand UX.
+function renderScoreBreakdown(r) {
+    const parts = r.score_breakdown || [];
+    let inner;
+    if (parts.length === 0) {
+        inner = `<div class="form-hint">No components fired (score stayed at 0).</div>`;
+    } else {
+        const lis = parts.map(function (c) {
+            const deltaClass = c.delta > 0 ? 'sc-delta-pos' : 'sc-delta-neg';
+            const sign = c.delta > 0 ? '+' : '';
+            const detail = c.detail
+                ? `<span class="sc-detail">${escHtml(c.detail)}</span>`
+                : '';
+            return `<li>
+                <span class="sc-delta ${deltaClass}">${sign}${c.delta}</span>
+                <span class="sc-label">${escHtml(c.label)}</span>
+                ${detail}
+            </li>`;
+        }).join('');
+        inner = `<ul>${lis}</ul>
+            <div class="form-hint">Custom Format contributions (if any) are applied on top of this base score at grab time — test via Settings → Custom Formats.</div>`;
+    }
+    return `<div class="score-components">
+        <div class="score-components-title">Base score breakdown</div>
+        ${inner}
+    </div>`;
+}
+
+// #1.3.0 — close any open <details class="score-details"> when the user
+// clicks outside it or presses Escape. Without these, the only way to
+// dismiss the expander is to click the score badge itself, which is a
+// footgun on the mobile card layout where the score sits in a small
+// target at the card's top-left corner.
+(function () {
+    function closeAllOpenBreakdowns(except) {
+        document.querySelectorAll('details.score-details[open]').forEach(function (d) {
+            if (d !== except) d.removeAttribute('open');
+        });
+    }
+    document.addEventListener('click', function (evt) {
+        // If the click landed inside any score-details, leave it alone —
+        // the <details> element handles toggling its own state. Only
+        // close *other* open breakdowns (the `name=` attribute on the
+        // <details> already enforces accordion behavior, but this also
+        // covers any unnamed future callers).
+        const inside = evt.target.closest('details.score-details');
+        closeAllOpenBreakdowns(inside);
+    });
+    document.addEventListener('keydown', function (evt) {
+        if (evt.key === 'Escape') {
+            closeAllOpenBreakdowns(null);
+        }
+    });
+})();
 
 // #6a — click-to-sort columns on the results table. Each row carries
 // data-* attributes populated server-side (data-score, data-name,
