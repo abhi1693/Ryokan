@@ -195,3 +195,74 @@ function escHtml(s) {
 function escAttr(s) {
     return s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
+
+// #6a — click-to-sort columns on the results table. Each row carries
+// data-* attributes populated server-side (data-score, data-name,
+// data-size, data-date, data-seeders, data-leechers, data-downloads).
+// Clicking a sortable header toggles between asc/desc and re-orders
+// the tbody rows in place. State is purely client-side — no URL
+// params, no server round-trip.
+(function () {
+    function parseValue(raw, key) {
+        if (raw == null) return null;
+        // Numeric columns.
+        if (key === 'score' || key === 'size' || key === 'seeders' || key === 'leechers' || key === 'downloads') {
+            const n = parseFloat(raw);
+            return isNaN(n) ? 0 : n;
+        }
+        // Date is sortable as a string in "YYYY-MM-DD HH:MM" shape;
+        // empty → sort last.
+        if (key === 'date') {
+            return raw || '';
+        }
+        // Name — case-insensitive string compare.
+        return String(raw).toLowerCase();
+    }
+
+    function sortRows(tbody, key, dir) {
+        const rows = Array.from(tbody.children);
+        const sign = dir === 'asc' ? 1 : -1;
+        rows.sort(function (a, b) {
+            const av = parseValue(a.dataset[key], key);
+            const bv = parseValue(b.dataset[key], key);
+            // Empty-date rows sort to the end regardless of direction.
+            if (key === 'date') {
+                if (!av && !bv) return 0;
+                if (!av) return 1;
+                if (!bv) return -1;
+            }
+            if (av < bv) return -1 * sign;
+            if (av > bv) return 1 * sign;
+            return 0;
+        });
+        const frag = document.createDocumentFragment();
+        rows.forEach(function (r) { frag.appendChild(r); });
+        tbody.appendChild(frag);
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        const table = document.getElementById('results-table');
+        if (!table) return;
+        const tbody = document.getElementById('results-body');
+        if (!tbody) return;
+        table.querySelectorAll('th.sortable').forEach(function (th) {
+            th.addEventListener('click', function () {
+                const key = th.dataset.sortKey;
+                const wasAsc = th.classList.contains('sort-asc');
+                const wasDesc = th.classList.contains('sort-desc');
+                // Clear other headers.
+                table.querySelectorAll('th.sortable').forEach(function (other) {
+                    other.classList.remove('sort-asc', 'sort-desc');
+                });
+                // Flip direction: no current sort → desc for numeric
+                // columns (more is usually better), asc for name/date.
+                let dir;
+                if (wasAsc) dir = 'desc';
+                else if (wasDesc) dir = 'asc';
+                else dir = (key === 'name' || key === 'date') ? 'asc' : 'desc';
+                th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+                sortRows(tbody, key, dir);
+            });
+        });
+    });
+})();

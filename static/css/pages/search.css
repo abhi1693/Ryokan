@@ -277,3 +277,54 @@
     margin-top: 1px;
 }
 
+/* Sticky search-bar (#6c). Keeps the query/filters/submit row
+   reachable when scrolling a long result list. Only on desktop;
+   the mobile card view is tall enough that sticky positioning gets
+   in the way. */
+@media (min-width: 641px) {
+    .search-bar {
+        position: sticky;
+        top: 0;
+        z-index: 15;
+        background: var(--bg);
+        padding-top: 8px;
+        padding-bottom: 8px;
+        margin-top: -8px;
+    }
+}
+
+/* Sortable column headers (#6a). Click a header to sort asc, click
+   again to flip desc. Arrows rendered via pseudo-elements so they
+   don't steal click targets from the label. */
+.results-table .sortable {
+    cursor: pointer;
+    user-select: none;
+}
+.results-table .sortable::after {
+    content: "";
+    display: inline-block;
+    width: 0;
+    height: 0;
+    margin-left: 6px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    opacity: 0.3;
+    vertical-align: middle;
+}
+.results-table .sortable.sort-asc::after {
+    border-bottom: 5px solid var(--text);
+    opacity: 1;
+}
+.results-table .sortable.sort-desc::after {
+    border-top: 5px solid var(--text);
+    opacity: 1;
+}
+.results-table .sortable:hover { color: var(--accent); }
+.col-date {
+    width: 96px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+

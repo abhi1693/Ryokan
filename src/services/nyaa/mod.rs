@@ -68,6 +68,13 @@ pub struct SearchResult {
     /// tracked separately at the auto-search site.
     #[serde(default)]
     pub score_breakdown: Vec<crate::services::scoring::ScoreComponent>,
+    /// #1.3.0 — upload date as Nyaa renders it in the table ("YYYY-
+    /// MM-DD HH:MM" UTC). Empty string when the column couldn't be
+    /// parsed (e.g. for releases fetched via the view page rather
+    /// than the listing). Surfaced to the UI so the search-results
+    /// table matches Nyaa's own listing shape.
+    #[serde(default)]
+    pub upload_date: String,
 }
 
 #[derive(Clone)]

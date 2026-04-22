@@ -161,6 +161,12 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
         let size = tds[3].text().collect::<String>().trim().to_string();
         let size_bytes = parse_size(&size);
 
+        // Upload date (td index 4) — Nyaa renders "YYYY-MM-DD HH:MM"
+        // in UTC. Some cells also carry a `data-timestamp` attribute
+        // with the Unix epoch; we prefer the text since it's already
+        // display-ready.
+        let upload_date = tds[4].text().collect::<String>().trim().to_string();
+
         // Seeders, leechers, downloads (td indices 5, 6, 7).
         let seeders = parse_int(&tds[5].text().collect::<String>());
         let leechers = parse_int(&tds[6].text().collect::<String>());
@@ -200,6 +206,7 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
             score: 0,
             info_hash,
             score_breakdown: Vec::new(),
+            upload_date: upload_date.clone(),
         };
 
         let (total, breakdown) =
@@ -493,6 +500,9 @@ pub(super) fn parse_view_page(
         score: 0,
         info_hash,
         score_breakdown: Vec::new(),
+        // The view page doesn't render the listing-table date column.
+        // Callers on this path (SeaDex-bypass) get an empty string.
+        upload_date: String::new(),
     };
 
     let (total, breakdown) =
@@ -967,6 +977,7 @@ mod tests {
             score: 0,
             info_hash: String::new(),
             score_breakdown: Vec::new(),
+            upload_date: String::new(),
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;
@@ -1009,6 +1020,7 @@ mod tests {
             score: 0,
             info_hash: String::new(),
             score_breakdown: Vec::new(),
+            upload_date: String::new(),
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;
