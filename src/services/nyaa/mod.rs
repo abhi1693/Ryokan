@@ -136,6 +136,15 @@ pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, S
     })
 }
 
+/// Enrich already-parsed search results with Layer 3 (group identity
+/// table) signals. Walks each result whose filename classifier didn't
+/// produce a source, looks up the group in `group_source_map`, and fills
+/// in `source` / `quality_label` when the group is known.
+///
+/// No-op for results that already have a filename-derived source — the
+/// filename is more specific than the group map (e.g. a SubsPlease
+/// release explicitly tagged "BluRay" remains BluRay, even though the
+/// group map says SubsPlease == Web).
 pub async fn enrich_results_with_group_map(db: &sqlx::SqlitePool, results: &mut [SearchResult]) {
     use crate::services::source::{Resolution, Source};
     use crate::services::source_groups::classify_group;
@@ -196,18 +205,13 @@ pub async fn enrich_results_with_group_map(db: &sqlx::SqlitePool, results: &mut 
     }
 }
 
-/// Strip exclusion-operator hyphens from a Nyaa search query. Nyaa
-/// runs Sphinx full-text search, where a token starting with `-` is
-/// interpreted as **NOT this token** — and Sphinx applies that even
-/// inside double-quoted phrases (verified live 2026-04-20). AniList's
-/// English titles routinely wrap subtitles in decorative hyphens —
-/// `Solo Leveling Season 2 -Arise from the Shadow-`, `Re:Zero
-/// -Starting Life in Another World-`, etc. — and shipping those raw
-/// silently drops every release whose title contains the subtitled
-/// word. The Solo Leveling S2 query that ought to surface the EMBER
-/// batch (`q=Solo+Leveling+Season+2+-Arise+from+the+Shadow-+batch`)
-/// returned zero hits because Sphinx excluded every result containing
-/// "Arise".
+/// Extract the 40-char lowercase-hex info-hash from a magnet URI.
+/// Returns an empty string when the magnet doesn't carry a `btih:`
+/// URN. Handles both the 40-char hex form and the 32-char
+/// base32-encoded form — the latter gets canonicalized to hex so
+/// every downstream comparison (SeaDex hash set membership,
+/// `grabbed_torrents.info_hash` uniqueness) can assume a single
+/// representation. BTIH URN matching is case-insensitive.
 pub(crate) fn extract_hash(magnet: &str) -> String {
     // BTIH URN is case-insensitive (`urn:btih:` and `urn:BTIH:` both
     // occur in the wild) — match on the lowercased copy.

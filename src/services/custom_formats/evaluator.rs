@@ -131,7 +131,7 @@ pub fn evaluate(cf: &CompiledCustomFormat, ctx: &EvalContext) -> bool {
 /// CFs ship up to ±10_000, and user-authored CFs can carry arbitrary
 /// scores. Naive `.sum()` would wrap on overflow and silently demote
 /// every candidate below `minimum_score`, dropping the entire search.
-pub fn total_cf_score(cfs: &[CompiledCustomFormat], ctx: &EvalContext) -> i32 {
+pub(super) fn total_cf_score(cfs: &[CompiledCustomFormat], ctx: &EvalContext) -> i32 {
     cfs.iter()
         .filter(|cf| evaluate(cf, ctx))
         .map(|cf| cf.score)
