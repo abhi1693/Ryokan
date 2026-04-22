@@ -26,10 +26,7 @@ use crate::services::{
 use super::reconcile::{
     force_kitsu_fallback_enabled, populate_series_cover_urls, resolve_series_context,
 };
-use super::{
-    Episode, ErrorTemplate, IndexTemplate, NeedsReviewTemplate, RelationCard, RelationGroup,
-    SeriesTemplate,
-};
+use super::{Episode, ErrorTemplate, IndexTemplate, RelationCard, RelationGroup, SeriesTemplate};
 
 pub async fn index(State(state): State<AppState>) -> Html<String> {
     // Fetch the library list and config concurrently — they're independent
@@ -59,27 +56,11 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
     Html(template.render().unwrap_or_default())
 }
 
-/// Phase 4 cross-library "needs review" page. Lists every episode the
-/// classifier couldn't land a confident verdict on, with a deep link back
-/// to the series detail page so the user can open the override modal.
-pub async fn needs_review_page(State(state): State<AppState>) -> Html<String> {
-    let mut entries = episode_tags::get_needs_review(&state.db)
-        .await
-        .unwrap_or_default();
-
-    populate_series_cover_urls(
-        &state.db,
-        &mut entries,
-        |e| e.series_id,
-        |entry, url| entry.cover_url = url,
-    )
-    .await;
-
-    let template = NeedsReviewTemplate {
-        page: "library".to_string(),
-        entries,
-    };
-    Html(template.render().unwrap_or_default())
+/// `/library/review` used to render its own page. It's now a System
+/// tab (`/system?tab=review`) — keep this as a 308 redirect so
+/// anything bookmarked, linked, or cached still resolves.
+pub async fn needs_review_page() -> axum::response::Redirect {
+    axum::response::Redirect::permanent("/system?tab=review")
 }
 
 pub async fn series_detail(
@@ -232,12 +213,28 @@ pub async fn series_detail(
         }
     };
 
-    let (cfg, relation_groups, episodes_out, cover_url, banner_url) = tokio::join!(
+    // #15b — last metadata refresh, folded into the existing concurrent
+    // fan-out so it doesn't add a sequential round-trip on top. Cheap
+    // (indexed provider_id lookup, WAL-cached) but the pattern of the
+    // surrounding handler is "every independent read goes in the join!"
+    // so stick with that.
+    let db_for_refresh = state.db.clone();
+    let refresh_fut = async move {
+        crate::models::metadata_cache::get_by_provider_id(&db_for_refresh, provider_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.cached_at)
+            .unwrap_or_default()
+    };
+
+    let (cfg, relation_groups, episodes_out, cover_url, banner_url, metadata_refreshed_at) = tokio::join!(
         cfg_fut,
         relation_groups_fut,
         episodes_fut,
         cover_fut,
         banner_fut,
+        refresh_fut,
     );
     let cfg = cfg.ok().flatten();
     let ((episodes, on_disk_count, downloaded_count, size_display, monitored_count), media_root) =
@@ -251,20 +248,19 @@ pub async fn series_detail(
         .unwrap_or_else(|| "english".to_string());
 
     let ep_total = detail.effective_episode_count();
-    let (external_url, external_label) = if detail.id < 0 {
-        (
-            detail
-                .id_mal
-                .map(|id| format!("https://myanimelist.net/anime/{}", id))
-                .unwrap_or_default(),
-            "MyAnimeList".to_string(),
-        )
+    // #15a — render AL and MAL links independently. AL link is hidden
+    // for the Jikan-fallback sentinel case (detail.id < 0); MAL link is
+    // hidden only when no MAL id is known.
+    let anilist_url = if detail.id > 0 {
+        format!("https://anilist.co/anime/{}", detail.id)
     } else {
-        (
-            format!("https://anilist.co/anime/{}", detail.id),
-            "AniList".to_string(),
-        )
+        String::new()
     };
+    let mal_url = detail
+        .id_mal
+        .filter(|id| *id > 0)
+        .map(|id| format!("https://myanimelist.net/anime/{}", id))
+        .unwrap_or_default();
 
     let all_monitored = ep_total > 0 && monitored_count >= ep_total;
     let allow_upgrades = db_series.as_ref().map(|s| s.allow_upgrades).unwrap_or(true);
@@ -303,8 +299,9 @@ pub async fn series_detail(
         size_display,
         title_language,
         relation_groups,
-        external_url,
-        external_label,
+        anilist_url,
+        mal_url,
+        metadata_refreshed_at,
         monitor_mode,
         monitor_mode_label,
         monitored_count,

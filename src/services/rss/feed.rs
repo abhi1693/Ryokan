@@ -39,6 +39,26 @@ static RE_BATCH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:e?\d{1,4}|s\d{1,2}e\d{1,4})\s*[-~]\s*(?:e?\d{1,4}|\d{1,4})\b").unwrap()
 });
 
+/// Season-marker-immediately-followed-by-bracket pattern. Catches the
+/// Kaizoku-style convention where a pack is named `[Group] Series
+/// Season N (Descriptor)` with no episode number between the season
+/// token and the metadata parens — the opening bracket is the anchor
+/// for a metadata block, not an episode number. Single-episode
+/// releases have a different anchor (episode token or dash) between
+/// the season marker and the bracket, so this regex doesn't fire.
+///
+/// The season-token vocabulary comes from `super::SEASON_TOKEN_
+/// FRAGMENTS` so a new phrasing (e.g. "Chapter N") only needs to be
+/// added in one place and both this regex and the masking pass in
+/// `parse_release` pick it up. The `\s*[(\[]` tail ensures no `E\d`
+/// or other digit sits between the season marker and the bracket,
+/// which regex-lite's lack of lookaround would otherwise need to
+/// express.
+static RE_BATCH_SEASON_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
+    let alternation = super::SEASON_TOKEN_FRAGMENTS.join("|");
+    Regex::new(&format!(r"(?i)\b(?:{})\s*[(\[]", alternation)).unwrap()
+});
+
 pub(super) fn build_item_key(item: &RssItem) -> String {
     if !item.info_hash.is_empty() {
         return format!("hash:{}", item.info_hash.to_lowercase());
@@ -282,10 +302,104 @@ pub(super) fn extract_resolution(title: &str) -> String {
 
 pub(super) fn detect_batch(title: &str) -> bool {
     let lower = title.to_lowercase();
-    RE_BATCH.is_match(&lower)
+    // Mask season markers before running RE_BATCH's `\d+-\d+` range
+    // regex — otherwise titles like "Season 3 - 05" match as a spurious
+    // range "3 - 05". Same trick `parse_release` uses before RE_ABSOLUTE.
+    // Keep the original `lower` for the other predicates: RE_BATCH_
+    // SEASON_BRACKET needs the season markers intact (it's literally
+    // matching them), and the " batch" / " complete" / etc. substrings
+    // don't overlap with season markers anyway.
+    let mut masked = lower.clone();
+    for re in super::RE_SEASON_MARKER_MASK.iter() {
+        masked = re.replace_all(&masked, " ").to_string();
+    }
+    RE_BATCH.is_match(&masked)
+        || RE_BATCH_SEASON_BRACKET.is_match(&lower)
         || lower.contains(" batch")
         || lower.contains(" complete")
         || lower.contains(" mini batch")
         || lower.contains(" full season")
         || lower.contains("全集")
+}
+
+#[cfg(test)]
+mod detect_batch_tests {
+    use super::detect_batch;
+
+    #[test]
+    fn kaizoku_season_parens_detected_as_batch() {
+        assert!(detect_batch(
+            "[Kaizoku] Jujutsu Kaisen Season 3 (WEB 1080p HEVC EAC-3) | The Culling Game Part 1"
+        ));
+    }
+
+    #[test]
+    fn subsplease_weekly_not_batch() {
+        assert!(!detect_batch(
+            "[SubsPlease] Frieren - 01 (1080p) [ABCD1234].mkv"
+        ));
+    }
+
+    #[test]
+    fn single_episode_not_batch() {
+        // Standard weekly release has no season-bracket anchor and no
+        // range token. `RE_BATCH_SEASON_BRACKET` doesn't fire because
+        // there's no season marker.
+        assert!(!detect_batch("[Group] Cool Anime - 05 (1080p)"));
+    }
+
+    #[test]
+    fn season_dash_episode_not_mistaken_for_range() {
+        // "Season 3 - 05" is a single episode of season 3, not a
+        // "3 - 05" batch range. RE_BATCH's \d-\d pattern would
+        // otherwise catch the season digit + episode as a range; the
+        // season-marker mask applied before RE_BATCH runs prevents it.
+        assert!(!detect_batch("[Group] Cool Anime Season 3 - 05 (1080p)"));
+    }
+
+    #[test]
+    fn part_dash_episode_not_mistaken_for_range() {
+        // Same false-positive risk for "Part N - NN" — mask covers it.
+        assert!(!detect_batch("[Group] Cool Anime Part 2 - 05 (1080p)"));
+    }
+
+    #[test]
+    fn real_range_still_batch_after_mask() {
+        // Sanity: an actual episode range "01-12" survives the mask
+        // because it contains no season marker to strip.
+        assert!(detect_batch("[Group] Cool Anime - 01-12 (1080p)"));
+    }
+
+    #[test]
+    fn s3e05_not_batch() {
+        // "S3E05" — the S\d immediately follows with E\d, so the
+        // `\s*[(\[]` tail on RE_BATCH_SEASON_BRACKET can't match
+        // (the next char after "s3" is "e", not whitespace/bracket).
+        assert!(!detect_batch("[Group] Cool Anime S3E05 (1080p)"));
+    }
+
+    #[test]
+    fn explicit_range_still_batch() {
+        assert!(detect_batch("[Group] Cool Anime 01-12 (1080p)"));
+    }
+
+    #[test]
+    fn explicit_batch_token_still_batch() {
+        assert!(detect_batch("[Group] Cool Anime Complete Batch"));
+    }
+
+    #[test]
+    fn nrd_season_parens_detected_as_batch() {
+        assert!(detect_batch("[Group] Series 3rd Season (1080p BD)"));
+    }
+
+    #[test]
+    fn cour_parens_detected_as_batch() {
+        assert!(detect_batch("[Group] Series Cour 2 (1080p)"));
+    }
+
+    #[test]
+    fn part_parens_detected_as_batch() {
+        assert!(detect_batch("[Group] Series Part 2 (1080p)"));
+    }
 }

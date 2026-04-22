@@ -236,6 +236,74 @@ async function cfExportClipboard(btn) {
     }
 }
 
+// CF test box (#18). Posts the pasted release title to
+// /api/custom-formats/test and renders matched/not-matched CFs with
+// the summed score. Title-based specs only — Size and SeaDex specs
+// always miss here, and the section copy on the page says so.
+async function runCfTest() {
+    const input = document.getElementById('cf-test-input');
+    const out = document.getElementById('cf-test-results');
+    if (!input || !out) return;
+    const title = (input.value || '').trim();
+    if (!title) {
+        out.style.display = 'none';
+        return;
+    }
+    // All user-controlled strings flowing into the rendered HTML below
+    // (CF names, parsed fields derived from the title the user pasted,
+    // error bodies from the server) must be HTML-escaped — CF names
+    // persist across requests, so a malicious CF name would otherwise
+    // self-execute for any admin who ran a test.
+    const esc = window.ryokanEscapeHtml;
+    out.style.display = 'block';
+    out.innerHTML = '<p class="form-hint">Testing…</p>';
+    try {
+        const r = await fetch('/api/custom-formats/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({release_title: title}),
+        });
+        const data = await r.json();
+        if (!r.ok || !data.ok) {
+            out.innerHTML = '<p class="form-hint">Test failed: ' + esc(data.error || r.status) + '</p>';
+            return;
+        }
+        const parsed = data.parsed || {};
+        const rows = [];
+        rows.push('<p class="form-hint" style="margin-bottom:8px">Parsed: source=<code>' + esc(parsed.source || 'Unknown') + '</code>, resolution=<code>' + esc(parsed.resolution || 'Unknown') + '</code>, group=<code>' + esc(parsed.group || '(none)') + '</code>' + (parsed.is_remux ? ', <code>remux</code>' : '') + (parsed.is_bdmv ? ', <code>BDMV</code>' : '') + '</p>');
+        rows.push('<p><strong>Total score: ' + Number(data.total_score) + '</strong> — <span class="form-hint">' + Number(data.matched.length) + ' matched, ' + Number(data.not_matched.length) + ' not matched</span></p>');
+        if (data.matched.length > 0) {
+            rows.push('<div class="settings-subheading">Matched</div>');
+            rows.push('<ul style="list-style:none;padding:0;margin:0 0 12px 0">');
+            data.matched.forEach(cf => {
+                const score = Number(cf.score);
+                const sign = score > 0 ? '+' : '';
+                const cls = score > 0 ? 'cf-score-positive' : (score < 0 ? 'cf-score-negative' : 'cf-score-zero');
+                rows.push('<li style="padding:4px 0;display:flex;gap:10px;align-items:baseline"><span class="cf-score ' + cls + '" style="min-width:48px;text-align:right">' + sign + score + '</span><span>' + esc(cf.name) + '</span></li>');
+            });
+            rows.push('</ul>');
+        }
+        if (data.not_matched.length > 0) {
+            rows.push('<details><summary class="form-hint">' + Number(data.not_matched.length) + ' CFs did not match</summary>');
+            rows.push('<ul style="list-style:none;padding:0;margin:4px 0 0 0">');
+            data.not_matched.forEach(cf => {
+                rows.push('<li style="padding:2px 0;color:var(--text-dim);font-size:13px">' + esc(cf.name) + ' <span class="form-hint">(score ' + Number(cf.score) + ')</span></li>');
+            });
+            rows.push('</ul></details>');
+        }
+        out.innerHTML = rows.join('');
+    } catch (e) {
+        out.innerHTML = '<p class="form-hint">Test failed: ' + esc(e && e.message ? e.message : e) + '</p>';
+    }
+}
+
+function clearCfTest() {
+    const input = document.getElementById('cf-test-input');
+    const out = document.getElementById('cf-test-results');
+    if (input) input.value = '';
+    if (out) { out.innerHTML = ''; out.style.display = 'none'; }
+}
+
 function generateApiKey() {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     const buf = new Uint8Array(32);
@@ -438,24 +506,58 @@ function refreshJellyfin(btn) {
     fetch('/api/health')
         .then(r => r.json())
         .then(data => {
+            let activeType = null;
             if (data.download_client) {
                 const dc = data.download_client;
+                activeType = dc.type;
                 const target = badges[dc.type];
                 if (target) {
                     if (dc.ok) {
-                        target.innerHTML = '<span class="log-badge log-badge-info">' + dc.message + '</span>';
-                    } else if (dc.message !== 'Not configured') {
+                        target.innerHTML = '<span class="log-badge log-badge-info">' + window.ryokanEscapeHtml(dc.message) + '</span>';
+                    } else if (dc.message === 'Not configured') {
+                        target.innerHTML = '<span class="log-badge log-badge-warn">Not configured</span>';
+                    } else {
                         target.innerHTML = '<span class="log-badge log-badge-error">Disconnected</span>';
                     }
                 }
             }
+            // Fill non-active client badges with a neutral "Not active"
+            // so the badge slot reads consistently across all four
+            // fieldsets when a user toggles the dropdown to view
+            // credentials for a client they haven't activated.
+            Object.keys(badges).forEach(function (key) {
+                const el = badges[key];
+                if (!el) return;
+                if (key === activeType) return;
+                if (el.innerHTML.trim() !== '') return;
+                el.innerHTML = '<span class="log-badge">Not active</span>';
+            });
             if (jellyfinHealth && data.jellyfin) {
                 if (data.jellyfin.ok) {
-                    jellyfinHealth.innerHTML = '<span class="log-badge log-badge-info">' + data.jellyfin.message + '</span>';
+                    jellyfinHealth.innerHTML = '<span class="log-badge log-badge-info">' + window.ryokanEscapeHtml(data.jellyfin.message) + '</span>';
                 } else if (data.jellyfin.message !== 'Not configured') {
                     jellyfinHealth.innerHTML = '<span class="log-badge log-badge-error">Disconnected</span>';
                 }
             }
         })
         .catch(() => {});
+})();
+
+// Dirty-state guard on the Settings form. Flips a flag on any input
+// change, prompts the user on nav-away (topbar click, browser back, tab
+// close). Clears the flag on submit so the save itself doesn't trigger
+// the prompt.
+(function () {
+    const form = document.querySelector('form.settings-form[action="/settings"]');
+    if (!form) return;
+    let dirty = false;
+    const markDirty = () => { dirty = true; };
+    form.addEventListener('input', markDirty);
+    form.addEventListener('change', markDirty);
+    form.addEventListener('submit', () => { dirty = false; });
+    window.addEventListener('beforeunload', (ev) => {
+        if (!dirty) return;
+        ev.preventDefault();
+        ev.returnValue = '';
+    });
 })();

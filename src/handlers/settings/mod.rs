@@ -127,6 +127,7 @@ struct SettingsTemplate {
     custom_format_import_review: Option<ImportReviewView>,
     message: Option<String>,
     error: Option<String>,
+    version: &'static str,
 }
 
 fn min_score_display(score: i32) -> String {
@@ -397,6 +398,7 @@ async fn build_settings_template(
         custom_format_import_review: import_review,
         message: msg,
         error: err,
+        version: env!("CARGO_PKG_VERSION"),
     }
 }
 
@@ -642,6 +644,7 @@ pub async fn settings_submit(
             custom_format_import_review: None,
             message: None,
             error: Some(format!("Failed to save: {}", e)),
+            version: env!("CARGO_PKG_VERSION"),
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -955,6 +958,7 @@ pub async fn settings_submit(
         // the user changes integration settings).
         message: Some(notices.join(" ")),
         error: None,
+        version: env!("CARGO_PKG_VERSION"),
     };
     Html(template.render().unwrap_or_default())
 }

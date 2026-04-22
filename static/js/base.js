@@ -476,3 +476,139 @@ window.addEventListener('DOMContentLoaded', function () {
         window.ryokanToast({kind: kind, title: title, body: body, log: false});
     });
 });
+
+// HTML-escape a string for safe concatenation into an `innerHTML`
+// sink. Use this wherever a user-controlled value (release title, CF
+// name, fetched error message, etc.) flows into a template literal
+// that's assigned to `.innerHTML`. Prefer DOM APIs (textContent,
+// createElement) for new code where feasible; this helper exists for
+// the "I'm building an HTML string with 5 interpolations and only
+// two of them are user-controlled" case.
+window.ryokanEscapeHtml = function (value) {
+    if (value == null) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+};
+
+// Generic copy-to-clipboard helper. `text` is the string to copy;
+// `btn` is the optional button to flash a confirmation on. Falls back
+// to a toast when the clipboard API is unavailable (HTTP contexts
+// without a secure origin don't expose navigator.clipboard).
+window.ryokanCopy = function (text, btn) {
+    if (text == null || text === '') return Promise.resolve();
+    const flash = function (label, ms) {
+        if (!btn) return;
+        const original = btn.textContent;
+        btn.textContent = label;
+        setTimeout(function () { btn.textContent = original; }, ms || 1500);
+    };
+    const success = function () {
+        flash('Copied!', 1500);
+        window.ryokanToast({kind: 'success', title: 'Copied to clipboard', body: '', log: false, duration: 1500});
+    };
+    const failure = function (err) {
+        flash('Failed', 2000);
+        window.ryokanToast({kind: 'error', title: 'Copy failed', body: (err && err.message) || 'Browser denied clipboard access', log: false});
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(String(text)).then(success).catch(failure);
+    }
+    // Fallback for non-secure contexts: execCommand path.
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = String(text);
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) { success(); return Promise.resolve(); }
+        failure(new Error('execCommand rejected'));
+        return Promise.reject();
+    } catch (e) {
+        failure(e);
+        return Promise.reject(e);
+    }
+};
+
+// Relative timestamp rendering. Any element with a `data-ts` attribute
+// gets its textContent replaced by a humanized delta ("3m ago",
+// "2h ago", "in 58s") and its `title` set to an absolute UTC string.
+// Ticks every 30s so stale values don't linger.
+//
+// Accepted formats on `data-ts`:
+//   - SQLite CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS", treated as UTC)
+//   - ISO 8601 ("YYYY-MM-DDTHH:MM:SSZ" or with offset)
+//   - Unix epoch seconds (10 digits) or ms (13 digits)
+//
+// Opt in by adding `data-ts="{{ grab.grabbed_at }}"` and leaving the
+// element's textContent empty (or a placeholder that will be replaced).
+(function () {
+    function parseTimestamp(raw) {
+        if (!raw) return null;
+        const s = raw.trim();
+        if (!s) return null;
+        if (/^\d{10}$/.test(s)) return new Date(parseInt(s, 10) * 1000);
+        if (/^\d{13}$/.test(s)) return new Date(parseInt(s, 10));
+        const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/);
+        if (m) {
+            const [, y, mo, d, h, mi, se, tz] = m;
+            if (!tz) {
+                return new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +se));
+            }
+            return new Date(s.replace(' ', 'T'));
+        }
+        const d = new Date(s);
+        return isNaN(d.getTime()) ? null : d;
+    }
+
+    function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+    function formatAbsolute(d) {
+        return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate())
+            + ' ' + pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ' UTC';
+    }
+
+    function humanize(deltaSec) {
+        const abs = Math.abs(deltaSec);
+        const future = deltaSec < 0;
+        if (abs < 5) return future ? 'just now' : 'just now';
+        let value, unit;
+        if (abs < 60) { value = abs; unit = 's'; }
+        else if (abs < 3600) { value = Math.round(abs / 60); unit = 'm'; }
+        else if (abs < 86400) { value = Math.round(abs / 3600); unit = 'h'; }
+        else if (abs < 30 * 86400) { value = Math.round(abs / 86400); unit = 'd'; }
+        else { return null; }
+        return future ? 'in ' + value + unit : value + unit + ' ago';
+    }
+
+    function refresh() {
+        const now = Date.now();
+        document.querySelectorAll('[data-ts]').forEach(function (el) {
+            const d = parseTimestamp(el.getAttribute('data-ts'));
+            if (!d) return;
+            const deltaSec = Math.round((now - d.getTime()) / 1000);
+            const rel = humanize(deltaSec);
+            const abs = formatAbsolute(d);
+            // For very old timestamps, show a short date instead of "... ago"
+            if (rel === null) {
+                el.textContent = abs.slice(0, 10);
+            } else {
+                el.textContent = rel;
+            }
+            el.setAttribute('title', abs);
+        });
+    }
+
+    // Expose for callers who inject new [data-ts] nodes after DOM ready.
+    window.ryokanRefreshTimestamps = refresh;
+
+    window.addEventListener('DOMContentLoaded', refresh);
+    setInterval(refresh, 30000);
+})();

@@ -1,7 +1,7 @@
 use askama::Template;
 use serde::{Deserialize, Serialize};
 
-use crate::models::{episode_tags, series};
+use crate::models::series;
 use crate::services::anilist;
 
 pub mod crud;
@@ -16,13 +16,6 @@ struct IndexTemplate {
     page: String,
     library: Vec<series::Series>,
     title_language: String,
-}
-
-#[derive(Template)]
-#[template(path = "needs_review.html")]
-struct NeedsReviewTemplate {
-    page: String,
-    entries: Vec<episode_tags::NeedsReviewEntry>,
 }
 
 #[derive(Template)]
@@ -50,8 +43,20 @@ struct SeriesTemplate {
     size_display: String,
     title_language: String,
     relation_groups: Vec<RelationGroup>,
-    external_url: String,
-    external_label: String,
+    /// Link to anilist.co for this series when a real (positive) AL ID
+    /// is known. Empty for Jikan-fallback series with a synthetic
+    /// negative id (those have no real AniList entry to link to).
+    anilist_url: String,
+    /// Link to myanimelist.net for this series when a MAL id is known.
+    /// Populated from `detail.id_mal` regardless of source — AL returns
+    /// it directly, and the Jikan fallback path populates the same
+    /// field on the detail struct. The synthetic-negative sentinel
+    /// stored on `series.anilist_id` is never read here.
+    mal_url: String,
+    /// Last refresh timestamp from `provider_metadata_cache.cached_at`.
+    /// Empty when we've never cached metadata (shouldn't normally
+    /// happen for a series reaching this page — be defensive).
+    metadata_refreshed_at: String,
     monitor_mode: String,
     monitor_mode_label: String,
     monitored_count: i32,
@@ -246,6 +251,15 @@ pub struct SetManualOverrideForm {
 pub struct ReclassifyEpisodeForm {
     pub series_id: i64,
     pub episode_number: i32,
+}
+
+/// Batch-apply manual overrides — used by the bulk-actions UI on
+/// `/library/review` so a user can tag a selection of rows with the
+/// same (or per-row) override in one transaction instead of N
+/// round trips.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct BulkManualOverrideForm {
+    pub items: Vec<SetManualOverrideForm>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

@@ -71,6 +71,42 @@ static RE_SEASON_DASH: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 static RE_RANGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?\b").unwrap());
 
+// Season-marker patterns that `parse_release` strips before running
+// RE_RANGE and RE_ABSOLUTE against the title. Otherwise the digit in
+// "Season 3" / "Part 1" / "S3" / "3rd Season" / "Cour 2" gets a
+// second life as an absolute episode number when followed by `(` or
+// `[` — e.g. "Season 3 (WEB 1080p ...)" yields episode 3 from the
+// lone "3 (" substring even though that 3 is the season. Sonarr's
+// parser avoids this by requiring specific anchor tokens (`- N (`,
+// `E\d+`, etc.) for absolute-episode extraction; we achieve the same
+// effect by masking the season tokens out of the search window.
+//
+// Masking is safe at this point because the season+episode combined
+// patterns (RE_SEASON_EP_RANGE / _SINGLE / _DASH) have already run
+// and either captured or returned early. If we reach the absolute-
+// episode loop, no season+episode combined pattern matched, so the
+// season digit has no episode counterpart to anchor to.
+/// Pattern fragments for every season-marker phrasing RSS recognizes.
+/// Shared between `RE_SEASON_MARKER_MASK` (this module) and
+/// `RE_BATCH_SEASON_BRACKET` (in `feed.rs`) so a new phrasing only
+/// needs to be added here — adding "Chapter N" or "Volume N" later
+/// updates both the masking pass and the batch-detect anchor in one
+/// place.
+pub(super) const SEASON_TOKEN_FRAGMENTS: &[&str] = &[
+    r"season\s*\d{1,2}",
+    r"\d{1,2}(?:st|nd|rd|th)\s+season",
+    r"part\s*\d{1,2}",
+    r"cour\s*\d{1,2}",
+    r"s\d{1,2}",
+];
+
+pub(super) static RE_SEASON_MARKER_MASK: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    SEASON_TOKEN_FRAGMENTS
+        .iter()
+        .map(|frag| Regex::new(&format!(r"(?i)\b{}\b", frag)).unwrap())
+        .collect()
+});
+
 // Absolute episode patterns (tried in order)
 static RE_ABSOLUTE: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
     vec![
@@ -171,6 +207,11 @@ struct PendingCandidate {
     score: i32,
     new_episode_count: i32,
     is_upgrade: bool,
+    /// Full pre-disk classification of this item — filename layer,
+    /// group-map, temporal, and description-body-when-ambiguous
+    /// combined. Computed once in the upgrade gate and reused by the
+    /// grab path so the same item isn't classified twice per cycle.
+    classification: ClassificationResult,
 }
 
 impl SeriesMeta {
@@ -478,9 +519,37 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 .unwrap_or_default();
             quality_tags_cache.entry(found.series.id).or_insert(tags)
         };
+        // Classify the incoming release once per item using the full
+        // pre-disk pipeline (filename + group-map + temporal +
+        // description-body-when-ambiguous). Stashed on
+        // `PendingCandidate` below so the grab path can reuse it for
+        // `episode_tags::record_grab` without re-classifying.
+        //
+        // Description-body fetching inside `classify_release` is
+        // already self-gated: clean L1+L3+L4 verdicts skip the HTTP
+        // entirely; ambiguous items fetch once and cache via
+        // `nyaa_description_cache` so downstream (scoring, grab) hits
+        // the cache.
+        let incoming_classification = source::classify_release(
+            &state.db,
+            &item.title,
+            Some(&item.resolution),
+            Some(source::NyaaContext {
+                info_hash: &item.info_hash,
+                view_url: &item.link,
+                is_batch: item.is_batch,
+            }),
+            Some(source::SeriesContext {
+                status: &found.series.status,
+                season_year: found.series.season_year,
+                end_year: found.series.end_year,
+            }),
+        )
+        .await;
         let decision = evaluate_candidate(
             &found.series,
             &item,
+            &incoming_classification,
             disk_files,
             &actionable_eps,
             &cutoff,
@@ -551,6 +620,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             score,
             new_episode_count: decision.new_episode_count,
             is_upgrade: decision.is_upgrade,
+            classification: incoming_classification,
         });
     }
 
@@ -681,7 +751,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 .await;
                 // Record for post-processing.
                 let ep_list: Vec<i32> = cand.found.resolved_eps.iter().copied().collect();
-                let _ = crate::models::grabbed_torrents::record_grab(
+                let grab_id = crate::models::grabbed_torrents::record_grab(
                     &state.db,
                     &cand.item.info_hash,
                     &cand.item.title,
@@ -689,41 +759,113 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     &ep_list,
                     cand.item.is_batch,
                 )
-                .await;
-                // Record quality tag + classification for episode status display.
-                let classification = crate::services::source::classify_release(
-                    &state.db,
-                    &cand.item.title,
-                    Some(&cand.item.resolution),
-                    Some(crate::services::source::NyaaContext {
-                        info_hash: &cand.item.info_hash,
-                        view_url: &cand.item.link,
-                        is_batch: cand.item.is_batch,
-                    }),
-                    Some(crate::services::source::SeriesContext {
-                        status: &cand.found.series.status,
-                        season_year: cand.found.series.season_year,
-                        end_year: cand.found.series.end_year,
-                    }),
-                )
-                .await;
+                .await
+                .ok()
+                .flatten();
+                // Reuse the pre-disk classification computed earlier
+                // during the upgrade gate (stashed on the pending
+                // candidate). Saves a second DB + potential HTTP round
+                // trip per grabbed item.
+                let classification = &cand.classification;
                 for ep_num in &ep_list {
                     // RSS items don't carry size info in the feed — the
-                    // grab history row starts at 0 and gets filled in
-                    // with the actual imported file size by
-                    // post-processing. RSS feeds only surface individual
-                    // episode releases, so `is_batch=false` by definition.
+                    // grab history row starts at 0 and post-processing
+                    // fills it in with the actual imported file size at
+                    // import time. For batches, every per-episode row
+                    // of the pack carries the same pack-total zero here
+                    // until post-processing refines to per-file size.
+                    //
+                    // `is_batch` is threaded through from the RSS item
+                    // so episode_grab_history.is_batch correctly flags
+                    // rows that came from a pack. Older comments here
+                    // asserted RSS feeds only surface single-episode
+                    // releases — that's no longer true: RSS now handles
+                    // batches (see the evaluate_candidate batch branch)
+                    // and the flag feeds the Needs Review UI and the
+                    // post-processing sibling-routing safety net.
                     let _ = episode_tags::record_grab(
                         &state.db,
                         cand.found.series.id,
                         *ep_num,
-                        &classification,
+                        classification,
                         &cand.item.title,
                         &cand.item.group,
                         0,
-                        false,
+                        cand.item.is_batch,
                     )
                     .await;
+                }
+
+                // Grab-time sibling detection for batch grabs — without
+                // this, a Monogatari-batch that actually contains
+                // Owarimonogatari files has its per-sibling grab_history
+                // rows transiently attributed to the parent series until
+                // post-processing's import-time safety net re-routes
+                // them. Files end up in the right folder either way,
+                // but the series page reads grab history for progress
+                // display so the UI looked wrong in the meantime.
+                //
+                // Only runs on batch grabs with a positive provider_id
+                // (AniList-sourced series). Jikan-fallback series with
+                // synthetic negative ids can't walk AL relations to
+                // discover siblings, so auto_expand isn't useful there.
+                // The `tokio::spawn` is fire-and-forget with a 180s
+                // metadata wait inside — the RSS sync cycle finishes
+                // long before this completes.
+                if cand.item.is_batch
+                    && let Some(grab_id) = grab_id
+                    && cand.found.series.anilist_id > 0
+                {
+                    let db_task = state.db.clone();
+                    let client_arc = client.clone();
+                    let info_hash_task = cand.item.info_hash.clone();
+                    let provider_id = cand.found.series.anilist_id;
+                    let parent_series_id = cand.found.series.id;
+                    let ep_list_task = ep_list.clone();
+                    let title_task = cand.item.title.clone();
+                    let grab_ctx_task = crate::services::auto_expand::AutoExpandGrabContext {
+                        classification: classification.clone(),
+                        release_group: cand.item.group.clone(),
+                        size_bytes: 0,
+                    };
+                    tokio::spawn(async move {
+                        // Cache-only detail lookup: if metadata hasn't
+                        // been cached yet (unusual for a series the
+                        // user has added) we fall back to letting
+                        // post-processing handle sibling routing at
+                        // import time.
+                        let detail = match crate::models::metadata_cache::get_by_provider_id(
+                            &db_task,
+                            provider_id,
+                        )
+                        .await
+                        {
+                            Ok(Some(row)) => row.detail,
+                            _ => return,
+                        };
+                        let files = match crate::services::download_client::wait_for_files(
+                            &*client_arc,
+                            &info_hash_task,
+                            std::time::Duration::from_secs(180),
+                        )
+                        .await
+                        {
+                            Ok(files) => files,
+                            Err(_) => return,
+                        };
+                        let filenames: Vec<String> = files.into_iter().map(|f| f.name).collect();
+                        crate::services::auto_expand::expand_from_files(
+                            &db_task,
+                            &filenames,
+                            &detail,
+                            parent_series_id,
+                            &ep_list_task,
+                            grab_id,
+                            &title_task,
+                            &grab_ctx_task,
+                        )
+                        .await;
+                    });
                 }
             }
             Err(err) => {
@@ -930,9 +1072,20 @@ fn resolution_rank(value: &str) -> i32 {
     }
 }
 
+/// Decide whether an RSS candidate should be grabbed. `incoming` is
+/// the pre-disk classification of the release (filename + group-map +
+/// temporal + description-when-ambiguous) computed once by the caller
+/// — passed in here for the upgrade gate and reused later by the
+/// grab path for `episode_tags::record_grab`, so we only classify
+/// each item once per cycle even when it reaches the grab stage.
+///
+/// Synchronous: no DB or HTTP inside this function. All the live
+/// lookups happen in the caller before calling this. That also makes
+/// the function unit-testable without a pool or mock client.
 fn evaluate_candidate(
     found: &series::Series,
     item: &RssItem,
+    incoming: &ClassificationResult,
     disk_files: &[media::EpisodeFile],
     parsed_eps: &HashSet<i32>,
     cutoff: &ClassificationResult,
@@ -942,7 +1095,20 @@ fn evaluate_candidate(
 
     if item.is_batch {
         if !parsed_eps.is_empty() {
-            // For batches, count episodes that are either missing or upgradeable.
+            // Pack-level decision: accept only when every episode in
+            // the pack's *covered* range is either missing from disk
+            // or a genuine upgrade over what's on disk. This matches
+            // the behavior we'd want Sonarr-style — per-episode upgrade
+            // evaluation — without the complication of selective-file
+            // download in RSS, because `do_file_op` in post-processing
+            // imports *every* file from the torrent folder and
+            // `fs::rename`/`fs::copy`/`fs::hard_link` silently overwrite
+            // on conflict. Grabbing a pack where even one covered
+            // episode would be a sidegrade or downgrade means that
+            // episode gets clobbered at import time — possibly with a
+            // worse-quality version from a different group. So the
+            // conservative rule is "every covered episode in the pack
+            // must be actionable" (missing or upgradeable).
             let new_count = parsed_eps
                 .iter()
                 .filter(|ep| !existing_ep_numbers.contains(ep))
@@ -951,15 +1117,28 @@ fn evaluate_candidate(
                 .iter()
                 .filter(|ep| {
                     existing_ep_numbers.contains(ep)
-                        && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
+                        && episode_is_upgradeable(ep, disk_files, incoming, cutoff, quality_tags)
                 })
                 .count() as i32;
             let actionable = new_count + upgrade_count;
+            let covered = parsed_eps.len() as i32;
+
             if actionable == 0 {
                 return CandidateDecision {
                     reject_reason: Some(
                         "Batch episodes are already on disk at or above cutoff".to_string(),
                     ),
+                    new_episode_count: 0,
+                    is_upgrade: false,
+                };
+            }
+            if actionable < covered {
+                let not_actionable = covered - actionable;
+                return CandidateDecision {
+                    reject_reason: Some(format!(
+                        "Batch would overwrite {} non-upgradeable episode(s) on disk (pack covers {} total, only {} are missing-or-upgradeable). Manual search bypasses this gate if you explicitly want to replace those episodes.",
+                        not_actionable, covered, actionable
+                    )),
                     new_episode_count: 0,
                     is_upgrade: false,
                 };
@@ -972,6 +1151,25 @@ fn evaluate_candidate(
         }
 
         if is_finished_status(&found.status) {
+            // Finished-series batch with no parsed range. The convenience
+            // path is: user adds an old series, a BD batch shows up,
+            // grab it. But we can only grab blindly when nothing is on
+            // disk — otherwise `do_file_op` in post-processing would
+            // silently overwrite existing episodes with whatever the
+            // batch contains, with no per-episode upgrade check
+            // possible (the pack's episode range is unknown). Safer to
+            // reject and let the user grab intentionally via manual
+            // search when they have existing episodes.
+            if !existing_ep_numbers.is_empty() {
+                return CandidateDecision {
+                    reject_reason: Some(format!(
+                        "Finished-series batch rejected: series has {} episode(s) on disk and the pack's episode range is unknown — can't verify whether the batch would overwrite them with worse quality. Manual search bypasses this gate if you explicitly want to replace those episodes.",
+                        existing_ep_numbers.len()
+                    )),
+                    new_episode_count: 0,
+                    is_upgrade: false,
+                };
+            }
             return CandidateDecision {
                 reject_reason: None,
                 new_episode_count: 0,
@@ -1002,7 +1200,7 @@ fn evaluate_candidate(
         .iter()
         .filter(|ep| {
             existing_ep_numbers.contains(ep)
-                && episode_is_upgradeable(ep, disk_files, item, cutoff, quality_tags)
+                && episode_is_upgradeable(ep, disk_files, incoming, cutoff, quality_tags)
         })
         .count() as i32;
     let actionable = new_count + upgrade_count;
@@ -1022,14 +1220,19 @@ fn evaluate_candidate(
     }
 }
 
-/// Check if an episode on disk is below the quality cutoff and the incoming
-/// release would be an upgrade. Classifies both sides via the classification
-/// pipeline (stored columns / release title / filename fallback for existing;
-/// filename-only for incoming) and compares by rank tuple.
+/// Check if an episode on disk is below the quality cutoff and the
+/// already-classified incoming release would be an upgrade.
+///
+/// Caller is responsible for running the incoming classification once
+/// per item (it's expensive enough — group-map DB lookup + potentially
+/// a description fetch — that re-doing it per covered episode in a
+/// batch would be wasteful). Existing side still classifies
+/// per-episode because each row on disk can have its own
+/// `episode_quality_tags` verdict.
 fn episode_is_upgradeable(
     ep: &i32,
     disk_files: &[media::EpisodeFile],
-    incoming: &RssItem,
+    incoming: &ClassificationResult,
     cutoff: &ClassificationResult,
     quality_tags: &HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> bool {
@@ -1048,10 +1251,9 @@ fn episode_is_upgradeable(
     if existing_classification.rank() >= cutoff.rank() {
         return false;
     }
-    let incoming_classification =
-        source::classify_release_sync(&incoming.title, Some(&incoming.resolution));
-    // Incoming must be strictly better than what's on disk.
-    incoming_classification.rank() > existing_classification.rank()
+    // Shared upgrade policy: strictly better on the rank tuple AND
+    // not a non-BDMV → BDMV crossing. See `source::is_valid_upgrade`.
+    source::is_valid_upgrade(&existing_classification, incoming)
 }
 
 fn is_finished_status(status: &str) -> bool {
@@ -1423,8 +1625,15 @@ fn parse_release(item: &RssItem) -> ParsedRelease {
         }
     }
 
+    // Mask season markers out of the search window for the absolute-
+    // episode and plain-range passes. See RE_SEASON_MARKER_MASK.
+    let mut masked = lower.clone();
+    for re in RE_SEASON_MARKER_MASK.iter() {
+        masked = re.replace_all(&masked, " ").to_string();
+    }
+
     // Plain range (no season prefix)
-    if let Some(caps) = RE_RANGE.captures(&lower) {
+    if let Some(caps) = RE_RANGE.captures(&masked) {
         let start = caps
             .get(1)
             .and_then(|m| m.as_str().parse::<i32>().ok())
@@ -1441,10 +1650,12 @@ fn parse_release(item: &RssItem) -> ParsedRelease {
         }
     }
 
-    // Absolute episode patterns
+    // Absolute episode patterns (run against the season-masked title
+    // so e.g. the "3" in "Season 3 (web ..." doesn't get picked up as
+    // absolute episode 3 via the digit-before-paren pattern).
     if absolute_eps.is_empty() {
         for (mode, re) in RE_ABSOLUTE.iter() {
-            for caps in re.captures_iter(&lower) {
+            for caps in re.captures_iter(&masked) {
                 if let Some(value) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
                     absolute_eps.insert(value);
                 }
@@ -1630,4 +1841,354 @@ fn group_matches_blacklist(group: &str, blacklist: &[String]) -> bool {
     blacklist
         .iter()
         .any(|blocked| blocked.eq_ignore_ascii_case(group.trim()))
+}
+
+#[cfg(test)]
+mod parse_release_tests {
+    use super::*;
+
+    fn item(title: &str) -> RssItem {
+        RssItem {
+            title: title.to_string(),
+            link: String::new(),
+            guid: String::new(),
+            torrent: String::new(),
+            magnet: String::new(),
+            info_hash: String::new(),
+            group: extract_group(title),
+            resolution: extract_resolution(title),
+            is_batch: detect_batch(title),
+        }
+    }
+
+    #[test]
+    fn season_digit_is_not_parsed_as_absolute_episode() {
+        // Regression: "[Kaizoku] Jujutsu Kaisen Season 3 (WEB 1080p HEVC
+        // EAC-3) | The Culling Game Part 1" used to extract absolute
+        // episode 3 from "season 3 (" via RE_ABSOLUTE's digit-before-
+        // paren pattern. After the season-marker masking pass, "season
+        // 3" and "part 1" are stripped from the absolute search window
+        // so no spurious episode number survives.
+        let parsed = parse_release(&item(
+            "[Kaizoku] Jujutsu Kaisen Season 3 (WEB 1080p HEVC EAC-3) | The Culling Game Part 1",
+        ));
+        assert_eq!(parsed.season_hint, Some(3), "season_hint should be 3");
+        assert!(
+            parsed.absolute_eps.is_empty(),
+            "absolute_eps should be empty, got {:?}",
+            parsed.absolute_eps
+        );
+        assert!(
+            parsed.season_relative_eps.is_empty(),
+            "season_relative_eps should be empty, got {:?}",
+            parsed.season_relative_eps
+        );
+    }
+
+    #[test]
+    fn hyphen_space_episode_still_parses_after_mask() {
+        // Sanity: the standard "[Group] Series - 01 (1080p)" shape
+        // should still resolve to absolute episode 1 after the mask
+        // pass. The mask strips optional season tokens; there are none
+        // here so the title passes through unchanged.
+        let parsed = parse_release(&item("[SubsPlease] Frieren - 01 (1080p) [ABCD1234].mkv"));
+        assert!(parsed.absolute_eps.contains(&1));
+    }
+
+    #[test]
+    fn s3_prefix_does_not_leak_season_digit_to_episode() {
+        // "[Group] Series S3 - 05 (1080p)" should extract season 3,
+        // episode 5 — not both-3-and-5. Belongs to the season-dash
+        // patterns, resolved before the absolute fallback runs, but
+        // verify nothing regresses.
+        let parsed = parse_release(&item("[Group] Cool Anime S3 - 05 (1080p)"));
+        assert_eq!(parsed.season_hint, Some(3));
+        assert!(
+            parsed.season_relative_eps.contains(&5) || parsed.absolute_eps.contains(&5),
+            "episode 5 should be resolved; got rel={:?} abs={:?}",
+            parsed.season_relative_eps,
+            parsed.absolute_eps
+        );
+    }
+
+    #[test]
+    fn nrd_season_marker_masked() {
+        // "3rd Season" should not leak its "3" as an absolute episode.
+        let parsed = parse_release(&item("[Group] Series 3rd Season (WEB 1080p)"));
+        assert_eq!(parsed.season_hint, Some(3));
+        assert!(parsed.absolute_eps.is_empty());
+    }
+
+    #[test]
+    fn cour_marker_masked() {
+        // "Cour 2" should not leak "2" to the absolute pass.
+        let parsed = parse_release(&item("[Group] Series Cour 2 (WEB 1080p)"));
+        assert!(parsed.absolute_eps.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod evaluate_candidate_tests {
+    //! Unit coverage for the `evaluate_candidate` decision tree. The
+    //! function is synchronous and takes a pre-computed
+    //! `ClassificationResult`, so these tests drive it directly with
+    //! in-memory fixtures — no DB or network.
+
+    use super::*;
+    use crate::models::episode_tags::EpisodeQualityTag;
+    use crate::services::source::DecisionRule;
+
+    fn series(status: &str) -> series::Series {
+        series::Series {
+            id: 1,
+            anilist_id: 101,
+            mal_id: None,
+            title: "Test Series".to_string(),
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            format: "TV".to_string(),
+            status: status.to_string(),
+            episodes: Some(12),
+            season_year: None,
+            end_year: None,
+            folder_name: "Test Series".to_string(),
+            monitor_mode: "all".to_string(),
+            allow_upgrades: true,
+            custom_query_tokens: String::new(),
+            restrict_to_uploader: String::new(),
+            cumulative_prior_episodes: 0,
+        }
+    }
+
+    fn item_with(title: &str, is_batch: bool) -> RssItem {
+        RssItem {
+            title: title.to_string(),
+            link: String::new(),
+            guid: String::new(),
+            torrent: String::new(),
+            magnet: String::new(),
+            info_hash: String::new(),
+            group: String::new(),
+            resolution: "1080".to_string(),
+            is_batch,
+        }
+    }
+
+    fn classification(
+        src: Source,
+        res: Resolution,
+        is_remux: bool,
+        is_bdmv: bool,
+    ) -> ClassificationResult {
+        ClassificationResult {
+            source: src,
+            resolution: res,
+            is_remux,
+            web_kind: source::WebKind::Unknown,
+            is_bdmv,
+            confidence: 1.0,
+            needs_review: false,
+            evidence: Vec::new(),
+            decision_rule: DecisionRule::Empty,
+        }
+    }
+
+    fn bluray_cutoff() -> ClassificationResult {
+        source::cutoff_classification(Source::BluRay, Resolution::R1080p, false, false)
+    }
+
+    fn disk_file(ep: i32, quality: &str) -> media::EpisodeFile {
+        media::EpisodeFile {
+            filename: format!("Test Series - S01E{:02}.mkv", ep),
+            episode_number: ep,
+            season_number: Some(1),
+            quality: quality.to_string(),
+            size_bytes: 1_000_000_000,
+            size_display: String::new(),
+        }
+    }
+
+    fn web_tag(ep: i32) -> (i32, EpisodeQualityTag) {
+        (
+            ep,
+            EpisodeQualityTag {
+                episode_number: ep,
+                quality_tag: "WEB-1080p".to_string(),
+                release_title: String::new(),
+                release_group: String::new(),
+                state: "imported".to_string(),
+                source: "Web".to_string(),
+                resolution: "1080p".to_string(),
+                is_remux: false,
+                is_bdmv: false,
+                web_kind: String::new(),
+                classification_confidence: 0.9,
+                needs_review: false,
+                manual_override: false,
+                classification_evidence: String::new(),
+                classification_attempted_at: None,
+            },
+        )
+    }
+
+    #[test]
+    fn batch_with_partial_coverage_is_rejected() {
+        // Pack covers eps 1..=3. Ep 1 on disk as WEB-1080p (upgradeable
+        // to BluRay-1080p incoming). Ep 2 on disk as BluRay-1080p (at
+        // cutoff — not upgradeable). Ep 3 missing. Covered=3,
+        // actionable=2 (missing + upgrade), so the mixed-coverage
+        // rejection fires.
+        let cutoff = bluray_cutoff();
+        let incoming = classification(Source::BluRay, Resolution::R1080p, false, false);
+        let found = series("RELEASING");
+        let item = item_with("[Group] Test Series Season 1 (BD 1080p)", true);
+        let disk = vec![disk_file(1, "WEB-1080p"), disk_file(2, "BluRay-1080p")];
+        let parsed_eps: HashSet<i32> = [1, 2, 3].into_iter().collect();
+        let quality_tags: HashMap<i32, EpisodeQualityTag> = [web_tag(1), {
+            let (ep, mut tag) = web_tag(2);
+            tag.source = "BluRay".to_string();
+            tag.quality_tag = "BluRay-1080p".to_string();
+            (ep, tag)
+        }]
+        .into_iter()
+        .collect();
+
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &cutoff,
+            &quality_tags,
+        );
+        assert!(
+            decision.reject_reason.is_some(),
+            "expected rejection for mixed coverage"
+        );
+        let reason = decision.reject_reason.unwrap();
+        assert!(
+            reason.contains("would overwrite"),
+            "reject reason should mention overwrite risk: {reason}"
+        );
+    }
+
+    #[test]
+    fn batch_with_full_coverage_is_accepted() {
+        // Same shape as above but all covered episodes actionable
+        // (1 upgradeable from WEB, 2 and 3 missing).
+        let cutoff = bluray_cutoff();
+        let incoming = classification(Source::BluRay, Resolution::R1080p, false, false);
+        let found = series("RELEASING");
+        let item = item_with("[Group] Test Series Season 1 (BD 1080p)", true);
+        let disk = vec![disk_file(1, "WEB-1080p")];
+        let parsed_eps: HashSet<i32> = [1, 2, 3].into_iter().collect();
+        let quality_tags: HashMap<i32, EpisodeQualityTag> = [web_tag(1)].into_iter().collect();
+
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &cutoff,
+            &quality_tags,
+        );
+        assert!(
+            decision.reject_reason.is_none(),
+            "expected acceptance when all covered episodes actionable; got: {:?}",
+            decision.reject_reason
+        );
+        assert_eq!(decision.new_episode_count, 3);
+    }
+
+    #[test]
+    fn finished_batch_no_range_with_disk_content_is_rejected() {
+        // Series is finished, item is a batch with no parsed range
+        // (parsed_eps empty). Existing episodes on disk. Should
+        // reject because we can't verify overwrite safety without a
+        // range to check per-episode.
+        let cutoff = bluray_cutoff();
+        let incoming = classification(Source::BluRay, Resolution::R1080p, false, false);
+        let found = series("FINISHED");
+        let item = item_with("[Group] Test Series Season 1 (BD 1080p)", true);
+        let disk = vec![disk_file(1, "WEB-1080p"), disk_file(2, "WEB-1080p")];
+        let parsed_eps: HashSet<i32> = HashSet::new();
+        let quality_tags: HashMap<i32, EpisodeQualityTag> = HashMap::new();
+
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &cutoff,
+            &quality_tags,
+        );
+        assert!(
+            decision.reject_reason.is_some(),
+            "expected rejection for finished-series batch with existing disk content"
+        );
+        let reason = decision.reject_reason.unwrap();
+        assert!(
+            reason.contains("episode range is unknown"),
+            "reject reason should mention unknown range: {reason}"
+        );
+    }
+
+    #[test]
+    fn finished_batch_no_range_with_empty_disk_is_accepted() {
+        // Same as above but empty disk — this is the intentional
+        // BD-batch convenience path for fresh adds. Should accept.
+        let cutoff = bluray_cutoff();
+        let incoming = classification(Source::BluRay, Resolution::R1080p, false, false);
+        let found = series("FINISHED");
+        let item = item_with("[Group] Test Series Season 1 (BD 1080p)", true);
+        let disk: Vec<media::EpisodeFile> = Vec::new();
+        let parsed_eps: HashSet<i32> = HashSet::new();
+        let quality_tags: HashMap<i32, EpisodeQualityTag> = HashMap::new();
+
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &cutoff,
+            &quality_tags,
+        );
+        assert!(
+            decision.reject_reason.is_none(),
+            "expected acceptance for finished-series fresh-add batch; got: {:?}",
+            decision.reject_reason
+        );
+    }
+
+    #[test]
+    fn airing_batch_no_range_is_rejected() {
+        // Airing series + batch without parsed range = not enough
+        // signal to grab safely. The is_finished_status branch
+        // doesn't fire so this hits the "batch doesn't include
+        // monitored episodes" reject.
+        let cutoff = bluray_cutoff();
+        let incoming = classification(Source::Web, Resolution::R1080p, false, false);
+        let found = series("RELEASING");
+        let item = item_with("[Group] Test Series Season 1 (WEB 1080p)", true);
+        let disk: Vec<media::EpisodeFile> = Vec::new();
+        let parsed_eps: HashSet<i32> = HashSet::new();
+        let quality_tags: HashMap<i32, EpisodeQualityTag> = HashMap::new();
+
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &cutoff,
+            &quality_tags,
+        );
+        assert!(decision.reject_reason.is_some());
+    }
 }

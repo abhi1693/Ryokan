@@ -193,7 +193,14 @@ pub fn classify_filename(title: &str) -> FilenameClassification {
                 format!("{} + {} → DVD override", token, result.resolution.as_str()),
             )
         } else {
-            (*mapped_src, 0.95, format!("keyword: {}", token))
+            // Bare "web" is a weaker signal than "web-dl"/"webrip": the
+            // latter two pin WebKind explicitly, bare "web" leaves
+            // WebKind::Unknown. Drop its confidence to 0.85 so the
+            // aggregator leaves room for post-download layers (ffprobe,
+            // group-map) to overrule when they disagree. Every other
+            // explicit source keyword stays at 0.95.
+            let conf = if *token == "web" { 0.85 } else { 0.95 };
+            (*mapped_src, conf, format!("keyword: {}", token))
         };
         result
             .evidence
@@ -381,10 +388,19 @@ const SOURCE_FALLBACK_TOKENS: &[(&str, Source)] = &[
     ("bdremux", Source::BluRay),
     ("bluray", Source::BluRay),
     ("blu-ray", Source::BluRay),
-    // Web variants
+    // Web variants — the bare "web" entry catches space-separated
+    // forms like "(WEB 1080p AV1 EAC-3)" that anitomy sometimes
+    // misses as an ElementCategory::Source and that the hyphenated
+    // variants don't cover. The dedup check inside `classify_filename`'s
+    // fallback loop (`.any(|e| e.source == *mapped_src)`) prevents
+    // double-counting when both the specific (web-dl) and the bare
+    // (web) token are present in the same title. Bare "web" also gets
+    // a lower confidence (0.85 vs 0.95 for the hyphenated variants) —
+    // see the comment in that loop for the rationale.
     ("web-dl", Source::Web),
     ("webrip", Source::Web),
     ("webdl", Source::Web),
+    ("web", Source::Web),
     // DVD variants
     ("dvdrip", Source::Dvd),
     // HDTV
@@ -535,6 +551,21 @@ mod tests {
     #[test]
     fn explicit_web_dl_classifies_as_web() {
         let (src, res, _) = classify("Sousou.no.Frieren.S01E01.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv");
+        assert_eq!(src, Source::Web);
+        assert_eq!(res, Resolution::R1080p);
+    }
+
+    #[test]
+    fn bare_web_in_parens_classifies_as_web() {
+        // Regression: "[miniKaizoku] Jujutsu Kaisen Season 3 (WEB 1080p
+        // AV1 EAC-3) | The Culling Game Part 1" used to classify as
+        // Unknown source because SOURCE_FALLBACK_TOKENS didn't include
+        // bare "web" (only the hyphenated web-dl / webrip forms). The
+        // title's space-separated WEB token inside parens now matches
+        // the fallback and fires Source::Web evidence.
+        let (src, res, _) = classify(
+            "[miniKaizoku] Jujutsu Kaisen Season 3 (WEB 1080p AV1 EAC-3) | The Culling Game Part 1",
+        );
         assert_eq!(src, Source::Web);
         assert_eq!(res, Resolution::R1080p);
     }
