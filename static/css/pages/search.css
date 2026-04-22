@@ -259,11 +259,15 @@
     min-width: 280px;
     max-width: 360px;
     padding: 10px 12px;
-    background: var(--panel);
+    /* --panel isn't defined in the theme — fell through to transparent,
+       which made the expanded breakdown render as floating text over
+       the rows below. --bg-elevated is the correct overlay surface
+       (same var used by log panels and other popovers). */
+    background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+    z-index: 30;
     text-align: left;
     font-size: 12px;
 }

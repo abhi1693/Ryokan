@@ -49,7 +49,7 @@
                 {% for r in results %}
                 <tr class="{% if r.is_batch && r.is_trusted %}is-batch is-trusted{% else if r.is_batch %}is-batch{% else if r.is_trusted %}is-trusted{% endif %}" data-score="{{ r.score }}" data-name="{{ r.title }}" data-size="{{ r.size_bytes }}" data-date="{{ r.upload_date }}" data-seeders="{{ r.seeders }}" data-leechers="{{ r.leechers }}" data-downloads="{{ r.downloads }}">
                     <td class="col-score">
-                        <details class="score-details">
+                        <details class="score-details" name="score-breakdown">
                             <summary class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}" title="Click to see breakdown">{{ r.score }}</summary>
                             <div class="score-components">
                                 <div class="score-components-title">Base score breakdown</div>
