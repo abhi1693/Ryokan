@@ -521,11 +521,57 @@ function renderScoreDetails(r, scoreClass) {
 // outside it or presses Escape. Registered once at module load; applies
 // to both the interactive-search table and the batch table since they
 // share the same markup shape.
+//
+// Also rewrites the panel's positioning to `fixed` on open when the
+// expander lives inside an overflow-clipping ancestor (the interactive-
+// search modal has `overflow:hidden` on `.modal` and `overflow-y:auto`
+// on `.modal-body`, which would otherwise clip the absolutely-
+// positioned `.score-components` panel out of sight). Without this the
+// breakdown silently opened offscreen and looked like nothing happened
+// when you clicked the score badge.
 (function () {
     function closeAllOpenBreakdowns(except) {
         document.querySelectorAll('details.score-details[open]').forEach(function (d) {
             if (d !== except) d.removeAttribute('open');
+            // Clear any inline fixed-position styles we applied on open.
+            const panel = d.querySelector('.score-components');
+            if (panel && d !== except) resetPanelPosition(panel);
         });
+    }
+    function resetPanelPosition(panel) {
+        panel.style.position = '';
+        panel.style.top = '';
+        panel.style.left = '';
+        panel.style.minWidth = '';
+    }
+    function positionPanelIfClipped(details) {
+        const panel = details.querySelector('.score-components');
+        if (!panel) return;
+        // Only lift to fixed-positioning when the details is inside an
+        // overflow-clipping ancestor. Outside a modal the regular CSS
+        // `position:absolute` works fine.
+        let clipped = false;
+        let node = details.parentElement;
+        while (node && node !== document.body) {
+            const cs = window.getComputedStyle(node);
+            if (cs.overflow !== 'visible' || cs.overflowX !== 'visible' || cs.overflowY !== 'visible') {
+                clipped = true;
+                break;
+            }
+            node = node.parentElement;
+        }
+        if (!clipped) {
+            resetPanelPosition(panel);
+            return;
+        }
+        const rect = details.getBoundingClientRect();
+        panel.style.position = 'fixed';
+        panel.style.top = (rect.bottom + 6) + 'px';
+        panel.style.left = rect.left + 'px';
+        // Constrain the minimum width to avoid flowing off the right
+        // edge of a narrow viewport; the max-width from the shared CSS
+        // still caps it at 360px.
+        panel.style.minWidth = '240px';
     }
     document.addEventListener('click', function (evt) {
         const inside = evt.target.closest('details.score-details');
@@ -536,6 +582,17 @@ function renderScoreDetails(r, scoreClass) {
             closeAllOpenBreakdowns(null);
         }
     });
+    // `toggle` doesn't bubble, so we capture it at the document level.
+    document.addEventListener('toggle', function (evt) {
+        const d = evt.target;
+        if (!(d instanceof HTMLDetailsElement)) return;
+        if (!d.classList.contains('score-details')) return;
+        if (d.open) positionPanelIfClipped(d);
+        else {
+            const panel = d.querySelector('.score-components');
+            if (panel) resetPanelPosition(panel);
+        }
+    }, true);
 })();
 
 function searchBatchReleases(btn) {
