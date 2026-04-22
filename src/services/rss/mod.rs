@@ -937,6 +937,43 @@ async fn load_canonical_history(
     keys
 }
 
+/// Match a release title against every tracked series in the library
+/// and return the best match's series id + resolved episode set, or
+/// `None` if no series cleared the matcher's confidence threshold.
+/// Used by the manual-search grab path (#1.3.0 plan item 6d) to
+/// link grabs to existing library entries without re-implementing
+/// the RSS matcher.
+///
+/// `is_batch` comes from the caller (the search UI already knows),
+/// so we don't need to re-run `detect_batch` here. Returns the
+/// resolved episode numbers so the grab recorder can populate
+/// episode_grab_history correctly.
+pub async fn match_library_title(
+    db: &sqlx::SqlitePool,
+    title: &str,
+    is_batch: bool,
+) -> Option<(series::Series, Vec<i32>)> {
+    let all_series = series::get_all(db).await.ok()?;
+    if all_series.is_empty() {
+        return None;
+    }
+    let all_meta: Vec<SeriesMeta> = all_series.iter().map(SeriesMeta::from_series).collect();
+    let pseudo = RssItem {
+        title: title.to_string(),
+        link: String::new(),
+        guid: String::new(),
+        torrent: String::new(),
+        magnet: String::new(),
+        info_hash: String::new(),
+        group: extract_group(title),
+        resolution: extract_resolution(title),
+        is_batch,
+    };
+    let found = best_series_match(&pseudo, &all_meta)?;
+    let eps: Vec<i32> = found.resolved_eps.iter().copied().collect();
+    Some((found.series, eps))
+}
+
 fn canonical_key_for_title(title: &str, all_meta: &[SeriesMeta]) -> Option<String> {
     let pseudo = RssItem {
         title: title.to_string(),

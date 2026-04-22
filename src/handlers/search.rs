@@ -51,6 +51,23 @@ fn default_page() -> i32 {
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct GrabForm {
     url: String,
+    /// Optional release title — used for library linkage (#1.3.0 plan
+    /// item 6d). When supplied, the grab handler tries to match it
+    /// against an existing library series; on match, the grab lands
+    /// in `grabbed_torrents` linked to that series and (for batches)
+    /// auto_expand runs for sibling-series detection. Empty / absent
+    /// = behave like the original grab endpoint (fire-and-forget).
+    #[serde(default)]
+    title: Option<String>,
+    /// Optional info_hash from the frontend. Used both to key the
+    /// download-client add and (when matched) as the grabbed_torrents
+    /// primary key. Frontend sends it when known.
+    #[serde(default)]
+    info_hash: Option<String>,
+    /// Whether the release was flagged as a batch by the search UI.
+    /// Gates auto_expand at grab time.
+    #[serde(default)]
+    is_batch: Option<bool>,
 }
 
 /// Helper to build SearchOptions from config.
@@ -225,12 +242,16 @@ pub async fn grab_release(
             .clone()
     };
 
-    let info_hash = crate::services::nyaa::extract_hash(&form.url);
+    let form_hash = form.info_hash.clone().unwrap_or_default();
+    let info_hash = if !form_hash.is_empty() {
+        form_hash
+    } else {
+        crate::services::nyaa::extract_hash(&form.url)
+    };
     client
         .add_torrent(&form.url, &info_hash)
         .await
         .map_err(|e| {
-            // Fire-and-forget log — don't block on it in the error path.
             let db = state.db.clone();
             let err_msg = e.clone();
             tokio::spawn(async move {
@@ -246,6 +267,155 @@ pub async fn grab_release(
         &form.url,
     )
     .await;
+
+    // Library linkage (#6d) — fire-and-forget so the user sees
+    // "grabbed" immediately while the library bookkeeping runs in the
+    // background. Only runs when the frontend passed a title (so we
+    // have something to match) and info_hash (so grabbed_torrents has
+    // a stable primary key). Matching against the existing library
+    // reuses the RSS matcher — no AniList calls, no HTTP, just the
+    // alias/fuzzy-match pass.
+    if let (Some(title), hash) = (form.title.clone(), info_hash.clone())
+        && !title.is_empty()
+        && !hash.is_empty()
+    {
+        let is_batch = form.is_batch.unwrap_or(false);
+        let state_task = state.clone();
+        let client_task = client.clone();
+        let url_task = form.url.clone();
+        tokio::spawn(async move {
+            let Some((series, eps)) =
+                crate::services::rss::match_library_title(&state_task.db, &title, is_batch).await
+            else {
+                // No library match. Grab succeeds without series
+                // attribution. Auto-adding the series via AniList is
+                // scoped out for this pass — it needs care around
+                // rate limits, duplicate detection, and provider
+                // fallbacks.
+                return;
+            };
+            // Record the grab against the matched series. Episode
+            // numbers come from the RSS matcher's resolved_eps
+            // (absolute or season-relative, whichever fired).
+            let grab_id = crate::models::grabbed_torrents::record_grab(
+                &state_task.db,
+                &hash,
+                &title,
+                series.id,
+                &eps,
+                is_batch,
+            )
+            .await
+            .ok()
+            .flatten();
+
+            // Populate episode_quality_tags so the series page shows
+            // each grabbed episode in 'grabbed' state right away.
+            let classification = crate::services::source::classify_release(
+                &state_task.db,
+                &title,
+                None,
+                Some(crate::services::source::NyaaContext {
+                    info_hash: &hash,
+                    view_url: "",
+                    is_batch,
+                }),
+                Some(crate::services::source::SeriesContext {
+                    status: &series.status,
+                    season_year: series.season_year,
+                    end_year: series.end_year,
+                }),
+            )
+            .await;
+            for ep in &eps {
+                let _ = crate::models::episode_tags::record_grab(
+                    &state_task.db,
+                    series.id,
+                    *ep,
+                    &classification,
+                    &title,
+                    "",
+                    0,
+                    is_batch,
+                )
+                .await;
+            }
+
+            logger::info(
+                &state_task.db,
+                LogCategory::Grab,
+                &format!(
+                    "Manual grab linked to series: {} ({} ep{})",
+                    series.title,
+                    eps.len(),
+                    if eps.len() == 1 { "" } else { "s" }
+                ),
+                &title,
+            )
+            .await;
+
+            // Batch grabs get sibling-series detection via auto_expand
+            // at metadata-available time — same path RSS + auto-search
+            // use. Skipped when the series's provider_id is negative
+            // (Jikan-fallback sentinel, no AL graph to walk).
+            if is_batch
+                && series.anilist_id > 0
+                && let Some(grab_id) = grab_id
+            {
+                let db_expand = state_task.db.clone();
+                let client_expand = client_task.clone();
+                let hash_expand = hash.clone();
+                let title_expand = title.clone();
+                let series_id_expand = series.id;
+                let provider_id_expand = series.anilist_id;
+                let ep_list_expand = eps.clone();
+                let classification_expand = classification.clone();
+                tokio::spawn(async move {
+                    let detail = match crate::models::metadata_cache::get_by_provider_id(
+                        &db_expand,
+                        provider_id_expand,
+                    )
+                    .await
+                    {
+                        Ok(Some(row)) => row.detail,
+                        _ => return,
+                    };
+                    let files = match crate::services::download_client::wait_for_files(
+                        &*client_expand,
+                        &hash_expand,
+                        std::time::Duration::from_secs(180),
+                    )
+                    .await
+                    {
+                        Ok(files) => files,
+                        Err(_) => return,
+                    };
+                    let filenames: Vec<String> = files.into_iter().map(|f| f.name).collect();
+                    let ctx = crate::services::auto_expand::AutoExpandGrabContext {
+                        classification: classification_expand,
+                        release_group: String::new(),
+                        size_bytes: 0,
+                    };
+                    crate::services::auto_expand::expand_from_files(
+                        &db_expand,
+                        &filenames,
+                        &detail,
+                        series_id_expand,
+                        &ep_list_expand,
+                        grab_id,
+                        &title_expand,
+                        &ctx,
+                    )
+                    .await;
+                });
+            }
+
+            // Suppress unused-variable warning when grab_id is None
+            // (record_grab returned Err) — the if-let above already
+            // guards auto_expand on it.
+            let _ = url_task;
+        });
+    }
 
     Ok(Json(serde_json::json!({"ok": true})))
 }

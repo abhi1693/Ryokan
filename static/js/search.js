@@ -166,10 +166,23 @@ function loadMore() {
 function grabRelease(url, btn) {
     btn.disabled = true;
     btn.textContent = '...';
+    // Pull the row's data-* attributes so the backend can link the
+    // grab to a library series (#6d). Falls back to a URL-only grab
+    // when the button wasn't mounted inside a result row — e.g. a
+    // caller from a different template.
+    const row = btn.closest('tr[data-score]') || btn.closest('.result-card');
+    const payload = {url: url};
+    if (row) {
+        // data-name carries the release title; is_batch is inferred
+        // from the row class. info_hash isn't exposed on the row
+        // today — the backend re-derives it from the URL when absent.
+        if (row.dataset.name) payload.title = row.dataset.name;
+        payload.is_batch = row.classList.contains('is-batch');
+    }
     fetch('/api/grab', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({url: url})
+        body: JSON.stringify(payload),
     })
     .then(resp => {
         if (resp.ok) {
