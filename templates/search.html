@@ -48,7 +48,26 @@
                 {% for r in results %}
                 <tr class="{% if r.is_batch && r.is_trusted %}is-batch is-trusted{% else if r.is_batch %}is-batch{% else if r.is_trusted %}is-trusted{% endif %}">
                     <td class="col-score">
-                        <span class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}">{{ r.score }}</span>
+                        <details class="score-details">
+                            <summary class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}" title="Click to see breakdown">{{ r.score }}</summary>
+                            <div class="score-components">
+                                <div class="score-components-title">Base score breakdown</div>
+                                {% if r.score_breakdown.is_empty() %}
+                                <div class="form-hint">No components fired (score stayed at 0).</div>
+                                {% else %}
+                                <ul>
+                                    {% for c in r.score_breakdown %}
+                                    <li>
+                                        <span class="sc-delta {% if c.delta > 0 %}sc-delta-pos{% else %}sc-delta-neg{% endif %}">{% if c.delta > 0 %}+{% endif %}{{ c.delta }}</span>
+                                        <span class="sc-label">{{ c.label }}</span>
+                                        {% if let Some(detail) = c.detail %}<span class="sc-detail">{{ detail }}</span>{% endif %}
+                                    </li>
+                                    {% endfor %}
+                                </ul>
+                                <div class="form-hint">Custom Format contributions (if any) are applied on top of this base score at grab time — test via Settings → Custom Formats.</div>
+                                {% endif %}
+                            </div>
+                        </details>
                     </td>
                     <td class="col-name">
                         <a href="{{ r.link }}" target="_blank" rel="noopener">{{ r.title }}</a>

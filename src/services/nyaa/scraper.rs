@@ -199,10 +199,13 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
             is_trusted,
             score: 0,
             info_hash,
+            score_breakdown: Vec::new(),
         };
 
-        result.score =
-            crate::services::scoring::score_result_with_sub_pref(&result, opts, opts.prefer_subs);
+        let (total, breakdown) =
+            crate::services::scoring::score_result_with_breakdown(&result, opts, opts.prefer_subs);
+        result.score = total;
+        result.score_breakdown = breakdown;
         results.push(result);
     }
 
@@ -489,10 +492,13 @@ pub(super) fn parse_view_page(
         is_trusted: false,
         score: 0,
         info_hash,
+        score_breakdown: Vec::new(),
     };
 
-    result.score =
-        crate::services::scoring::score_result_with_sub_pref(&result, opts, opts.prefer_subs);
+    let (total, breakdown) =
+        crate::services::scoring::score_result_with_breakdown(&result, opts, opts.prefer_subs);
+    result.score = total;
+    result.score_breakdown = breakdown;
 
     Some(result)
 }
@@ -960,6 +966,7 @@ mod tests {
             is_trusted: false,
             score: 0,
             info_hash: String::new(),
+            score_breakdown: Vec::new(),
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;
@@ -1001,6 +1008,7 @@ mod tests {
             is_trusted: false,
             score: 0,
             info_hash: String::new(),
+            score_breakdown: Vec::new(),
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;

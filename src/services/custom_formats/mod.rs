@@ -226,6 +226,7 @@ pub(super) mod test_helpers {
             is_trusted: false,
             score: 0,
             info_hash: info_hash.to_string(),
+            score_breakdown: Vec::new(),
         }
     }
 

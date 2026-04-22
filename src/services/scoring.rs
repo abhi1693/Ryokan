@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use regex_lite::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::services::nyaa::{SearchOptions, SearchResult};
 
@@ -16,7 +16,7 @@ static DUB_RE: LazyLock<Regex> =
 /// many seeders, what threshold crossed, etc.). Surfaced on the
 /// /api/search response and persisted alongside grab history so the
 /// "why this score" UI can show users exactly what happened.
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ScoreComponent {
     /// Short label — displayed as the left-column "what" in the UI
     /// breakdown table (e.g. "Seeders", "Preferred Group",
@@ -260,6 +260,7 @@ mod tests {
             is_trusted: false,
             score: 0,
             info_hash: String::new(),
+            score_breakdown: Vec::new(),
         }
     }
 
