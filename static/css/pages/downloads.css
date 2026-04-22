@@ -1,0 +1,14 @@
+/* pages/downloads.css — auto-split from style.css. */
+
+.dl-torrent-name {
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.dl-actions {
+    white-space: nowrap;
+}
+

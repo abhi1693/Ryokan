@@ -8,6 +8,7 @@ pub mod settings;
 pub mod system;
 
 pub mod arr_auth;
+pub mod arr_shared;
 pub mod media;
 pub mod radarr_compat;
 pub mod sonarr_compat;

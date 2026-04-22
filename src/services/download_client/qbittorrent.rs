@@ -19,6 +19,13 @@
 //!     polls collapses to one upstream fetch — the cache mutex is
 //!     never held across the HTTP round trip so mutation calls
 //!     don't serialize behind a hung seedbox's in-flight GET.
+//!   - qBit 5.x changed `POST /torrents/add` duplicate-response body
+//!     from the silent `200 "Ok."` older versions returned to
+//!     `200 "Fails."` — indistinguishable from the body used for a
+//!     genuinely-malformed magnet. `add_torrent` disambiguates by
+//!     probing `/torrents/info?hashes=<hash>` after a `Fails.` and
+//!     reporting `AddOutcome::AlreadyPresent` when the hash is
+//!     present in the session. See the comment on `add_torrent`.
 
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
@@ -346,7 +353,7 @@ impl DownloadClient for QbitClient {
         Ok(version)
     }
 
-    async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
+    async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
         let form = [("urls", url), ("category", &self.category)];
         let resp = self.do_post_form("/api/v2/torrents/add", &form).await?;
 
@@ -356,18 +363,46 @@ impl DownloadClient for QbitClient {
         if !status.is_success() {
             return Err(format!("qbit add failed (HTTP {status}): {body}"));
         }
-        // qBit returns 200 OK with body "Fails." when it couldn't parse
-        // the URL or otherwise refused to add the torrent.
+        // qBit returns 200 OK with body "Fails." in two different
+        // scenarios that are indistinguishable from the response
+        // alone: a genuinely-malformed magnet (bad hash length, bad
+        // URN scheme) and — the case live-verified against v5.1.4
+        // during the Phase 1 download-client smoke work — a *duplicate*
+        // magnet whose info-hash is already in the session. Older
+        // builds are silent about duplicates (the "always 200 Ok."
+        // behavior the module-header comment describes); v5.x changed
+        // that, and the auto-search path lit up with
+        // `qBit returned 'Fails.'` errors on every re-grab of a
+        // torrent already in the client (e.g. RSS re-emitting an item
+        // whose grab row was lost on a crash, or a manual grab +
+        // upgrade-sweep hitting the same release).
+        //
+        // We can disambiguate after the fact: look the info-hash up
+        // via `/torrents/info?hashes=`. Present → duplicate, report
+        // `AlreadyPresent` and let the caller record the grab
+        // normally. Missing → the magnet really was rejected; surface
+        // the error so auto-search backs off.
         if body.trim() == "Fails." {
+            if !info_hash.is_empty() {
+                let hash_lc = info_hash.to_ascii_lowercase();
+                let lookup = format!("/api/v2/torrents/info?hashes={hash_lc}");
+                if let Ok(resp) = self.do_get(&lookup).await
+                    && resp.status().is_success()
+                    && let Ok(raw) = resp.json::<Vec<QbitRawTorrent>>().await
+                    && raw.iter().any(|t| t.hash.eq_ignore_ascii_case(&hash_lc))
+                {
+                    return Ok(AddOutcome::AlreadyPresent);
+                }
+            }
             return Err(format!(
                 "qbit add rejected url={url}: qBit returned 'Fails.'"
             ));
         }
         self.invalidate_torrents_cache().await;
-        // qBit is silent about duplicates — the add is idempotent,
-        // returning 200 "Ok." whether the hash was new or already
-        // present. We can't distinguish here, so always report Added.
-        // Non-qBit impls detect and return AlreadyPresent explicitly.
+        // On the 200 "Ok." path qBit returns the same body whether the
+        // hash was new or (on older builds) a silent duplicate. We
+        // report `Added` either way; the `AlreadyPresent` path only
+        // fires for the v5.x "Fails." duplicate disambiguation above.
         Ok(AddOutcome::Added)
     }
 
@@ -839,14 +874,21 @@ mod tests {
             "qBit category should round-trip as DownloadItem.category"
         );
 
-        // Re-add tolerance: in practice qBit's /torrents/add returns
-        // "Fails." on a duplicate magnet URL in some container
-        // versions, not the silent `Ok.` the impl's header comment
-        // describes. The post-condition we actually care about is
-        // "the torrent is still in the client after the re-add
-        // attempt" — verified via the list_scoped check further
-        // down. Either Ok or a Fails-rejection is acceptable here.
-        let _ = client.add_torrent(magnet, info_hash).await;
+        // Duplicate-add contract: qBit 5.x responds with 200 "Fails."
+        // when asked to add a hash already in the session, which
+        // `add_torrent` now disambiguates via `/torrents/info?hashes=`
+        // and surfaces as `AddOutcome::AlreadyPresent`. Older builds
+        // silently returned 200 "Ok." and `AddOutcome::Added`. Both
+        // must succeed — a bare `Err` here would mean the v5.x
+        // disambiguation regressed.
+        let dup_outcome = client
+            .add_torrent(magnet, info_hash)
+            .await
+            .expect("duplicate add_torrent() should succeed");
+        assert!(matches!(
+            dup_outcome,
+            AddOutcome::Added | AddOutcome::AlreadyPresent
+        ));
         tokio::time::sleep(Duration::from_millis(500)).await;
         let still_there = client
             .list_scoped()

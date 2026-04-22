@@ -1,6 +1,6 @@
 [package]
 name = "ryokan"
-version = "1.2.0"
+version = "1.2.5"
 edition = "2024"
 rust-version = "1.95"
 

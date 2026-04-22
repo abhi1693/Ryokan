@@ -1,0 +1,213 @@
+        <fieldset>
+            <legend>Download Client</legend>
+            <div class="form-group">
+                <label for="active_client">Active client</label>
+                <select name="active_client" id="active_client" onchange="toggleClientFieldset(this.value)">
+                    <option value="qbittorrent" {% if config.active_client == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
+                    <option value="deluge" {% if config.active_client == "deluge" %}selected{% endif %}>Deluge</option>
+                    <option value="transmission" {% if config.active_client == "transmission" %}selected{% endif %}>Transmission</option>
+                    <option value="rtorrent" {% if config.active_client == "rtorrent" %}selected{% endif %}>rTorrent</option>
+                </select>
+                <span class="form-hint">Ryokan talks to one client at a time. Switching cancels any pending grabs queued against the previous client.</span>
+            </div>
+        </fieldset>
+
+        <fieldset id="qbit-fieldset" {% if config.active_client != "qbittorrent" %}style="display:none"{% endif %}>
+            <legend>qBittorrent <span id="qbit-health" class="form-hint"></span></legend>
+            <div class="form-group">
+                <label for="qbit_url">URL</label>
+                <input type="text" name="qbit_url" id="qbit_url" value="{{ config.qbit_url }}" placeholder="http://localhost:8080">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="qbit_user">Username</label>
+                    <input type="text" name="qbit_user" id="qbit_user" value="{{ config.qbit_user }}">
+                </div>
+                <div class="form-group">
+                    <label for="qbit_pass">Password</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <input type="password" name="qbit_pass" id="qbit_pass" value="{{ config.qbit_pass }}" style="flex:1">
+                        <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('qbit_pass', this)" style="white-space:nowrap">Show</button>
+                        <button type="button" class="btn btn-secondary" onclick="copyApiKey('qbit_pass', this)" style="white-space:nowrap">Copy</button>
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="qbit_category">Download Category</label>
+                <input type="text" name="qbit_category" id="qbit_category" value="{{ config.qbit_category }}" placeholder="anime">
+            </div>
+            <div class="form-group">
+                <label for="qbit_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="qbit_download_path" id="qbit_download_path" value="{{ config.qbit_download_path }}" placeholder="/downloads">
+                <span class="form-hint">The local path where qBittorrent's completed downloads are accessible to Ryokan. When qBit runs in Docker with a host volume mount, enter the host-side path (e.g. <code>/home/user/downloads</code>). When qBit runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and qBit see the exact same paths.</span>
+            </div>
+            <div class="settings-inline-actions">
+                <button type="button" class="btn btn-secondary" onclick="testQbit(this)">Test</button>
+                <span id="qbit-test-result" class="form-hint"></span>
+            </div>
+        </fieldset>
+
+        <fieldset id="deluge-fieldset" {% if config.active_client != "deluge" %}style="display:none"{% endif %}>
+            <legend>Deluge <span id="deluge-health" class="form-hint"></span></legend>
+            <div class="form-group">
+                <label for="deluge_url">URL</label>
+                <input type="text" name="deluge_url" id="deluge_url" value="{{ config.deluge_url }}" placeholder="http://localhost:8112">
+                <span class="form-hint">Deluge Web UI base URL (Ryokan appends <code>/json</code>). Default port is 8112.</span>
+            </div>
+            <div class="form-group">
+                <label for="deluge_password">Web UI password</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="password" name="deluge_password" id="deluge_password" value="{{ config.deluge_password }}" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('deluge_password', this)" style="white-space:nowrap">Show</button>
+                </div>
+                <span class="form-hint">The Web UI password (not the daemon/localclient password). Default on fresh installs is <code>deluge</code>.</span>
+            </div>
+            <div class="form-group">
+                <label for="deluge_label">Scoping label</label>
+                <input type="text" name="deluge_label" id="deluge_label" value="{{ config.deluge_label }}" placeholder="ryokan">
+                <span class="form-hint">Ryokan tags every torrent it adds with this label and filters by it when listing. Requires the Label plugin; Ryokan auto-enables it on first connect.</span>
+            </div>
+            <div class="form-group">
+                <label for="deluge_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="deluge_download_path" id="deluge_download_path" value="{{ config.deluge_download_path }}" placeholder="/downloads">
+                <span class="form-hint">The local path where Deluge's completed downloads are accessible to Ryokan. When Deluge runs in Docker with a host volume mount, enter the host-side path. When Deluge runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and Deluge see the exact same paths.</span>
+            </div>
+        </fieldset>
+
+        <fieldset id="transmission-fieldset" {% if config.active_client != "transmission" %}style="display:none"{% endif %}>
+            <legend>Transmission <span id="transmission-health" class="form-hint"></span></legend>
+            <div class="form-group">
+                <label for="transmission_url">URL</label>
+                <input type="text" name="transmission_url" id="transmission_url" value="{{ config.transmission_url }}" placeholder="http://localhost:9091">
+                <span class="form-hint">Transmission RPC base URL (Ryokan appends <code>/transmission/rpc</code>). Default port is 9091.</span>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="transmission_user">Username</label>
+                    <input type="text" name="transmission_user" id="transmission_user" value="{{ config.transmission_user }}">
+                </div>
+                <div class="form-group">
+                    <label for="transmission_password">Password</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <input type="password" name="transmission_password" id="transmission_password" value="{{ config.transmission_password }}" style="flex:1">
+                        <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('transmission_password', this)" style="white-space:nowrap">Show</button>
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="transmission_label">Scoping label</label>
+                <input type="text" name="transmission_label" id="transmission_label" value="{{ config.transmission_label }}" placeholder="ryokan">
+                <span class="form-hint">Ryokan tags every torrent it adds with this label and filters by it when listing. Requires Transmission 4.x for native label support.</span>
+            </div>
+            <div class="form-group">
+                <label for="transmission_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="transmission_download_path" id="transmission_download_path" value="{{ config.transmission_download_path }}" placeholder="/downloads/complete">
+                <span class="form-hint">The local path where Transmission's completed downloads are accessible to Ryokan. When Transmission runs in Docker with a host volume mount, enter the host-side path. When Transmission runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and Transmission see the exact same paths. <strong>Note:</strong> the <code>linuxserver/transmission</code> image defaults <code>download-dir</code> to <code>/downloads/complete</code> (not <code>/downloads</code>), so point this at the <code>complete</code> subdirectory on the host — or edit Transmission's <code>settings.json</code> to flatten it.</span>
+            </div>
+        </fieldset>
+
+        <fieldset id="rtorrent-fieldset" {% if config.active_client != "rtorrent" %}style="display:none"{% endif %}>
+            <legend>rTorrent <span id="rtorrent-health" class="form-hint"></span></legend>
+            <div class="form-group">
+                <label for="rtorrent_url">XML-RPC URL</label>
+                <input type="text" name="rtorrent_url" id="rtorrent_url" value="{{ config.rtorrent_url }}" placeholder="">
+                <span class="form-hint">Full XML-RPC endpoint URL. Common shapes: <code>http://host:8081/RPC2</code> for a local ruTorrent container, <code>https://seedbox.example.com/rutorrent/RPC2</code> or <code>https://seedbox.example.com/RPC2</code> for a seedbox. Ryokan does not append a default path — use the exact URL the daemon accepts.</span>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="rtorrent_user">Username</label>
+                    <input type="text" name="rtorrent_user" id="rtorrent_user" value="{{ config.rtorrent_user }}">
+                </div>
+                <div class="form-group">
+                    <label for="rtorrent_password">Password</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <input type="password" name="rtorrent_password" id="rtorrent_password" value="{{ config.rtorrent_password }}" style="flex:1">
+                        <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('rtorrent_password', this)" style="white-space:nowrap">Show</button>
+                    </div>
+                    <span class="form-hint">HTTP Basic auth. Leave blank if the endpoint is unauthenticated (e.g. a same-host container on an internal network).</span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="rtorrent_label">Scoping label</label>
+                <input type="text" name="rtorrent_label" id="rtorrent_label" value="{{ config.rtorrent_label }}" placeholder="ryokan">
+                <span class="form-hint">Stored in rtorrent's <code>custom1</code> field (the ruTorrent label convention). Ryokan filters <code>list_scoped</code> by this value.</span>
+            </div>
+            <div class="form-group">
+                <label for="rtorrent_download_path">Download Path (as seen by Ryokan)</label>
+                <input type="text" name="rtorrent_download_path" id="rtorrent_download_path" value="{{ config.rtorrent_download_path }}" placeholder="/downloads/completed/ryokan">
+                <span class="form-hint">The local path where rtorrent's completed downloads are accessible to Ryokan. When rtorrent runs in Docker with a host volume mount, enter the host-side path. When rtorrent runs on a seedbox, enter the local mount point you reach it through (SSHFS/NFS/rclone). Leave blank only if Ryokan and rtorrent see the exact same paths. <strong>Note:</strong> many <code>rtorrent.rc</code> configs (including the <code>linuxserver/rutorrent</code> image's defaults) move completed torrents into a per-label subdirectory via <code>event.download.finished</code> hooks — e.g. <code>/downloads/completed/ryokan/</code> rather than just <code>/downloads/completed/</code>. If your setup does this, include the label subdirectory in the path here (the scoping label you set above is typically the subdir name).</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Jellyfin <span id="jellyfin-health" class="form-hint"></span></legend>
+            <div class="form-group">
+                <label for="jellyfin_url">URL</label>
+                <input type="text" name="jellyfin_url" id="jellyfin_url" value="{{ config.jellyfin_url }}" placeholder="http://192.168.68.61:8096">
+            </div>
+            <div class="form-group">
+                <label for="jellyfin_api_key">API Key</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="password" name="jellyfin_api_key" id="jellyfin_api_key" value="{{ config.jellyfin_api_key }}" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('jellyfin_api_key', this)" style="white-space:nowrap">Show</button>
+                    <button type="button" class="btn btn-secondary" onclick="copyApiKey('jellyfin_api_key', this)" style="white-space:nowrap">Copy</button>
+                </div>
+                <span class="form-hint">Ryokan will use this for server info, targeted lookups, and library refreshes.</span>
+            </div>
+            <div class="settings-inline-actions">
+                <button type="button" class="btn btn-secondary" onclick="testJellyfin(this)">Test</button>
+                <button type="button" class="btn btn-secondary" onclick="refreshJellyfin(this)">Refresh Library</button>
+                <span id="jellyfin-test-result" class="form-hint"></span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Seerr (Sonarr API Compatibility)</legend>
+            <p class="form-hint" style="margin-bottom: 12px;">
+                Exposes a Sonarr-compatible API so Seerr can add and manage anime through Ryokan.
+                In Seerr, add a new Sonarr server pointing to this Ryokan instance's address with the API key below.
+            </p>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="sonarr_enabled" id="sonarr_enabled" {% if config.sonarr_enabled %}checked{% endif %}>
+                    <span>Enable Sonarr API</span>
+                </label>
+                <span class="form-hint">When enabled, Ryokan accepts Sonarr v3 API calls at <code>/api/v3/</code> authenticated with the key below.</span>
+            </div>
+            <div class="form-group">
+                <label for="sonarr_api_key">API Key</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="password" name="sonarr_api_key" id="sonarr_api_key" value="{{ config.sonarr_api_key }}" placeholder="Paste this key into Seerr's Sonarr server config" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('sonarr_api_key', this)" style="white-space:nowrap">Show</button>
+                    <button type="button" class="btn btn-secondary" onclick="copyApiKey('sonarr_api_key', this)" style="white-space:nowrap">Copy</button>
+                    <button type="button" class="btn btn-secondary" onclick="generateApiKey()" style="white-space:nowrap">Generate</button>
+                </div>
+                <span class="form-hint">Use this key as the API key when adding Ryokan as a Sonarr server in Seerr.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Seerr (Radarr API Compatibility)</legend>
+            <p class="form-hint" style="margin-bottom: 12px;">
+                Exposes a Radarr-compatible API so Seerr can add and manage anime movies through Ryokan.
+                In Seerr, add a new Radarr server pointing to this Ryokan instance with URL Base set to <code>/radarr</code> and the API key below.
+            </p>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="radarr_enabled" id="radarr_enabled" {% if config.radarr_enabled %}checked{% endif %}>
+                    <span>Enable Radarr API</span>
+                </label>
+                <span class="form-hint">When enabled, Ryokan accepts Radarr v3 API calls at <code>/radarr/api/v3/</code> authenticated with the key below.</span>
+            </div>
+            <div class="form-group">
+                <label for="radarr_api_key">API Key</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="password" name="radarr_api_key" id="radarr_api_key" value="{{ config.radarr_api_key }}" placeholder="Paste this key into Seerr's Radarr server config" style="flex:1">
+                    <button type="button" class="btn btn-secondary" onclick="toggleApiKeyVisibility('radarr_api_key', this)" style="white-space:nowrap">Show</button>
+                    <button type="button" class="btn btn-secondary" onclick="copyApiKey('radarr_api_key', this)" style="white-space:nowrap">Copy</button>
+                    <button type="button" class="btn btn-secondary" onclick="generateRadarrApiKey()" style="white-space:nowrap">Generate</button>
+                </div>
+                <span class="form-hint">Use this key as the API key when adding Ryokan as a Radarr server in Seerr.</span>
+            </div>
+        </fieldset>
+

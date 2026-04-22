@@ -1,0 +1,134 @@
+/* topbar.css — auto-split from style.css. */
+
+.mobile-tabbar {
+    display: none;
+}
+
+.nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    height: 56px;
+    background: rgba(15, 15, 19, 0.92);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+}
+
+.nav-brand {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-bright);
+    text-decoration: none;
+}
+
+.nav-links {
+    display: flex;
+    gap: 8px;
+}
+
+.nav-links a {
+    color: var(--text-dim);
+    text-decoration: none;
+    padding: 6px 14px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 500;
+    transition: color 0.15s, background 0.15s;
+}
+
+.nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
+
+.nav-links a.active { color: var(--accent); background: rgba(203, 166, 247, 0.08); }
+
+.nav-logout { color: var(--text-dim) !important; }
+
+@media (max-width: 640px) {
+    .nav-links {
+        display: none;
+    }
+    .mobile-tabbar {
+        display: flex;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 100;
+        background: var(--bg);
+        border-top: 1px solid var(--border);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        
+        will-change: transform;
+        transform: translateZ(0);
+    }
+    .mobile-tab {
+        
+        flex: 0 0 20%;
+        width: 20%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        padding: 8px 4px 6px;
+        color: var(--text-dim);
+        text-decoration: none;
+        min-height: 56px;
+        transition: color 0.15s;
+    }
+    .mobile-tab svg {
+        flex-shrink: 0;
+    }
+    .mobile-tab-label {
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.2px;
+    }
+    .mobile-tab.active {
+        color: var(--accent);
+    }
+    .mobile-tab:hover {
+        color: var(--text-bright);
+    }
+    .mobile-tab.active:hover {
+        color: var(--accent);
+    }
+    .mobile-tab:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+        border-radius: 4px;
+    }
+    .nav { padding: 0 16px; }
+    .nav-links { gap: 4px; }
+    .nav-links a { padding: 6px 10px; font-size: 13px; }
+}
+
+.nav-links-right {
+    align-items: center;
+}
+
+.nav-title-select {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 13px;
+}
+
+.nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+}
+
+.nav-links {
+    margin-left: auto;
+    align-items: center;
+}
+
