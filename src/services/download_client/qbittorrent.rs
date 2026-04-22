@@ -19,6 +19,13 @@
 //!     polls collapses to one upstream fetch — the cache mutex is
 //!     never held across the HTTP round trip so mutation calls
 //!     don't serialize behind a hung seedbox's in-flight GET.
+//!   - qBit 5.x changed `POST /torrents/add` duplicate-response body
+//!     from the silent `200 "Ok."` older versions returned to
+//!     `200 "Fails."` — indistinguishable from the body used for a
+//!     genuinely-malformed magnet. `add_torrent` disambiguates by
+//!     probing `/torrents/info?hashes=<hash>` after a `Fails.` and
+//!     reporting `AddOutcome::AlreadyPresent` when the hash is
+//!     present in the session. See the comment on `add_torrent`.
 
 use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
@@ -378,7 +385,7 @@ impl DownloadClient for QbitClient {
         if body.trim() == "Fails." {
             if !info_hash.is_empty() {
                 let hash_lc = info_hash.to_ascii_lowercase();
-                let lookup = format!("/api/v2/torrents/info?hashes={}", hash_lc);
+                let lookup = format!("/api/v2/torrents/info?hashes={hash_lc}");
                 if let Ok(resp) = self.do_get(&lookup).await
                     && resp.status().is_success()
                     && let Ok(raw) = resp.json::<Vec<QbitRawTorrent>>().await
@@ -867,14 +874,21 @@ mod tests {
             "qBit category should round-trip as DownloadItem.category"
         );
 
-        // Re-add tolerance: in practice qBit's /torrents/add returns
-        // "Fails." on a duplicate magnet URL in some container
-        // versions, not the silent `Ok.` the impl's header comment
-        // describes. The post-condition we actually care about is
-        // "the torrent is still in the client after the re-add
-        // attempt" — verified via the list_scoped check further
-        // down. Either Ok or a Fails-rejection is acceptable here.
-        let _ = client.add_torrent(magnet, info_hash).await;
+        // Duplicate-add contract: qBit 5.x responds with 200 "Fails."
+        // when asked to add a hash already in the session, which
+        // `add_torrent` now disambiguates via `/torrents/info?hashes=`
+        // and surfaces as `AddOutcome::AlreadyPresent`. Older builds
+        // silently returned 200 "Ok." and `AddOutcome::Added`. Both
+        // must succeed — a bare `Err` here would mean the v5.x
+        // disambiguation regressed.
+        let dup_outcome = client
+            .add_torrent(magnet, info_hash)
+            .await
+            .expect("duplicate add_torrent() should succeed");
+        assert!(matches!(
+            dup_outcome,
+            AddOutcome::Added | AddOutcome::AlreadyPresent
+        ));
         tokio::time::sleep(Duration::from_millis(500)).await;
         let still_there = client
             .list_scoped()

@@ -10,9 +10,10 @@
 //!    true" — grouped OR-within-type, AND-across-types, with a
 //!    required-hard-fail gate per group.
 //!
-//! The public API is `evaluate` + `total_cf_score` +
-//! `total_cf_score_with_breakdown`; the kernel stays private to keep
-//! callers from accidentally bypassing the negate wrapper.
+//! The public API is `evaluate` + `total_cf_score_with_breakdown`
+//! (with `total_cf_score` retained as `pub(super)` for the in-module
+//! test matrix); the kernel stays private to keep callers from
+//! accidentally bypassing the negate wrapper.
 
 use std::collections::BTreeMap;
 
