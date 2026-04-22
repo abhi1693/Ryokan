@@ -346,7 +346,7 @@ impl DownloadClient for QbitClient {
         Ok(version)
     }
 
-    async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
+    async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
         let form = [("urls", url), ("category", &self.category)];
         let resp = self.do_post_form("/api/v2/torrents/add", &form).await?;
 
@@ -356,18 +356,46 @@ impl DownloadClient for QbitClient {
         if !status.is_success() {
             return Err(format!("qbit add failed (HTTP {status}): {body}"));
         }
-        // qBit returns 200 OK with body "Fails." when it couldn't parse
-        // the URL or otherwise refused to add the torrent.
+        // qBit returns 200 OK with body "Fails." in two different
+        // scenarios that are indistinguishable from the response
+        // alone: a genuinely-malformed magnet (bad hash length, bad
+        // URN scheme) and — the case live-verified against v5.1.4
+        // during the Phase 1 download-client smoke work — a *duplicate*
+        // magnet whose info-hash is already in the session. Older
+        // builds are silent about duplicates (the "always 200 Ok."
+        // behavior the module-header comment describes); v5.x changed
+        // that, and the auto-search path lit up with
+        // `qBit returned 'Fails.'` errors on every re-grab of a
+        // torrent already in the client (e.g. RSS re-emitting an item
+        // whose grab row was lost on a crash, or a manual grab +
+        // upgrade-sweep hitting the same release).
+        //
+        // We can disambiguate after the fact: look the info-hash up
+        // via `/torrents/info?hashes=`. Present → duplicate, report
+        // `AlreadyPresent` and let the caller record the grab
+        // normally. Missing → the magnet really was rejected; surface
+        // the error so auto-search backs off.
         if body.trim() == "Fails." {
+            if !info_hash.is_empty() {
+                let hash_lc = info_hash.to_ascii_lowercase();
+                let lookup = format!("/api/v2/torrents/info?hashes={}", hash_lc);
+                if let Ok(resp) = self.do_get(&lookup).await
+                    && resp.status().is_success()
+                    && let Ok(raw) = resp.json::<Vec<QbitRawTorrent>>().await
+                    && raw.iter().any(|t| t.hash.eq_ignore_ascii_case(&hash_lc))
+                {
+                    return Ok(AddOutcome::AlreadyPresent);
+                }
+            }
             return Err(format!(
                 "qbit add rejected url={url}: qBit returned 'Fails.'"
             ));
         }
         self.invalidate_torrents_cache().await;
-        // qBit is silent about duplicates — the add is idempotent,
-        // returning 200 "Ok." whether the hash was new or already
-        // present. We can't distinguish here, so always report Added.
-        // Non-qBit impls detect and return AlreadyPresent explicitly.
+        // On the 200 "Ok." path qBit returns the same body whether the
+        // hash was new or (on older builds) a silent duplicate. We
+        // report `Added` either way; the `AlreadyPresent` path only
+        // fires for the v5.x "Fails." duplicate disambiguation above.
         Ok(AddOutcome::Added)
     }
 
