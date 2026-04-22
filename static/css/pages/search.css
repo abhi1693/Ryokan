@@ -226,13 +226,27 @@
 .score-details {
     position: relative;
     display: inline-block;
+    vertical-align: middle;
 }
 .score-details > summary {
     cursor: pointer;
     list-style: none;
+    /* Override the browser default `display: list-item` on <summary>.
+       list-item's baseline behavior interacts awkwardly with the
+       containing td's vertical-align and was keeping the badge
+       pinned high even after the td switched to middle. Forcing
+       inline-block gives us the simple "this sits where I put it"
+       box model. */
+    display: inline-block;
+    vertical-align: middle;
 }
 .score-details > summary::-webkit-details-marker {
     display: none;
+}
+/* Firefox uses a different pseudo for the disclosure marker. */
+.score-details > summary::marker {
+    display: none;
+    content: "";
 }
 .score-details[open] > summary {
     outline: 2px solid var(--accent);
