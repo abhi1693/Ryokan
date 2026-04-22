@@ -707,11 +707,19 @@ async fn import_torrent(
             // upgrade with many old grabs the per-iteration lock acquire
             // was serializing against any other task touching
             // `state.download_client`.
+            //
+            // `mark_replaced` (not `mark_removed`) so the Downloads
+            // history keeps the upgrade chain: state='replaced' with
+            // `replaced_by_grab_id = grab.id`. Without this distinction
+            // users who got their existing SubsPlease episodes silently
+            // swapped out by a Kaizoku batch had no way to tell the
+            // upgrade actually happened — old rows looked identical to
+            // user-cancelled grabs.
             for old_grab in &old_grabs {
                 if !old_grab.hash.is_empty() {
                     let _ = client.delete(&old_grab.hash, true).await;
                 }
-                let _ = grabbed_torrents::mark_removed(&state.db, old_grab.id).await;
+                let _ = grabbed_torrents::mark_replaced(&state.db, old_grab.id, grab.id).await;
             }
         }
 

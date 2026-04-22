@@ -437,6 +437,31 @@ pub async fn mark_removed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Flip a previously-imported grab to the `replaced` state and stamp
+/// `replaced_by_grab_id` with the id of the new grab that took its
+/// place. Called by post-processing when a higher-scoring upgrade
+/// lands on the same episode(s) as an existing import — distinct from
+/// `mark_removed`, which is the user-cancel / cleanup path.
+///
+/// The history UI reads both columns: `replaced` rows show a "replaced
+/// by <new release>" tooltip + link so users can see why an earlier
+/// download disappeared, and the replacing grab's row surfaces a
+/// "superseded N grabs" note derived from the reverse lookup.
+pub async fn mark_replaced(
+    db: &SqlitePool,
+    id: i64,
+    replaced_by_grab_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE grabbed_torrents SET state = 'replaced', replaced_by_grab_id = ? WHERE id = ?",
+    )
+    .bind(replaced_by_grab_id)
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Build the `series_title` SELECT expression honoring the user's
 /// `title_language` preference. Mirrors the fallback order in
 /// `services::nfo::title_for_preference` — `NULLIF(col, '')` is needed
@@ -471,9 +496,13 @@ pub async fn get_all_with_series(
     let sql = format!(
         r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
                   {title_expr},
-                  COALESCE(s.anilist_id, 0) AS anilist_id
+                  COALESCE(s.anilist_id, 0) AS anilist_id,
+                  g.replaced_by_grab_id,
+                  COALESCE(rby.torrent_name, '') AS replaced_by_torrent_name,
+                  (SELECT COUNT(*) FROM grabbed_torrents rp WHERE rp.replaced_by_grab_id = g.id) AS replaces_count
            FROM grabbed_torrents g
            LEFT JOIN series s ON s.id = g.series_id
+           LEFT JOIN grabbed_torrents rby ON rby.id = g.replaced_by_grab_id
            ORDER BY g.grabbed_at DESC
            LIMIT ?"#,
         title_expr = title_select_expr(title_language),
@@ -496,6 +525,9 @@ pub async fn get_all_with_series(
                 imported_at: row.get("imported_at"),
                 series_title: row.get("series_title"),
                 anilist_id: row.get("anilist_id"),
+                replaced_by_grab_id: row.get("replaced_by_grab_id"),
+                replaced_by_torrent_name: row.get("replaced_by_torrent_name"),
+                replaces_count: row.get("replaces_count"),
             }
         })
         .collect())
@@ -509,7 +541,10 @@ pub async fn get_blocked(
     let sql = format!(
         r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
                   {title_expr},
-                  COALESCE(s.anilist_id, 0) AS anilist_id
+                  COALESCE(s.anilist_id, 0) AS anilist_id,
+                  g.replaced_by_grab_id,
+                  '' AS replaced_by_torrent_name,
+                  0 AS replaces_count
            FROM grabbed_torrents g
            LEFT JOIN series s ON s.id = g.series_id
            WHERE g.state = 'failed'
@@ -534,6 +569,9 @@ pub async fn get_blocked(
                 imported_at: row.get("imported_at"),
                 series_title: row.get("series_title"),
                 anilist_id: row.get("anilist_id"),
+                replaced_by_grab_id: row.get("replaced_by_grab_id"),
+                replaced_by_torrent_name: row.get("replaced_by_torrent_name"),
+                replaces_count: row.get("replaces_count"),
             }
         })
         .collect())
@@ -791,6 +829,21 @@ pub struct GrabbedTorrentWithSeries {
     pub imported_at: Option<String>,
     pub series_title: String,
     pub anilist_id: i64,
+    /// When `state = 'replaced'`, the id of the grab that superseded
+    /// this one (upgrade-driven replacement from post-processing).
+    /// `None` for any other state and for replaced rows written before
+    /// the column was introduced.
+    pub replaced_by_grab_id: Option<i64>,
+    /// Title of the grab referenced by `replaced_by_grab_id`, resolved
+    /// via a LEFT JOIN at query time so the UI can render a "replaced
+    /// by <release>" tooltip without a second round-trip. Empty when
+    /// the pointer is NULL or dangles.
+    pub replaced_by_torrent_name: String,
+    /// Count of rows that carry `replaced_by_grab_id = this.id` — i.e.
+    /// how many prior grabs this one superseded. Drives the
+    /// "superseded N grabs" note on the replacing row. Zero for the
+    /// common case.
+    pub replaces_count: i64,
 }
 
 #[cfg(test)]
@@ -1225,6 +1278,96 @@ mod tests {
         assert!(
             hits_after_remove.is_empty(),
             "removed grabs must not reappear in pending lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_replaced_flips_state_and_stamps_back_pointer() {
+        use sqlx::Row;
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("memory db");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (series_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 424242,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2024),
+                end_year: Some(2024),
+            },
+        )
+        .await
+        .expect("series upsert");
+
+        let old_id = record_grab(
+            &db,
+            "old00000000000000000000000000000000000001",
+            "[OldGroup] Show - 01",
+            series_id,
+            &[1],
+            false,
+        )
+        .await
+        .expect("old")
+        .expect("id");
+        mark_imported(&db, old_id).await.expect("mark imported");
+
+        let new_id = record_grab(
+            &db,
+            "new00000000000000000000000000000000000001",
+            "[BetterGroup] Show - Batch [BD]",
+            series_id,
+            &[1, 2, 3],
+            true,
+        )
+        .await
+        .expect("new")
+        .expect("id");
+
+        mark_replaced(&db, old_id, new_id)
+            .await
+            .expect("mark replaced");
+
+        let row =
+            sqlx::query("SELECT state, replaced_by_grab_id FROM grabbed_torrents WHERE id = ?")
+                .bind(old_id)
+                .fetch_one(&db)
+                .await
+                .expect("lookup");
+        let state: String = row.get("state");
+        let replaced_by: Option<i64> = row.get("replaced_by_grab_id");
+        assert_eq!(state, "replaced");
+        assert_eq!(replaced_by, Some(new_id));
+
+        // The replacing grab's row surfaces via replaces_count in the
+        // with_series query — verify end-to-end.
+        let history = get_all_with_series(&db, 10, "english")
+            .await
+            .expect("history");
+        let new_row = history
+            .iter()
+            .find(|r| r.id == new_id)
+            .expect("new grab present");
+        assert_eq!(new_row.replaces_count, 1);
+        let old_row = history
+            .iter()
+            .find(|r| r.id == old_id)
+            .expect("old grab present");
+        assert_eq!(old_row.state, "replaced");
+        assert_eq!(old_row.replaced_by_grab_id, Some(new_id));
+        assert_eq!(
+            old_row.replaced_by_torrent_name,
+            "[BetterGroup] Show - Batch [BD]"
         );
     }
 }

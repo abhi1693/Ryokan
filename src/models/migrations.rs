@@ -1105,6 +1105,21 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // `replaced_by_grab_id` — nullable back-pointer set when an
+    // upgrade-driven import supersedes this grab. Paired with a new
+    // `state='replaced'` value (distinct from `removed`, which is the
+    // generic "gone from download client" state reserved for user
+    // cancels and cleanup). No FK: an `ON DELETE SET NULL` would need
+    // a schema rebuild under SQLite and pruning a new grab shouldn't
+    // dangle old replaced rows in a way that breaks queries — the
+    // history handler tolerates `NULL` here. History filter and the
+    // replaced-by tooltip in the Downloads tab key off this column to
+    // show the replacement chain.
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN replaced_by_grab_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
     // `active_client` on config — lowercase-snake discriminator for
     // the download client currently in use. Phase 1 only has
     // 'qbittorrent'; Phase 2+ will branch on this at AppState init.

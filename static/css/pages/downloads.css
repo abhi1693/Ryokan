@@ -12,3 +12,30 @@
     white-space: nowrap;
 }
 
+/* Secondary info line under a History row's torrent name, used for
+   upgrade-chain hints. `.dl-replaced-note` is the generic "this row
+   was superseded" style; `.dl-replaced-note-upgrade` colors the other
+   side of the chain — the replacing row's "upgraded N" summary — so
+   the two kinds of note are visually distinct at a glance. */
+.dl-replaced-note {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 2px;
+    font-style: italic;
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dl-replaced-note-upgrade {
+    color: var(--accent);
+    font-style: normal;
+    font-weight: 500;
+}
+
+.dl-replaced-target {
+    font-style: normal;
+    color: var(--text);
+}
+
