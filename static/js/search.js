@@ -411,5 +411,19 @@ function renderScoreBreakdown(r) {
                 sortRows(tbody, key, dir);
             });
         });
+
+        // Template ships `sort-desc` on the Score column as the default
+        // visual state, but the server hands us rows in Nyaa's natural
+        // order (upload date descending) — not sorted by score. Without
+        // this initial sort the arrow lies about the column state,
+        // which read as "sort-by-score gives weird results" on page
+        // load. Run the same sort the click handler would so the
+        // rendered rows match whatever initial class the server set.
+        const initial = table.querySelector('th.sortable.sort-asc, th.sortable.sort-desc');
+        if (initial) {
+            const key = initial.dataset.sortKey;
+            const dir = initial.classList.contains('sort-asc') ? 'asc' : 'desc';
+            sortRows(tbody, key, dir);
+        }
     });
 })();
