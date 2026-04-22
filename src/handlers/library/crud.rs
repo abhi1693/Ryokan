@@ -486,23 +486,40 @@ pub async fn set_monitoring(
     )
     .await;
 
-    // Auto-grab monitored episodes if requested (e.g. after initial add).
-    if form.auto_grab.unwrap_or(false)
-        && mode != monitoring::MonitorMode::None
+    // Auto-grab monitored episodes when either:
+    //   1. The caller explicitly asked for it via `form.auto_grab`
+    //      (e.g. the add-series flow does this once to seed the
+    //      library), gated on `config.auto_grab_on_add`; or
+    //   2. `config.search_on_monitoring_change` is on (#1.3.0 opt-in
+    //      flag). This fires on every monitoring change so users who
+    //      flip `none → all` get an immediate delta-search without
+    //      needing to click an extra button.
+    //
+    // Either trigger bails when the mode is `None` (nothing to search
+    // for) or when no download client is configured. `auto_search_
+    // series` internally walks only monitored-and-missing episodes,
+    // so narrowing transitions (`all → missing`) are a natural no-op.
+    if mode != monitoring::MonitorMode::None
         && summary.monitored_count > 0
         && state.download_client.read().await.is_some()
     {
-        let auto_grab_on_add = config::get_config(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.auto_grab_on_add)
-            .unwrap_or(true);
+        let cfg = config::get_config(&state.db).await.ok().flatten();
+        let auto_grab_on_add = cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true);
+        let search_on_change = cfg
+            .as_ref()
+            .map(|c| c.search_on_monitoring_change)
+            .unwrap_or(false);
 
-        if auto_grab_on_add {
+        let should_search =
+            (form.auto_grab.unwrap_or(false) && auto_grab_on_add) || search_on_change;
+
+        if should_search {
             let state_clone = state.clone();
             tokio::spawn(async move {
-                // Small delay to let metadata hydration finish.
+                // Small delay to let metadata hydration finish. Not
+                // strictly needed on a monitoring-only toggle (no
+                // hydration pending) but harmless and keeps the two
+                // call paths consistent.
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 let _ = auto_search_series(
                     axum::extract::State(state_clone),

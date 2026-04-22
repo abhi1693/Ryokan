@@ -914,6 +914,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // search_on_monitoring_change (#1.3.0 UX pass): when true, any
+    // update to a series's monitoring mode triggers a background
+    // auto-search over the newly-monitored-and-airable episodes.
+    // Default off to preserve existing behavior on upgrade.
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN search_on_monitoring_change INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     // prefer_subs: when true (default), penalize dual audio / dub releases in scoring.
     sqlx::query("ALTER TABLE config ADD COLUMN prefer_subs INTEGER NOT NULL DEFAULT 1")
         .execute(db)

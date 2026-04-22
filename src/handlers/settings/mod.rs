@@ -208,6 +208,9 @@ pub struct SettingsForm {
     rss_interval_minutes: i32,
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
+    /// #1.3.0 — opt-in: trigger auto-search when a series's
+    /// monitoring mode changes. Default off. Settings → General.
+    search_on_monitoring_change: Option<String>,
     prefer_subs: String,
     sonarr_enabled: Option<String>,
     sonarr_api_key: Option<String>,
@@ -530,6 +533,7 @@ pub async fn settings_submit(
             .as_ref()
             .map(|c| c.auto_grab_on_add)
             .unwrap_or(true),
+        search_on_monitoring_change: form.search_on_monitoring_change.is_some(),
         prefer_subs: form.prefer_subs == "1",
         allow_non_english: existing_cfg
             .as_ref()
