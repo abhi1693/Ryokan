@@ -211,7 +211,18 @@
    the score column; clicking the score badge expands the panel with
    per-component deltas. Panel absolutely-positions under the cell
    so it doesn't push the table layout around, and uses a small z-
-   index so it overlays subsequent rows. */
+   index so it overlays subsequent rows.
+
+   Score column overrides the td default `vertical-align: top` to
+   `middle` so the badge sits at the same visual height as the
+   effectively-centered single-line metadata columns (size / date /
+   seed / leech / dl / Grab) in rows where the Name column wraps to
+   two lines. Without this the badge pins to the top of the cell
+   while everything else looks centered, which reads as the badge
+   being "higher than" the text rows. */
+.results-table .col-score {
+    vertical-align: middle;
+}
 .score-details {
     position: relative;
     display: inline-block;
