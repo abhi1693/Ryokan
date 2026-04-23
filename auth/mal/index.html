@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ryokan — MyAnimeList Authorization</title>
+  <meta name="robots" content="noindex">
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      max-width: 640px;
+      margin: 40px auto;
+      padding: 0 24px;
+      line-height: 1.5;
+    }
+    h1 { font-size: 1.5rem; margin: 0 0 16px; }
+    p { margin: 12px 0; }
+    code#code {
+      background: rgba(127, 127, 127, 0.15);
+      padding: 12px;
+      display: block;
+      margin: 16px 0;
+      word-break: break-all;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    button {
+      padding: 8px 16px;
+      font-size: 1rem;
+      cursor: pointer;
+      border-radius: 4px;
+      border: 1px solid currentColor;
+      background: transparent;
+      color: inherit;
+      font-family: inherit;
+    }
+    button:hover { background: rgba(127, 127, 127, 0.15); }
+    .error {
+      padding: 12px 16px;
+      background: rgba(204, 0, 0, 0.1);
+      border: 1px solid rgba(204, 0, 0, 0.4);
+      border-radius: 4px;
+      margin: 16px 0;
+    }
+    .error strong { color: #c00; }
+    footer {
+      margin-top: 48px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(127, 127, 127, 0.2);
+      font-size: 0.85rem;
+      opacity: 0.75;
+    }
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+  <h1>Ryokan — MyAnimeList Authorization</h1>
+
+  <div id="success" hidden>
+    <p>MyAnimeList has issued an authorization code for Ryokan. Copy the code below and paste it into your Ryokan instance under <strong>Settings → Connections → MyAnimeList</strong>.</p>
+    <code id="code"></code>
+    <button id="copy-btn" type="button">Copy code to clipboard</button>
+    <p>The code is single-use and expires in a few minutes. If Ryokan rejects it, come back and link again.</p>
+  </div>
+
+  <div id="error-block" class="error" hidden>
+    <p><strong>Authorization failed.</strong></p>
+    <p id="error-msg"></p>
+    <p>Go back to Ryokan's Settings → Connections → MyAnimeList and try again.</p>
+  </div>
+
+  <div id="no-code" hidden>
+    <p>This page expects an authorization code in the URL. You probably landed here without going through MyAnimeList first.</p>
+    <p>Open Ryokan, go to <strong>Settings → Connections → MyAnimeList</strong>, and click <em>Link account</em>.</p>
+  </div>
+
+  <footer>
+    This page is part of <a href="https://github.com/johnthreekay/Ryokan">Ryokan</a>, a self-hosted anime PVR. It receives the OAuth authorization code from MyAnimeList and displays it so you can paste it back into your local Ryokan instance. No data is sent anywhere else — the code stays in your browser. <a href="https://github.com/johnthreekay/Ryokan/blob/gh-pages/auth/mal/index.html">View this page's source.</a>
+  </footer>
+
+  <script>
+    (function () {
+      const params = new URLSearchParams(location.search);
+      const code = params.get('code');
+      const error = params.get('error');
+      const errorDesc = params.get('error_description');
+
+      if (error) {
+        document.getElementById('error-block').hidden = false;
+        document.getElementById('error-msg').textContent = errorDesc
+          ? error + ': ' + errorDesc
+          : error;
+      } else if (code) {
+        document.getElementById('success').hidden = false;
+        document.getElementById('code').textContent = code;
+        const btn = document.getElementById('copy-btn');
+        btn.addEventListener('click', async function () {
+          try {
+            await navigator.clipboard.writeText(code);
+            btn.textContent = 'Copied!';
+            setTimeout(function () { btn.textContent = 'Copy code to clipboard'; }, 2000);
+          } catch (e) {
+            alert('Copy failed — select the code and copy it manually.');
+          }
+        });
+      } else {
+        document.getElementById('no-code').hidden = false;
+      }
+    })();
+  </script>
+</body>
+</html>
