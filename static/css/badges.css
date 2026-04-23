@@ -58,7 +58,12 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-    z-index: 30;
+    /* 5 keeps the panel above normal table rows but below the sticky
+       results-table thead th (z-index: 15 on the search page) — so
+       scrolling past an open breakdown slides the panel under the
+       header bar instead of painting over it. The fixed-positioning
+       escape path (inside modals) overrides this inline. */
+    z-index: 5;
     text-align: left;
     font-size: 12px;
 }

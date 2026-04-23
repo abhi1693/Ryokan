@@ -206,6 +206,7 @@ pub(super) fn rescore_for_auto_search(
         cutoff_source,
         cutoff_resolution,
         absolute_offset,
+        false, // batch_search_mode — non-batch callers
     )
     .0
 }
@@ -214,6 +215,14 @@ pub(super) fn rescore_for_auto_search(
 /// score components added on top of the scraper's base score. Used by
 /// the interactive search path so each candidate's breakdown in the UI
 /// stays in sync with its final displayed score.
+///
+/// `batch_search_mode` is `true` when the caller is explicitly
+/// collecting batch-only candidates (`collect_scored_batches_for_
+/// target`, powering both interactive batch search and auto-search's
+/// batch grab path). In that mode the single-target batch penalty is
+/// suppressed — penalizing a batch for being a batch when the user
+/// explicitly asked for batches is nonsense, and surfaced in the
+/// breakdown as a confusing "-5 Batch Penalty" on every row.
 #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
 pub(super) fn rescore_for_auto_search_with_breakdown(
     result: &SearchResult,
@@ -229,6 +238,7 @@ pub(super) fn rescore_for_auto_search_with_breakdown(
     cutoff_source: Source,
     cutoff_resolution: Resolution,
     absolute_offset: i32,
+    batch_search_mode: bool,
 ) -> (i32, Vec<ScoreComponent>) {
     let mut score = result.score;
     let mut parts: Vec<ScoreComponent> = Vec::new();
@@ -285,7 +295,12 @@ pub(super) fn rescore_for_auto_search_with_breakdown(
             if lower.contains("movie") || lower.contains("special") || lower.contains("ova") {
                 add(&mut parts, "Movie / Special / OVA", 8, None);
             }
-            if result.is_batch {
+            // Only penalize batches when the user is looking for a
+            // single-unit target (movie, OVA, single-episode special).
+            // Suppress on explicit batch-search paths — every candidate
+            // is a batch there, so the penalty is meaningless and just
+            // pollutes the displayed breakdown.
+            if result.is_batch && !batch_search_mode {
                 add(&mut parts, "Batch Penalty (single target)", -5, None);
             }
         }

@@ -278,6 +278,7 @@ pub async fn find_all_for_target(
             cutoff_source_enum,
             cutoff_resolution_enum,
             series_ctx.absolute_offset,
+            false, // batch_search_mode — episode target, single-unit penalty applies
         );
         // No CF floor on the interactive path — see comment above.
         if let Some((final_score, cf_parts)) = apply_cf_seadex_overlay_with_breakdown(
@@ -521,6 +522,7 @@ pub async fn collect_scored_batches_for_target(
             cutoff_source_enum,
             cutoff_resolution_enum,
             series_ctx.absolute_offset,
+            true, // batch_search_mode — every candidate is a batch here
         );
         if let Some((final_score, cf_parts)) = apply_cf_seadex_overlay_with_breakdown(
             base,
