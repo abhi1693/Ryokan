@@ -1562,6 +1562,35 @@ async fn main() {
         });
     }
 
+    // Background task: evict stale `pending_grabs` rows (issue #83).
+    // Minimum-viable sweep for PR A — drops expired rows only. The
+    // full "auto-commit abandoned modal with all-files-wanted" shape
+    // from plan decision #3 lands in PR C alongside the grab-row
+    // write + sibling auto-expand path. See `services::grab_sweep`
+    // module docstring for the rationale behind the staged roll-out.
+    {
+        let grab_sweep_db = db.clone();
+        tokio::spawn(async move {
+            supervise("grab_sweep", move || {
+                let db = grab_sweep_db.clone();
+                async move {
+                    let mut interval = tokio::time::interval(services::grab_sweep::SWEEP_INTERVAL);
+                    loop {
+                        interval.tick().await;
+                        if let Err(e) = services::grab_sweep::sweep_once(&db).await {
+                            tracing::warn!(
+                                target: "ryokan::grab_sweep",
+                                error = %e,
+                                "sweep_once failed; will retry on next tick"
+                            );
+                        }
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
     // Use `into_make_service_with_connect_info::<SocketAddr>()` so the auth
     // handler can pull the true client socket address via
     // `ConnectInfo<SocketAddr>`. This is the ground-truth IP the rate limiter
