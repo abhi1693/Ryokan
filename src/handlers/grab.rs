@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::models::pending_grabs;
+use crate::services::download_client::{self, AddOutcome};
 
 /// POST body for `/api/grab/preview`.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -88,6 +89,11 @@ pub struct GrabPreviewStatus {
     /// the modal can render per-file sizes and a running total.
     #[serde(default)]
     pub file_list: Vec<PreviewFile>,
+    /// Human-readable error message, only populated when
+    /// `status == "error"`. Modal uses this verbatim in the
+    /// retry/defaults dialog.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -118,6 +124,13 @@ pub struct GrabConfirmResult {
     /// are left at default priority and the modal can warn the user.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_priority_errors: Vec<String>,
+    /// Error message from the final `resume` call, if any. Separate
+    /// from the per-file priority errors so the modal can distinguish
+    /// "some priorities didn't apply" (recoverable via client UI)
+    /// from "torrent may still be paused" (which matters because
+    /// the user expected the grab to start downloading).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_error: Option<String>,
 }
 
 /// POST body for `/api/grab/cancel`.
@@ -175,11 +188,25 @@ pub async fn grab_preview(
     }
     let client = require_download_client(&state).await?;
 
-    let preview_id = generate_preview_id();
     let info_hash = form.info_hash.to_ascii_lowercase();
     let client_kind = client.sonarr_impl_name().to_string();
     let metadata_json = form.release_metadata.to_string();
 
+    // Run the paused-add synchronously so we know whether the
+    // torrent was added fresh or was pre-existing. `we_added_torrent`
+    // gates the destructive delete in `grab_cancel` — we can't make
+    // that decision after the fact because AddOutcome isn't stored
+    // on the row. Blocking the HTTP handler here is acceptable
+    // because non-qBit impls return immediately (they don't wait
+    // for metadata in `add_torrent_paused`), and qBit's in-impl
+    // wait is bounded to 10s.
+    let outcome = match client.add_torrent_paused(&form.url, &info_hash).await {
+        Ok(v) => v,
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    };
+    let we_added = matches!(outcome, AddOutcome::Added);
+
+    let preview_id = generate_preview_id();
     pending_grabs::create(
         &state.db,
         &preview_id,
@@ -188,43 +215,46 @@ pub async fn grab_preview(
         None,
         form.series_id,
         &metadata_json,
+        we_added,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // Spawn the metadata-fetch. `add_torrent_paused` may block for the
-    // metadata budget (qBit 5.x races a skip-all against peer startup;
-    // other clients need DHT bootstrap for bare magnets). The handler
-    // returns preview_id immediately and the modal polls.
+    // Spawn the metadata-wait + file-list-persist. qBit already
+    // blocked up to 10s inside add_torrent_paused above and may have
+    // the file list ready immediately; Deluge/Transmission/rTorrent
+    // return before metadata arrives (add_paused=true is non-blocking
+    // by design), so wait_for_files does the cross-client bounded
+    // poll. Handler returns preview_id immediately either way.
     let db = state.db.clone();
-    let url = form.url.clone();
     let hash = info_hash.clone();
     let preview_id_for_task = preview_id.clone();
     tokio::spawn(async move {
-        // Paused-add is best-effort: on failure (network, bad URL,
-        // client down) leave file_list_json empty so the GET endpoint
-        // surfaces `status: fetching_metadata` until the sweep fires.
-        // Auto-commit on sweep won't have a file list, falling
-        // through to the "metadata never arrived" cancel path —
-        // see `services::grab_sweep` (landing in a subsequent commit).
-        if let Err(e) = client.add_torrent_paused(&url, &hash).await {
-            tracing::warn!(
-                target: "ryokan::handlers::grab",
-                preview_id = %preview_id_for_task,
-                error = %e,
-                "add_torrent_paused failed; modal will see fetching_metadata until sweep"
-            );
-            return;
-        }
-        let files = match client.get_files(&hash).await {
+        let files = match download_client::wait_for_files(
+            client.as_ref(),
+            &hash,
+            std::time::Duration::from_secs(METADATA_WAIT_SECS),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
+                let msg = format!("metadata fetch failed: {}", e);
                 tracing::warn!(
                     target: "ryokan::handlers::grab",
                     preview_id = %preview_id_for_task,
                     error = %e,
-                    "get_files after add_torrent_paused failed"
+                    "wait_for_files failed; modal will flip to status=error"
                 );
+                if let Err(db_err) = pending_grabs::set_error(&db, &preview_id_for_task, &msg).await
+                {
+                    tracing::error!(
+                        target: "ryokan::handlers::grab",
+                        preview_id = %preview_id_for_task,
+                        error = %db_err,
+                        "set_error failed"
+                    );
+                }
                 return;
             }
         };
@@ -238,12 +268,14 @@ pub async fn grab_preview(
         let json = match serde_json::to_string(&preview_files) {
             Ok(s) => s,
             Err(e) => {
+                let msg = format!("serialize file list failed: {}", e);
                 tracing::error!(
                     target: "ryokan::handlers::grab",
                     preview_id = %preview_id_for_task,
                     error = %e,
                     "serialize file list failed"
                 );
+                let _ = pending_grabs::set_error(&db, &preview_id_for_task, &msg).await;
                 return;
             }
         };
@@ -254,6 +286,7 @@ pub async fn grab_preview(
                 error = %e,
                 "set_file_list failed"
             );
+            let _ = pending_grabs::set_error(&db, &preview_id_for_task, &e).await;
         }
     });
 
@@ -262,6 +295,13 @@ pub async fn grab_preview(
         status: "fetching_metadata".to_string(),
     }))
 }
+
+/// Cross-client metadata-fetch budget for the spawned preview task.
+/// Picked to match the qBit in-impl budget so the outer poll is
+/// never the thing that times out first. Magnet DHT bootstraps that
+/// take longer than this surface as `status: error` to the modal,
+/// which can offer the retry/defaults dialog (plan decision #1).
+const METADATA_WAIT_SECS: u64 = 20;
 
 #[utoipa::path(
     get,
@@ -295,12 +335,27 @@ pub async fn grab_preview_status(
         serde_json::from_str(&row.release_metadata_json).unwrap_or(serde_json::Value::Null)
     };
 
+    // Error takes precedence over fetching/ready. If the spawned
+    // metadata-fetch task marked an error, surface it immediately so
+    // the modal can offer retry/defaults without waiting for the TTL
+    // sweep to drop the row.
+    if !row.error_message.is_empty() {
+        return Ok(Json(GrabPreviewStatus {
+            preview_id,
+            status: "error".to_string(),
+            release_metadata,
+            file_list: Vec::new(),
+            error: row.error_message,
+        }));
+    }
+
     if row.file_list_json.is_empty() {
         return Ok(Json(GrabPreviewStatus {
             preview_id,
             status: "fetching_metadata".to_string(),
             release_metadata,
             file_list: Vec::new(),
+            error: String::new(),
         }));
     }
 
@@ -310,6 +365,7 @@ pub async fn grab_preview_status(
         status: "ready".to_string(),
         release_metadata,
         file_list,
+        error: String::new(),
     }))
 }
 
@@ -405,25 +461,23 @@ pub async fn grab_confirm(
     let wanted_set: std::collections::HashSet<usize> = wanted.iter().copied().collect();
     let unwanted: Vec<usize> = (0..total).filter(|i| !wanted_set.contains(i)).collect();
 
-    let mut errors: Vec<String> = Vec::new();
+    let mut file_priority_errors: Vec<String> = Vec::new();
     if !unwanted.is_empty()
         && let Err(e) = client
             .set_file_wanted(&row.info_hash, &unwanted, false)
             .await
     {
-        errors.push(format!("mark unwanted: {}", e));
+        file_priority_errors.push(format!("mark unwanted: {}", e));
     }
     if !wanted.is_empty()
         && let Err(e) = client.set_file_wanted(&row.info_hash, &wanted, true).await
     {
-        errors.push(format!("mark wanted: {}", e));
+        file_priority_errors.push(format!("mark wanted: {}", e));
     }
     // Resume starts downloading on Deluge / Transmission / rTorrent
     // (they were added paused). On qBit the torrent is already
     // running — resume is idempotent.
-    if let Err(e) = client.resume(&row.info_hash).await {
-        errors.push(format!("resume: {}", e));
-    }
+    let resume_error = client.resume(&row.info_hash).await.err();
 
     // Drop the pending row — the user has committed, so the sweep
     // should never revisit this preview_id. Grab-row write happens
@@ -435,8 +489,9 @@ pub async fn grab_confirm(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(GrabConfirmResult {
-        ok: errors.is_empty(),
-        file_priority_errors: errors,
+        ok: file_priority_errors.is_empty() && resume_error.is_none(),
+        file_priority_errors,
+        resume_error,
     }))
 }
 
@@ -468,13 +523,16 @@ pub async fn grab_cancel(
 
     let client = require_download_client(&state).await?;
 
-    // Delete the torrent including files — the user explicitly
-    // cancelled, so we're not in "keep seeding just in case"
-    // territory. Errors are logged but don't fail the call so the
-    // pending_grabs row still gets dropped (otherwise a client-side
-    // hiccup would leave an orphan modal-state row that the sweep
-    // will keep retrying against a torrent that may not exist).
-    if let Err(e) = client.delete(&row.info_hash, true).await {
+    // Only delete the torrent if THIS preview added it fresh. If the
+    // torrent was already in the client at add time (AlreadyPresent),
+    // the user may have partial-downloaded it from a prior grab or
+    // added it manually outside Ryokan — cancelling the preview
+    // doesn't give us permission to delete data we didn't create.
+    // The pending_grabs row is still dropped either way so the modal-
+    // state doesn't linger.
+    if row.we_added_torrent
+        && let Err(e) = client.delete(&row.info_hash, true).await
+    {
         tracing::warn!(
             target: "ryokan::handlers::grab",
             preview_id = %form.preview_id,
@@ -523,6 +581,7 @@ mod tests {
             None,
             None,
             "{\"title\":\"t\"}",
+            true,
         )
         .await
         .unwrap();
@@ -554,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_200_when_present_404_when_gone() {
         let db = in_memory_pool().await;
-        pending_grabs::create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}")
+        pending_grabs::create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
 
@@ -600,7 +659,7 @@ mod tests {
     #[tokio::test]
     async fn confirm_400_when_file_list_empty() {
         let db = in_memory_pool().await;
-        pending_grabs::create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}")
+        pending_grabs::create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
         let state = build_test_app_state(db, None);

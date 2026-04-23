@@ -1,9 +1,3 @@
-// Issue #83, PR A — the endpoint handlers and sweep task that consume
-// these functions land in subsequent commits. Allow dead_code at the
-// module level until the consumers are wired so the data layer can be
-// landed in isolation (with its own test coverage) instead of as a
-// single monolithic commit that's hard to review.
-#![allow(dead_code)]
 //! Interactive file-picker scratch state (issue #83).
 //!
 //! One row per open modal. Lifecycle:
@@ -44,6 +38,13 @@ use sqlx::{FromRow, SqlitePool};
 pub const HEARTBEAT_TTL_SECS: i64 = 60;
 
 #[derive(Debug, Clone, FromRow)]
+// PR A ships the struct with more columns than the handler currently
+// reads; `client_kind` / `indexer_id` / `series_id` / `created_at` /
+// `heartbeat_at` are populated for the sweep's decision-making (PR C)
+// and for future diagnostics. Silencing struct-level dead-code so the
+// fields stay available when the PR C consumers wire up, without
+// per-field noise.
+#[allow(dead_code)]
 pub struct PendingGrab {
     pub preview_id: String,
     pub info_hash: String,
@@ -59,6 +60,25 @@ pub struct PendingGrab {
     /// hit Grab — the modal uses it to render the header row
     /// (title, size, seeders) before the file list arrives.
     pub release_metadata_json: String,
+    /// Populated by the metadata-fetch task on permanent failure
+    /// (add_torrent_paused err, wait_for_files timeout, serialize
+    /// error). Empty string = no error so far; any other value is
+    /// a human-readable failure description. GET preview flips
+    /// `status: "error"` when this is non-empty so the modal can
+    /// surface the retry/defaults dialog immediately rather than
+    /// waiting for the TTL sweep. The ALTER TABLE adds this with
+    /// `DEFAULT ''`, so rows written before the column existed
+    /// load as "no error" without any Rust-side default needed.
+    pub error_message: String,
+    /// `true` when `add_torrent_paused` returned `Added` for this
+    /// preview, `false` when it returned `AlreadyPresent`. `grab_cancel`
+    /// gates its destructive `delete(hash, with_files=true)` call on
+    /// this so a cancel on a pre-existing (user-added-earlier) torrent
+    /// doesn't nuke data the user may have partial-downloaded. The
+    /// ALTER TABLE adds this with `DEFAULT 1`, so rows written before
+    /// the column existed take the conservative "yes, we added it"
+    /// path on read without any Rust-side default needed.
+    pub we_added_torrent: bool,
 }
 
 /// Insert a new row. `preview_id` is a caller-supplied opaque string
@@ -66,6 +86,14 @@ pub struct PendingGrab {
 /// cookies). The `indexer_id` field is kept nullable for forward-
 /// compat with issue #28 — current callers (Nyaa-direct only) always
 /// pass `None`.
+///
+/// `we_added_torrent` records whether the preview's backing torrent
+/// was added fresh by this preview's `add_torrent_paused` call
+/// (`true`) or was already in the download client at add time
+/// (`false`, mapped from `AddOutcome::AlreadyPresent`). Used by the
+/// cancel path to decide whether the destructive `delete(..., true)`
+/// is appropriate or whether it would nuke a pre-existing grab.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     db: &SqlitePool,
     preview_id: &str,
@@ -74,13 +102,15 @@ pub async fn create(
     indexer_id: Option<i64>,
     series_id: Option<i64>,
     release_metadata_json: &str,
+    we_added_torrent: bool,
 ) -> Result<(), String> {
     let now = now_unix();
     sqlx::query(
         "INSERT INTO pending_grabs \
          (preview_id, info_hash, client_kind, indexer_id, series_id, \
-          created_at, heartbeat_at, file_list_json, release_metadata_json) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)",
+          created_at, heartbeat_at, file_list_json, release_metadata_json, \
+          error_message, we_added_torrent) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, '', ?)",
     )
     .bind(preview_id)
     .bind(info_hash)
@@ -90,18 +120,21 @@ pub async fn create(
     .bind(now)
     .bind(now)
     .bind(release_metadata_json)
+    .bind(if we_added_torrent { 1_i64 } else { 0_i64 })
     .execute(db)
     .await
     .map_err(|e| format!("failed to create pending grab: {}", e))?;
     Ok(())
 }
 
+const SELECT_COLUMNS: &str = "preview_id, info_hash, client_kind, indexer_id, series_id, \
+     created_at, heartbeat_at, file_list_json, release_metadata_json, \
+     error_message, we_added_torrent";
+
 pub async fn get(db: &SqlitePool, preview_id: &str) -> Result<Option<PendingGrab>, String> {
-    sqlx::query_as::<_, PendingGrab>(
-        "SELECT preview_id, info_hash, client_kind, indexer_id, series_id, \
-                created_at, heartbeat_at, file_list_json, release_metadata_json \
-         FROM pending_grabs WHERE preview_id = ?",
-    )
+    sqlx::query_as::<_, PendingGrab>(&format!(
+        "SELECT {SELECT_COLUMNS} FROM pending_grabs WHERE preview_id = ?"
+    ))
     .bind(preview_id)
     .fetch_optional(db)
     .await
@@ -113,16 +146,19 @@ pub async fn get(db: &SqlitePool, preview_id: &str) -> Result<Option<PendingGrab
 /// modal for this release in another tab?"). Returns the most
 /// recently created matching row, or `None` when no open modal holds
 /// the hash.
+///
+/// `#[allow(dead_code)]` until PR B wires the same-hash dedup flow —
+/// keeping it per-item rather than module-wide so new dead code in
+/// this module stands out in review.
+#[allow(dead_code)]
 pub async fn get_by_hash(db: &SqlitePool, info_hash: &str) -> Result<Option<PendingGrab>, String> {
     if info_hash.is_empty() {
         return Ok(None);
     }
-    sqlx::query_as::<_, PendingGrab>(
-        "SELECT preview_id, info_hash, client_kind, indexer_id, series_id, \
-                created_at, heartbeat_at, file_list_json, release_metadata_json \
-         FROM pending_grabs WHERE info_hash = ? \
-         ORDER BY created_at DESC LIMIT 1",
-    )
+    sqlx::query_as::<_, PendingGrab>(&format!(
+        "SELECT {SELECT_COLUMNS} FROM pending_grabs WHERE info_hash = ? \
+         ORDER BY created_at DESC LIMIT 1"
+    ))
     .bind(info_hash)
     .fetch_optional(db)
     .await
@@ -145,6 +181,24 @@ pub async fn set_file_list(
         .execute(db)
         .await
         .map_err(|e| format!("failed to update file list: {}", e))?;
+    Ok(())
+}
+
+/// Record a permanent metadata-fetch failure on this preview. The
+/// GET endpoint promotes a non-empty `error_message` to
+/// `status: "error"` so the modal flips to the retry/defaults
+/// dialog immediately rather than waiting for the TTL sweep.
+pub async fn set_error(
+    db: &SqlitePool,
+    preview_id: &str,
+    error_message: &str,
+) -> Result<(), String> {
+    sqlx::query("UPDATE pending_grabs SET error_message = ? WHERE preview_id = ?")
+        .bind(error_message)
+        .bind(preview_id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("failed to update error_message: {}", e))?;
     Ok(())
 }
 
@@ -179,11 +233,10 @@ pub async fn delete(db: &SqlitePool, preview_id: &str) -> Result<(), String> {
 /// list and auto-commits each row.
 pub async fn list_expired(db: &SqlitePool) -> Result<Vec<PendingGrab>, String> {
     let cutoff = now_unix() - HEARTBEAT_TTL_SECS;
-    sqlx::query_as::<_, PendingGrab>(
-        "SELECT preview_id, info_hash, client_kind, indexer_id, series_id, \
-                created_at, heartbeat_at, file_list_json, release_metadata_json \
-         FROM pending_grabs WHERE heartbeat_at < ? ORDER BY heartbeat_at ASC",
-    )
+    sqlx::query_as::<_, PendingGrab>(&format!(
+        "SELECT {SELECT_COLUMNS} FROM pending_grabs \
+         WHERE heartbeat_at < ? ORDER BY heartbeat_at ASC"
+    ))
     .bind(cutoff)
     .fetch_all(db)
     .await
@@ -225,6 +278,7 @@ mod tests {
             None,
             Some(42),
             "{\"title\":\"test\"}",
+            true,
         )
         .await
         .expect("create");
@@ -235,13 +289,48 @@ mod tests {
         assert_eq!(row.series_id, Some(42));
         assert_eq!(row.file_list_json, "");
         assert_eq!(row.release_metadata_json, "{\"title\":\"test\"}");
+        assert_eq!(row.error_message, "");
+        assert!(row.we_added_torrent);
         assert_eq!(row.created_at, row.heartbeat_at);
+    }
+
+    #[tokio::test]
+    async fn we_added_false_roundtrips() {
+        let db = in_memory_pool().await;
+        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", false)
+            .await
+            .unwrap();
+        let row = get(&db, "pid-1").await.unwrap().unwrap();
+        assert!(!row.we_added_torrent);
+    }
+
+    #[tokio::test]
+    async fn set_error_flips_column() {
+        let db = in_memory_pool().await;
+        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
+            .await
+            .unwrap();
+        assert!(
+            get(&db, "pid-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .error_message
+                .is_empty()
+        );
+        set_error(&db, "pid-1", "metadata fetch timed out")
+            .await
+            .unwrap();
+        let row = get(&db, "pid-1").await.unwrap().unwrap();
+        assert_eq!(row.error_message, "metadata fetch timed out");
+        // Should not touch file_list_json or other columns.
+        assert_eq!(row.file_list_json, "");
     }
 
     #[tokio::test]
     async fn bump_heartbeat_updates_heartbeat_at() {
         let db = in_memory_pool().await;
-        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}")
+        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
         let before = get(&db, "pid-1").await.unwrap().unwrap().heartbeat_at;
@@ -277,6 +366,7 @@ mod tests {
             None,
             Some(7),
             "{\"title\":\"t\"}",
+            true,
         )
         .await
         .unwrap();
@@ -293,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_the_row() {
         let db = in_memory_pool().await;
-        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}")
+        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
         delete(&db, "pid-1").await.unwrap();
@@ -303,13 +393,31 @@ mod tests {
     #[tokio::test]
     async fn get_by_hash_returns_most_recent() {
         let db = in_memory_pool().await;
-        create(&db, "pid-old", "deadbeef", "qbittorrent", None, None, "{}")
-            .await
-            .unwrap();
+        create(
+            &db,
+            "pid-old",
+            "deadbeef",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        create(&db, "pid-new", "deadbeef", "qbittorrent", None, None, "{}")
-            .await
-            .unwrap();
+        create(
+            &db,
+            "pid-new",
+            "deadbeef",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
         let row = get_by_hash(&db, "deadbeef")
             .await
             .unwrap()
@@ -320,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn get_by_hash_ignores_empty_hash() {
         let db = in_memory_pool().await;
-        create(&db, "pid-1", "", "qbittorrent", None, None, "{}")
+        create(&db, "pid-1", "", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
         assert!(
@@ -333,11 +441,11 @@ mod tests {
     async fn list_expired_returns_stale_rows_only() {
         let db = in_memory_pool().await;
         // Fresh row — heartbeat just now.
-        create(&db, "fresh", "h1", "qbittorrent", None, None, "{}")
+        create(&db, "fresh", "h1", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
         // Backdate a second row's heartbeat past the TTL.
-        create(&db, "stale", "h2", "qbittorrent", None, None, "{}")
+        create(&db, "stale", "h2", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
         let stale_heartbeat = now_unix() - HEARTBEAT_TTL_SECS - 5;
@@ -355,10 +463,10 @@ mod tests {
     async fn count_reflects_creates_and_deletes() {
         let db = in_memory_pool().await;
         assert_eq!(count(&db).await.unwrap(), 0);
-        create(&db, "pid-1", "a", "qbittorrent", None, None, "{}")
+        create(&db, "pid-1", "a", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
-        create(&db, "pid-2", "b", "qbittorrent", None, None, "{}")
+        create(&db, "pid-2", "b", "qbittorrent", None, None, "{}", true)
             .await
             .unwrap();
         assert_eq!(count(&db).await.unwrap(), 2);

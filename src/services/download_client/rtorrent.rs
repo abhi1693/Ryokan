@@ -364,6 +364,15 @@ impl DownloadClient for RtorrentClient {
             return Ok(outcome);
         }
 
+        // Don't pause a pre-existing torrent. If the user already
+        // has this release running from a prior grab, pausing it
+        // out from under them is destructive — the handler is
+        // responsible for surfacing the existing state to the modal
+        // instead (same-hash dedup flow, plan decision #6).
+        if outcome == AddOutcome::AlreadyPresent {
+            return Ok(outcome);
+        }
+
         // Small settle loop: wait until the hash is visible in the
         // session before calling `d.pause`. `load.start_verbose`
         // returns before rtorrent finishes registering the torrent;

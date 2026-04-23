@@ -760,6 +760,31 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // Added in PR #88's review follow-up. The spawned metadata-fetch
+    // task needs a way to signal "fetch failed permanently" so the
+    // modal can flip from the `fetching_metadata` spinner to the
+    // retry/defaults dialog (plan decision #1) without waiting for
+    // the TTL sweep. Empty string means "no error so far"; any other
+    // value is a human-readable failure description.
+    sqlx::query("ALTER TABLE pending_grabs ADD COLUMN error_message TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // Added in PR #88's review follow-up. Remembers whether the
+    // `add_torrent_paused` call added the torrent fresh or adopted an
+    // existing one (duplicate-add). `grab_cancel` uses this to avoid
+    // deleting a pre-existing torrent the user may have partial
+    // downloaded from a prior grab — if we didn't add it, we don't
+    // own the deletion. `1` = we added it in this preview, `0` =
+    // pre-existing at add time (AlreadyPresent). Default 1 so rows
+    // written before this column existed take the conservative
+    // "delete on cancel" path (matches the pre-fix behavior).
+    sqlx::query("ALTER TABLE pending_grabs ADD COLUMN we_added_torrent INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
+
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.
     sqlx::query("ALTER TABLE series ADD COLUMN tmdb_id INTEGER")

@@ -437,8 +437,19 @@ impl DownloadClient for QbitClient {
         let hash_lc = info_hash.to_ascii_lowercase();
 
         let outcome = self.add_torrent(url, &hash_lc).await?;
-        // Explicit resume so a duplicate-add that landed on a stopped
-        // torrent starts flowing metadata. Matches the pattern in
+
+        // Don't touch a pre-existing torrent's priorities. The user
+        // may have partial-downloaded this release from an earlier
+        // grab with careful file-selection; mark-all-skip would wipe
+        // that and force them to re-pick. Handler is responsible for
+        // surfacing the existing state to the modal instead (same-
+        // hash dedup flow, plan decision #6).
+        if outcome == AddOutcome::AlreadyPresent {
+            return Ok(outcome);
+        }
+
+        // Explicit resume so a fresh add that landed in stopped state
+        // starts flowing metadata. Matches the pattern in
         // `add_torrent_with_file_filter`.
         let _ = self.resume(&hash_lc).await;
 
