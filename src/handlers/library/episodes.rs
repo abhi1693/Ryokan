@@ -826,23 +826,59 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn get_episode_grab_history_accepts_internal_id_path() {
+        async fn get_episode_grab_history_accepts_internal_id_and_anilist_id_equivalently() {
             // The path parameter can be either an AniList id or an
             // internal series id — resolve_tracked_series handles
-            // both. Pin the dual-lookup so a refactor that narrows
-            // it to AL-only would break the Library UI's internal-id
-            // links.
+            // both. Pin dual-lookup PARITY by seeding a real grab
+            // row and asserting that both paths return it. Without
+            // the seed, an empty-history-for-both result would only
+            // prove the internal-id branch doesn't reject — it
+            // wouldn't catch a regression that routed the two ids
+            // to different series.
             let db = in_memory_pool().await;
-            let series_id = seed_series(&db, 101, "Show").await;
-            let state = build_test_app_state(db, None);
-            let AxumJson(history) = get_episode_grab_history(
-                State(state),
-                // Pass the INTERNAL series id, not the anilist_id.
-                Path((series_id, 1)),
+            let anilist_id: i64 = 101;
+            let series_id = seed_series(&db, anilist_id, "Show").await;
+            // Raw SQL insert — bypasses episode_tags::record_grab's
+            // ClassificationResult plumbing since we only care that
+            // the row round-trips through the handler's resolver.
+            sqlx::query(
+                "INSERT INTO episode_grab_history \
+                 (series_id, episode_number, quality_tag, release_title, release_group) \
+                 VALUES (?, ?, ?, ?, ?)",
             )
+            .bind(series_id)
+            .bind(5_i32)
+            .bind("WEBDL-1080p")
+            .bind("[Group] Show - 05 [WEB-DL 1080p].mkv")
+            .bind("Group")
+            .execute(&db)
             .await
-            .expect("internal id lookup should work");
-            assert!(history.is_empty());
+            .unwrap();
+
+            let state = build_test_app_state(db, None);
+            let AxumJson(via_al) =
+                get_episode_grab_history(State(state.clone()), Path((anilist_id, 5)))
+                    .await
+                    .expect("AL-id lookup should work");
+            let AxumJson(via_internal) =
+                get_episode_grab_history(State(state), Path((series_id, 5)))
+                    .await
+                    .expect("internal-id lookup should work");
+
+            assert_eq!(via_al.len(), 1, "AL-id lookup must return the seeded grab");
+            assert_eq!(
+                via_internal.len(),
+                1,
+                "internal-id lookup must return the seeded grab"
+            );
+            // Parity: both paths resolve to the same series, so they
+            // return the same row (same release_title + quality_tag).
+            assert_eq!(via_al[0].release_title, via_internal[0].release_title);
+            assert_eq!(via_al[0].quality_tag, via_internal[0].quality_tag);
+            assert_eq!(
+                via_al[0].release_title,
+                "[Group] Show - 05 [WEB-DL 1080p].mkv"
+            );
         }
 
         // ─── delete_episode_file (no-client path) ─────────────────
