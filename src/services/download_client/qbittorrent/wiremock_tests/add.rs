@@ -8,8 +8,8 @@ use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, ResponseTemplate};
 
 use super::fixture::new_fixture;
+use crate::services::download_client::AddOutcome;
 use crate::services::download_client::DownloadClient;
-use crate::services::download_client::{AddOutcome, qbittorrent::QbitClient};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:aabbccddeeff00112233445566778899aabbccdd";
 const HASH: &str = "aabbccddeeff00112233445566778899aabbccdd";
@@ -106,8 +106,10 @@ async fn non_2xx_response_returns_error() {
 async fn form_body_contains_urls_and_category_keys() {
     // Pin the form shape — if a refactor stopped sending `category`
     // (load-bearing for `list_scoped`'s filter), every grab would
-    // land outside Ryokan's filter and appear lost.
-    let (server, _client) = new_fixture().await;
+    // land outside Ryokan's filter and appear lost. `new_fixture()`
+    // defaults to `ryokan-test` as the category, so the same client
+    // it returns already has the right category baked in.
+    let (server, client) = new_fixture().await;
     Mock::given(method("POST"))
         .and(path("/api/v2/torrents/add"))
         .and(body_string_contains("urls="))
@@ -116,9 +118,6 @@ async fn form_body_contains_urls_and_category_keys() {
         .expect(1)
         .mount(&server)
         .await;
-    // Rebuild a client bound to this specific server instance (the
-    // fixture's default category matches the match-expression above).
-    let client = QbitClient::new(&server.uri(), "admin", "hunter2", "ryokan-test");
     client.add_torrent(MAGNET, HASH).await.expect("add");
     // Dropping `server` here runs Mock's `expect(1)` check — panics
     // if the matcher wasn't hit exactly once.

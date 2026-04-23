@@ -3,46 +3,48 @@
 //! returns early instead of queuing, so two concurrent post-
 //! processing runs can't double-import files.
 //!
-//! The lock is a process-global `LazyLock<Mutex>`, so parallel tests
-//! that acquire it will serialize against each other. Both tests
-//! below hold the lock briefly enough (< ~100 ms) that they don't
-//! slow the suite meaningfully, and each completes before releasing
-//! the guard so there's no cross-test interference.
-
-use std::time::Duration;
+//! The test lives in a single function that walks the full state
+//! machine sequentially: acquire, try-while-held (must fail),
+//! drop, re-acquire. Splitting into two `#[tokio::test]` functions
+//! would race — Rust's test harness runs them on separate threads
+//! and `try_lock()` does not block, so a test-2 that asserts "lock
+//! free at start" can panic when test-1 is still inside its guard
+//! scope.
 
 use crate::services::post_processing::POST_PROC_LOCK;
 
 #[tokio::test]
-async fn try_lock_returns_err_while_lock_is_held() {
-    // Acquire the lock manually, simulating a `run_once` in flight.
-    let _held = POST_PROC_LOCK
+async fn post_proc_lock_serializes_via_try_lock_contention() {
+    // 1. Acquire — must succeed from a fresh process state. If a
+    //    prior test left the lock held this would panic, but
+    //    `POST_PROC_LOCK` is a production-global that no other
+    //    test touches (`run_once` is the only legitimate caller
+    //    in `services::post_processing::mod.rs`, and that's not
+    //    exercised from unit tests).
+    let first = POST_PROC_LOCK
         .try_lock()
-        .expect("lock should be free at test start");
-    // A second try_lock must fail while the first guard is alive.
-    let second = POST_PROC_LOCK.try_lock();
-    assert!(
-        second.is_err(),
-        "second try_lock should fail while first is held"
-    );
-    // Explicit drop so the lock frees before the next test runs.
-    drop(_held);
-}
+        .expect("lock must be free at test start");
 
-#[tokio::test]
-async fn try_lock_succeeds_after_prior_holder_drops() {
-    {
-        let _held = POST_PROC_LOCK
-            .try_lock()
-            .expect("lock should be free at test start");
-        // scope drops the guard here
-    }
-    // Give the scheduler a beat to unwind any contending acquires
-    // from the serialized sibling test above.
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    let acquired = POST_PROC_LOCK.try_lock();
+    // 2. Second try_lock inside the first guard's scope — the
+    //    contention case. This is the load-bearing property for
+    //    the `run_once` drop-on-overlap semantic: if two ticks
+    //    overlap, the second one's try_lock fails and `run_once`
+    //    returns immediately rather than queuing.
     assert!(
-        acquired.is_ok(),
-        "lock should be re-acquirable after prior holder drops"
+        POST_PROC_LOCK.try_lock().is_err(),
+        "second try_lock must fail while first guard is alive"
     );
+
+    // 3. Drop the first guard explicitly — re-acquire semantics
+    //    depend on the drop happening before the next try_lock.
+    drop(first);
+
+    // 4. Re-acquire — post-drop the lock is free again. This
+    //    pins the "sticky lock" regression guard: a refactor
+    //    that leaked the guard (holding it across await with
+    //    an unexpected branch) would leave the lock held
+    //    forever and fail this step.
+    let _regained = POST_PROC_LOCK
+        .try_lock()
+        .expect("lock must be re-acquirable after prior holder drops");
 }

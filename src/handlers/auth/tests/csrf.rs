@@ -179,7 +179,7 @@ fn origin_matches_xfh_only_when_trust_is_on() {
     // (common for header-scrubbing proxies). Browser sends the
     // externally-visible host in Origin. The backend sees the
     // internal Host. Without trust, this is a mismatch.
-    let mut req = Request::builder()
+    let req = Request::builder()
         .method(Method::POST)
         .uri("/login")
         .header(header::HOST, "ryokan.internal")
@@ -187,16 +187,10 @@ fn origin_matches_xfh_only_when_trust_is_on() {
         .header("x-forwarded-host", "ryokan.example.com")
         .body(Body::empty())
         .unwrap();
-    // Rebuild because Request::builder consumes headers on the insert.
-    // (Actually the above builder is fine — Request::builder can carry multiple headers.)
     // With trust=false → X-Forwarded-Host is ignored → rejection.
     assert!(verify_same_origin_with_trust(&req, false).is_err());
     // With trust=true → X-Forwarded-Host expands the allowed set → accept.
     assert!(verify_same_origin_with_trust(&req, true).is_ok());
-    // Silence the unused-mut lint on the cfg-ignored body; Request
-    // is consumed by verify_same_origin_with_trust so `req` is no
-    // longer mutable past this point anyway.
-    let _ = &mut req;
 }
 
 #[test]

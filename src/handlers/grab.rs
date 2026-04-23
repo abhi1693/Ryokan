@@ -191,7 +191,22 @@ pub async fn grab_preview(
         ));
     }
 
-    let info_hash = form.info_hash.to_ascii_lowercase();
+    let info_hash = form.info_hash.trim().to_ascii_lowercase();
+
+    // v1 info-hash is a 40-char lowercase-hex string at the trait
+    // boundary; the `pending_grabs` row stores it verbatim and
+    // every downstream `DownloadClient` call expects that shape.
+    // Reject anything else up front so a misformatted hash (v2's
+    // 64-byte SHA-256, a URL-encoded variant, stray whitespace the
+    // trim didn't catch, or a caller's typo) fails cleanly with
+    // 400 rather than inserting an unusable row that the dedup
+    // path later trips over.
+    if info_hash.len() != 40 || !info_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "info_hash must be a 40-char lowercase-hex v1 BitTorrent infohash".to_string(),
+        ));
+    }
 
     // Pre-flight same-session dedup. Two browser tabs both hitting
     // Grab on the same release would otherwise race through
@@ -616,6 +631,11 @@ mod tests {
     // coverage from the `live_smoke*` tests on each
     // `DownloadClient` impl.
 
+    // A valid 40-char lowercase-hex v1 infohash — use this whenever
+    // the test wants to clear the hex-validation gate in
+    // `grab_preview` and reach the downstream path under test.
+    const VALID_HASH: &str = "aabbccddeeff00112233445566778899aabbccdd";
+
     #[tokio::test]
     async fn preview_status_404_when_missing() {
         let db = in_memory_pool().await;
@@ -764,10 +784,51 @@ mod tests {
         let res = grab_preview(
             State(state),
             Json(GrabPreviewForm {
-                url: "magnet:?xt=urn:btih:abc".into(),
-                info_hash: "abcdef0123".into(),
+                url: format!("magnet:?xt=urn:btih:{VALID_HASH}"),
+                info_hash: VALID_HASH.into(),
                 series_id: Some(42),
                 release_metadata: serde_json::json!({"title": "test"}),
+            }),
+        )
+        .await;
+        // Clears the hex-validation gate (hash is 40-char lowercase
+        // hex) and reaches `require_download_client`, which returns
+        // 400 because the fixture's `AppState` has None as the
+        // download client.
+        assert!(matches!(res, Err((StatusCode::BAD_REQUEST, _))));
+    }
+
+    #[tokio::test]
+    async fn preview_rejects_non_hex_info_hash_with_400() {
+        // Regression guard on the PR 89 review fix: a v2 hash
+        // (64 hex chars), a bare title, or any non-40-char input
+        // must not reach the DB. Cheap check at the top of
+        // `grab_preview`.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        // 64-char "v2-like" input.
+        let too_long = "a".repeat(64);
+        let res = grab_preview(
+            State(state.clone()),
+            Json(GrabPreviewForm {
+                url: "magnet:?xt=urn:btih:abc".into(),
+                info_hash: too_long,
+                series_id: None,
+                release_metadata: serde_json::Value::Null,
+            }),
+        )
+        .await;
+        assert!(matches!(res, Err((StatusCode::BAD_REQUEST, _))));
+
+        // Garbage non-hex — 40 chars but with a "z".
+        let bad_chars = "z".repeat(40);
+        let res = grab_preview(
+            State(state),
+            Json(GrabPreviewForm {
+                url: "magnet:?xt=urn:btih:abc".into(),
+                info_hash: bad_chars,
+                series_id: None,
+                release_metadata: serde_json::Value::Null,
             }),
         )
         .await;
@@ -787,7 +848,7 @@ mod tests {
         pending_grabs::create(
             &db,
             "pid-existing",
-            "deadbeef",
+            VALID_HASH,
             "qbittorrent",
             None,
             None,
@@ -800,8 +861,8 @@ mod tests {
         let res = grab_preview(
             State(state),
             Json(GrabPreviewForm {
-                url: "magnet:?xt=urn:btih:deadbeef".into(),
-                info_hash: "deadbeef".into(),
+                url: format!("magnet:?xt=urn:btih:{VALID_HASH}"),
+                info_hash: VALID_HASH.into(),
                 series_id: None,
                 release_metadata: serde_json::json!({"title": "tab-2 request"}),
             }),
@@ -815,12 +876,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_dedupe_reports_error_status_when_prior_failed() {
+    async fn preview_does_not_dedupe_onto_error_row_from_prior_tab() {
+        // Regression guard on the PR 89 review fix: when a prior
+        // Tab-1's metadata fetch failed and wrote `error_message`,
+        // Tab 2 opening the same release must NOT be short-circuited
+        // onto Tab 1's failure — otherwise the user sees an
+        // immediate "error" for ~2 min until the TTL sweep drops
+        // the row. Instead, `get_by_hash`'s `error_message = ''`
+        // filter makes the error row invisible to dedup; Tab 2
+        // falls through to the full add_torrent_paused path.
+        //
+        // Here we observe that fall-through via the
+        // `require_download_client` short-circuit — with no client
+        // configured, the handler reaches that check and returns
+        // BadRequest rather than reusing the errored row's
+        // preview_id.
         let db = in_memory_pool().await;
         pending_grabs::create(
             &db,
             "pid-failed",
-            "deadbeef",
+            VALID_HASH,
             "qbittorrent",
             None,
             None,
@@ -836,15 +911,19 @@ mod tests {
         let res = grab_preview(
             State(state),
             Json(GrabPreviewForm {
-                url: "magnet:?xt=urn:btih:deadbeef".into(),
-                info_hash: "deadbeef".into(),
+                url: format!("magnet:?xt=urn:btih:{VALID_HASH}"),
+                info_hash: VALID_HASH.into(),
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
             }),
         )
-        .await
-        .unwrap();
-        assert_eq!(res.preview_id, "pid-failed");
-        assert_eq!(res.status, "error");
+        .await;
+        // Reached `require_download_client` → BadRequest. If the
+        // dedup had incorrectly returned the error row we'd have
+        // gotten `Ok(status: "error")` instead.
+        assert!(
+            matches!(res, Err((StatusCode::BAD_REQUEST, _))),
+            "error-row dedup suppression failed; got {res:?}"
+        );
     }
 }
