@@ -146,11 +146,6 @@ pub async fn get(db: &SqlitePool, preview_id: &str) -> Result<Option<PendingGrab
 /// modal for this release in another tab?"). Returns the most
 /// recently created matching row, or `None` when no open modal holds
 /// the hash.
-///
-/// `#[allow(dead_code)]` until PR B wires the same-hash dedup flow —
-/// keeping it per-item rather than module-wide so new dead code in
-/// this module stands out in review.
-#[allow(dead_code)]
 pub async fn get_by_hash(db: &SqlitePool, info_hash: &str) -> Result<Option<PendingGrab>, String> {
     if info_hash.is_empty() {
         return Ok(None);

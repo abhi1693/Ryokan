@@ -191,20 +191,37 @@ pub async fn grab_preview(
         ));
     }
 
-    // TODO (PR B): call `pending_grabs::get_by_hash` here as a pre-
-    // flight dedup check. Current behavior on the Tab-1-Added /
-    // Tab-2-AlreadyPresent race: if Tab 1 cancels, its
-    // `we_added_torrent=true` lets it nuke the torrent, and Tab 2's
-    // still-open modal breaks on confirm because the torrent is gone.
-    // The dedup check turns Tab 2 into "reuse the existing
-    // preview_id" (or a 409 "modal already open in another tab") and
-    // sidesteps the race entirely. Deferred to PR B alongside the
-    // same-hash-already-in-client flow (plan decision #6) so both
-    // dedup surfaces land together.
+    let info_hash = form.info_hash.to_ascii_lowercase();
+
+    // Pre-flight same-session dedup. Two browser tabs both hitting
+    // Grab on the same release would otherwise race through
+    // `add_torrent_paused` twice — Tab 1 creates a paused torrent
+    // with we_added_torrent=true, Tab 2 sees AlreadyPresent and
+    // stores we_added_torrent=false, and if Tab 1 then cancels its
+    // (we_added_torrent=true) delete nukes the torrent out from under
+    // Tab 2's still-open modal. Returning Tab 1's existing preview_id
+    // to Tab 2 collapses both tabs onto the same session, so whichever
+    // tab confirms first wins and the other just sees a 404 on its
+    // next poll. Plan decision #6 also wants the eventual "show
+    // current priorities" flow for releases already in the client,
+    // but that's PR C — this only covers the in-flight modal case.
+    if let Some(existing) = pending_grabs::get_by_hash(&state.db, &info_hash)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Ok(Json(GrabPreviewCreated {
+            preview_id: existing.preview_id,
+            status: if !existing.error_message.is_empty() {
+                "error".to_string()
+            } else if existing.file_list_json.is_empty() {
+                "fetching_metadata".to_string()
+            } else {
+                "ready".to_string()
+            },
+        }));
+    }
 
     let client = require_download_client(&state).await?;
-
-    let info_hash = form.info_hash.to_ascii_lowercase();
     let client_kind = client.sonarr_impl_name().to_string();
     let metadata_json = form.release_metadata.to_string();
 
@@ -755,5 +772,79 @@ mod tests {
         )
         .await;
         assert!(matches!(res, Err((StatusCode::BAD_REQUEST, _))));
+    }
+
+    // Pre-flight same-session dedup: when a pending_grabs row already
+    // exists for this info_hash, the handler returns the existing
+    // preview_id before touching the download client. Exercised by
+    // seeding a row and checking the response short-circuits to 200.
+    // The no-client test above proves the short-circuit is *before*
+    // `require_download_client`, which is the whole point — we don't
+    // want Tab 2 to add the torrent a second time.
+    #[tokio::test]
+    async fn preview_dedupes_same_hash_in_flight_modal() {
+        let db = in_memory_pool().await;
+        pending_grabs::create(
+            &db,
+            "pid-existing",
+            "deadbeef",
+            "qbittorrent",
+            None,
+            None,
+            "{\"title\":\"tab-1 snapshot\"}",
+            true,
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+        let res = grab_preview(
+            State(state),
+            Json(GrabPreviewForm {
+                url: "magnet:?xt=urn:btih:deadbeef".into(),
+                info_hash: "deadbeef".into(),
+                series_id: None,
+                release_metadata: serde_json::json!({"title": "tab-2 request"}),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.preview_id, "pid-existing");
+        // Row exists but file_list_json is empty, so modal sees
+        // "fetching_metadata" on its first status poll.
+        assert_eq!(res.status, "fetching_metadata");
+    }
+
+    #[tokio::test]
+    async fn preview_dedupe_reports_error_status_when_prior_failed() {
+        let db = in_memory_pool().await;
+        pending_grabs::create(
+            &db,
+            "pid-failed",
+            "deadbeef",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
+        pending_grabs::set_error(&db, "pid-failed", "metadata fetch timed out")
+            .await
+            .unwrap();
+        let state = build_test_app_state(db, None);
+        let res = grab_preview(
+            State(state),
+            Json(GrabPreviewForm {
+                url: "magnet:?xt=urn:btih:deadbeef".into(),
+                info_hash: "deadbeef".into(),
+                series_id: None,
+                release_metadata: serde_json::Value::Null,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.preview_id, "pid-failed");
+        assert_eq!(res.status, "error");
     }
 }
