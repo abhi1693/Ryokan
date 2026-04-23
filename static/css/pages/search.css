@@ -218,19 +218,19 @@
     vertical-align: middle;
 }
 
-/* Sticky search-bar (#6c). Keeps the query/filters/submit row
-   reachable when scrolling a long result list. Only on desktop;
-   the mobile card view is tall enough that sticky positioning gets
-   in the way. */
+/* Sticky results-table header (#6c). Mirror the interactive-search
+   table on the series page: the column headers stay pinned as the
+   result list scrolls, so score/name/size/etc. labels remain visible.
+   `bg-elevated` background matches the interactive picker, so users
+   learn one sticky-row pattern across both surfaces. Only applies on
+   desktop — on mobile the table is replaced by `.results-cards` so
+   there's no header row to pin. */
 @media (min-width: 641px) {
-    .search-bar {
+    .results-table thead th {
         position: sticky;
         top: 0;
         z-index: 15;
-        background: var(--bg);
-        padding-top: 8px;
-        padding-bottom: 8px;
-        margin-top: -8px;
+        background: var(--bg-elevated);
     }
 }
 

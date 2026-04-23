@@ -69,12 +69,26 @@ function searchAnilist() {
                     ? (r.title_romaji || r.title_native || '')
                     : (r.title_english || r.title_romaji || r.title_native || '');
                 const eps = r.episodes ? `${r.episodes} eps` : '?';
-                const sourceLabel = r.source === 'mal' ? 'MAL' : 'AniList';
+                const isMal = r.source === 'mal';
+                const sourceLabel = isMal ? 'MAL' : 'AniList';
+                // External link to the provider page matching whichever
+                // source served the row. MAL uses id_mal (always set for
+                // Jikan-served rows); AL uses the AniList id. Stops
+                // click-propagation to the row so clicking the title
+                // link doesn't also fire an accidental Add if we add a
+                // row-click later.
+                const externalHref = isMal
+                    ? `https://myanimelist.net/anime/${r.id_mal || r.id}`
+                    : `https://anilist.co/anime/${r.id}`;
                 return `
                     <div class="anilist-result">
-                        <img src="${escAttr(r.cover_url)}" alt="" class="anilist-cover" loading="lazy">
+                        <a href="${escAttr(externalHref)}" target="_blank" rel="noopener" class="anilist-cover-link" title="Open on ${escAttr(sourceLabel)}">
+                            <img src="${escAttr(r.cover_url)}" alt="" class="anilist-cover" loading="lazy">
+                        </a>
                         <div class="anilist-info">
-                            <p class="anilist-title">${escHtml(title)}</p>
+                            <p class="anilist-title">
+                                <a href="${escAttr(externalHref)}" target="_blank" rel="noopener" class="anilist-title-link" title="Open on ${escAttr(sourceLabel)}">${escHtml(title)}</a>
+                            </p>
                             <p class="anilist-subtitle">${escHtml(subtitle)}</p>
                             <div class="anilist-meta">
                                 <span class="tag tag-res">${escHtml((r.format || 'TBA').replace(/_/g, ' '))}</span>
