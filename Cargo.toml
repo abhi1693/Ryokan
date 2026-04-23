@@ -39,7 +39,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 # for us (we only talk to public HTTPS endpoints) and removes the
 # OpenSSL headers dependency on Linux builds; we just have to opt back
 # into `query` + `form`.
-reqwest = { version = "0.13", features = ["json", "cookies", "query", "form"] }
+reqwest = { version = "0.13", features = ["json", "cookies", "query", "form", "multipart"] }
 
 # Async trait support. Rust's native async-fn-in-traits (stable since
 # 1.75) does not yet produce Send-bound futures by default, which is
@@ -87,3 +87,25 @@ ammonia = "4"
 
 # Anime release title tokenization (wraps bundled anitomy C++ lib, compiled via cc)
 anitomy = "0.2"
+
+[dev-dependencies]
+# Used only by the env-gated live_smoke tests for the DownloadClient
+# impls — each smoke creates a synthetic multi-file .torrent in a
+# tempdir (via shell-out to transmission-create) to get deterministic
+# file-list testing without depending on DHT metadata fetch landing
+# during the test window.
+tempfile = "3"
+# SHA-1 for computing a .torrent's v1 infohash from its bencoded
+# `info` dict — needed by the rtorrent smoke since `load.raw_start_verbose`
+# returns 0 on success rather than echoing back the hash. Test-only;
+# BitTorrent's v1 spec mandates SHA-1 here so we can't swap to sha2.
+sha1_smol = "1"
+# Base64 encoding. Used by:
+# * The rtorrent XML-RPC encoder's `XmlValue::Base64` variant, which is
+#   itself `#[cfg(test)]`-gated and only constructed by
+#   `live_smoke_narrowed`'s `load.raw_verbose` upload path.
+# * The `live_smoke_narrowed` test for Deluge, where
+#   `core.add_torrent_file` takes a base64-encoded payload.
+# Test-only for now; promote to a direct prod dep if/when a UI feature
+# loads `.torrent` bytes from disk.
+base64 = "0.22"

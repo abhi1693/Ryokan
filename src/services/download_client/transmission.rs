@@ -888,4 +888,438 @@ mod tests {
         );
         eprintln!("smoke passed");
     }
+
+    /// Upload a local `.torrent` to Transmission via `torrent-add`
+    /// RPC with the `metainfo` field (base64-encoded bytes), applying
+    /// `paused=true` and the Ryokan label at add time. Returns the
+    /// infohash Transmission assigned.
+    ///
+    /// Handles Transmission's CSRF session handshake: first request
+    /// returns HTTP 409 with an `X-Transmission-Session-Id` header
+    /// that must be echoed on every subsequent request. Documented
+    /// in `transmission.rs`'s file header and in CLAUDE.md's
+    /// download-client quirks.
+    async fn upload_torrent_file_transmission(
+        base_url: &str,
+        user: &str,
+        pass: &str,
+        label: &str,
+        torrent_path: &std::path::Path,
+    ) -> String {
+        use base64::{Engine, engine::general_purpose};
+        use serde_json::{Value, json};
+        let client = reqwest::Client::builder().build().expect("reqwest client");
+        let bytes = std::fs::read(torrent_path).expect("read .torrent");
+        let b64 = general_purpose::STANDARD.encode(&bytes);
+
+        let body = json!({
+            "method": "torrent-add",
+            "arguments": {
+                "metainfo": b64,
+                "paused": true,
+                "labels": [label.to_string()],
+            },
+        });
+
+        // First attempt — expect 409 + session header.
+        let first = client
+            .post(format!("{base_url}/transmission/rpc"))
+            .basic_auth(user, Some(pass))
+            .json(&body)
+            .send()
+            .await
+            .expect("transmission first POST");
+        let session_id = first
+            .headers()
+            .get("X-Transmission-Session-Id")
+            .map(|v| v.to_str().expect("session id utf8").to_string());
+        // If Transmission returned 200 already (no auth required), use it.
+        let resp: Value = if first.status() == 200 {
+            first.json().await.expect("transmission first json")
+        } else {
+            assert_eq!(
+                first.status(),
+                409,
+                "Transmission expected 409 for CSRF handshake, got {}",
+                first.status()
+            );
+            let sid =
+                session_id.expect("Transmission 409 without X-Transmission-Session-Id header");
+            let retry = client
+                .post(format!("{base_url}/transmission/rpc"))
+                .basic_auth(user, Some(pass))
+                .header("X-Transmission-Session-Id", sid)
+                .json(&body)
+                .send()
+                .await
+                .expect("transmission retry POST");
+            assert_eq!(
+                retry.status(),
+                200,
+                "Transmission retry returned HTTP {}",
+                retry.status()
+            );
+            retry.json().await.expect("transmission retry json")
+        };
+
+        // Response shape: {"result": "success",
+        //                  "arguments": {"torrent-added": {"hashString": "...", ...}}}
+        // or              {"result": "success",
+        //                  "arguments": {"torrent-duplicate": {"hashString": "...", ...}}}
+        assert_eq!(
+            resp.get("result").and_then(|v| v.as_str()),
+            Some("success"),
+            "Transmission torrent-add result: {resp}"
+        );
+        let args = resp.get("arguments").expect("missing arguments");
+        let added = args
+            .get("torrent-added")
+            .or_else(|| args.get("torrent-duplicate"))
+            .expect("neither torrent-added nor torrent-duplicate in response");
+        added
+            .get("hashString")
+            .and_then(|v| v.as_str())
+            .expect("missing hashString")
+            .to_string()
+    }
+
+    /// Live smoke covering `add_torrent_with_file_filter` narrowing
+    /// (C1) and the re-narrow preservation contract (C2) against
+    /// Transmission. Mirrors the qBit/Deluge equivalents at the
+    /// intent layer; differs at the wire-protocol layer (CSRF
+    /// session handshake, `files-wanted`/`files-unwanted` file
+    /// priority shape).
+    ///
+    ///     RYOKAN_TRANSMISSION_E2E=1 cargo test \
+    ///       transmission::tests::live_smoke_narrowed -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live Transmission at localhost:9091 + transmission-create"]
+    async fn live_smoke_narrowed() {
+        if std::env::var("RYOKAN_TRANSMISSION_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_TRANSMISSION_E2E=1 to run against localhost:9091)");
+            return;
+        }
+        let Some((_tmp_guard, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let base_url = "http://localhost:9091";
+        let user = "transmission";
+        let pass = "transmission";
+        let label = "ryokan-e2e-narrow";
+
+        let info_hash =
+            upload_torrent_file_transmission(base_url, user, pass, label, &torrent_path).await;
+        eprintln!("uploaded testpack hash={info_hash}");
+
+        let client = TransmissionClient::new(base_url, user, pass, label);
+
+        let files = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files should return metadata immediately");
+        assert_eq!(
+            files.len(),
+            7,
+            "synthetic testpack should have 7 files, got {}",
+            files.len()
+        );
+        assert!(
+            files.iter().all(|f| f.wanted),
+            "all files should start wanted=true before narrow"
+        );
+
+        let episode_indices: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.name.contains("episode_").then_some(i))
+            .collect();
+        assert_eq!(episode_indices.len(), 5, "expected 5 episode files");
+
+        let expected_episode_indices = episode_indices.clone();
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
+        let outcome = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_episode_indices.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C1 failed");
+
+        match outcome {
+            SelectiveOutcome::Filtered(kept) => {
+                let mut sorted_kept = kept.clone();
+                sorted_kept.sort_unstable();
+                let mut sorted_expected = episode_indices.clone();
+                sorted_expected.sort_unstable();
+                assert_eq!(sorted_kept, sorted_expected);
+            }
+            SelectiveOutcome::FullDownload => panic!("C1 expected Filtered, got FullDownload"),
+        }
+
+        let files_after_c1 = client.get_files(&info_hash).await.expect("get_files C1");
+        for (i, f) in files_after_c1.iter().enumerate() {
+            let should_be_wanted = episode_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C1 post-narrow: [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C1 narrowing verified");
+
+        let expanded_indices: Vec<usize> = files_after_c1
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                (f.name.contains("episode_") || f.name.contains("sample")).then_some(i)
+            })
+            .collect();
+        assert_eq!(expanded_indices.len(), 6);
+
+        let expected_expanded = expanded_indices.clone();
+        let outcome2 = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_expanded.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C2 failed");
+        assert!(matches!(outcome2, SelectiveOutcome::Filtered(_)));
+
+        let files_after_c2 = client.get_files(&info_hash).await.expect("get_files C2");
+        for (i, f) in files_after_c2.iter().enumerate() {
+            let should_be_wanted = expanded_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C2 post-renarrow: [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C2 re-narrow verified");
+
+        // A7: delete with delete_files=true removes torrent + files
+        client
+            .delete(&info_hash, true)
+            .await
+            .expect("delete(hash, true) failed");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let after = client
+            .list_scoped()
+            .await
+            .expect("list_scoped after delete(true) failed");
+        assert!(
+            !after
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&info_hash)),
+            "A7: torrent must not survive delete(_, true)"
+        );
+        eprintln!("A7 delete(true) verified");
+        eprintln!("narrowed-smoke passed");
+    }
+
+    /// Live smoke for B2: Transmission `list_scoped` filters by
+    /// native label (4.x labels feature). A torrent with a different
+    /// label must not surface in Ryokan's scoped list.
+    ///
+    ///     RYOKAN_TRANSMISSION_E2E=1 cargo test \
+    ///       transmission::tests::live_smoke_scoped_exclusion -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live Transmission at localhost:9091 + transmission-create"]
+    async fn live_smoke_scoped_exclusion() {
+        if std::env::var("RYOKAN_TRANSMISSION_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_TRANSMISSION_E2E=1 to run against localhost:9091)");
+            return;
+        }
+        let Some((_tmp1, torrent1)) =
+            super::super::test_helpers::build_named_torrent("ryokan-scoped-test")
+        else {
+            return;
+        };
+        let Some((_tmp2, torrent2)) =
+            super::super::test_helpers::build_named_torrent("other-tool-test")
+        else {
+            return;
+        };
+        let base_url = "http://localhost:9091";
+        let user = "transmission";
+        let pass = "transmission";
+        let ryokan_label = "ryokan-e2e-scope";
+        let foreign_label = "other-tool-scope";
+
+        let ryokan_hash =
+            upload_torrent_file_transmission(base_url, user, pass, ryokan_label, &torrent1).await;
+        let foreign_hash =
+            upload_torrent_file_transmission(base_url, user, pass, foreign_label, &torrent2).await;
+        eprintln!("ryokan={ryokan_hash} foreign={foreign_hash}");
+        assert_ne!(ryokan_hash, foreign_hash);
+
+        let client = TransmissionClient::new(base_url, user, pass, ryokan_label);
+        let list = client.list_scoped().await.expect("list_scoped");
+
+        assert!(
+            list.iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&ryokan_hash)),
+            "B2: Ryokan-labeled torrent must appear"
+        );
+        assert!(
+            !list
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&foreign_hash)),
+            "B2: foreign-labeled torrent must NOT appear (found {foreign_hash})"
+        );
+        eprintln!("B2 scoped exclusion verified");
+
+        client
+            .delete(&ryokan_hash, true)
+            .await
+            .expect("cleanup ryokan");
+        let foreign_client = TransmissionClient::new(base_url, user, pass, foreign_label);
+        foreign_client
+            .delete(&foreign_hash, true)
+            .await
+            .expect("cleanup foreign");
+        eprintln!("scoped-exclusion smoke passed");
+    }
+
+    /// Error-path live smoke (F1 / F2 / F3) against Transmission.
+    #[tokio::test]
+    #[ignore = "requires live Transmission at localhost:9091"]
+    async fn live_smoke_error_paths() {
+        if std::env::var("RYOKAN_TRANSMISSION_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let client = TransmissionClient::new(
+            "http://localhost:9091",
+            "transmission",
+            "transmission",
+            "ryokan-e2e-errs",
+        );
+        let fake_hash = "0000000000000000000000000000000000000000";
+
+        let result = client.delete(fake_hash, false).await;
+        eprintln!("F1 Transmission delete(non-existent) → {result:?}");
+
+        let result = client.get_files(fake_hash).await;
+        eprintln!("F2 Transmission get_files(non-existent) → {result:?}");
+        if let Ok(files) = result {
+            assert!(files.is_empty(), "F2: Ok result must be empty");
+        }
+
+        let result = client
+            .add_torrent("this-is-not-a-valid-url-or-magnet", fake_hash)
+            .await;
+        eprintln!("F3 Transmission add(malformed) → {result:?}");
+        assert!(
+            result.is_err(),
+            "F3: add_torrent with malformed URL must return Err (got {result:?})"
+        );
+
+        eprintln!("error-paths smoke passed");
+    }
+
+    /// E1+E2 live smoke for Transmission.
+    #[tokio::test]
+    #[ignore = "requires live Transmission at localhost:9091 + transmission-create"]
+    async fn live_smoke_state_progress() {
+        if std::env::var("RYOKAN_TRANSMISSION_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let Some((_tmp, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let base_url = "http://localhost:9091";
+        let user = "transmission";
+        let pass = "transmission";
+        let label = "ryokan-e2e-state";
+
+        let info_hash =
+            upload_torrent_file_transmission(base_url, user, pass, label, &torrent_path).await;
+        let client = TransmissionClient::new(base_url, user, pass, label);
+
+        async fn poll_until_state(
+            client: &TransmissionClient,
+            hash: &str,
+            acceptable: &[DownloadItemState],
+        ) -> DownloadItem {
+            for _ in 0..30 {
+                let list = client.list_scoped().await.expect("list_scoped");
+                if let Some(t) = list
+                    .iter()
+                    .find(|t| t.hash.eq_ignore_ascii_case(hash))
+                    .cloned()
+                    && acceptable.contains(&t.state_kind)
+                {
+                    return t;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            let list = client.list_scoped().await.expect("list_scoped");
+            list.iter()
+                .find(|t| t.hash.eq_ignore_ascii_case(hash))
+                .cloned()
+                .unwrap_or_else(|| panic!("torrent never appeared"))
+        }
+
+        // Uploaded with paused=true → expect Paused.
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[DownloadItemState::Paused, DownloadItemState::PausedComplete],
+        )
+        .await;
+        eprintln!(
+            "E1 Transmission paused: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(matches!(
+            t.state_kind,
+            DownloadItemState::Paused | DownloadItemState::PausedComplete
+        ));
+        assert!((0.0..=1.0).contains(&t.progress));
+
+        client.resume(&info_hash).await.expect("resume");
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[
+                DownloadItemState::Downloading,
+                DownloadItemState::DownloadingStalled,
+                DownloadItemState::DownloadingQueued,
+                DownloadItemState::CheckingDownload,
+            ],
+        )
+        .await;
+        eprintln!(
+            "E1 Transmission resumed: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(matches!(
+            t.state_kind,
+            DownloadItemState::Downloading
+                | DownloadItemState::DownloadingStalled
+                | DownloadItemState::DownloadingQueued
+                | DownloadItemState::CheckingDownload
+        ));
+
+        client.pause(&info_hash).await.expect("pause");
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[DownloadItemState::Paused, DownloadItemState::PausedComplete],
+        )
+        .await;
+        eprintln!(
+            "E1 Transmission re-paused: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(matches!(
+            t.state_kind,
+            DownloadItemState::Paused | DownloadItemState::PausedComplete
+        ));
+
+        client.delete(&info_hash, true).await.expect("cleanup");
+        eprintln!("state-progress smoke passed");
+    }
 }

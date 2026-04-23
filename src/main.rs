@@ -2,6 +2,9 @@ mod handlers;
 mod models;
 mod services;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use axum::http::{HeaderValue, header};
 use axum::{
     Router,

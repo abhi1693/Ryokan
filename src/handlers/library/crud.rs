@@ -1113,3 +1113,145 @@ pub async fn list_folders(
     let folders = media::list_media_folders(&media_root);
     Ok(Json(folders))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::download_client::DownloadClient;
+    use crate::services::download_client::qbittorrent::QbitClient;
+    use crate::services::download_client::test_helpers;
+    use crate::test_support;
+    use std::sync::Arc;
+
+    /// D1 live integration test: removing a series from the library
+    /// must also delete every grabbed torrent for that series from
+    /// the active download client.
+    ///
+    /// Flow under test:
+    /// 1. Seed the DB with one series + two grabbed_torrents rows
+    ///    pointing at it.
+    /// 2. Upload the two synthetic torrents to qBit so the hashes
+    ///    are real + addressable.
+    /// 3. Call `remove_series(id, delete_files=true)`.
+    /// 4. Assert every hash is gone from qBit's scoped list and
+    ///    the `grabbed_torrents` rows cascaded away with the series.
+    ///
+    /// Env-gated (`RYOKAN_QBIT_E2E=1`) so the default `cargo test` run
+    /// never touches the download client.
+    #[tokio::test]
+    #[ignore = "requires live qBit + transmission-create"]
+    async fn d1_remove_series_cleans_up_torrents_and_rows() {
+        if std::env::var("RYOKAN_QBIT_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_QBIT_E2E=1)");
+            return;
+        }
+        let Some((_tmp_a, torrent_a)) = test_helpers::build_named_torrent("d1-series-remove-a")
+        else {
+            return;
+        };
+        let Some((_tmp_b, torrent_b)) = test_helpers::build_named_torrent("d1-series-remove-b")
+        else {
+            return;
+        };
+        let pass = std::env::var("QBIT_PASS").unwrap_or_else(|_| "adminadmin".to_string());
+        let base_url = "http://localhost:8080";
+        let category = "ryokan-e2e-d1";
+
+        // Two separate categories so upload_torrent_file_qbit's
+        // first-returned-hash convention picks up each distinct
+        // torrent rather than colliding in the same category.
+        let cat_a = format!("{category}-a");
+        let cat_b = format!("{category}-b");
+        let hash_a =
+            test_helpers::upload_torrent_file_qbit(base_url, "admin", &pass, &cat_a, &torrent_a)
+                .await;
+        let hash_b =
+            test_helpers::upload_torrent_file_qbit(base_url, "admin", &pass, &cat_b, &torrent_b)
+                .await;
+
+        // Scaffolding: pool + migrations + AppState with a real
+        // qBit client on the same category used for seeding, so
+        // `remove_series`'s internal scoped-list lookup and delete
+        // path hit the same torrents.
+        let pool = test_support::in_memory_pool().await;
+        let qbit: Arc<dyn DownloadClient> =
+            Arc::new(QbitClient::new(base_url, "admin", &pass, category));
+        let state = test_support::build_test_app_state(pool.clone(), Some(qbit.clone()));
+
+        // Seed: one series, two grabbed rows. `folder_name` stays
+        // empty so the handler's "delete media folder" step no-ops
+        // (we're testing torrent cleanup, not filesystem removal).
+        let series_id = test_support::seed_series(&pool, 12345, "D1 Test Series").await;
+        let _gid_a = test_support::seed_grabbed_torrent(
+            &pool,
+            series_id,
+            &hash_a,
+            "d1-test-a.torrent",
+            &[1],
+        )
+        .await;
+        let _gid_b = test_support::seed_grabbed_torrent(
+            &pool,
+            series_id,
+            &hash_b,
+            "d1-test-b.torrent",
+            &[2],
+        )
+        .await;
+        assert_eq!(
+            test_support::count_grabs_for_series(&pool, series_id).await,
+            2,
+            "precondition: 2 grabs seeded"
+        );
+        assert_eq!(
+            test_support::count_series(&pool).await,
+            1,
+            "precondition: 1 series seeded"
+        );
+
+        // Exercise: call the handler directly.
+        let form: RemoveSeriesForm = serde_json::from_value(serde_json::json!({
+            "id": series_id,
+            "delete_files": true,
+        }))
+        .expect("deserialize RemoveSeriesForm");
+        let result = remove_series(axum::extract::State(state.clone()), axum::Json(form)).await;
+        assert!(
+            result.is_ok(),
+            "remove_series returned error: {:?}",
+            result
+                .as_ref()
+                .err()
+                .map(|(s, b)| (s.as_u16(), b.0.to_string()))
+        );
+
+        // Assert: grab rows cascaded, series row gone.
+        assert_eq!(
+            test_support::count_grabs_for_series(&pool, series_id).await,
+            0,
+            "D1: grabbed_torrents must cascade on series delete"
+        );
+        assert_eq!(
+            test_support::count_series(&pool).await,
+            0,
+            "D1: series row must be gone"
+        );
+
+        // Assert: torrents deleted from qBit. We check via a
+        // scoped-list-agnostic lookup (separate QbitClients, one per
+        // upload category) so category filtering doesn't mask a
+        // "still exists but uncategorized" state.
+        for (scope_cat, hash) in [(cat_a.as_str(), &hash_a), (cat_b.as_str(), &hash_b)] {
+            let scoped_client = QbitClient::new(base_url, "admin", &pass, scope_cat);
+            let list = scoped_client
+                .list_scoped()
+                .await
+                .expect("list_scoped post-remove");
+            assert!(
+                !list.iter().any(|t| t.hash.eq_ignore_ascii_case(hash)),
+                "D1: torrent {hash} must be deleted from qBit after remove_series"
+            );
+        }
+        eprintln!("D1 integration verified");
+    }
+}

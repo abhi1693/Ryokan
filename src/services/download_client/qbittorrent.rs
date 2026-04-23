@@ -659,7 +659,7 @@ fn map_qbit_state(state: &str) -> DownloadItemState {
         "stalledUP" => SeedingStalled,
         "queuedUP" => SeedingQueued,
         "checkingUP" => CheckingSeed,
-        "pausedDL" => Paused,
+        "pausedDL" | "stoppedDL" => Paused,
         "pausedUP" | "stoppedUP" => PausedComplete,
         "error" | "missingFiles" => Errored,
         // `metaDL`, `allocating`, `moving`, `unknown`, and any
@@ -924,5 +924,489 @@ mod tests {
             "torrent must not survive delete"
         );
         eprintln!("smoke passed");
+    }
+
+    /// Live smoke covering `add_torrent_with_file_filter` narrowing
+    /// (C1) and the re-narrow preservation contract (C2). Uses a
+    /// synthetic multi-file `.torrent` (built via
+    /// `transmission-create`) uploaded directly via qBit's multipart
+    /// endpoint so metadata is present immediately — no DHT
+    /// dependency, no flakiness window.
+    ///
+    /// Contract verified:
+    /// * C1 — narrowing a full file list down to a proper subset
+    ///   returns `SelectiveOutcome::Filtered(kept_indices)` and
+    ///   writes `wanted=false` to every non-selected file.
+    /// * C2 — re-narrowing with an expanded pick bumps previously-
+    ///   skipped files that are now wanted, but does *not* re-skip
+    ///   files the expanded pick dropped. Matches the `already_narrowed`
+    ///   branch in `add_torrent_with_file_filter` whose contract says
+    ///   "re-narrow must not clobber user edits."
+    ///
+    /// Gated the same way as `live_smoke`:
+    ///
+    ///     RYOKAN_QBIT_E2E=1 QBIT_PASS=<pw> cargo test \
+    ///       qbittorrent::tests::live_smoke_narrowed -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live qBittorrent at localhost:8080 + transmission-create"]
+    async fn live_smoke_narrowed() {
+        if std::env::var("RYOKAN_QBIT_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_QBIT_E2E=1 to run against localhost:8080)");
+            return;
+        }
+        let Some((_tmp_guard, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let pass = std::env::var("QBIT_PASS").unwrap_or_else(|_| "adminadmin".to_string());
+        let base_url = "http://localhost:8080";
+        let category = "ryokan-e2e-narrow";
+
+        let info_hash = super::super::test_helpers::upload_torrent_file_qbit(
+            base_url,
+            "admin",
+            &pass,
+            category,
+            &torrent_path,
+        )
+        .await;
+        eprintln!("uploaded testpack hash={info_hash}");
+
+        let client = QbitClient::new(base_url, "admin", &pass, category);
+
+        // Cleanup-on-panic safety: if any assertion fails below, we want
+        // the torrent gone so the next test run starts clean. Accomplish
+        // via a drop-guard closure pattern — but since we can't early-
+        // return from a test with cleanup, just ensure the final delete
+        // runs and previous state is cleared at entry too.
+        let files = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files should return metadata immediately after file upload");
+        assert_eq!(
+            files.len(),
+            7,
+            "synthetic testpack should have 7 files (5 episodes + sample + readme), got {}",
+            files.len()
+        );
+        assert!(
+            files.iter().all(|f| f.wanted),
+            "all files should start wanted=true before narrow"
+        );
+
+        // --- C1: narrow to episode files only ---
+        let episode_indices: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.name.contains("episode_").then_some(i))
+            .collect();
+        assert_eq!(episode_indices.len(), 5, "expected 5 episode files");
+
+        let expected_episode_indices = episode_indices.clone();
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
+        let outcome = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_episode_indices.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C1 failed");
+
+        match outcome {
+            SelectiveOutcome::Filtered(kept) => {
+                let mut sorted_kept = kept.clone();
+                sorted_kept.sort_unstable();
+                let mut sorted_expected = episode_indices.clone();
+                sorted_expected.sort_unstable();
+                assert_eq!(
+                    sorted_kept, sorted_expected,
+                    "C1 Filtered(kept) should equal the pick indices"
+                );
+            }
+            SelectiveOutcome::FullDownload => {
+                panic!("C1 expected Filtered narrow, got FullDownload");
+            }
+        }
+
+        // Verify priorities actually applied to the client state.
+        let files_after_c1 = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files after C1 failed");
+        for (i, f) in files_after_c1.iter().enumerate() {
+            let should_be_wanted = episode_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C1 post-narrow: file [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C1 narrowing verified (5 episodes wanted, sample+readme skipped)");
+
+        // --- C2: re-narrow with expanded pick (add sample.mkv) ---
+        let expanded_indices: Vec<usize> = files_after_c1
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                (f.name.contains("episode_") || f.name.contains("sample")).then_some(i)
+            })
+            .collect();
+        assert_eq!(
+            expanded_indices.len(),
+            6,
+            "expected 6 files in expanded pick (5 episodes + sample)"
+        );
+
+        let expected_expanded = expanded_indices.clone();
+        let outcome2 = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_expanded.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C2 failed");
+
+        match outcome2 {
+            SelectiveOutcome::Filtered(_) => {}
+            SelectiveOutcome::FullDownload => {
+                panic!("C2 expected Filtered re-narrow, got FullDownload");
+            }
+        }
+
+        let files_after_c2 = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files after C2 failed");
+        for (i, f) in files_after_c2.iter().enumerate() {
+            let should_be_wanted = expanded_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C2 post-renarrow: file [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C2 re-narrow verified (sample now wanted, readme still skipped)");
+
+        // --- A7: delete with delete_files=true removes torrent + files ---
+        client
+            .delete(&info_hash, true)
+            .await
+            .expect("delete(hash, true) failed");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after = client
+            .list_scoped()
+            .await
+            .expect("list_scoped after delete(true) failed");
+        assert!(
+            !after
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&info_hash)),
+            "A7: torrent must not survive delete(_, true)"
+        );
+        eprintln!("A7 delete(true) verified — torrent gone from list_scoped");
+        eprintln!("narrowed-smoke passed");
+    }
+
+    /// Live smoke covering B2 (`list_scoped` isolation): uploads a
+    /// Ryokan-scoped torrent alongside a non-Ryokan torrent and
+    /// asserts `list_scoped` returns exactly one (the Ryokan one).
+    /// Validates the scoping mechanism (qBit's `?category=` filter)
+    /// does the right thing when other tooling's torrents are also
+    /// present in the client.
+    ///
+    ///     RYOKAN_QBIT_E2E=1 QBIT_PASS=<pw> cargo test \
+    ///       qbittorrent::tests::live_smoke_scoped_exclusion -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live qBittorrent at localhost:8080 + transmission-create"]
+    async fn live_smoke_scoped_exclusion() {
+        if std::env::var("RYOKAN_QBIT_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_QBIT_E2E=1 to run against localhost:8080)");
+            return;
+        }
+        let Some((_tmp1, torrent1)) =
+            super::super::test_helpers::build_named_torrent("ryokan-scoped-test")
+        else {
+            return;
+        };
+        let Some((_tmp2, torrent2)) =
+            super::super::test_helpers::build_named_torrent("other-tool-test")
+        else {
+            return;
+        };
+        let pass = std::env::var("QBIT_PASS").unwrap_or_else(|_| "adminadmin".to_string());
+        let base_url = "http://localhost:8080";
+        let ryokan_category = "ryokan-e2e-scope";
+        let foreign_category = "other-tool-scope";
+
+        let ryokan_hash = super::super::test_helpers::upload_torrent_file_qbit(
+            base_url,
+            "admin",
+            &pass,
+            ryokan_category,
+            &torrent1,
+        )
+        .await;
+        let foreign_hash = super::super::test_helpers::upload_torrent_file_qbit(
+            base_url,
+            "admin",
+            &pass,
+            foreign_category,
+            &torrent2,
+        )
+        .await;
+        eprintln!("ryokan={ryokan_hash} foreign={foreign_hash}");
+        assert_ne!(
+            ryokan_hash, foreign_hash,
+            "test distinct torrents must have distinct hashes"
+        );
+
+        let client = QbitClient::new(base_url, "admin", &pass, ryokan_category);
+        let list = client
+            .list_scoped()
+            .await
+            .expect("list_scoped should succeed");
+
+        assert!(
+            list.iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&ryokan_hash)),
+            "B2: Ryokan-scoped torrent must appear in list_scoped"
+        );
+        assert!(
+            !list
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&foreign_hash)),
+            "B2: foreign-categorized torrent must NOT appear in list_scoped (found foreign {foreign_hash} in scoped list)"
+        );
+        eprintln!("B2 scoped exclusion verified (Ryokan present, foreign absent)");
+
+        // Cleanup both — foreign one via a separate client instance scoped to it.
+        client
+            .delete(&ryokan_hash, true)
+            .await
+            .expect("cleanup ryokan");
+        let foreign_client = QbitClient::new(base_url, "admin", &pass, foreign_category);
+        foreign_client
+            .delete(&foreign_hash, true)
+            .await
+            .expect("cleanup foreign");
+        eprintln!("scoped-exclusion smoke passed");
+    }
+
+    /// Live smoke covering error paths (F1, F2, F3): `delete` and
+    /// `get_files` on a non-existent hash must not panic and must
+    /// surface a sensible result; `add_torrent` with a malformed URL
+    /// must return `Err`. Validates defensive behavior Ryokan's
+    /// handlers depend on (e.g. post-processing calling `get_files`
+    /// on a hash that might have been deleted by another path, or
+    /// the user pasting garbage into the interactive-search URL
+    /// field).
+    ///
+    ///     RYOKAN_QBIT_E2E=1 QBIT_PASS=<pw> cargo test \
+    ///       qbittorrent::tests::live_smoke_error_paths -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live qBittorrent at localhost:8080"]
+    async fn live_smoke_error_paths() {
+        if std::env::var("RYOKAN_QBIT_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let pass = std::env::var("QBIT_PASS").unwrap_or_else(|_| "adminadmin".to_string());
+        let client = QbitClient::new("http://localhost:8080", "admin", &pass, "ryokan-e2e-errs");
+        let fake_hash = "0000000000000000000000000000000000000000";
+
+        // F1: delete non-existent hash — should return Ok (qBit's
+        // DELETE is idempotent; deleting a hash not in the session
+        // is a no-op). Must not panic regardless.
+        let result = client.delete(fake_hash, false).await;
+        eprintln!("F1 qBit delete(non-existent) → {result:?}");
+        // qBit's actual behavior: silently succeeds. Accept both so
+        // a future qBit version that starts erroring doesn't regress
+        // the test — the essential property is "no panic".
+
+        // F2: get_files non-existent — per trait contract returns
+        // empty `Vec` or Err (qBit returns 404, which the impl maps
+        // to Err). Must not panic.
+        let result = client.get_files(fake_hash).await;
+        eprintln!("F2 qBit get_files(non-existent) → {result:?}");
+        if let Ok(files) = result {
+            assert!(
+                files.is_empty(),
+                "F2: Ok result must be empty Vec per trait contract"
+            );
+        }
+        // Err is also acceptable per trait contract; only panic is a fail.
+
+        // F3: add with malformed URL. Must return Err, not panic.
+        let result = client
+            .add_torrent("this-is-not-a-valid-url-or-magnet", fake_hash)
+            .await;
+        eprintln!("F3 qBit add(malformed) → {result:?}");
+        assert!(
+            result.is_err(),
+            "F3: add_torrent with malformed URL must return Err (got {result:?})"
+        );
+
+        eprintln!("error-paths smoke passed");
+    }
+
+    /// Live smoke for E1+E2: verifies `DownloadItemState` transitions
+    /// correctly through pause→resume→pause and that `progress` stays
+    /// in its contract range [0.0, 1.0] throughout. Uses the synthetic
+    /// testpack so there's no real content to download — the torrent
+    /// sits at ~0 progress, letting us observe state changes without
+    /// racing a real download.
+    ///
+    ///     RYOKAN_QBIT_E2E=1 QBIT_PASS=<pw> cargo test \
+    ///       qbittorrent::tests::live_smoke_state_progress -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live qBittorrent at localhost:8080 + transmission-create"]
+    async fn live_smoke_state_progress() {
+        if std::env::var("RYOKAN_QBIT_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let Some((_tmp, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let pass = std::env::var("QBIT_PASS").unwrap_or_else(|_| "adminadmin".to_string());
+        let base_url = "http://localhost:8080";
+        let category = "ryokan-e2e-state";
+
+        let info_hash = super::super::test_helpers::upload_torrent_file_qbit(
+            base_url,
+            "admin",
+            &pass,
+            category,
+            &torrent_path,
+        )
+        .await;
+        let client = QbitClient::new(base_url, "admin", &pass, category);
+
+        // qBit 5.x ignores the `paused` / `stopped` multipart flag on
+        // add — empirically verified against v5.1.4. Issue an explicit
+        // pause so the torrent settles into the Paused state we
+        // expect to observe. This isn't cheating the test: the
+        // `pause()` RPC round-trip is what the test would exercise on
+        // the Resume→Pause transition anyway.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        client.pause(&info_hash).await.expect("initial pause");
+
+        /// Poll list_scoped until the target hash appears AND its
+        /// state_kind matches one of `acceptable`. qBit goes through
+        /// transient states on add (e.g. `checkingResumeData` which
+        /// the state mapping surfaces as Downloading) before settling
+        /// to the requested pause/resume state — we need the stable
+        /// state, not the first observation.
+        async fn poll_until_state(
+            client: &QbitClient,
+            hash: &str,
+            acceptable: &[DownloadItemState],
+        ) -> DownloadItem {
+            for _ in 0..30 {
+                let list = client.list_scoped().await.expect("list_scoped");
+                if let Some(t) = list
+                    .iter()
+                    .find(|t| t.hash.eq_ignore_ascii_case(hash))
+                    .cloned()
+                    && acceptable.contains(&t.state_kind)
+                {
+                    return t;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            // Fall through: return the last observed state so the
+            // assertion below produces a useful error message.
+            let list = client.list_scoped().await.expect("list_scoped");
+            list.iter()
+                .find(|t| t.hash.eq_ignore_ascii_case(hash))
+                .cloned()
+                .unwrap_or_else(|| panic!("torrent never appeared in list_scoped"))
+        }
+
+        // Uploaded paused → state should settle to Paused (after qBit
+        // completes resume-data checking, typically <1s).
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[DownloadItemState::Paused, DownloadItemState::PausedComplete],
+        )
+        .await;
+        eprintln!(
+            "E1 after paused-upload: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(
+            matches!(
+                t.state_kind,
+                DownloadItemState::Paused | DownloadItemState::PausedComplete
+            ),
+            "E1: expected Paused after paused-upload, got {:?} ({})",
+            t.state_kind,
+            t.state
+        );
+        assert!(
+            (0.0..=1.0).contains(&t.progress),
+            "E2: progress must be in [0.0, 1.0], got {}",
+            t.progress
+        );
+
+        // Resume → state transitions to a Downloading* variant.
+        client.resume(&info_hash).await.expect("resume");
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[
+                DownloadItemState::Downloading,
+                DownloadItemState::DownloadingStalled,
+                DownloadItemState::DownloadingQueued,
+                DownloadItemState::CheckingDownload,
+            ],
+        )
+        .await;
+        eprintln!(
+            "E1 after resume: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(
+            matches!(
+                t.state_kind,
+                DownloadItemState::Downloading
+                    | DownloadItemState::DownloadingStalled
+                    | DownloadItemState::DownloadingQueued
+                    | DownloadItemState::CheckingDownload
+            ),
+            "E1: expected Downloading* after resume, got {:?} ({})",
+            t.state_kind,
+            t.state
+        );
+        assert!(
+            (0.0..=1.0).contains(&t.progress),
+            "E2 progress: {}",
+            t.progress
+        );
+
+        // Pause again → back to Paused.
+        client.pause(&info_hash).await.expect("pause");
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[DownloadItemState::Paused, DownloadItemState::PausedComplete],
+        )
+        .await;
+        eprintln!(
+            "E1 after re-pause: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(
+            matches!(
+                t.state_kind,
+                DownloadItemState::Paused | DownloadItemState::PausedComplete
+            ),
+            "E1: expected Paused after re-pause, got {:?} ({})",
+            t.state_kind,
+            t.state
+        );
+
+        client.delete(&info_hash, true).await.expect("cleanup");
+        eprintln!("state-progress smoke passed");
     }
 }
