@@ -14,26 +14,28 @@ jobs:
   claude:
     # Trust gate: the `@claude` string alone is insufficient on a public
     # repo because anyone who can open an issue or leave a comment can
-    # set the trigger content. Additionally require the author's
-    # association with the repo to be one of OWNER / MEMBER /
-    # COLLABORATOR — people with explicit access. CONTRIBUTOR (= has
-    # had a PR merged) is deliberately excluded, since a one-time
-    # past PR shouldn't confer command-execution rights indefinitely.
+    # set the trigger content. Restricted to repo OWNER only — this is
+    # a solo project, so nobody else should be able to execute workflows
+    # carrying `contents: write` under the owner's name. If a
+    # collaborator ever joins the project, widen this to also include
+    # `COLLABORATOR` (and `MEMBER` if the repo moves into an org); past
+    # one-off CONTRIBUTORs stay excluded either way since a single
+    # merged PR shouldn't confer indefinite command-execution rights.
     # The association field lives at a different path per event type,
     # which is why the gate repeats the check inside each event arm.
     if: |
       (github.event_name == 'issue_comment' &&
         contains(github.event.comment.body, '@claude') &&
-        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        contains(fromJson('["OWNER"]'), github.event.comment.author_association)) ||
       (github.event_name == 'pull_request_review_comment' &&
         contains(github.event.comment.body, '@claude') &&
-        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        contains(fromJson('["OWNER"]'), github.event.comment.author_association)) ||
       (github.event_name == 'pull_request_review' &&
         contains(github.event.review.body, '@claude') &&
-        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+        contains(fromJson('["OWNER"]'), github.event.review.author_association)) ||
       (github.event_name == 'issues' &&
         (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
-        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+        contains(fromJson('["OWNER"]'), github.event.issue.author_association))
     runs-on: ubuntu-latest
     permissions:
       contents: write
