@@ -166,8 +166,12 @@ async fn require_download_client(
     tag = "Grab",
     summary = "Open a pending grab preview (interactive file picker)",
     description = "Adds the torrent in a paused state and returns a \
-        preview_id the modal uses to poll for the file list. Non-blocking \
-        — the metadata fetch runs in a background task; the modal polls \
+        preview_id the modal uses to poll for the file list. May block \
+        up to ~10s on qBittorrent while it waits for metadata before \
+        returning (qBit 5.x can't publish files while stopped, so the \
+        AddOutcome — needed to decide whether to store we_added_torrent=true \
+        — must be resolved synchronously). Subsequent metadata waiting for \
+        the remaining budget runs in a background task; the modal polls \
         GET /api/grab/preview/{id} for readiness.",
     request_body = GrabPreviewForm,
     responses(
@@ -186,6 +190,18 @@ pub async fn grab_preview(
             "url and info_hash are required".to_string(),
         ));
     }
+
+    // TODO (PR B): call `pending_grabs::get_by_hash` here as a pre-
+    // flight dedup check. Current behavior on the Tab-1-Added /
+    // Tab-2-AlreadyPresent race: if Tab 1 cancels, its
+    // `we_added_torrent=true` lets it nuke the torrent, and Tab 2's
+    // still-open modal breaks on confirm because the torrent is gone.
+    // The dedup check turns Tab 2 into "reuse the existing
+    // preview_id" (or a 409 "modal already open in another tab") and
+    // sidesteps the race entirely. Deferred to PR B alongside the
+    // same-hash-already-in-client flow (plan decision #6) so both
+    // dedup surfaces land together.
+
     let client = require_download_client(&state).await?;
 
     let info_hash = form.info_hash.to_ascii_lowercase();
@@ -297,10 +313,22 @@ pub async fn grab_preview(
 }
 
 /// Cross-client metadata-fetch budget for the spawned preview task.
-/// Picked to match the qBit in-impl budget so the outer poll is
-/// never the thing that times out first. Magnet DHT bootstraps that
-/// take longer than this surface as `status: error` to the modal,
-/// which can offer the retry/defaults dialog (plan decision #1).
+/// Set to 2× qBit's in-impl 10s budget so:
+///
+/// * On qBit, the in-impl wait succeeds first (typical case), the
+///   outer poll sees a populated file list immediately, and no time
+///   is spent retrying what already succeeded.
+/// * On Deluge / Transmission / rTorrent, the outer poll owns the
+///   wait. 20s covers cold-DHT magnet bootstraps for the overwhelming
+///   majority of magnet links. Bare magnets that take longer surface
+///   as `status: error` on the next GET poll, flipping the modal to
+///   the retry/defaults dialog (plan decision #1).
+///
+/// Changing either this value or qBit's in-impl budget: they should
+/// be tuned as a pair — `OUTER ≥ qBit_inner`. If the inner budget is
+/// shortened, qBit's time-at-default-priorities window shrinks with
+/// it (issue #5 from the review), but the outer must stay larger or
+/// the cross-client poll gives up before qBit would.
 const METADATA_WAIT_SECS: u64 = 20;
 
 #[utoipa::path(
@@ -410,7 +438,16 @@ pub async fn grab_heartbeat(
         (qBit down mid-apply, a priority write rejected) leave the \
         failed files at default priority rather than rolling back \
         the whole grab. Returns 404 if the preview was already \
-        committed or swept.",
+        committed or swept. \
+        \
+        NOTE: unlike grab_cancel, confirm does NOT gate on \
+        we_added_torrent — the user consciously submitted their \
+        selection, so overwriting a pre-existing torrent's priorities \
+        is the intended behavior (plan decision #6's \"show current \
+        priorities + allow re-apply\" same-hash flow). Prior \
+        partial-downloaded files remain on disk; qBit/rTorrent don't \
+        delete previously-downloaded data when a file flips to skip, \
+        so the data-risk on overwrite is low.",
     request_body = GrabConfirmForm,
     responses(
         (status = 200, description = "Grab committed", body = GrabConfirmResult),

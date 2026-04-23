@@ -736,7 +736,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             created_at INTEGER NOT NULL,
             heartbeat_at INTEGER NOT NULL,
             file_list_json TEXT NOT NULL DEFAULT '',
-            release_metadata_json TEXT NOT NULL DEFAULT ''
+            release_metadata_json TEXT NOT NULL DEFAULT '',
+            -- Empty = no metadata-fetch error yet; non-empty = human-
+            -- readable failure that GET preview promotes to status=error.
+            error_message TEXT NOT NULL DEFAULT '',
+            -- 1 when add_torrent_paused returned Added for this preview,
+            -- 0 when AlreadyPresent. grab_cancel gates its destructive
+            -- delete(hash, with_files=true) on this flag so a cancel on
+            -- a pre-existing torrent doesn't nuke prior-grab data. The
+            -- ALTER TABLE below is idempotency for upgraders; fresh
+            -- installs pick up the column from this CREATE.
+            we_added_torrent INTEGER NOT NULL DEFAULT 1
         )
         "#,
     )
@@ -760,26 +770,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    // Added in PR #88's review follow-up. The spawned metadata-fetch
-    // task needs a way to signal "fetch failed permanently" so the
-    // modal can flip from the `fetching_metadata` spinner to the
-    // retry/defaults dialog (plan decision #1) without waiting for
-    // the TTL sweep. Empty string means "no error so far"; any other
-    // value is a human-readable failure description.
+    // Idempotency guards for databases created before these columns
+    // were added to the CREATE TABLE above. Fresh installs pick the
+    // columns up from CREATE and these ALTERs silently no-op; existing
+    // installs get the columns added with the defaults that match the
+    // pre-fix behavior (error_message empty; we_added_torrent=1 so the
+    // cancel path behaves conservatively). Column semantics are
+    // documented on the CREATE TABLE; keeping the doc in one place so
+    // future readers don't have to cross-reference the ALTER history.
     sqlx::query("ALTER TABLE pending_grabs ADD COLUMN error_message TEXT NOT NULL DEFAULT ''")
         .execute(db)
         .await
         .ok();
-
-    // Added in PR #88's review follow-up. Remembers whether the
-    // `add_torrent_paused` call added the torrent fresh or adopted an
-    // existing one (duplicate-add). `grab_cancel` uses this to avoid
-    // deleting a pre-existing torrent the user may have partial
-    // downloaded from a prior grab — if we didn't add it, we don't
-    // own the deletion. `1` = we added it in this preview, `0` =
-    // pre-existing at add time (AlreadyPresent). Default 1 so rows
-    // written before this column existed take the conservative
-    // "delete on cancel" path (matches the pre-fix behavior).
     sqlx::query("ALTER TABLE pending_grabs ADD COLUMN we_added_torrent INTEGER NOT NULL DEFAULT 1")
         .execute(db)
         .await
