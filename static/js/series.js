@@ -697,7 +697,7 @@ function renderInteractiveResults(results, epNum) {
         const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
         html += `<tr>
             <td class="col-score">${renderScoreDetails(r, scoreClass)}</td>
-            <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
+            <td><a class="isearch-release-link" href="${escHtml(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
             <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
@@ -808,7 +808,7 @@ function renderInteractiveBatchResults(results) {
         const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
         html += `<tr>
             <td class="col-score">${renderScoreDetails(r, scoreClass)}</td>
-            <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
+            <td><a class="isearch-release-link" href="${escHtml(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
             <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>

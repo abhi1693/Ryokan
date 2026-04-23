@@ -297,6 +297,31 @@ function renderScoreBreakdown(r) {
     function positionPanel(details) {
         const panel = details.querySelector('.score-components');
         if (!panel) return;
+        // Only lift the panel to fixed-positioning when it lives
+        // inside an overflow-clipping ancestor (e.g. the interactive-
+        // search modal). On the plain /search page the results table
+        // is a direct descendant of the viewport, so CSS
+        // `position: absolute; top: calc(100% + 6px); left: 0` anchored
+        // to the `.score-details` summary is the correct placement —
+        // it rides scroll with the row and keeps the CSS max-width
+        // cap intact. An earlier blanket fixed-positioning here
+        // stretched the panel to the full viewport width and left it
+        // floating in place after a scroll.
+        let clipped = false;
+        let node = details.parentElement;
+        while (node && node !== document.body) {
+            const cs = window.getComputedStyle(node);
+            if (cs.overflow !== 'visible' || cs.overflowX !== 'visible' || cs.overflowY !== 'visible') {
+                clipped = true;
+                break;
+            }
+            node = node.parentElement;
+        }
+        if (!clipped) {
+            resetPanelPosition(panel);
+            return;
+        }
+
         const GAP = 6;
         const MARGIN = 8;
         const rect = details.getBoundingClientRect();
