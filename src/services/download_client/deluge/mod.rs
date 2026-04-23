@@ -1504,3 +1504,11 @@ mod tests {
         eprintln!("state-progress smoke passed");
     }
 }
+
+/// Wire-level JSON-RPC coverage via `wiremock`. Parallel to the
+/// qBit wiremock tree — covers the Deluge-specific quirks (two-step
+/// connect handshake, Label plugin auto-enable + reconnect, 0/4
+/// file priority, single-hash `core.remove_torrent`) against a
+/// mock `/json` endpoint.
+#[cfg(test)]
+mod wiremock_tests;

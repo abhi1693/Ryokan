@@ -116,10 +116,13 @@ function loadMore() {
                 tr.dataset.score = r.score;
                 tr.dataset.name = r.title;
                 tr.dataset.size = r.size_bytes;
+                tr.dataset.sizeHuman = r.size;
                 tr.dataset.date = r.upload_date || '';
                 tr.dataset.seeders = r.seeders;
                 tr.dataset.leechers = r.leechers;
                 tr.dataset.downloads = r.downloads;
+                tr.dataset.infoHash = r.info_hash || '';
+                tr.dataset.group = r.group || '';
                 tr.innerHTML = `
                     <td class="col-score">
                         <details class="score-details" name="score-breakdown">
@@ -146,6 +149,11 @@ function loadMore() {
                 if (cards) {
                     const card = document.createElement('div');
                     card.className = `result-card${rowClass ? ' ' + rowClass : ''}`;
+                    card.dataset.name = r.title;
+                    card.dataset.sizeHuman = r.size;
+                    card.dataset.seeders = r.seeders;
+                    card.dataset.infoHash = r.info_hash || '';
+                    card.dataset.group = r.group || '';
                     card.innerHTML = `
                         <div class="result-card-header">
                             <details class="score-details" name="score-breakdown">
@@ -187,20 +195,43 @@ function loadMore() {
 }
 
 function grabRelease(url, btn) {
+    // Pull the row's data-* attributes so the backend can link the
+    // grab to a library series (#6d) and so we can feed the file-
+    // picker modal a useful header when we route that way. Falls
+    // back to a URL-only grab when the button wasn't mounted inside
+    // a result row — e.g. a caller from a different template.
+    const row = btn.closest('tr[data-score]') || btn.closest('.result-card');
+    const isBatch = !!(row && row.classList.contains('is-batch'));
+
+    // Issue #83 PR B — batch releases open the interactive file
+    // picker. Single-file releases keep the direct /api/grab path
+    // (no files to pick). `grab_preview_mode` is the long-term toggle
+    // (plan decision plan docs) but lands server-side in PR C; for
+    // now the batch-vs-single split is the whole routing decision.
+    // When the picker isn't available on this page (no modal DOM,
+    // no info_hash on the row), fall through to the direct grab so
+    // the button keeps working.
+    const canPicker = isBatch
+        && typeof window.openGrabPicker === 'function'
+        && row && row.dataset.infoHash;
+    if (canPicker) {
+        window.openGrabPicker(url, {
+            title: row.dataset.name || '',
+            size: row.dataset.sizeHuman || '',
+            seeders: Number(row.dataset.seeders) || 0,
+            group: row.dataset.group || '',
+            infoHash: row.dataset.infoHash || '',
+        });
+        return;
+    }
+
     btn.disabled = true;
     btn.textContent = '...';
-    // Pull the row's data-* attributes so the backend can link the
-    // grab to a library series (#6d). Falls back to a URL-only grab
-    // when the button wasn't mounted inside a result row — e.g. a
-    // caller from a different template.
-    const row = btn.closest('tr[data-score]') || btn.closest('.result-card');
     const payload = {url: url};
     if (row) {
-        // data-name carries the release title; is_batch is inferred
-        // from the row class. info_hash isn't exposed on the row
-        // today — the backend re-derives it from the URL when absent.
         if (row.dataset.name) payload.title = row.dataset.name;
-        payload.is_batch = row.classList.contains('is-batch');
+        if (row.dataset.infoHash) payload.info_hash = row.dataset.infoHash;
+        payload.is_batch = isBatch;
     }
     fetch('/api/grab', {
         method: 'POST',

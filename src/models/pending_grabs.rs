@@ -144,19 +144,25 @@ pub async fn get(db: &SqlitePool, preview_id: &str) -> Result<Option<PendingGrab
 /// Fetch a pending grab by its backing torrent's `info_hash` — used
 /// by the pre-modal concurrency check ("is there already an open
 /// modal for this release in another tab?"). Returns the most
-/// recently created matching row, or `None` when no open modal holds
-/// the hash.
+/// recently created matching row that is **NOT** in an error state,
+/// or `None` when no live modal holds the hash.
 ///
-/// `#[allow(dead_code)]` until PR B wires the same-hash dedup flow —
-/// keeping it per-item rather than module-wide so new dead code in
-/// this module stands out in review.
-#[allow(dead_code)]
+/// The `error_message = ''` filter exists so Tab 2 opening the
+/// same release after Tab 1's metadata fetch errored doesn't get
+/// stuck on Tab 1's failure — without this, `get_by_hash` would
+/// return the error row and the handler would short-circuit Tab 2
+/// onto `status: "error"` immediately, forcing the user to wait
+/// ~2 min for the TTL sweep to drop the row before a retry can
+/// start. With the filter, Tab 2 falls through to a fresh paused-
+/// add attempt on the same hash — qBit's `AddOutcome::AlreadyPresent`
+/// handling takes over from there, so the retry is cheap.
 pub async fn get_by_hash(db: &SqlitePool, info_hash: &str) -> Result<Option<PendingGrab>, String> {
     if info_hash.is_empty() {
         return Ok(None);
     }
     sqlx::query_as::<_, PendingGrab>(&format!(
         "SELECT {SELECT_COLUMNS} FROM pending_grabs WHERE info_hash = ? \
+         AND error_message = '' \
          ORDER BY created_at DESC LIMIT 1"
     ))
     .bind(info_hash)
@@ -435,6 +441,76 @@ mod tests {
             get_by_hash(&db, "").await.unwrap().is_none(),
             "empty hash lookup should never return a row"
         );
+    }
+
+    #[tokio::test]
+    async fn get_by_hash_skips_rows_with_error_message_set() {
+        // PR 89 review fix: an error-flagged row must not be
+        // returned by the pre-modal dedup path, otherwise Tab 2
+        // opening the same release sees Tab 1's failure
+        // immediately and has no retry path except waiting for the
+        // TTL sweep. Invisible-to-dedup means Tab 2 falls through
+        // to a fresh paused-add attempt.
+        let db = in_memory_pool().await;
+        create(
+            &db,
+            "pid-errored",
+            "deadbeef",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
+        set_error(&db, "pid-errored", "metadata fetch timed out")
+            .await
+            .unwrap();
+        assert!(
+            get_by_hash(&db, "deadbeef").await.unwrap().is_none(),
+            "rows with error_message set must be invisible to dedup lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_by_hash_skips_error_row_but_returns_healthy_newer_row() {
+        // Two rows on the same hash: Tab 1 errored, Tab 2 is
+        // healthy. The healthy Tab 2 row — the "newer" one — wins,
+        // which is correct: error-flagged dedup suppression must
+        // not swallow a legitimate parallel session.
+        let db = in_memory_pool().await;
+        create(
+            &db,
+            "pid-err",
+            "deadbeef",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
+        set_error(&db, "pid-err", "failure").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        create(
+            &db,
+            "pid-ok",
+            "deadbeef",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
+        let row = get_by_hash(&db, "deadbeef")
+            .await
+            .unwrap()
+            .expect("healthy row must be returned");
+        assert_eq!(row.preview_id, "pid-ok");
     }
 
     #[tokio::test]

@@ -1123,6 +1123,407 @@ mod tests {
     use crate::test_support;
     use std::sync::Arc;
 
+    // ─── CI-gated library-CRUD coverage (PR 7) ────────────────────
+    //
+    // These tests exercise the handler functions directly (not via
+    // the axum router) so they don't need a download client wired
+    // in. The complex client-backed paths (d1 / d2 / d3 above) stay
+    // env-gated; what lives below is the straight DB-mutation shape
+    // that drives the Library UI: set_folder, set_monitoring,
+    // set_allow_upgrades, set_episode_monitoring, set_search_overrides,
+    // set_manual_override. Handler calls take `State<AppState>` and
+    // `Json<Form>` and return `Result<Json<Value>, (StatusCode, _)>`
+    // — we construct Forms directly by field (crud.rs is a child
+    // module of `library`, so private form fields are visible).
+    mod crud_ci {
+        use super::super::*;
+        use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::Json as AxumJson;
+
+        // Wrap the Result → extract the JSON body on success,
+        // panicking on Err so tests surface the status / message.
+        async fn ok_json<T>(res: Result<AxumJson<T>, (StatusCode, String)>) -> T {
+            match res {
+                Ok(AxumJson(body)) => body,
+                Err((status, msg)) => panic!("handler returned error: {status} {msg}"),
+            }
+        }
+
+        // ─── set_folder ──────────────────────────────────────────
+
+        #[tokio::test]
+        async fn set_folder_persists_sanitized_name_on_happy_path() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 10, "Show").await;
+            let state = build_test_app_state(db.clone(), None);
+            let form = super::super::SetFolderForm {
+                series_id,
+                folder_name: "My Show - 2024".to_string(),
+            };
+            let _ = ok_json(set_folder(State(state), AxumJson(form)).await).await;
+            let folder: String = sqlx::query_scalar("SELECT folder_name FROM series WHERE id = ?")
+                .bind(series_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(folder, "My Show - 2024");
+        }
+
+        #[tokio::test]
+        async fn set_folder_rejects_name_containing_path_separator() {
+            // Caller passes `show/../etc`; sanitize strips the slash
+            // and the sanitized output differs from the input — the
+            // handler rejects with 400 per the policy of "we don't
+            // silently rewrite folder names, we refuse the grey-area
+            // input so the user picks an unambiguous one."
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 11, "Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetFolderForm {
+                series_id,
+                folder_name: "show/../etc".to_string(),
+            };
+            let err = set_folder(State(state), AxumJson(form))
+                .await
+                .expect_err("should reject slashed folder name");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn set_folder_rejects_empty_name() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 12, "Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetFolderForm {
+                series_id,
+                folder_name: String::new(),
+            };
+            let err = set_folder(State(state), AxumJson(form))
+                .await
+                .expect_err("should reject empty folder name");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        }
+
+        // ─── set_monitoring ──────────────────────────────────────
+
+        #[tokio::test]
+        async fn set_monitoring_accepts_all_mode_and_reports_summary() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 20, "Monitored Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetMonitoringForm {
+                series_id,
+                monitor_mode: "all".to_string(),
+                auto_grab: Some(false),
+            };
+            let body: serde_json::Value =
+                ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["monitor_mode"], "all");
+        }
+
+        #[tokio::test]
+        async fn set_monitoring_accepts_none_mode_without_triggering_autosearch() {
+            // `None` short-circuits the auto-grab branch regardless
+            // of auto_grab flag. Pin the property — a refactor that
+            // starts firing auto-search even on None would eat tokens
+            // on transient monitoring flips.
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 21, "Unmonitored").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetMonitoringForm {
+                series_id,
+                monitor_mode: "none".to_string(),
+                auto_grab: Some(true),
+            };
+            let body: serde_json::Value =
+                ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+            assert_eq!(body["monitor_mode"], "none");
+            assert_eq!(body["monitored_count"], 0);
+        }
+
+        #[tokio::test]
+        async fn set_monitoring_unknown_mode_falls_back_to_future() {
+            // MonitorMode::from_str on unrecognized input defaults to
+            // the `future` bucket (the safest default — monitors
+            // upcoming episodes but doesn't spam back-fill for a
+            // long-finished series). A refactor that changes the
+            // fallback to `all` would silently start mass-grabbing
+            // old releases for every typo in the API body.
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 22, "Typo Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetMonitoringForm {
+                series_id,
+                monitor_mode: "definitely-not-a-mode".to_string(),
+                auto_grab: None,
+            };
+            let body: serde_json::Value =
+                ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+            assert_eq!(body["monitor_mode"], "future");
+        }
+
+        // ─── set_episode_monitoring ──────────────────────────────
+
+        #[tokio::test]
+        async fn set_episode_monitoring_flips_monitored_flag() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 30, "Show").await;
+            let state = build_test_app_state(db, None);
+            for monitored in [true, false, true] {
+                let form = super::super::SetEpisodeMonitoringForm {
+                    series_id,
+                    episode_number: 5,
+                    monitored,
+                };
+                let body: serde_json::Value =
+                    ok_json(set_episode_monitoring(State(state.clone()), AxumJson(form)).await)
+                        .await;
+                assert_eq!(body["monitored"], monitored);
+                assert_eq!(body["episode_number"], 5);
+            }
+        }
+
+        // ─── set_allow_upgrades ──────────────────────────────────
+
+        #[tokio::test]
+        async fn set_allow_upgrades_persists_flag() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 40, "Show").await;
+            let state = build_test_app_state(db.clone(), None);
+
+            // Flip off.
+            let body: serde_json::Value = ok_json(
+                set_allow_upgrades(
+                    State(state.clone()),
+                    AxumJson(super::super::SetAllowUpgradesForm {
+                        series_id,
+                        allow: false,
+                    }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(body["allow_upgrades"], false);
+            let stored: i64 = sqlx::query_scalar("SELECT allow_upgrades FROM series WHERE id = ?")
+                .bind(series_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(stored, 0, "allow=false must persist as 0");
+
+            // Flip back on.
+            let body: serde_json::Value = ok_json(
+                set_allow_upgrades(
+                    State(state),
+                    AxumJson(super::super::SetAllowUpgradesForm {
+                        series_id,
+                        allow: true,
+                    }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(body["allow_upgrades"], true);
+        }
+
+        // ─── set_search_overrides ────────────────────────────────
+
+        #[tokio::test]
+        async fn set_search_overrides_persists_tokens_and_uploader() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 50, "Show").await;
+            let state = build_test_app_state(db.clone(), None);
+            let form = super::super::SetSearchOverridesForm {
+                series_id,
+                custom_query_tokens: "  1080p BD  ".to_string(),
+                restrict_to_uploader: "TrustedUser".to_string(),
+            };
+            let body: serde_json::Value =
+                ok_json(set_search_overrides(State(state), AxumJson(form)).await).await;
+            // Response trims whitespace for display.
+            assert_eq!(body["custom_query_tokens"], "1080p BD");
+            assert_eq!(body["restrict_to_uploader"], "TrustedUser");
+            // DB row should carry the stored values.
+            let (tokens, uploader): (String, String) = sqlx::query_as(
+                "SELECT custom_query_tokens, restrict_to_uploader FROM series WHERE id = ?",
+            )
+            .bind(series_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert!(tokens.contains("1080p"));
+            assert_eq!(uploader, "TrustedUser");
+        }
+
+        #[tokio::test]
+        async fn set_search_overrides_clears_on_empty_strings() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 51, "Show").await;
+            let state = build_test_app_state(db.clone(), None);
+            // Set a value.
+            let _ = set_search_overrides(
+                State(state.clone()),
+                AxumJson(super::super::SetSearchOverridesForm {
+                    series_id,
+                    custom_query_tokens: "initial".to_string(),
+                    restrict_to_uploader: "User".to_string(),
+                }),
+            )
+            .await;
+            // Clear with empty strings — per the form docstring, empty
+            // resets to global defaults.
+            let body: serde_json::Value = ok_json(
+                set_search_overrides(
+                    State(state),
+                    AxumJson(super::super::SetSearchOverridesForm {
+                        series_id,
+                        custom_query_tokens: String::new(),
+                        restrict_to_uploader: String::new(),
+                    }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(body["custom_query_tokens"], "");
+            assert_eq!(body["restrict_to_uploader"], "");
+        }
+
+        // ─── set_manual_override ─────────────────────────────────
+
+        #[tokio::test]
+        async fn set_manual_override_accepts_valid_source_and_resolution() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 60, "Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetManualOverrideForm {
+                series_id,
+                episode_number: 3,
+                source: "BluRay".to_string(),
+                resolution: "1080".to_string(),
+                is_remux: true,
+                is_bdmv: false,
+                web_kind: String::new(),
+            };
+            let body: serde_json::Value =
+                ok_json(set_manual_override(State(state), AxumJson(form)).await).await;
+            assert_eq!(body["source"], "BluRay");
+            assert_eq!(body["resolution"], "1080p");
+            assert_eq!(body["is_remux"], true);
+        }
+
+        #[tokio::test]
+        async fn set_manual_override_rejects_invalid_source() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 61, "Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetManualOverrideForm {
+                series_id,
+                episode_number: 3,
+                source: "DefinitelyNotASource".to_string(),
+                resolution: "1080".to_string(),
+                is_remux: false,
+                is_bdmv: false,
+                web_kind: String::new(),
+            };
+            let err = set_manual_override(State(state), AxumJson(form))
+                .await
+                .expect_err("invalid source should 400");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+            assert!(
+                err.1.contains("source"),
+                "error should name the source field: {}",
+                err.1
+            );
+        }
+
+        #[tokio::test]
+        async fn set_manual_override_rejects_invalid_resolution() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 62, "Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetManualOverrideForm {
+                series_id,
+                episode_number: 3,
+                source: "BluRay".to_string(),
+                resolution: "99999".to_string(),
+                is_remux: false,
+                is_bdmv: false,
+                web_kind: String::new(),
+            };
+            let err = set_manual_override(State(state), AxumJson(form))
+                .await
+                .expect_err("invalid resolution should 400");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn set_manual_override_empty_source_clears_and_skips_validation() {
+            // Empty `source` is the "clear override" path — it
+            // should NOT run through Source::from_str validation.
+            // The resolution can be anything, the web_kind can be
+            // anything; it all resets.
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 63, "Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetManualOverrideForm {
+                series_id,
+                episode_number: 3,
+                source: String::new(),
+                resolution: "garbage".to_string(),
+                is_remux: false,
+                is_bdmv: false,
+                web_kind: "garbage".to_string(),
+            };
+            let body: serde_json::Value =
+                ok_json(set_manual_override(State(state), AxumJson(form)).await).await;
+            assert_eq!(body["source"], "");
+            assert_eq!(body["resolution"], "");
+        }
+
+        // ─── remove_series (no-client path) ──────────────────────
+
+        #[tokio::test]
+        async fn remove_series_with_delete_files_false_drops_row_without_client() {
+            // `delete_files = false` is the API path the Sonarr shim
+            // takes: drop the DB tracking row only, leave torrents +
+            // media alone. That path doesn't need a download client
+            // wired up; a `None` client shouldn't interfere.
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 70, "Show").await;
+            let state = build_test_app_state(db.clone(), None);
+            let form = super::super::RemoveSeriesForm {
+                id: series_id,
+                delete_files: Some(false),
+            };
+            let result = remove_series(State(state), AxumJson(form)).await;
+            assert!(result.is_ok(), "expected Ok, got {result:?}");
+            let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE id = ?")
+                .bind(series_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(remaining, 0, "series row must be deleted");
+        }
+
+        #[tokio::test]
+        async fn remove_series_on_missing_id_is_idempotent() {
+            // Deleting a non-existent series is a no-op — the handler
+            // short-circuits the "lookup returns None" branch and the
+            // DB delete is harmless.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::RemoveSeriesForm {
+                id: 99_999,
+                delete_files: Some(false),
+            };
+            let result = remove_series(State(state), AxumJson(form)).await;
+            assert!(result.is_ok(), "missing id must still return Ok");
+        }
+    }
+
     /// D1 live integration test: removing a series from the library
     /// must also delete every grabbed torrent for that series from
     /// the active download client.

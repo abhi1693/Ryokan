@@ -191,20 +191,52 @@ pub async fn grab_preview(
         ));
     }
 
-    // TODO (PR B): call `pending_grabs::get_by_hash` here as a pre-
-    // flight dedup check. Current behavior on the Tab-1-Added /
-    // Tab-2-AlreadyPresent race: if Tab 1 cancels, its
-    // `we_added_torrent=true` lets it nuke the torrent, and Tab 2's
-    // still-open modal breaks on confirm because the torrent is gone.
-    // The dedup check turns Tab 2 into "reuse the existing
-    // preview_id" (or a 409 "modal already open in another tab") and
-    // sidesteps the race entirely. Deferred to PR B alongside the
-    // same-hash-already-in-client flow (plan decision #6) so both
-    // dedup surfaces land together.
+    let info_hash = form.info_hash.trim().to_ascii_lowercase();
+
+    // v1 info-hash is a 40-char lowercase-hex string at the trait
+    // boundary; the `pending_grabs` row stores it verbatim and
+    // every downstream `DownloadClient` call expects that shape.
+    // Reject anything else up front so a misformatted hash (v2's
+    // 64-byte SHA-256, a URL-encoded variant, stray whitespace the
+    // trim didn't catch, or a caller's typo) fails cleanly with
+    // 400 rather than inserting an unusable row that the dedup
+    // path later trips over.
+    if info_hash.len() != 40 || !info_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "info_hash must be a 40-char lowercase-hex v1 BitTorrent infohash".to_string(),
+        ));
+    }
+
+    // Pre-flight same-session dedup. Two browser tabs both hitting
+    // Grab on the same release would otherwise race through
+    // `add_torrent_paused` twice — Tab 1 creates a paused torrent
+    // with we_added_torrent=true, Tab 2 sees AlreadyPresent and
+    // stores we_added_torrent=false, and if Tab 1 then cancels its
+    // (we_added_torrent=true) delete nukes the torrent out from under
+    // Tab 2's still-open modal. Returning Tab 1's existing preview_id
+    // to Tab 2 collapses both tabs onto the same session, so whichever
+    // tab confirms first wins and the other just sees a 404 on its
+    // next poll. Plan decision #6 also wants the eventual "show
+    // current priorities" flow for releases already in the client,
+    // but that's PR C — this only covers the in-flight modal case.
+    if let Some(existing) = pending_grabs::get_by_hash(&state.db, &info_hash)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Ok(Json(GrabPreviewCreated {
+            preview_id: existing.preview_id,
+            status: if !existing.error_message.is_empty() {
+                "error".to_string()
+            } else if existing.file_list_json.is_empty() {
+                "fetching_metadata".to_string()
+            } else {
+                "ready".to_string()
+            },
+        }));
+    }
 
     let client = require_download_client(&state).await?;
-
-    let info_hash = form.info_hash.to_ascii_lowercase();
     let client_kind = client.sonarr_impl_name().to_string();
     let metadata_json = form.release_metadata.to_string();
 
@@ -599,6 +631,11 @@ mod tests {
     // coverage from the `live_smoke*` tests on each
     // `DownloadClient` impl.
 
+    // A valid 40-char lowercase-hex v1 infohash — use this whenever
+    // the test wants to clear the hex-validation gate in
+    // `grab_preview` and reach the downstream path under test.
+    const VALID_HASH: &str = "aabbccddeeff00112233445566778899aabbccdd";
+
     #[tokio::test]
     async fn preview_status_404_when_missing() {
         let db = in_memory_pool().await;
@@ -747,13 +784,146 @@ mod tests {
         let res = grab_preview(
             State(state),
             Json(GrabPreviewForm {
-                url: "magnet:?xt=urn:btih:abc".into(),
-                info_hash: "abcdef0123".into(),
+                url: format!("magnet:?xt=urn:btih:{VALID_HASH}"),
+                info_hash: VALID_HASH.into(),
                 series_id: Some(42),
                 release_metadata: serde_json::json!({"title": "test"}),
             }),
         )
         .await;
+        // Clears the hex-validation gate (hash is 40-char lowercase
+        // hex) and reaches `require_download_client`, which returns
+        // 400 because the fixture's `AppState` has None as the
+        // download client.
         assert!(matches!(res, Err((StatusCode::BAD_REQUEST, _))));
+    }
+
+    #[tokio::test]
+    async fn preview_rejects_non_hex_info_hash_with_400() {
+        // Regression guard on the PR 89 review fix: a v2 hash
+        // (64 hex chars), a bare title, or any non-40-char input
+        // must not reach the DB. Cheap check at the top of
+        // `grab_preview`.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        // 64-char "v2-like" input.
+        let too_long = "a".repeat(64);
+        let res = grab_preview(
+            State(state.clone()),
+            Json(GrabPreviewForm {
+                url: "magnet:?xt=urn:btih:abc".into(),
+                info_hash: too_long,
+                series_id: None,
+                release_metadata: serde_json::Value::Null,
+            }),
+        )
+        .await;
+        assert!(matches!(res, Err((StatusCode::BAD_REQUEST, _))));
+
+        // Garbage non-hex — 40 chars but with a "z".
+        let bad_chars = "z".repeat(40);
+        let res = grab_preview(
+            State(state),
+            Json(GrabPreviewForm {
+                url: "magnet:?xt=urn:btih:abc".into(),
+                info_hash: bad_chars,
+                series_id: None,
+                release_metadata: serde_json::Value::Null,
+            }),
+        )
+        .await;
+        assert!(matches!(res, Err((StatusCode::BAD_REQUEST, _))));
+    }
+
+    // Pre-flight same-session dedup: when a pending_grabs row already
+    // exists for this info_hash, the handler returns the existing
+    // preview_id before touching the download client. Exercised by
+    // seeding a row and checking the response short-circuits to 200.
+    // The no-client test above proves the short-circuit is *before*
+    // `require_download_client`, which is the whole point — we don't
+    // want Tab 2 to add the torrent a second time.
+    #[tokio::test]
+    async fn preview_dedupes_same_hash_in_flight_modal() {
+        let db = in_memory_pool().await;
+        pending_grabs::create(
+            &db,
+            "pid-existing",
+            VALID_HASH,
+            "qbittorrent",
+            None,
+            None,
+            "{\"title\":\"tab-1 snapshot\"}",
+            true,
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+        let res = grab_preview(
+            State(state),
+            Json(GrabPreviewForm {
+                url: format!("magnet:?xt=urn:btih:{VALID_HASH}"),
+                info_hash: VALID_HASH.into(),
+                series_id: None,
+                release_metadata: serde_json::json!({"title": "tab-2 request"}),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.preview_id, "pid-existing");
+        // Row exists but file_list_json is empty, so modal sees
+        // "fetching_metadata" on its first status poll.
+        assert_eq!(res.status, "fetching_metadata");
+    }
+
+    #[tokio::test]
+    async fn preview_does_not_dedupe_onto_error_row_from_prior_tab() {
+        // Regression guard on the PR 89 review fix: when a prior
+        // Tab-1's metadata fetch failed and wrote `error_message`,
+        // Tab 2 opening the same release must NOT be short-circuited
+        // onto Tab 1's failure — otherwise the user sees an
+        // immediate "error" for ~2 min until the TTL sweep drops
+        // the row. Instead, `get_by_hash`'s `error_message = ''`
+        // filter makes the error row invisible to dedup; Tab 2
+        // falls through to the full add_torrent_paused path.
+        //
+        // Here we observe that fall-through via the
+        // `require_download_client` short-circuit — with no client
+        // configured, the handler reaches that check and returns
+        // BadRequest rather than reusing the errored row's
+        // preview_id.
+        let db = in_memory_pool().await;
+        pending_grabs::create(
+            &db,
+            "pid-failed",
+            VALID_HASH,
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
+        pending_grabs::set_error(&db, "pid-failed", "metadata fetch timed out")
+            .await
+            .unwrap();
+        let state = build_test_app_state(db, None);
+        let res = grab_preview(
+            State(state),
+            Json(GrabPreviewForm {
+                url: format!("magnet:?xt=urn:btih:{VALID_HASH}"),
+                info_hash: VALID_HASH.into(),
+                series_id: None,
+                release_metadata: serde_json::Value::Null,
+            }),
+        )
+        .await;
+        // Reached `require_download_client` → BadRequest. If the
+        // dedup had incorrectly returned the error row we'd have
+        // gotten `Ok(status: "error")` instead.
+        assert!(
+            matches!(res, Err((StatusCode::BAD_REQUEST, _))),
+            "error-row dedup suppression failed; got {res:?}"
+        );
     }
 }

@@ -585,7 +585,7 @@ const NYAA_TRACKER_SET: &[&str] = &[
 /// needs an HTTP round-trip.
 ///
 /// The URI shape is:
-/// ```
+/// ```text
 /// magnet:?xt=urn:btih:<hash>&dn=<group>&tr=<tracker1>&tr=<tracker2>...
 /// ```
 ///

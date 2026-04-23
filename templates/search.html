@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block page_css %}<link rel="stylesheet" href="/static/css/pages/search.css">{% endblock %}
+{% block page_css %}<link rel="stylesheet" href="/static/css/pages/search.css">
+<link rel="stylesheet" href="/static/css/pages/grab_picker.css">{% endblock %}
 
 {% block title %} - Search{% endblock %}
 
@@ -47,7 +48,7 @@
             </thead>
             <tbody id="results-body">
                 {% for r in results %}
-                <tr class="{% if r.is_batch && r.is_trusted %}is-batch is-trusted{% else if r.is_batch %}is-batch{% else if r.is_trusted %}is-trusted{% endif %}" data-score="{{ r.score }}" data-name="{{ r.title }}" data-size="{{ r.size_bytes }}" data-date="{{ r.upload_date }}" data-seeders="{{ r.seeders }}" data-leechers="{{ r.leechers }}" data-downloads="{{ r.downloads }}">
+                <tr class="{% if r.is_batch && r.is_trusted %}is-batch is-trusted{% else if r.is_batch %}is-batch{% else if r.is_trusted %}is-trusted{% endif %}" data-score="{{ r.score }}" data-name="{{ r.title }}" data-size="{{ r.size_bytes }}" data-size-human="{{ r.size }}" data-date="{{ r.upload_date }}" data-seeders="{{ r.seeders }}" data-leechers="{{ r.leechers }}" data-downloads="{{ r.downloads }}" data-info-hash="{{ r.info_hash }}" data-group="{{ r.group }}">
                     <td class="col-score">
                         <details class="score-details" name="score-breakdown">
                             <summary class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}" title="Click to see breakdown">{{ r.score }}</summary>
@@ -102,7 +103,7 @@
            paginated results show up regardless of viewport. #}
         <div class="results-cards" id="results-cards">
             {% for r in results %}
-            <div class="result-card {% if r.is_batch %}is-batch{% endif %} {% if r.is_trusted %}is-trusted{% endif %}">
+            <div class="result-card {% if r.is_batch %}is-batch{% endif %} {% if r.is_trusted %}is-trusted{% endif %}" data-name="{{ r.title }}" data-size-human="{{ r.size }}" data-seeders="{{ r.seeders }}" data-info-hash="{{ r.info_hash }}" data-group="{{ r.group }}">
                 <div class="result-card-header">
                     <span class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}">{{ r.score }}</span>
                     <a class="result-card-title" href="{{ r.link }}" target="_blank" rel="noopener">{{ r.title }}</a>
@@ -144,5 +145,44 @@ window.searchState = {
     searched: {{ searched }},
 };
 </script>
+<script src="/static/js/grab_picker.js" defer></script>
 <script src="/static/js/search.js" defer></script>
+
+{# Interactive file-picker modal (issue #83 PR B). Opened by
+   openGrabPicker() in grab_picker.js when the user hits Grab on a
+   batch release. Single-file releases bypass this and take the
+   direct /api/grab path. Footer + toolbar start hidden — they flip
+   to flex once the file list is rendered. #}
+<div class="modal-backdrop" id="grab-picker-modal" style="display:none">
+    <div class="modal grab-picker-modal" role="dialog" aria-modal="true" aria-labelledby="grab-picker-title">
+        <div class="modal-header">
+            <div class="grab-picker-header-meta">
+                <div id="grab-picker-title" class="grab-picker-title">Release</div>
+                <div id="grab-picker-subtitle" class="grab-picker-subtitle"></div>
+            </div>
+            <button class="btn-icon" type="button" id="grab-picker-close" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div id="grab-picker-toolbar" class="grab-picker-toolbar" style="display:none">
+            <div class="grab-picker-view-toggle" role="tablist" aria-label="File view">
+                <button type="button" id="grab-picker-view-flat" class="btn btn-secondary active" role="tab" aria-selected="true">Flat</button>
+                <button type="button" id="grab-picker-view-tree" class="btn btn-secondary" role="tab" aria-selected="false">Tree</button>
+            </div>
+            <div class="grab-picker-toolbar-spacer"></div>
+            <button type="button" class="btn btn-secondary" data-grab-picker-action="check-all">Check all</button>
+            <button type="button" class="btn btn-secondary" data-grab-picker-action="uncheck-all">Uncheck all</button>
+            <button type="button" class="btn btn-secondary" data-grab-picker-action="uncheck-ncops">Uncheck NCOPs/NCEDs</button>
+            <button type="button" class="btn btn-secondary" data-grab-picker-action="uncheck-samples">Uncheck samples</button>
+            <button type="button" class="btn btn-secondary" data-grab-picker-action="uncheck-extras">Uncheck extras</button>
+        </div>
+        <div class="modal-body" id="grab-picker-body" style="padding:0"></div>
+        <div class="grab-picker-footer" id="grab-picker-footer" style="display:none">
+            <div class="grab-picker-selection-total" id="grab-picker-total"></div>
+            <div class="grab-picker-footer-actions">
+                <button type="button" class="btn btn-primary" id="grab-picker-confirm">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}

@@ -691,3 +691,232 @@ fn parse_provider_id(key: &str, provider: &str) -> Option<i64> {
     let id_str = rest.split(':').next()?;
     id_str.parse().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ─── parse_provider_id ────────────────────────────────────────
+
+    #[test]
+    fn parse_provider_id_extracts_matching_prefix_id() {
+        assert_eq!(parse_provider_id("anilist:12345", "anilist"), Some(12345));
+        assert_eq!(parse_provider_id("mal:67890", "mal"), Some(67890));
+    }
+
+    #[test]
+    fn parse_provider_id_rejects_wrong_prefix() {
+        assert_eq!(parse_provider_id("mal:12345", "anilist"), None);
+        assert_eq!(parse_provider_id("anilist:12345", "mal"), None);
+    }
+
+    #[test]
+    fn parse_provider_id_ignores_trailing_fields_after_id() {
+        // The mappings sometimes have suffixes like "anilist:12345:s1".
+        // The id-parser should take only the first numeric part.
+        assert_eq!(
+            parse_provider_id("anilist:12345:extra", "anilist"),
+            Some(12345)
+        );
+    }
+
+    #[test]
+    fn parse_provider_id_returns_none_on_non_numeric_id() {
+        assert_eq!(parse_provider_id("anilist:notanumber", "anilist"), None);
+    }
+
+    // ─── parse_show_id ────────────────────────────────────────────
+
+    #[test]
+    fn parse_show_id_extracts_show_id_without_season() {
+        // No `s<N>` segment → default season 0 ("unscoped").
+        assert_eq!(parse_show_id("tmdb_show:42", "tmdb_show"), Some((42, 0)));
+    }
+
+    #[test]
+    fn parse_show_id_extracts_show_id_with_season() {
+        assert_eq!(parse_show_id("tmdb_show:42:s3", "tmdb_show"), Some((42, 3)));
+        assert_eq!(
+            parse_show_id("tvdb_show:100:s1", "tvdb_show"),
+            Some((100, 1))
+        );
+    }
+
+    #[test]
+    fn parse_show_id_rejects_wrong_prefix() {
+        assert_eq!(parse_show_id("tvdb_show:42", "tmdb_show"), None);
+    }
+
+    #[test]
+    fn parse_show_id_falls_back_to_zero_season_on_malformed_suffix() {
+        // "s-not-a-number" can't parse as i32 — falls back to 0
+        // rather than dropping the entry entirely (the show id is
+        // still useful as an unscoped lookup).
+        assert_eq!(parse_show_id("tmdb_show:42:sX", "tmdb_show"), Some((42, 0)));
+    }
+
+    // ─── lookup_show ──────────────────────────────────────────────
+
+    fn seed_map() -> HashMap<(i64, i32), Vec<AnimeIds>> {
+        let mut map: HashMap<(i64, i32), Vec<AnimeIds>> = HashMap::new();
+        map.insert(
+            (100, 1),
+            vec![AnimeIds {
+                anilist_id: Some(11),
+                mal_id: Some(111),
+            }],
+        );
+        map.insert(
+            (100, 2),
+            vec![AnimeIds {
+                anilist_id: Some(22),
+                mal_id: Some(222),
+            }],
+        );
+        map.insert(
+            (100, 0),
+            vec![AnimeIds {
+                anilist_id: Some(99),
+                mal_id: None,
+            }],
+        );
+        map
+    }
+
+    #[test]
+    fn lookup_show_returns_exact_season_match() {
+        let map = seed_map();
+        let results = lookup_show(&map, 100, Some(1));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].anilist_id, Some(11));
+    }
+
+    #[test]
+    fn lookup_show_falls_back_to_season_zero_on_miss() {
+        // Requesting a season that isn't present → falls through
+        // to season 0 (the "unscoped" entry). Covers the anime-film
+        // case where the mapping indexes the whole TMDB show under
+        // season 0 but the caller asks for season 99.
+        let map = seed_map();
+        let results = lookup_show(&map, 100, Some(99));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].anilist_id, Some(99));
+    }
+
+    #[test]
+    fn lookup_show_without_season_returns_all_seasons() {
+        let map = seed_map();
+        let mut results = lookup_show(&map, 100, None);
+        results.sort_by_key(|ids| ids.anilist_id.unwrap_or(0));
+        assert_eq!(results.len(), 3, "should include all seasons for this show");
+    }
+
+    #[test]
+    fn lookup_show_without_season_dedupes_same_anilist_id_across_seasons() {
+        // If two seasons map to the same AniList id (e.g. a
+        // split-cour handled as two TMDB seasons but one AL entry),
+        // collect-all-seasons should produce one entry, not two.
+        let mut map: HashMap<(i64, i32), Vec<AnimeIds>> = HashMap::new();
+        map.insert(
+            (200, 1),
+            vec![AnimeIds {
+                anilist_id: Some(42),
+                mal_id: None,
+            }],
+        );
+        map.insert(
+            (200, 2),
+            vec![AnimeIds {
+                anilist_id: Some(42),
+                mal_id: None,
+            }],
+        );
+        let results = lookup_show(&map, 200, None);
+        assert_eq!(results.len(), 1, "duplicates by AniList id should collapse");
+    }
+
+    #[test]
+    fn lookup_show_returns_empty_for_unknown_show_id() {
+        let map = seed_map();
+        assert!(lookup_show(&map, 9999, Some(1)).is_empty());
+        assert!(lookup_show(&map, 9999, None).is_empty());
+    }
+
+    // ─── lookup_show_seasons ─────────────────────────────────────
+
+    #[test]
+    fn lookup_show_seasons_returns_sorted_pairs() {
+        let map = seed_map();
+        let pairs = lookup_show_seasons(&map, 100);
+        let seasons: Vec<i32> = pairs.iter().map(|(s, _)| *s).collect();
+        assert_eq!(seasons, vec![0, 1, 2], "seasons must be sorted ascending");
+    }
+
+    // ─── parse_bytes / build_cache round-trip ────────────────────
+
+    #[test]
+    fn parse_bytes_on_minimal_anibridge_entry_builds_lookup_tables() {
+        // Shape matches the real anime-lists JSON: outer object
+        // keyed by source provider+id, targets object keyed by
+        // other-provider+id. This fixture is a synthetic minimal
+        // entry that exercises build_cache's scan without relying
+        // on the 8.5 MB real mappings blob.
+        let raw = json!({
+            "anilist:12345": {
+                "mal:67890": {},
+                "tmdb_show:200:s1": {},
+                "tvdb_show:300:s1": {}
+            }
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let cache = parse_bytes(&bytes).expect("parse_bytes should succeed");
+        // AniList 12345 → TMDB 200 reverse lookup.
+        assert_eq!(cache.anilist_to_tmdb.get(&12345), Some(&200));
+        // MAL 67890 → TMDB 200 reverse lookup.
+        assert_eq!(cache.mal_to_tmdb.get(&67890), Some(&200));
+        // (TMDB 200, season 1) → AnimeIds with both ids.
+        let entry = cache
+            .tmdb_to_anime
+            .get(&(200, 1))
+            .expect("tmdb entry must be present");
+        assert_eq!(entry.len(), 1);
+        assert_eq!(entry[0].anilist_id, Some(12345));
+        assert_eq!(entry[0].mal_id, Some(67890));
+    }
+
+    #[test]
+    fn parse_bytes_on_non_object_root_returns_empty_cache_not_error() {
+        // Defensive: a JSON that deserializes but is structurally
+        // wrong (array at root) should produce an empty cache, not
+        // error. Matches how the impl treats unrecognized shapes.
+        let bytes = b"[]".to_vec();
+        let cache = parse_bytes(&bytes).expect("non-object root should parse to empty cache");
+        assert!(cache.tmdb_to_anime.is_empty());
+        assert!(cache.anilist_to_tmdb.is_empty());
+    }
+
+    #[test]
+    fn parse_bytes_on_malformed_json_returns_error() {
+        let bytes = b"this is not json".to_vec();
+        assert!(parse_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_bytes_skips_entries_without_anime_ids() {
+        // A TMDB-only entry with no anilist/mal companion must not
+        // land in the cache — otherwise the reverse lookups would
+        // inherit an empty anilist_id and confuse downstream code.
+        let raw = json!({
+            "tmdb_show:500:s1": {
+                "tvdb_show:600:s1": {}
+            }
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let cache = parse_bytes(&bytes).unwrap();
+        assert!(
+            !cache.tmdb_to_anime.contains_key(&(500, 1)),
+            "anime-less entries should not be indexed"
+        );
+    }
+}

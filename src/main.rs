@@ -1,18 +1,15 @@
-mod handlers;
-mod models;
-mod services;
-
-#[cfg(test)]
-pub(crate) mod test_support;
+// Module tree lives in `src/lib.rs` so integration tests under `tests/`
+// can exercise handlers without spawning a binary. `main.rs` is just
+// the boot entry point — everything else rides the library crate.
+use ryokan::{AppState, handlers, models, services};
 
 use axum::http::{HeaderValue, header};
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, FromRef},
+    extract::DefaultBodyLimit,
     middleware,
     routing::{get, post},
 };
-use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -28,7 +25,6 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use services::{
     custom_formats::{self, CompiledCfCache},
-    download_client::DownloadClient,
     jellyfin::JellyfinClient,
     progress::ProgressRegistry,
 };
@@ -167,43 +163,6 @@ use services::{
     ),
 )]
 struct ApiDoc;
-
-/// Shared application state available to all handlers.
-#[derive(Clone)]
-pub struct AppState {
-    pub db: SqlitePool,
-    pub download_client: Arc<RwLock<Option<Arc<dyn DownloadClient>>>>,
-    pub jellyfin: Arc<RwLock<Option<JellyfinClient>>>,
-    /// Compiled Custom Formats, loaded once at startup and rebuilt on
-    /// CF create/update/delete via `custom_formats::rebuild_cf_cache`.
-    /// Outer `RwLock` owns swap; the inner `Arc<Vec<_>>` is cheap-cloned
-    /// out on the scoring hot path so the read lock releases before the
-    /// per-candidate evaluation loop begins.
-    pub custom_formats: CompiledCfCache,
-    /// In-memory progress registry for long-running user-triggered jobs
-    /// (currently the manual auto-search). The frontend mints an opaque
-    /// `progress_id`, the trigger handler binds it via
-    /// `register(...).await`, and the polling endpoint at
-    /// `/api/progress/{id}` drains buffered events. See
-    /// `services::progress` for the full lifecycle.
-    pub progress: ProgressRegistry,
-    /// Flip-to-true-once cache of `user::has_users`. The auth middleware
-    /// runs on every protected request and was firing a `SELECT COUNT(*)
-    /// FROM users` query for each one just to decide whether to redirect
-    /// to `/setup`. Because Ryokan never deletes the admin account, once
-    /// this flag is true it stays true for the life of the process, and
-    /// the check becomes a lock-free atomic load. While false, the
-    /// middleware still hits the DB on the setup-pending path so a fresh
-    /// `/setup` submission is picked up on the very next request.
-    pub users_exist: Arc<std::sync::atomic::AtomicBool>,
-}
-
-// Allow handlers to extract SqlitePool directly from AppState.
-impl FromRef<AppState> for SqlitePool {
-    fn from_ref(state: &AppState) -> SqlitePool {
-        state.db.clone()
-    }
-}
 
 /// Run a supervising loop around a background tick future.
 ///
@@ -1562,22 +1521,23 @@ async fn main() {
         });
     }
 
-    // Background task: evict stale `pending_grabs` rows (issue #83).
-    // Minimum-viable sweep for PR A — drops expired rows only. The
-    // full "auto-commit abandoned modal with all-files-wanted" shape
-    // from plan decision #3 lands in PR C alongside the grab-row
-    // write + sibling auto-expand path. See `services::grab_sweep`
-    // module docstring for the rationale behind the staged roll-out.
+    // Background task: auto-commit or evict stale `pending_grabs`
+    // rows (issue #83, plan decision #3). A walkaway tab's torrent
+    // is still a user-intended download — the sweep marks every
+    // file wanted and resumes the torrent. See
+    // `services::grab_sweep` module docstring for the full
+    // per-row flow, including the error-row and no-metadata
+    // branches that skip auto-commit but still delete the row.
     {
-        let grab_sweep_db = db.clone();
+        let grab_sweep_state = state.clone();
         tokio::spawn(async move {
             supervise("grab_sweep", move || {
-                let db = grab_sweep_db.clone();
+                let state = grab_sweep_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(services::grab_sweep::SWEEP_INTERVAL);
                     loop {
                         interval.tick().await;
-                        if let Err(e) = services::grab_sweep::sweep_once(&db).await {
+                        if let Err(e) = services::grab_sweep::sweep_once(&state).await {
                             tracing::warn!(
                                 target: "ryokan::grab_sweep",
                                 error = %e,

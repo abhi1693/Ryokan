@@ -831,3 +831,109 @@ pub async fn compute_suggestions(
 
     Ok(suggestions)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    async fn fresh_db() -> SqlitePool {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        // `group_source_map` owns its own CREATE TABLE, but the
+        // `schema_migrations` table is created on demand by the
+        // helpers under test — no pre-seeding needed.
+        migrate(&db).await.expect("group_source_map::migrate");
+        db
+    }
+
+    // ─── schema_migrations ledger round-trip (PR 6) ────────────────
+
+    #[tokio::test]
+    async fn ensure_schema_migrations_table_is_idempotent() {
+        // Running the setup twice must not error — the `CREATE TABLE
+        // IF NOT EXISTS` is the documented idempotency knob and a
+        // refactor that swapped to the non-`IF NOT EXISTS` variant
+        // would break every second startup.
+        let db = fresh_db().await;
+        ensure_schema_migrations_table(&db)
+            .await
+            .expect("first create");
+        ensure_schema_migrations_table(&db)
+            .await
+            .expect("second create must also succeed");
+    }
+
+    #[tokio::test]
+    async fn migration_already_applied_returns_false_for_unknown_id() {
+        let db = fresh_db().await;
+        ensure_schema_migrations_table(&db).await.unwrap();
+        assert!(
+            !migration_already_applied(&db, "some_random_migration_id")
+                .await
+                .unwrap(),
+            "unknown migration id should report as not-applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_then_check_round_trip() {
+        // mark → check: mark a stable id, verify check returns true.
+        // The mark path uses INSERT OR IGNORE so a second mark is a
+        // no-op (exercised by the next test).
+        let db = fresh_db().await;
+        ensure_schema_migrations_table(&db).await.unwrap();
+        let mut tx = db.begin().await.unwrap();
+        mark_migration_applied(&mut tx, "test_marker_v1")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            migration_already_applied(&db, "test_marker_v1")
+                .await
+                .unwrap(),
+            "marker should report as applied after mark"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_migration_applied_is_idempotent_via_insert_or_ignore() {
+        // INSERT OR IGNORE on the primary key means a second mark of
+        // the same id is a no-op — not an error, not a duplicate
+        // row. Property: the count of ledger rows for a given id
+        // never exceeds 1 regardless of how many times mark fires.
+        let db = fresh_db().await;
+        ensure_schema_migrations_table(&db).await.unwrap();
+        for _ in 0..3 {
+            let mut tx = db.begin().await.unwrap();
+            mark_migration_applied(&mut tx, "test_dup_marker")
+                .await
+                .expect("repeated mark should not error");
+            tx.commit().await.unwrap();
+        }
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schema_migrations WHERE id = 'test_dup_marker'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "repeated mark must keep ledger rows at 1");
+    }
+
+    #[tokio::test]
+    async fn different_migration_ids_are_independent() {
+        let db = fresh_db().await;
+        ensure_schema_migrations_table(&db).await.unwrap();
+        let mut tx = db.begin().await.unwrap();
+        mark_migration_applied(&mut tx, "migration_a")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(migration_already_applied(&db, "migration_a").await.unwrap());
+        assert!(
+            !migration_already_applied(&db, "migration_b").await.unwrap(),
+            "marking A must not flip B"
+        );
+    }
+}

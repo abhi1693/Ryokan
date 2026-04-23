@@ -1,0 +1,10 @@
+---
+source: src/handlers/radarr_compat/tests/system.rs
+expression: body
+---
+[
+  {
+    "id": 1,
+    "name": "Default"
+  }
+]

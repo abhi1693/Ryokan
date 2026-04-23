@@ -327,3 +327,186 @@ pub async fn load_bytes(db: &SqlitePool, cache_key: &str) -> Option<(Vec<u8>, St
     let bytes = tokio::fs::read(Path::new(&entry.local_path)).await.ok()?;
     Some((bytes, entry.content_type))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── sanitize_key ─────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_key_preserves_alphanumeric_and_dash_and_underscore() {
+        assert_eq!(sanitize_key("abc-123_XYZ"), "abc-123_XYZ");
+    }
+
+    #[test]
+    fn sanitize_key_replaces_slashes_and_spaces_with_dash() {
+        // Cache keys flow into URL paths and filesystem filenames —
+        // anything that isn't [A-Za-z0-9_-] gets dashed to avoid a
+        // caller from injecting path segments or breaking the URL.
+        assert_eq!(
+            sanitize_key("provider/id with space"),
+            "provider-id-with-space"
+        );
+    }
+
+    #[test]
+    fn sanitize_key_replaces_dots_and_colons() {
+        // `.` and `:` are path-traversal hazards and URL-parse
+        // hazards respectively — both get dashed.
+        assert_eq!(sanitize_key("foo.bar:baz"), "foo-bar-baz");
+    }
+
+    #[test]
+    fn sanitize_key_empty_input_returns_empty() {
+        assert_eq!(sanitize_key(""), "");
+    }
+
+    // ─── extension_for ────────────────────────────────────────────
+
+    #[test]
+    fn extension_for_png_content_type_returns_png() {
+        assert_eq!(extension_for("image/png", "http://example.com/img"), "png");
+    }
+
+    #[test]
+    fn extension_for_webp_content_type_returns_webp() {
+        assert_eq!(
+            extension_for("image/webp", "http://example.com/img"),
+            "webp"
+        );
+    }
+
+    #[test]
+    fn extension_for_falls_back_to_jpg_on_unknown_content_type() {
+        // Default is jpg — JPEG is the most common provider format
+        // and covers the unknown-content-type case without forcing a
+        // rediscovery on every new shape.
+        assert_eq!(extension_for("application/octet-stream", ""), "jpg");
+    }
+
+    #[test]
+    fn extension_for_falls_back_to_url_suffix_when_content_type_silent() {
+        // AniList sometimes returns `image/jpeg` for PNGs and vice
+        // versa. URL suffix is the tiebreaker.
+        assert_eq!(
+            extension_for("image/jpeg", "http://cdn.example.com/art.png"),
+            "png"
+        );
+    }
+
+    // ─── blob_filename ────────────────────────────────────────────
+
+    #[test]
+    fn blob_filename_combines_hash_and_extension() {
+        assert_eq!(
+            blob_filename("abc123", "image/png", "http://x.com/i.png"),
+            "abc123.png"
+        );
+    }
+
+    #[test]
+    fn blob_filename_uses_jpg_default_for_unknown_types() {
+        assert_eq!(
+            blob_filename("deadbeef", "application/json", "http://x.com/i"),
+            "deadbeef.jpg"
+        );
+    }
+
+    // ─── local_url ────────────────────────────────────────────────
+
+    #[test]
+    fn local_url_embeds_cache_key_and_cachebust_param() {
+        // The `?v=<epoch>` query param forces browser revalidation
+        // when the artwork's last_write changes — without it every
+        // Jellyfin client caches a stale cover forever.
+        assert_eq!(
+            local_url("provider-al-12345-cover", 1_700_000_000),
+            "/media/art/provider-al-12345-cover?v=1700000000"
+        );
+    }
+
+    // ─── canonical_identity_key ───────────────────────────────────
+
+    #[test]
+    fn canonical_identity_key_prefers_mal_id_when_positive() {
+        // MAL ID is the more stable external key — AniList IDs shift
+        // during provider re-imports, MAL rarely changes. Preferring
+        // MAL when available means a series re-imported from
+        // AniList-fallback-to-Jikan still hits the cached artwork.
+        assert_eq!(canonical_identity_key(123, Some(456)), "mal-456");
+    }
+
+    #[test]
+    fn canonical_identity_key_falls_back_to_anilist_id_when_mal_absent() {
+        assert_eq!(canonical_identity_key(123, None), "al-123");
+    }
+
+    #[test]
+    fn canonical_identity_key_ignores_non_positive_mal_id() {
+        // A negative or zero mal_id is the Jikan-fallback sentinel
+        // shape (`-mal_id` stored in `series.anilist_id` for
+        // series added via the MAL fallback). Filter those out so
+        // we don't generate a `mal-0` cache key.
+        assert_eq!(canonical_identity_key(123, Some(0)), "al-123");
+        assert_eq!(canonical_identity_key(123, Some(-1)), "al-123");
+    }
+
+    #[test]
+    fn canonical_identity_key_uses_prov_prefix_for_negative_provider_id() {
+        // Negative provider_id is the sentinel for MAL-fallback series
+        // without an AniList mapping. Emit `prov-<negid>` so the key
+        // is still disambiguated but doesn't claim to be an AL id.
+        assert_eq!(canonical_identity_key(-12345, None), "prov--12345");
+    }
+
+    // ─── provider_cover_key / provider_banner_key ─────────────────
+
+    #[test]
+    fn provider_cover_key_combines_identity_key_with_cover_suffix() {
+        assert_eq!(provider_cover_key(123, Some(456)), "provider-mal-456-cover");
+    }
+
+    #[test]
+    fn provider_banner_key_combines_identity_key_with_banner_suffix() {
+        assert_eq!(
+            provider_banner_key(123, Some(456)),
+            "provider-mal-456-banner"
+        );
+    }
+
+    #[test]
+    fn provider_cover_and_banner_keys_share_identity_prefix() {
+        // If the identity prefix diverges between cover and banner,
+        // a series-rename + re-scan would double-write one of the
+        // two. Pin the invariant that they share the prefix.
+        let cover = provider_cover_key(42, None);
+        let banner = provider_banner_key(42, None);
+        let cover_prefix = cover.trim_end_matches("-cover");
+        let banner_prefix = banner.trim_end_matches("-banner");
+        assert_eq!(cover_prefix, banner_prefix);
+    }
+
+    // ─── series_relation_cover_key / provider_relation_cover_key ──
+
+    #[test]
+    fn series_relation_cover_key_includes_parent_series_and_related_identity() {
+        assert_eq!(
+            series_relation_cover_key(10, 20, Some(30)),
+            "series-10-relation-mal-30-cover"
+        );
+    }
+
+    #[test]
+    fn provider_relation_cover_key_uses_parent_provider_id_without_mal() {
+        // The parent identity in a provider-relation key intentionally
+        // omits `mal_id` — the relation is defined from the provider's
+        // perspective, so using the provider's AL id keeps the
+        // relation graph consistent when the same series has a
+        // different MAL id in different relation trees.
+        assert_eq!(
+            provider_relation_cover_key(10, 20, Some(30)),
+            "provider-al-10-relation-mal-30-cover"
+        );
+    }
+}

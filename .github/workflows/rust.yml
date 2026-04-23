@@ -25,11 +25,21 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # `--features test-support` enables the `ryokan::test_support`
+        # re-export that integration tests under `tests/` depend on.
+        # Without the flag those tests silently skip (via
+        # `required-features` in Cargo.toml) and clippy wouldn't touch
+        # them — running with the flag means the lint pass covers both
+        # unit and integration targets.
+        run: cargo clippy --workspace --all-targets --features test-support -- -D warnings
       - name: Build
         run: cargo build --workspace --locked --verbose
       - name: Test
-        run: cargo test --workspace --locked --verbose
+        # Same reason as clippy: flip on `test-support` so integration
+        # tests under `tests/` actually execute. Release builds and
+        # Docker images deliberately leave the feature off so the test
+        # helpers don't ship to production.
+        run: cargo test --workspace --locked --features test-support --verbose
 
   msrv:
     # Verify the crate still builds on the declared MSRV. Cargo.toml's

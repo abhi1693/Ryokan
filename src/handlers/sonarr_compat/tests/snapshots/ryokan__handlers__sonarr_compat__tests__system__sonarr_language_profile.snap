@@ -1,0 +1,10 @@
+---
+source: src/handlers/sonarr_compat/tests/system.rs
+expression: body
+---
+[
+  {
+    "id": 1,
+    "name": "English"
+  }
+]

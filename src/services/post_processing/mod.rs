@@ -17,7 +17,7 @@ use artwork_copy::{copy_series_and_season_poster, copy_series_banner_and_backdro
 use state::fallback_ep_offset;
 pub use state::{grab_is_stale, scan_library_for_unclassified, scan_series_for_unclassified};
 
-static POST_PROC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+pub(crate) static POST_PROC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 // Completion and error detection goes through the trait's normalized
@@ -29,7 +29,7 @@ static POST_PROC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
 // string set, which silently skipped Deluge's completed torrents
 // forever (#63 Phase 2 regression).
 
-fn is_video_file(name: &str) -> bool {
+pub(crate) fn is_video_file(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(
         Path::new(&lower)
@@ -41,7 +41,7 @@ fn is_video_file(name: &str) -> bool {
 }
 
 /// Replace filesystem-unsafe characters in a filename component.
-fn sanitize_filename(s: &str) -> String {
+pub(crate) fn sanitize_filename(s: &str) -> String {
     media::sanitize_folder_name(s)
 }
 
@@ -51,7 +51,7 @@ fn sanitize_filename(s: &str) -> String {
 /// episode cross-device copy can easily be 1–4 GB and blocks for
 /// multiple seconds; doing that on a tokio worker starves the RSS sync,
 /// HTTP handlers, and other background tasks sharing the same runtime.
-async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::Result<()> {
     let mode = mode.to_string();
     let src = src.to_path_buf();
     let dst = dst.to_path_buf();
@@ -1433,3 +1433,6 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

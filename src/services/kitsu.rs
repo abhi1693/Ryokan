@@ -601,3 +601,221 @@ pub async fn fetch_episode_titles_fallback(
     let _ = cache_kitsu_episodes(db, candidate.id, &out).await;
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_candidate(
+        canonical: &str,
+        titles: &[(&str, &str)],
+        start_date: Option<&str>,
+        episode_count: Option<i32>,
+        subtype: &str,
+    ) -> Candidate {
+        Candidate {
+            id: 42,
+            canonical_title: canonical.to_string(),
+            titles: titles
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            abbreviated_titles: vec![],
+            synopsis: String::new(),
+            poster_image: ImageSet::default(),
+            cover_image: ImageSet::default(),
+            subtype: subtype.to_string(),
+            status: "finished".to_string(),
+            episode_count,
+            episode_length: None,
+            start_date: start_date.map(String::from),
+            end_date: None,
+            average_rating: None,
+        }
+    }
+
+    // ─── first_image ─────────────────────────────────────────────
+
+    #[test]
+    fn first_image_prefers_original_then_large_then_medium_etc() {
+        let all_filled = ImageSet {
+            tiny: Some("tiny.jpg".into()),
+            small: Some("small.jpg".into()),
+            medium: Some("medium.jpg".into()),
+            large: Some("large.jpg".into()),
+            original: Some("original.jpg".into()),
+        };
+        assert_eq!(first_image(&all_filled), "original.jpg");
+    }
+
+    #[test]
+    fn first_image_falls_back_through_size_chain() {
+        let no_original = ImageSet {
+            tiny: Some("tiny.jpg".into()),
+            small: None,
+            medium: None,
+            large: Some("large.jpg".into()),
+            original: None,
+        };
+        assert_eq!(first_image(&no_original), "large.jpg");
+    }
+
+    #[test]
+    fn first_image_returns_empty_when_all_sizes_missing() {
+        assert_eq!(first_image(&ImageSet::default()), "");
+    }
+
+    // ─── normalize_title ─────────────────────────────────────────
+
+    #[test]
+    fn normalize_title_lowercases_and_strips_punctuation() {
+        // Kitsu's title matching has to survive apostrophes, colons,
+        // and smart-quote variants — all replaced with a space so
+        // downstream token equality matches across punctuation
+        // styles.
+        assert_eq!(normalize_title("Your Name."), "your name");
+        assert_eq!(
+            normalize_title("A.I.C.O.: Incarnation"),
+            "a i c o incarnation"
+        );
+    }
+
+    #[test]
+    fn normalize_title_collapses_multiple_spaces_into_one() {
+        assert_eq!(normalize_title("foo   bar"), "foo bar");
+    }
+
+    #[test]
+    fn normalize_title_replaces_smart_quote_apostrophe() {
+        // Provider responses mix `'` and `’` (U+2019). Both must
+        // normalize to the same token or otherwise-identical titles
+        // won't match.
+        assert_eq!(normalize_title("don't"), normalize_title("don’t"));
+    }
+
+    #[test]
+    fn normalize_title_empty_input_returns_empty() {
+        assert_eq!(normalize_title(""), "");
+        assert_eq!(normalize_title("   "), "");
+    }
+
+    // ─── nonempty ────────────────────────────────────────────────
+
+    #[test]
+    fn nonempty_drops_empty_and_whitespace_entries() {
+        let inputs = vec!["foo".into(), "  ".into(), String::new(), "bar".into()];
+        assert_eq!(nonempty(inputs), vec!["foo".to_string(), "bar".to_string()]);
+    }
+
+    #[test]
+    fn nonempty_dedupes_by_normalized_form() {
+        // "Attack on Titan" and "Attack on Titan!" normalize to the
+        // same token — the second one should drop.
+        let inputs = vec!["Attack on Titan".into(), "Attack on Titan!".into()];
+        let result = nonempty(inputs);
+        assert_eq!(result.len(), 1);
+        // First wins — the exclamation-point variant is the dup.
+        assert_eq!(result[0], "Attack on Titan");
+    }
+
+    // ─── candidate_titles ────────────────────────────────────────
+
+    #[test]
+    fn candidate_titles_combines_canonical_and_localized_variants() {
+        let c = test_candidate(
+            "Canon",
+            &[("en", "English"), ("ja_jp", "日本語")],
+            None,
+            None,
+            "TV",
+        );
+        let titles = candidate_titles(&c);
+        assert!(titles.contains(&"Canon".to_string()));
+        assert!(titles.contains(&"English".to_string()));
+        assert!(titles.contains(&"日本語".to_string()));
+    }
+
+    // ─── parse_year ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_year_extracts_leading_four_digits() {
+        assert_eq!(parse_year(Some("2024-03-15")), Some(2024));
+    }
+
+    #[test]
+    fn parse_year_returns_none_on_missing_or_malformed() {
+        assert_eq!(parse_year(None), None);
+        assert_eq!(parse_year(Some("")), None);
+        assert_eq!(parse_year(Some("bad-date")), None);
+    }
+
+    // ─── score_candidate ─────────────────────────────────────────
+
+    #[test]
+    fn score_candidate_awards_exact_title_match_highest() {
+        // Exact-token match is worth 220 — substantially more than a
+        // partial-contains match (120). If the two ever collapse to
+        // similar weights, the wrong candidate wins on ambiguous
+        // series titles.
+        let c = test_candidate("Your Name", &[], None, None, "TV");
+        let wanted = vec!["Your Name".to_string()];
+        let score = score_candidate(&c, &wanted, None, None);
+        assert!(
+            score >= 220,
+            "exact-match score should dominate: got {score}"
+        );
+    }
+
+    #[test]
+    fn score_candidate_awards_year_bonus_only_when_matching() {
+        let c = test_candidate("Show", &[], Some("2024-01-01"), None, "TV");
+        let wanted = vec!["Show".to_string()];
+        let match_score = score_candidate(&c, &wanted, Some(2024), None);
+        let off_by_one_score = score_candidate(&c, &wanted, Some(2023), None);
+        let far_off_score = score_candidate(&c, &wanted, Some(2000), None);
+        assert!(
+            match_score > off_by_one_score,
+            "exact year should beat off-by-one: {match_score} vs {off_by_one_score}"
+        );
+        assert!(
+            off_by_one_score > far_off_score,
+            "off-by-one year should beat far-off: {off_by_one_score} vs {far_off_score}"
+        );
+    }
+
+    #[test]
+    fn score_candidate_tv_subtype_gets_bonus() {
+        let tv = test_candidate("Show", &[], None, None, "TV");
+        let ova = test_candidate("Show", &[], None, None, "OVA");
+        let wanted = vec!["Show".to_string()];
+        assert!(
+            score_candidate(&tv, &wanted, None, None) > score_candidate(&ova, &wanted, None, None)
+        );
+    }
+
+    #[test]
+    fn score_candidate_ignores_empty_wanted_title() {
+        // Empty wanted entry must not blow up or score weirdly —
+        // the normalized-empty guard in the impl returns an empty
+        // string and the per-candidate loop skips it.
+        let c = test_candidate("Show", &[], None, None, "TV");
+        let wanted = vec!["".to_string(), "   ".to_string()];
+        let score = score_candidate(&c, &wanted, None, None);
+        // Score still picks up the TV-subtype bonus but no title match.
+        assert_eq!(score, 10);
+    }
+
+    #[test]
+    fn score_candidate_episode_count_delta_tiers() {
+        // Bands per impl: exact=40, ±1-2=18, ±3-6=8, else=0.
+        let c = test_candidate("Show", &[], None, Some(12), "TV");
+        let wanted = vec!["Show".to_string()];
+        let exact = score_candidate(&c, &wanted, None, Some(12));
+        let near = score_candidate(&c, &wanted, None, Some(13));
+        let mid = score_candidate(&c, &wanted, None, Some(18));
+        let far = score_candidate(&c, &wanted, None, Some(50));
+        assert!(exact > near);
+        assert!(near > mid);
+        assert!(mid > far);
+    }
+}
