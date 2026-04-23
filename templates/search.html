@@ -32,23 +32,43 @@
         </div>
     {% else %}
         <p class="results-count" id="results-count">{{ results.len() }} results</p>
-        <table class="results-table">
+        <table class="results-table" id="results-table">
             <thead>
                 <tr>
-                    <th class="col-score">Score</th>
-                    <th class="col-name">Name</th>
-                    <th class="col-size">Size</th>
-                    <th class="col-seed">S</th>
-                    <th class="col-leech">L</th>
-                    <th class="col-dl">D</th>
+                    <th class="col-score sortable sort-desc" data-sort-key="score">Score</th>
+                    <th class="col-name sortable" data-sort-key="name">Name</th>
+                    <th class="col-size sortable" data-sort-key="size">Size</th>
+                    <th class="col-date sortable" data-sort-key="date">Date</th>
+                    <th class="col-seed sortable" data-sort-key="seeders">S</th>
+                    <th class="col-leech sortable" data-sort-key="leechers">L</th>
+                    <th class="col-dl sortable" data-sort-key="downloads">D</th>
                     <th class="col-actions"></th>
                 </tr>
             </thead>
             <tbody id="results-body">
                 {% for r in results %}
-                <tr class="{% if r.is_batch && r.is_trusted %}is-batch is-trusted{% else if r.is_batch %}is-batch{% else if r.is_trusted %}is-trusted{% endif %}">
+                <tr class="{% if r.is_batch && r.is_trusted %}is-batch is-trusted{% else if r.is_batch %}is-batch{% else if r.is_trusted %}is-trusted{% endif %}" data-score="{{ r.score }}" data-name="{{ r.title }}" data-size="{{ r.size_bytes }}" data-date="{{ r.upload_date }}" data-seeders="{{ r.seeders }}" data-leechers="{{ r.leechers }}" data-downloads="{{ r.downloads }}">
                     <td class="col-score">
-                        <span class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}">{{ r.score }}</span>
+                        <details class="score-details" name="score-breakdown">
+                            <summary class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}" title="Click to see breakdown">{{ r.score }}</summary>
+                            <div class="score-components">
+                                <div class="score-components-title">Base score breakdown</div>
+                                {% if r.score_breakdown.is_empty() %}
+                                <div class="form-hint">No components fired (score stayed at 0).</div>
+                                {% else %}
+                                <ul>
+                                    {% for c in r.score_breakdown %}
+                                    <li>
+                                        <span class="sc-delta {% if c.delta > 0 %}sc-delta-pos{% else %}sc-delta-neg{% endif %}">{% if c.delta > 0 %}+{% endif %}{{ c.delta }}</span>
+                                        <span class="sc-label">{{ c.label }}</span>
+                                        {% if let Some(detail) = c.detail %}<span class="sc-detail">{{ detail }}</span>{% endif %}
+                                    </li>
+                                    {% endfor %}
+                                </ul>
+                                <div class="form-hint">CF contributions shown here are evaluated against the release's classification alone. SeaDex-based CFs need a tracked AniList series to resolve, so they never fire on the manual search page — open the series page's interactive search for the full breakdown.</div>
+                                {% endif %}
+                            </div>
+                        </details>
                     </td>
                     <td class="col-name">
                         <a href="{{ r.link }}" target="_blank" rel="noopener">{{ r.title }}</a>
@@ -60,6 +80,7 @@
                         </div>
                     </td>
                     <td class="col-size">{{ r.size }}</td>
+                    <td class="col-date">{% if !r.upload_date.is_empty() %}<span data-ts="{{ r.upload_date }}">{{ r.upload_date }}</span>{% else %}—{% endif %}</td>
                     <td class="col-seed"><span class="seed-count">{{ r.seeders }}</span></td>
                     <td class="col-leech"><span class="leech-count">{{ r.leechers }}</span></td>
                     <td class="col-dl"><span class="dl-count">{{ r.downloads }}</span></td>

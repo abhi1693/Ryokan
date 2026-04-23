@@ -445,6 +445,14 @@ async fn import_torrent(
         std::collections::BTreeMap::new();
     let mut imported_count = 0_usize;
 
+    // Old grab ids we've marked as replaced during this import pass,
+    // paired with the new `grab.id` that superseded them. Deduped via
+    // HashSet so a batch that covers 12 episodes doesn't issue 12
+    // identical UPDATEs against the same old grab row. Flushed once
+    // after the file loop.
+    let mut grabs_to_mark_replaced: std::collections::HashSet<i64> =
+        std::collections::HashSet::new();
+
     for (file_idx, file) in &video_files {
         // Route this file: prefer the routes table (Phase 2 batch
         // auto-expansion), fall back to `grab.series_id` for legacy
@@ -660,9 +668,44 @@ async fn import_torrent(
                     .await
                     .unwrap_or_default();
 
+            // No matching prior grab row but disk has a file for this
+            // SxxExx slot — treat it as an **orphan upgrade**. The disk
+            // state is ground truth: a file exists, the user is grabbing
+            // something new, they expect the new file to replace what's
+            // there. Covers three historical shapes where the DB row
+            // doesn't line up:
+            //   1. Legacy batch grabs whose `episode_numbers` was
+            //      mis-parsed from the release title before the current
+            //      batch_episode_numbers logic existed (e.g. Kaizoku
+            //      Season 3 packs stored as [3] instead of [1..12] —
+            //      `find_imported_for_episode(series, 1)` misses them).
+            //   2. Files manually dropped into the library from outside
+            //      Ryokan (pre-existing rips, migration from another
+            //      PVR) — no grab row ever existed.
+            //   3. The original grab's row is in state='pending'
+            //      (torrent stuck, crash mid-import) — not 'imported',
+            //      so find_imported skips it.
+            // The `mark_replaced` step is skipped when old_grabs is
+            // empty — the new row simply replaces on disk without a
+            // chain pointer. The replacing grab still shows up as
+            // 'imported' in history; there's just no "replaced by"
+            // backlink because nothing in the DB was the predecessor.
             if old_grabs.is_empty() {
-                // No older import record — likely a re-run of the same grab. Skip.
-                continue;
+                logger::info(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Orphan upgrade: '{}' replacing S{:02}E{:02} file on disk (no prior imported grab)",
+                        filename_only, season, ep_num
+                    ),
+                    &format!(
+                        "series_id={}, existing_files={}, grab_id={}",
+                        target_series_id,
+                        existing_for_ep.len(),
+                        grab.id
+                    ),
+                )
+                .await;
             }
 
             // Remove old file(s) and their NFOs to make way for the upgrade.
@@ -707,12 +750,40 @@ async fn import_torrent(
             // upgrade with many old grabs the per-iteration lock acquire
             // was serializing against any other task touching
             // `state.download_client`.
+            //
+            // `mark_replaced` (not `mark_removed`) so the Downloads
+            // history keeps the upgrade chain: state='replaced' with
+            // `replaced_by_grab_id = grab.id`. Without this distinction
+            // users who got their existing SubsPlease episodes silently
+            // swapped out by a Kaizoku batch had no way to tell the
+            // upgrade actually happened — old rows looked identical to
+            // user-cancelled grabs.
+            // `client.delete` still runs inside the per-episode loop
+            // because it's cheap-ish (one RPC per torrent) and the old
+            // hash may repeat across per-episode finds — but qBit's
+            // delete is idempotent on an already-removed hash, so the
+            // repeat is harmless. The expensive SQL UPDATE for
+            // `mark_replaced` is deferred to a post-loop flush so a
+            // batch grab that covers 12 episodes doesn't UPDATE the
+            // same old grab 12 times.
             for old_grab in &old_grabs {
                 if !old_grab.hash.is_empty() {
                     let _ = client.delete(&old_grab.hash, true).await;
                 }
-                let _ = grabbed_torrents::mark_removed(&state.db, old_grab.id).await;
+                grabs_to_mark_replaced.insert(old_grab.id);
             }
+
+            // Per-episode history counterpart: flip the old grab's
+            // episode_grab_history row for this specific ep from
+            // 'completed' to 'replaced' so the episode detail modal
+            // mirrors what the Downloads tab shows. Without this the
+            // old Kaizoku row and the new SubsPlease row both read
+            // 'completed' in grab history, hiding the upgrade chain.
+            // Stays inside the loop since episode_grab_history is
+            // keyed on (series_id, episode_number) — one UPDATE per
+            // episode is correct, not redundant.
+            let _ =
+                episode_tags::mark_grab_history_replaced(&state.db, target_series_id, ep_num).await;
         }
 
         match do_file_op(&cfg.post_processing_mode, &src, &dest_video).await {
@@ -888,6 +959,23 @@ async fn import_torrent(
 
     if imported_count == 0 {
         return Ok(false);
+    }
+
+    // Flush the `grabbed_torrents.state = 'replaced'` updates collected
+    // during the file loop. One UPDATE per distinct old grab instead
+    // of one-per-episode so a batch that covered 12 episodes doesn't
+    // run 12 identical write-identical-row UPDATEs.
+    //
+    // Deliberately placed AFTER the `imported_count == 0` early return
+    // above: if zero files actually landed (cross-fs copy failure, disk
+    // full, permission denied across the whole set), we don't flip old
+    // grabs to 'replaced' — they stay 'imported' and the upgrade chain
+    // isn't misrepresented. A pre-earlier version ran the marks inline
+    // with each file op, which would flip old grabs even on a total
+    // failure. Net effect of this placement: orphaned-replace rows
+    // can't appear when the replacement never materialized.
+    for old_grab_id in &grabs_to_mark_replaced {
+        let _ = grabbed_torrents::mark_replaced(&state.db, *old_grab_id, grab.id).await;
     }
 
     // Series-level artifacts (tvshow.nfo + poster) run once per unique

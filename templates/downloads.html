@@ -39,7 +39,7 @@
         </tr></thead><tbody>
         {% for t in queue %}
         <tr data-hash="{{ t.hash }}">
-            <td><div class="dl-torrent-name">{{ t.name }}</div></td>
+            <td><div class="dl-torrent-name" title="{{ t.name }}">{{ t.name }}</div></td>
             <td>{{ t.size_display }}</td>
             <td><div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:{{ t.progress_pct }}%"></div></div><span class="dl-progress-text">{{ t.progress_pct }}%</span></div></td>
             <td>{{ t.speed_display }}</td>
@@ -72,6 +72,7 @@
             <option value="all">All states</option>
             <option value="pending">Pending</option>
             <option value="imported">Imported</option>
+            <option value="replaced">Replaced (upgraded)</option>
             <option value="failed">Failed</option>
             <option value="removed">Removed</option>
         </select>
@@ -91,14 +92,23 @@
                 {% for entry in history %}
                 <tr data-state="{{ entry.state }}" data-text="{{ entry.series_title }} {{ entry.torrent_name }}">
                     <td><span data-ts="{{ entry.grabbed_at }}">{{ entry.grabbed_at }}</span></td>
-                    <td>{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
-                    <td><div class="dl-torrent-name">{{ entry.torrent_name }}</div></td>
+                    <td title="{{ entry.series_title }}">{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
+                    <td>
+                        <div class="dl-torrent-name" title="{{ entry.torrent_name }}">{{ entry.torrent_name }}</div>
+                        {% if entry.state == "replaced" && !entry.replaced_by_torrent_name.is_empty() %}
+                        <div class="dl-replaced-note" title="Superseded by upgrade: {{ entry.replaced_by_torrent_name }}">↪ replaced by <span class="dl-replaced-target">{{ entry.replaced_by_torrent_name }}</span></div>
+                        {% else if entry.replaces_count > 0 %}
+                        <div class="dl-replaced-note dl-replaced-note-upgrade" title="This grab superseded {{ entry.replaces_count }} earlier grab{% if entry.replaces_count != 1 %}s{% endif %} for the same episode(s)">↑ upgraded {{ entry.replaces_count }} earlier grab{% if entry.replaces_count != 1 %}s{% endif %}</div>
+                        {% endif %}
+                    </td>
                     <td>{% for ep in entry.episode_numbers %}{% if !loop.first %}, {% endif %}{{ ep }}{% endfor %}</td>
                     <td>
                         {% if entry.state == "imported" %}
                         <span class="log-badge log-badge-info">imported</span>
                         {% else if entry.state == "pending" %}
                         <span class="log-badge log-badge-debug">pending</span>
+                        {% else if entry.state == "replaced" %}
+                        <span class="log-badge log-badge-warn">replaced</span>
                         {% else if entry.state == "failed" %}
                         <span class="log-badge log-badge-error">failed</span>
                         {% else if entry.state == "removed" %}
@@ -135,8 +145,8 @@
                 {% for entry in blocklist %}
                 <tr id="blocklist-row-{{ entry.id }}">
                     <td><span data-ts="{{ entry.grabbed_at }}">{{ entry.grabbed_at }}</span></td>
-                    <td>{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
-                    <td><div class="dl-torrent-name">{{ entry.torrent_name }}</div></td>
+                    <td title="{{ entry.series_title }}">{% if entry.anilist_id > 0 %}<a href="/series/{{ entry.anilist_id }}">{{ entry.series_title }}</a>{% else %}{{ entry.series_title }}{% endif %}</td>
+                    <td><div class="dl-torrent-name" title="{{ entry.torrent_name }}">{{ entry.torrent_name }}</div></td>
                     <td>{% for ep in entry.episode_numbers %}{% if !loop.first %}, {% endif %}{{ ep }}{% endfor %}</td>
                     <td>
                         <button class="btn btn-ghost btn-sm" onclick="removeFromBlocklist({{ entry.id }})" title="Remove from blocklist">

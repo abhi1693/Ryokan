@@ -78,6 +78,11 @@ pub struct Config {
     pub post_processing_enabled: bool,
     pub post_processing_mode: String,
     pub auto_grab_on_add: bool,
+    /// #1.3.0 UX pass — when true, any update to a series's
+    /// monitoring mode triggers an auto-search over the newly-
+    /// monitored-and-airable episodes. Default off to preserve
+    /// existing behavior.
+    pub search_on_monitoring_change: bool,
     pub prefer_subs: bool,
     pub allow_non_english: bool,
     pub sonarr_enabled: bool,
@@ -155,6 +160,7 @@ impl Default for Config {
             post_processing_enabled: false,
             post_processing_mode: "hardlink".to_string(),
             auto_grab_on_add: true,
+            search_on_monitoring_change: false,
             prefer_subs: true,
             allow_non_english: false,
             sonarr_enabled: false,
@@ -212,6 +218,7 @@ struct ConfigRow {
     post_processing_enabled: i64,
     post_processing_mode: String,
     auto_grab_on_add: i64,
+    search_on_monitoring_change: i64,
     prefer_subs: i64,
     allow_non_english: i64,
     sonarr_enabled: i64,
@@ -228,7 +235,7 @@ struct ConfigRow {
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader FROM config WHERE id = 1",
+        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -274,6 +281,7 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         post_processing_enabled: r.post_processing_enabled != 0,
         post_processing_mode: r.post_processing_mode,
         auto_grab_on_add: r.auto_grab_on_add != 0,
+        search_on_monitoring_change: r.search_on_monitoring_change != 0,
         prefer_subs: r.prefer_subs != 0,
         allow_non_english: r.allow_non_english != 0,
         sonarr_enabled: r.sonarr_enabled != 0,
@@ -292,8 +300,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             active_client = excluded.active_client,
             qbit_url = excluded.qbit_url,
@@ -335,6 +343,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             post_processing_enabled = excluded.post_processing_enabled,
             post_processing_mode = excluded.post_processing_mode,
             auto_grab_on_add = excluded.auto_grab_on_add,
+            search_on_monitoring_change = excluded.search_on_monitoring_change,
             prefer_subs = excluded.prefer_subs,
             allow_non_english = excluded.allow_non_english,
             sonarr_enabled = excluded.sonarr_enabled,
@@ -388,6 +397,11 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(if config.post_processing_enabled { 1_i64 } else { 0_i64 })
     .bind(&config.post_processing_mode)
     .bind(if config.auto_grab_on_add { 1_i64 } else { 0_i64 })
+    .bind(if config.search_on_monitoring_change {
+        1_i64
+    } else {
+        0_i64
+    })
     .bind(if config.prefer_subs { 1_i64 } else { 0_i64 })
     .bind(if config.allow_non_english { 1_i64 } else { 0_i64 })
     .bind(if config.sonarr_enabled { 1_i64 } else { 0_i64 })

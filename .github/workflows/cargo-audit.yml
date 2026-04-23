@@ -11,6 +11,18 @@ on:
   schedule:
     - cron: "0 9 * * 1"
 
+# `rustsec/audit-check@v2` posts advisory results via the Checks API
+# and opens issue comments on the PR it's running against. Without
+# these write scopes the action still runs the audit, but the final
+# "create check run" call fails with "Resource not accessible by
+# integration" and the step errors out. Granted at the workflow level
+# so scheduled / main-push runs can also post through.
+permissions:
+  contents: read
+  checks: write
+  issues: write
+  pull-requests: write
+
 jobs:
   audit:
     runs-on: ubuntu-latest

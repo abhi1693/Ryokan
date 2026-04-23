@@ -202,6 +202,7 @@ function renderGrabHistory(entries, epNum) {
     for (const e of entries) {
         const stateClass = e.state === 'failed' ? 'grab-state-failed'
             : e.state === 'removed' ? 'grab-state-removed'
+            : e.state === 'replaced' ? 'grab-state-replaced'
             : e.state === 'completed' ? 'grab-state-completed'
             : 'grab-state-grabbed';
         // Only active 'grabbed' rows can be manually failed — once
@@ -483,6 +484,146 @@ function renderPeers(seeders, leechers) {
     return `<span class="seed-count">${s}</span><span class="peer-sep">/</span><span class="leech-count">${l}</span>`;
 }
 
+// #1.3.0 — score breakdown expander for the interactive search tables.
+// Parallel to the server-rendered <details> in templates/search.html, so
+// the UX is identical between the generic Nyaa search and the per-series
+// interactive picker. Panel content lives in a named accordion group so
+// opening a second breakdown auto-closes the first.
+function renderScoreDetails(r, scoreClass) {
+    const parts = r.score_breakdown || [];
+    let inner;
+    if (parts.length === 0) {
+        inner = `<div class="form-hint">No components fired.</div>`;
+    } else {
+        const lis = parts.map(function (c) {
+            const deltaClass = c.delta > 0 ? 'sc-delta-pos' : 'sc-delta-neg';
+            const sign = c.delta > 0 ? '+' : '';
+            const detail = c.detail
+                ? `<span class="sc-detail">${escHtml(c.detail)}</span>`
+                : '';
+            return `<li>
+                <span class="sc-delta ${deltaClass}">${sign}${c.delta}</span>
+                <span class="sc-label">${escHtml(c.label)}</span>
+                ${detail}
+            </li>`;
+        }).join('');
+        inner = `<ul>${lis}</ul>`;
+    }
+    return `<details class="score-details" name="isearch-score-breakdown">
+        <summary class="score-badge ${scoreClass}" title="Click to see breakdown">${r.score}</summary>
+        <div class="score-components">
+            <div class="score-components-title">Score breakdown</div>
+            ${inner}
+        </div>
+    </details>`;
+}
+
+// Close any open <details class="score-details"> when the user clicks
+// outside it or presses Escape. Registered once at module load; applies
+// to both the interactive-search table and the batch table since they
+// share the same markup shape.
+//
+// Also rewrites the panel's positioning to `fixed` on open when the
+// expander lives inside an overflow-clipping ancestor (the interactive-
+// search modal has `overflow:hidden` on `.modal` and `overflow-y:auto`
+// on `.modal-body`, which would otherwise clip the absolutely-
+// positioned `.score-components` panel out of sight). Without this the
+// breakdown silently opened offscreen and looked like nothing happened
+// when you clicked the score badge.
+(function () {
+    function closeAllOpenBreakdowns(except) {
+        document.querySelectorAll('details.score-details[open]').forEach(function (d) {
+            if (d !== except) d.removeAttribute('open');
+            // Clear any inline fixed-position styles we applied on open.
+            const panel = d.querySelector('.score-components');
+            if (panel && d !== except) resetPanelPosition(panel);
+        });
+    }
+    function resetPanelPosition(panel) {
+        panel.style.position = '';
+        panel.style.top = '';
+        panel.style.left = '';
+        panel.style.width = '';
+        panel.style.minWidth = '';
+        panel.style.maxWidth = '';
+        panel.style.maxHeight = '';
+        panel.style.overflowY = '';
+    }
+    function positionPanelIfClipped(details) {
+        const panel = details.querySelector('.score-components');
+        if (!panel) return;
+        // Only lift to fixed-positioning when the details is inside an
+        // overflow-clipping ancestor. Outside a modal the regular CSS
+        // `position:absolute` works fine.
+        let clipped = false;
+        let node = details.parentElement;
+        while (node && node !== document.body) {
+            const cs = window.getComputedStyle(node);
+            if (cs.overflow !== 'visible' || cs.overflowX !== 'visible' || cs.overflowY !== 'visible') {
+                clipped = true;
+                break;
+            }
+            node = node.parentElement;
+        }
+        if (!clipped) {
+            resetPanelPosition(panel);
+            return;
+        }
+        // Scrolling-only strategy — no flip-above fallback. The panel
+        // always opens below the badge; vertical fit is handled by
+        // `max-height` + internal scroll, horizontal fit by clamping
+        // `left` and capping width to the viewport. Works the same on
+        // desktop and mobile: narrow viewports just get a narrower
+        // panel with more internal scroll.
+        const GAP = 6;
+        const MARGIN = 8;
+        const rect = details.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        const top = rect.bottom + GAP;
+        const maxHeight = Math.max(120, vh - top - MARGIN);
+        const maxWidth = Math.max(240, vw - 2 * MARGIN);
+        // Clamp left edge to stay within the viewport; on phones the
+        // panel's full width often exceeds badge.left + panel.width,
+        // so also cap the width when it would otherwise overflow.
+        let left = rect.left;
+        const desiredWidth = Math.min(360, maxWidth);
+        if (left + desiredWidth + MARGIN > vw) {
+            left = Math.max(MARGIN, vw - desiredWidth - MARGIN);
+        }
+        if (left < MARGIN) left = MARGIN;
+
+        panel.style.position = 'fixed';
+        panel.style.top = top + 'px';
+        panel.style.left = left + 'px';
+        panel.style.minWidth = '240px';
+        panel.style.maxWidth = maxWidth + 'px';
+        panel.style.maxHeight = maxHeight + 'px';
+        panel.style.overflowY = 'auto';
+    }
+    document.addEventListener('click', function (evt) {
+        const inside = evt.target.closest('details.score-details');
+        closeAllOpenBreakdowns(inside);
+    });
+    document.addEventListener('keydown', function (evt) {
+        if (evt.key === 'Escape') {
+            closeAllOpenBreakdowns(null);
+        }
+    });
+    // `toggle` doesn't bubble, so we capture it at the document level.
+    document.addEventListener('toggle', function (evt) {
+        const d = evt.target;
+        if (!(d instanceof HTMLDetailsElement)) return;
+        if (!d.classList.contains('score-details')) return;
+        if (d.open) positionPanelIfClipped(d);
+        else {
+            const panel = d.querySelector('.score-components');
+            if (panel) resetPanelPosition(panel);
+        }
+    }, true);
+})();
+
 function searchBatchReleases(btn) {
     setBusyButton(btn, true, 'Searching…');
     const pid = window.ryokanNewProgressId();
@@ -555,8 +696,8 @@ function renderInteractiveResults(results, epNum) {
         const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
         const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
         html += `<tr>
-            <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
-            <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
+            <td class="col-score">${renderScoreDetails(r, scoreClass)}</td>
+            <td><a class="isearch-release-link" href="${escHtml(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
             <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
@@ -666,8 +807,8 @@ function renderInteractiveBatchResults(results) {
         const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
         const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
         html += `<tr>
-            <td class="col-score"><span class="score-badge ${scoreClass}">${r.score}</span></td>
-            <td><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
+            <td class="col-score">${renderScoreDetails(r, scoreClass)}</td>
+            <td><a class="isearch-release-link" href="${escHtml(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
             <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>

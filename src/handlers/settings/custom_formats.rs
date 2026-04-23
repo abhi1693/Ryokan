@@ -1304,6 +1304,8 @@ pub async fn settings_custom_formats_test(
         is_trusted: false,
         score: 0,
         info_hash: String::new(),
+        score_breakdown: Vec::new(),
+        upload_date: String::new(),
     };
     let seadex: std::collections::HashSet<String> = std::collections::HashSet::new();
     let ctx = EvalContext {

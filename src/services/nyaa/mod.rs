@@ -60,6 +60,21 @@ pub struct SearchResult {
     pub is_trusted: bool,
     pub score: i32,
     pub info_hash: String,
+    /// #1.3.0 — per-component breakdown of the base score (what rules
+    /// fired, with what delta and a human-readable detail). Populated
+    /// by the search scraper alongside `score` so the UI can render a
+    /// "why this score" expansion on search results. Note this covers
+    /// only the base scoring rules; Custom Format contributions are
+    /// tracked separately at the auto-search site.
+    #[serde(default)]
+    pub score_breakdown: Vec<crate::services::scoring::ScoreComponent>,
+    /// #1.3.0 — upload date as Nyaa renders it in the table ("YYYY-
+    /// MM-DD HH:MM" UTC). Empty string when the column couldn't be
+    /// parsed (e.g. for releases fetched via the view page rather
+    /// than the listing). Surfaced to the UI so the search-results
+    /// table matches Nyaa's own listing shape.
+    #[serde(default)]
+    pub upload_date: String,
 }
 
 #[derive(Clone)]

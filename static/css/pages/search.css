@@ -10,7 +10,15 @@
 
 .results-table {
     width: 100%;
-    border-collapse: collapse;
+    /* `separate` (not `collapse`) is load-bearing for the sticky header
+       below: with collapsed borders the browser can't apply
+       `position: sticky` to <th> because collapsed borders are a shared
+       resource between adjacent cells, so the th is layout-bound to
+       the row beneath it. `border-spacing: 0` keeps the visual
+       identical to the old collapsed layout; the row-separator lines
+       come from `td { border-bottom }` below, same as before. */
+    border-collapse: separate;
+    border-spacing: 0;
     font-size: 13px;
 }
 
@@ -205,5 +213,79 @@
         flex: 1 1 auto;
         min-width: 0;
     }
+}
+
+/* Keep the results-table column alignment override here — the generic
+   expander styles live in badges.css (shared with the series page's
+   interactive search), but the table td vertical-align override is
+   specific to this page's table layout. Badge needs to sit at the
+   same visual height as the single-line metadata columns; without
+   this override it pins to the top of the cell in rows where the
+   Name column wraps. */
+.results-table .col-score {
+    vertical-align: middle;
+}
+
+/* Sticky results-table header (#6c). Mirror the interactive-search
+   table on the series page: the column headers stay pinned as the
+   result list scrolls, so score/name/size/etc. labels remain visible.
+   `bg-elevated` background matches the interactive picker, so users
+   learn one sticky-row pattern across both surfaces. Only applies on
+   desktop — on mobile the table is replaced by `.results-cards` so
+   there's no header row to pin. */
+@media (min-width: 641px) {
+    .results-table thead th {
+        position: sticky;
+        /* The top nav is `position: sticky; top: 0; height: 56px` on
+           desktop (topbar.css), so our header must pin BELOW it or it
+           vanishes behind the nav as you scroll. Matching 56px keeps
+           the header edge-to-edge with the nav bottom. */
+        top: 56px;
+        z-index: 15;
+        background: var(--bg-elevated);
+    }
+}
+
+/* Sortable column headers (#6a). Click a header to sort asc, click
+   again to flip desc. Arrows rendered via pseudo-elements so they
+   don't steal click targets from the label.
+   `white-space: nowrap` is load-bearing: without it, the pseudo-
+   element arrow on narrow columns like .col-score (55px) wrapped to
+   a second line below the text, which inflated the whole column's
+   <th> height and visually shifted the cells in that column down
+   relative to the other columns — read as "the score badge is
+   higher than the rest of the row." Keeping the label + arrow on
+   one line keeps every column's header the same height. */
+.results-table .sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+.results-table .sortable::after {
+    content: "";
+    display: inline-block;
+    width: 0;
+    height: 0;
+    margin-left: 4px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    opacity: 0.3;
+    vertical-align: middle;
+}
+.results-table .sortable.sort-asc::after {
+    border-bottom: 5px solid var(--text);
+    opacity: 1;
+}
+.results-table .sortable.sort-desc::after {
+    border-top: 5px solid var(--text);
+    opacity: 1;
+}
+.results-table .sortable:hover { color: var(--accent); }
+.col-date {
+    width: 96px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: nowrap;
 }
 

@@ -914,6 +914,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // search_on_monitoring_change (#1.3.0 UX pass): when true, any
+    // update to a series's monitoring mode triggers a background
+    // auto-search over the newly-monitored-and-airable episodes.
+    // Default off to preserve existing behavior on upgrade.
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN search_on_monitoring_change INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     // prefer_subs: when true (default), penalize dual audio / dub releases in scoring.
     sqlx::query("ALTER TABLE config ADD COLUMN prefer_subs INTEGER NOT NULL DEFAULT 1")
         .execute(db)
@@ -1093,6 +1104,21 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await
     .ok();
+
+    // `replaced_by_grab_id` — nullable back-pointer set when an
+    // upgrade-driven import supersedes this grab. Paired with a new
+    // `state='replaced'` value (distinct from `removed`, which is the
+    // generic "gone from download client" state reserved for user
+    // cancels and cleanup). No FK: an `ON DELETE SET NULL` would need
+    // a schema rebuild under SQLite and pruning a new grab shouldn't
+    // dangle old replaced rows in a way that breaks queries — the
+    // history handler tolerates `NULL` here. History filter and the
+    // replaced-by tooltip in the Downloads tab key off this column to
+    // show the replacement chain.
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN replaced_by_grab_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
 
     // `active_client` on config — lowercase-snake discriminator for
     // the download client currently in use. Phase 1 only has

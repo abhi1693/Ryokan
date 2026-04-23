@@ -44,6 +44,17 @@
         </fieldset>
 
         <fieldset>
+            <legend>Monitoring</legend>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="search_on_monitoring_change" id="search_on_monitoring_change" {% if config.search_on_monitoring_change %}checked{% endif %}>
+                    <span>Auto-search when monitoring changes</span>
+                </label>
+                <span class="form-hint">When you change a series's monitoring mode (e.g. <code>none</code> → <code>all</code>), Ryokan will run a background auto-search for the newly-monitored aired episodes. Off by default — turn on if you want monitoring changes to immediately start grabbing. Narrowing transitions (<code>all</code> → <code>missing</code>, <code>any</code> → <code>none</code>) are a no-op.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
             <legend>Display</legend>
             <div class="form-group">
                 <label for="title_language">Preferred Title Language</label>
