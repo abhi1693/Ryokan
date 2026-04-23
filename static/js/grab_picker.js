@@ -115,6 +115,16 @@
             return false;
         }
         modal.style.display = 'flex';
+        // Reset the confirm button shape explicitly on open. A prior
+        // session's `confirmGrab` sets the button to "Sending…" +
+        // disabled, and closeModal doesn't undo it; without this,
+        // the next modal open inherits the stale "Sending…" state
+        // and the user can't click through.
+        const confirmBtn = $('grab-picker-confirm');
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Confirm';
+        }
         return true;
     }
 

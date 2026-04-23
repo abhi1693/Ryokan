@@ -1521,22 +1521,23 @@ async fn main() {
         });
     }
 
-    // Background task: evict stale `pending_grabs` rows (issue #83).
-    // Minimum-viable sweep for PR A — drops expired rows only. The
-    // full "auto-commit abandoned modal with all-files-wanted" shape
-    // from plan decision #3 lands in PR C alongside the grab-row
-    // write + sibling auto-expand path. See `services::grab_sweep`
-    // module docstring for the rationale behind the staged roll-out.
+    // Background task: auto-commit or evict stale `pending_grabs`
+    // rows (issue #83, plan decision #3). A walkaway tab's torrent
+    // is still a user-intended download — the sweep marks every
+    // file wanted and resumes the torrent. See
+    // `services::grab_sweep` module docstring for the full
+    // per-row flow, including the error-row and no-metadata
+    // branches that skip auto-commit but still delete the row.
     {
-        let grab_sweep_db = db.clone();
+        let grab_sweep_state = state.clone();
         tokio::spawn(async move {
             supervise("grab_sweep", move || {
-                let db = grab_sweep_db.clone();
+                let state = grab_sweep_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(services::grab_sweep::SWEEP_INTERVAL);
                     loop {
                         interval.tick().await;
-                        if let Err(e) = services::grab_sweep::sweep_once(&db).await {
+                        if let Err(e) = services::grab_sweep::sweep_once(&state).await {
                             tracing::warn!(
                                 target: "ryokan::grab_sweep",
                                 error = %e,

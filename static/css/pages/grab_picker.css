@@ -84,25 +84,87 @@
     flex: 1;
 }
 
+/* View toggle — match the .btn.btn-secondary language the rest of
+ * the toolbar uses, but with a distinct active state so it still
+ * reads as a selector rather than two equally-clickable buttons.
+ * The two buttons are regular `.btn.btn-secondary`s (template-
+ * side); the `.active` class here inverts colors the same way
+ * `.btn-primary` does for the selected view. */
 .grab-picker-view-toggle {
     display: inline-flex;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 4px);
-    overflow: hidden;
-}
-
-.grab-picker-view-toggle button {
-    font-size: 12px;
-    padding: 4px 10px;
-    background: var(--bg-card);
-    color: var(--text-dim);
-    border: none;
-    cursor: pointer;
+    gap: 6px;
 }
 
 .grab-picker-view-toggle button.active {
     background: var(--accent);
-    color: var(--text-bright);
+    color: var(--bg);
+    border-color: var(--accent);
+}
+
+/* Checkboxes inside the file-list + tree views. Matches the
+ * `.checkbox-label` / `.checkbox-row` / `.cf-export-check` pattern
+ * in forms.css so unchecked boxes render dark against the row
+ * background instead of the UA-default white square.
+ * `accent-color` alone only tints the checked fill — we need
+ * `appearance: none` + an explicit background + a `::after`
+ * checkmark to theme the unchecked state too. */
+.grab-picker-file-list input[type="checkbox"],
+.grab-picker-tree input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent);
+    appearance: none;
+    -webkit-appearance: none;
+    background: var(--bg);
+    border: 2px solid var(--border-accent);
+    border-radius: 3px;
+    box-sizing: border-box;
+    cursor: pointer;
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    vertical-align: middle;
+    margin: 0;
+    padding: 0;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.grab-picker-file-list input[type="checkbox"]:checked,
+.grab-picker-tree input[type="checkbox"]:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.grab-picker-file-list input[type="checkbox"]:checked::after,
+.grab-picker-tree input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 4px;
+    height: 8px;
+    border: solid var(--bg);
+    border-width: 0 2px 2px 0;
+    transform: translate(-50%, -58%) rotate(45deg);
+}
+
+.grab-picker-file-list input[type="checkbox"]:indeterminate,
+.grab-picker-tree input[type="checkbox"]:indeterminate {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.grab-picker-file-list input[type="checkbox"]:indeterminate::after,
+.grab-picker-tree input[type="checkbox"]:indeterminate::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 8px;
+    height: 2px;
+    background: var(--bg);
+    transform: translate(-50%, -50%);
 }
 
 .grab-picker-file-list {
