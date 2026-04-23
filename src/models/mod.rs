@@ -10,6 +10,7 @@ pub mod media_probe_cache;
 pub mod metadata_cache;
 pub mod monitoring;
 pub mod nyaa_description_cache;
+pub mod pending_grabs;
 pub mod rss;
 pub mod scheduled_tasks;
 pub mod series;

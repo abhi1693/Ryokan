@@ -339,6 +339,75 @@ impl DownloadClient for RtorrentClient {
         Ok(AddOutcome::Added)
     }
 
+    /// Add a torrent and immediately pause it. rtorrent has no native
+    /// `add_paused` flag — post-load commands passed to
+    /// `load.start_verbose` race the session-level auto-start
+    /// scheduler and a post-command `d.pause` sometimes doesn't stick
+    /// (the test helper at the bottom of this file documents the same
+    /// race for the raw-bytes variant). Instead: do the regular
+    /// `add_torrent` + wait until the hash appears in `d.multicall2`,
+    /// then `d.pause` from the outside.
+    ///
+    /// Metadata continues to arrive via DHT while `d.pause` is in
+    /// effect — `base_path` still populates once peers deliver the
+    /// `info` dict — so callers can poll `get_files` after this
+    /// returns the same way they would on Deluge / Transmission.
+    async fn add_torrent_paused(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        let outcome = self.add_torrent(url, info_hash).await?;
+
+        if info_hash.is_empty() {
+            // No pre-computed hash → can't address the pause call.
+            // Caller gets back the Added/AlreadyPresent outcome but
+            // the torrent may be running. Upstream validation
+            // normally ensures info_hash is set for paused adds, but
+            // fall through gracefully rather than hard-failing.
+            return Ok(outcome);
+        }
+
+        // Don't pause a pre-existing torrent. If the user already
+        // has this release running from a prior grab, pausing it
+        // out from under them is destructive — the handler is
+        // responsible for surfacing the existing state to the modal
+        // instead (same-hash dedup flow, plan decision #6).
+        if outcome == AddOutcome::AlreadyPresent {
+            return Ok(outcome);
+        }
+
+        // Small settle loop: wait until the hash is visible in the
+        // session before calling `d.pause`. `load.start_verbose`
+        // returns before rtorrent finishes registering the torrent;
+        // pausing too early returns "No such download" on some
+        // versions. Budget 2s — if rtorrent hasn't registered the
+        // torrent in 2s the add has genuinely failed.
+        let hash_uc = info_hash.to_ascii_uppercase();
+        let start = Instant::now();
+        let mut delay = Duration::from_millis(100);
+        loop {
+            match self.hash_exists(&hash_uc).await {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        target: "ryokan::download_client::rtorrent",
+                        error = %e,
+                        "hash_exists poll failed during paused-add settle"
+                    );
+                }
+            }
+            if start.elapsed() >= Duration::from_secs(2) {
+                // Torrent never registered — fall through and let
+                // the caller see `Added` or `AlreadyPresent` without
+                // the pause. They can retry or surface the error.
+                return Ok(outcome);
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_millis(500));
+        }
+
+        self.pause(info_hash).await?;
+        Ok(outcome)
+    }
+
     async fn add_torrent_with_file_filter(
         &self,
         url: &str,

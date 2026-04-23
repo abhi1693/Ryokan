@@ -708,6 +708,85 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // Interactive file-picker scratch state (issue #83). One row per
+    // open modal. Created when the user hits Grab, deleted on
+    // confirm / cancel / TTL-sweep auto-commit. The TTL sweep (see
+    // services::grab_sweep) runs every minute and auto-commits rows
+    // whose heartbeat is stale, converting them into normal
+    // `grabbed_torrents` rows with all files wanted. No FK to
+    // `series` — series_id is nullable because interactive grabs can
+    // target bare magnet URLs before a series is selected — but when
+    // present it matches the target series for post-confirm
+    // sibling-auto-expand routing.
+    //
+    // `release_metadata_json` stashes the `SearchResult`-shaped
+    // payload the modal needs to render before the torrent's file
+    // list arrives (title, size, seeders, ...). `file_list_json` is
+    // populated once `wait_for_metadata` returns — until then the
+    // modal polls `GET /api/grab/preview/{id}` and sees
+    // `status: fetching_metadata`.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS pending_grabs (
+            preview_id TEXT PRIMARY KEY,
+            info_hash TEXT NOT NULL DEFAULT '',
+            client_kind TEXT NOT NULL DEFAULT '',
+            indexer_id INTEGER,
+            series_id INTEGER,
+            created_at INTEGER NOT NULL,
+            heartbeat_at INTEGER NOT NULL,
+            file_list_json TEXT NOT NULL DEFAULT '',
+            release_metadata_json TEXT NOT NULL DEFAULT '',
+            -- Empty = no metadata-fetch error yet; non-empty = human-
+            -- readable failure that GET preview promotes to status=error.
+            error_message TEXT NOT NULL DEFAULT '',
+            -- 1 when add_torrent_paused returned Added for this preview,
+            -- 0 when AlreadyPresent. grab_cancel gates its destructive
+            -- delete(hash, with_files=true) on this flag so a cancel on
+            -- a pre-existing torrent doesn't nuke prior-grab data. The
+            -- ALTER TABLE below is idempotency for upgraders; fresh
+            -- installs pick up the column from this CREATE.
+            we_added_torrent INTEGER NOT NULL DEFAULT 1
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    // Sweep query filters on `heartbeat_at < now - TTL`; cheap index
+    // makes the per-minute tick near-free even as the table grows
+    // during heavy modal use.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pending_grabs_heartbeat ON pending_grabs (heartbeat_at)",
+    )
+    .execute(db)
+    .await?;
+
+    // Pre-modal same-hash dedup check needs a fast lookup from
+    // info_hash to "is there already an open modal for this torrent?"
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pending_grabs_hash ON pending_grabs (info_hash) WHERE info_hash != ''",
+    )
+    .execute(db)
+    .await?;
+
+    // Idempotency guards for databases created before these columns
+    // were added to the CREATE TABLE above. Fresh installs pick the
+    // columns up from CREATE and these ALTERs silently no-op; existing
+    // installs get the columns added with the defaults that match the
+    // pre-fix behavior (error_message empty; we_added_torrent=1 so the
+    // cancel path behaves conservatively). Column semantics are
+    // documented on the CREATE TABLE; keeping the doc in one place so
+    // future readers don't have to cross-reference the ALTER history.
+    sqlx::query("ALTER TABLE pending_grabs ADD COLUMN error_message TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE pending_grabs ADD COLUMN we_added_torrent INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
+
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.
     sqlx::query("ALTER TABLE series ADD COLUMN tmdb_id INTEGER")

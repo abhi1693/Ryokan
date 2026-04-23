@@ -231,29 +231,24 @@ impl TransmissionClient {
             .next()
             .ok_or_else(|| format!("Transmission: torrent {} not found", info_hash))
     }
-}
 
-#[async_trait]
-impl DownloadClient for TransmissionClient {
-    async fn test(&self) -> Result<String, String> {
-        let args = self
-            .send("session-get", json!({"fields": ["version", "rpc-version"]}))
-            .await?;
-        let version = args
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        Ok(version)
-    }
-
-    async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+    /// Shared implementation for `add_torrent` / `add_torrent_paused`.
+    /// `paused` flips Transmission's native `paused` option on
+    /// `torrent-add`. Duplicate handling + label reassertion is
+    /// identical across both entry points.
+    async fn add_torrent_inner(
+        &self,
+        url: &str,
+        info_hash: &str,
+        paused: bool,
+    ) -> Result<AddOutcome, String> {
         let args = self
             .send(
                 "torrent-add",
                 json!({
                     "filename": url,
                     "labels": [self.label],
+                    "paused": paused,
                 }),
             )
             .await?;
@@ -281,6 +276,32 @@ impl DownloadClient for TransmissionClient {
             return Ok(AddOutcome::AlreadyPresent);
         }
         Ok(AddOutcome::Added)
+    }
+}
+
+#[async_trait]
+impl DownloadClient for TransmissionClient {
+    async fn test(&self) -> Result<String, String> {
+        let args = self
+            .send("session-get", json!({"fields": ["version", "rpc-version"]}))
+            .await?;
+        let version = args
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        Ok(version)
+    }
+
+    async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        self.add_torrent_inner(url, info_hash, false).await
+    }
+
+    async fn add_torrent_paused(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        // Transmission supports `paused=true` on `torrent-add` natively,
+        // and metadata continues to flow while paused — no qBit-style
+        // workaround needed.
+        self.add_torrent_inner(url, info_hash, true).await
     }
 
     async fn add_torrent_with_file_filter(

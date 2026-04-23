@@ -105,6 +105,12 @@ use services::{
         handlers::system::api_force_upgrade_search,
         handlers::system::api_rebuild_cached_metadata,
         handlers::system::api_anibridge_reload,
+        // Grab (issue #83 interactive file picker)
+        handlers::grab::grab_preview,
+        handlers::grab::grab_preview_status,
+        handlers::grab::grab_heartbeat,
+        handlers::grab::grab_confirm,
+        handlers::grab::grab_cancel,
     ),
     components(schemas(
         services::anilist::AnimeEntry,
@@ -143,6 +149,13 @@ use services::{
         handlers::settings::custom_formats::CustomFormatDeleteForm,
         handlers::settings::custom_formats::CustomFormatMinScoreForm,
         handlers::settings::custom_formats::CustomFormatImportForm,
+        handlers::grab::GrabPreviewForm,
+        handlers::grab::GrabPreviewCreated,
+        handlers::grab::GrabPreviewStatus,
+        handlers::grab::PreviewFile,
+        handlers::grab::GrabConfirmForm,
+        handlers::grab::GrabConfirmResult,
+        handlers::grab::GrabCancelForm,
     )),
     tags(
         (name = "Library", description = "Anime library management — add, remove, search, and monitor series"),
@@ -150,6 +163,7 @@ use services::{
         (name = "Downloads", description = "qBittorrent download management"),
         (name = "System", description = "Health checks, logs, RSS sync, and background tasks"),
         (name = "Settings", description = "Settings management — Custom Formats CRUD, import/export, and scoring thresholds"),
+        (name = "Grab", description = "Interactive file-picker grab flow (#83) — preview, heartbeat, confirm, cancel"),
     ),
 )]
 struct ApiDoc;
@@ -553,6 +567,20 @@ async fn main() {
             get(handlers::library::crud::list_folders),
         )
         .route("/api/grab", post(handlers::search::grab_release))
+        // Issue #83 interactive file picker — new endpoints.
+        // `/api/grab/preview` deliberately uses a different path than
+        // the legacy `/api/grab` so existing clients keep working.
+        .route("/api/grab/preview", post(handlers::grab::grab_preview))
+        .route(
+            "/api/grab/preview/{preview_id}",
+            get(handlers::grab::grab_preview_status),
+        )
+        .route(
+            "/api/grab/heartbeat/{preview_id}",
+            post(handlers::grab::grab_heartbeat),
+        )
+        .route("/api/grab/confirm", post(handlers::grab::grab_confirm))
+        .route("/api/grab/cancel", post(handlers::grab::grab_cancel))
         .route("/api/search/page", get(handlers::search::search_page_api))
         .route("/api/torrents", get(handlers::search::get_torrents))
         .route("/downloads", get(handlers::downloads::downloads_page))
@@ -1527,6 +1555,35 @@ async fn main() {
                     loop {
                         interval.tick().await;
                         progress.sweep(std::time::Duration::from_secs(60)).await;
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
+    // Background task: evict stale `pending_grabs` rows (issue #83).
+    // Minimum-viable sweep for PR A — drops expired rows only. The
+    // full "auto-commit abandoned modal with all-files-wanted" shape
+    // from plan decision #3 lands in PR C alongside the grab-row
+    // write + sibling auto-expand path. See `services::grab_sweep`
+    // module docstring for the rationale behind the staged roll-out.
+    {
+        let grab_sweep_db = db.clone();
+        tokio::spawn(async move {
+            supervise("grab_sweep", move || {
+                let db = grab_sweep_db.clone();
+                async move {
+                    let mut interval = tokio::time::interval(services::grab_sweep::SWEEP_INTERVAL);
+                    loop {
+                        interval.tick().await;
+                        if let Err(e) = services::grab_sweep::sweep_once(&db).await {
+                            tracing::warn!(
+                                target: "ryokan::grab_sweep",
+                                error = %e,
+                                "sweep_once failed; will retry on next tick"
+                            );
+                        }
                     }
                 }
             })

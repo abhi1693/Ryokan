@@ -321,35 +321,18 @@ impl DelugeClient {
             Err(msg) => Err(msg),
         }
     }
-}
 
-fn is_disconnect_error(msg: &str) -> bool {
-    // `core.*` methods disappear from the RPC surface when the web
-    // process loses its daemon connection — the Deluge web proxy
-    // returns "Unknown method" rather than a more specific status.
-    // The "Not connected to a daemon" variant shows up less often
-    // but is worth catching too.
-    msg.contains("Unknown method") || msg.contains("Not connected to a daemon")
-}
-
-#[async_trait]
-impl DownloadClient for DelugeClient {
-    async fn test(&self) -> Result<String, String> {
-        self.connect().await?;
-        // `daemon.get_version` returns the Deluge daemon version
-        // string ("2.2.0" etc.). Picked over `daemon.info` — the
-        // latter is NOT exposed through the web-proxy's `/json`
-        // endpoint (only the raw daemon RPC on port 58846), so
-        // calling it here returns "Unknown method" post-connect
-        // and the settings page shows "Connection failed" despite
-        // the handshake working. Live-probed 2026-04-21.
-        let version: String =
-            serde_json::from_value(self.connected_rpc("daemon.get_version", json!([])).await?)
-                .map_err(|e| format!("Deluge daemon.get_version parse failed: {e}"))?;
-        Ok(version)
-    }
-
-    async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+    /// Shared implementation for `add_torrent` / `add_torrent_paused`.
+    /// `add_paused` flips Deluge's native `add_paused` option; both
+    /// outer entry points share the duplicate-detection + labeling
+    /// logic so they behave identically apart from the initial
+    /// running-state.
+    async fn add_torrent_inner(
+        &self,
+        url: &str,
+        info_hash: &str,
+        add_paused: bool,
+    ) -> Result<AddOutcome, String> {
         // `core.add_torrent_magnet` for magnet URIs; `core.add_torrent_url`
         // for http:// .torrent URLs. The distinction matters because
         // `add_torrent_magnet` errors on an http URL and vice versa
@@ -357,12 +340,12 @@ impl DownloadClient for DelugeClient {
         let (method, params) = if url.starts_with("magnet:") {
             (
                 "core.add_torrent_magnet",
-                json!([url, {"add_paused": false}]),
+                json!([url, {"add_paused": add_paused}]),
             )
         } else {
             (
                 "core.add_torrent_url",
-                json!([url, {"add_paused": false}, Value::Null]),
+                json!([url, {"add_paused": add_paused}, Value::Null]),
             )
         };
 
@@ -424,6 +407,45 @@ impl DownloadClient for DelugeClient {
         }
 
         Ok(outcome)
+    }
+}
+
+fn is_disconnect_error(msg: &str) -> bool {
+    // `core.*` methods disappear from the RPC surface when the web
+    // process loses its daemon connection — the Deluge web proxy
+    // returns "Unknown method" rather than a more specific status.
+    // The "Not connected to a daemon" variant shows up less often
+    // but is worth catching too.
+    msg.contains("Unknown method") || msg.contains("Not connected to a daemon")
+}
+
+#[async_trait]
+impl DownloadClient for DelugeClient {
+    async fn test(&self) -> Result<String, String> {
+        self.connect().await?;
+        // `daemon.get_version` returns the Deluge daemon version
+        // string ("2.2.0" etc.). Picked over `daemon.info` — the
+        // latter is NOT exposed through the web-proxy's `/json`
+        // endpoint (only the raw daemon RPC on port 58846), so
+        // calling it here returns "Unknown method" post-connect
+        // and the settings page shows "Connection failed" despite
+        // the handshake working. Live-probed 2026-04-21.
+        let version: String =
+            serde_json::from_value(self.connected_rpc("daemon.get_version", json!([])).await?)
+                .map_err(|e| format!("Deluge daemon.get_version parse failed: {e}"))?;
+        Ok(version)
+    }
+
+    async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        self.add_torrent_inner(url, info_hash, false).await
+    }
+
+    async fn add_torrent_paused(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        // Deluge supports `add_paused=True` natively — metadata still
+        // arrives while paused, so no workaround is needed (unlike
+        // qBit 5.x). Callers that want to read the file list should
+        // poll `get_files` after this returns.
+        self.add_torrent_inner(url, info_hash, true).await
     }
 
     async fn add_torrent_with_file_filter(
