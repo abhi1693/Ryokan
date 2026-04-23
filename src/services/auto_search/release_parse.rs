@@ -427,6 +427,27 @@ fn pick_by_part_number(
     part: i32,
     detail: &AnimeDetail,
 ) -> Option<Vec<usize>> {
+    // Part-number narrowing is for trilogies / multi-part OVAs where
+    // each "part" is a single file inside a grouped pack (Kizumonogatari
+    // I/II/III, Rebuild of Evangelion 1/2/3, etc.). Those AniList
+    // entries all have a single-digit `episodes` count because each
+    // part is itself one film.
+    //
+    // A season whose title happens to end in a Roman numeral ("Mob
+    // Psycho 100 III", "Overlord IV") ALSO triggers
+    // `extract_part_number` — but its SeaDex batch is 12 per-episode
+    // files named "...III - 01" … "...III - 12". Part-number narrowing
+    // there picks the one file whose parsed ep number equals the
+    // Roman numeral (file 3 for "III"), which is catastrophically
+    // wrong — the user wants the whole season, not one episode that
+    // happens to share the season index. Gate the strategy on a small
+    // episode count so seasons fall through to the (correct) full-pack
+    // grab + auto_expand path.
+    const MAX_EPISODES_FOR_PART_NARROWING: i32 = 3;
+    if detail.effective_episode_count() > MAX_EPISODES_FOR_PART_NARROWING {
+        return None;
+    }
+
     let mut matches: Vec<usize> = Vec::new();
     let mut media_count = 0usize;
     for (idx, name) in filenames.iter().enumerate() {
@@ -925,6 +946,43 @@ mod tests {
         ];
         let d = detail_with_titles("JoJo's Bizarre Adventure", "JoJo no Kimyou na Bouken");
         assert_eq!(pick_wanted_file_indices(&files, &d), None);
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_skips_part_narrowing_on_multi_episode_season() {
+        // Regression: Mob Psycho 100 III is a 12-episode season whose
+        // AniList title ends in a Roman numeral. Without the episode-
+        // count gate, `extract_part_number` returns 3 and
+        // `pick_by_part_number` latches onto the "...III - 03" file —
+        // narrowing a whole-season SeaDex batch to a single-ep pick.
+        // The auto-search grab then records episode_numbers=[1] (the
+        // target) while qBit only downloads ep 3's file. Gate fix:
+        // detail.episodes > 3 → skip part-number narrowing entirely
+        // so the full season downloads as intended.
+        let files: Vec<String> = (1..=12)
+            .map(|i| format!("[SeaDex] Mob Psycho 100 III - {:02}.mkv", i))
+            .collect();
+        let mut d = detail_with_titles("Mob Psycho 100 III", "Mob Psycho 100 III");
+        d.episodes = Some(12);
+        assert_eq!(
+            pick_wanted_file_indices(&files, &d),
+            None,
+            "multi-episode season with Roman-numeral title must not be part-narrowed",
+        );
+    }
+
+    #[test]
+    fn pick_wanted_file_indices_still_narrows_trilogy_part() {
+        // Counterpart to the regression test above — the Kizumonogatari
+        // trilogy (episodes=1 per AniList part) must still narrow.
+        let files = vec![
+            "[smol] Monogatari - S09E01 - Kizumonogatari Tekketsu-hen.mkv".to_string(),
+            "[smol] Monogatari - S09E02 - Kizumonogatari Nekketsu-hen.mkv".to_string(),
+            "[smol] Monogatari - S09E03 - Kizumonogatari Reiketsu-hen.mkv".to_string(),
+        ];
+        let mut d = detail_with_titles("Kizumonogatari II: Nekketsu-hen", "Kizumonogatari II");
+        d.episodes = Some(1);
+        assert_eq!(pick_wanted_file_indices(&files, &d), Some(vec![1]));
     }
 
     #[test]
