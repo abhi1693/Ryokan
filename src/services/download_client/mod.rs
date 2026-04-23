@@ -51,6 +51,43 @@ pub trait DownloadClient: Send + Sync {
     /// use it for idempotency checks and addressing.
     async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String>;
 
+    /// Add a torrent in a state where **file data does not actively
+    /// download until the caller resumes**. Entry point for the
+    /// interactive file picker (#83) — the handler shows the user the
+    /// file list, the user picks, then the handler calls
+    /// [`set_file_wanted`](Self::set_file_wanted) to mark unwanted
+    /// files as skipped and [`resume`](Self::resume) to start
+    /// downloading the wanted subset.
+    ///
+    /// Post-condition: the torrent is in the client's "not consuming
+    /// peer bandwidth for file data" state. For Deluge, Transmission,
+    /// and rTorrent this maps cleanly to the native `paused` flag;
+    /// metadata continues to arrive over DHT/peers while the torrent
+    /// is paused.
+    ///
+    /// **qBit 5.x leaky abstraction:** qBit `v5.x` stopped torrents
+    /// don't publish their file list through `/torrents/files` (the
+    /// "paused → no metadata" quirk documented in
+    /// `qbittorrent.rs`'s `add_torrent_with_file_filter` header). The
+    /// qBit impl works around this by adding running, waiting for
+    /// metadata up to a fixed budget, then calling
+    /// `set_file_wanted(all_indices, wanted=false)` to skip every
+    /// file before returning. From the caller's perspective the
+    /// post-condition holds — no file data is being downloaded — but
+    /// the call blocks for the metadata-fetch duration (typically
+    /// 1-3s for `.torrent` URLs, up to `~10s` for DHT-dependent
+    /// magnets). Callers that want to avoid stalling the request
+    /// thread should run this inside a `tokio::spawn` and surface
+    /// progress separately.
+    ///
+    /// Default implementation provided for compatibility so impls can
+    /// adopt the picker incrementally; the default is best-effort and
+    /// may leave a torrent running with all files downloading on
+    /// impls that haven't overridden it.
+    async fn add_torrent_paused(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        self.add_torrent(url, info_hash).await
+    }
+
     /// Add a torrent and narrow it to a subset of its files. The `pick`
     /// callback receives the file names and returns the indices to
     /// keep (or `None` for a full grab). Each impl handles its own

@@ -406,6 +406,66 @@ impl DownloadClient for QbitClient {
         Ok(AddOutcome::Added)
     }
 
+    /// Add a torrent in a state where no file data downloads, for the
+    /// interactive file picker (#83).
+    ///
+    /// The trait contract is "paused," but qBit 5.x can't deliver that
+    /// directly: a stopped torrent doesn't publish its file list
+    /// through `/torrents/files`, so the picker would never have
+    /// files to render. Instead we race — add running, wait for
+    /// metadata (same 10s budget as `add_torrent_with_file_filter`),
+    /// then set **every** file to priority 0 before returning. From
+    /// the caller's perspective the post-condition holds: files are
+    /// visible and nothing is downloading peer data.
+    ///
+    /// Confirm-time flow: caller flips the user's wanted files back
+    /// to priority 1 via `set_file_wanted(indices, wanted=true)`. The
+    /// torrent is already running so no explicit `resume` is needed —
+    /// calling `resume` is still harmless, and matches the uniform
+    /// cross-client contract the handler uses (see Deluge /
+    /// Transmission / rTorrent impls which DO need the resume).
+    ///
+    /// Metadata-fetch failure: if the 10s budget elapses, the
+    /// torrent is left running with every file at default priority
+    /// (all-wanted). The caller can surface this as "metadata
+    /// timeout, grab with defaults" — matching the plan doc's
+    /// decision #1 two-button dialog.
+    async fn add_torrent_paused(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        if info_hash.is_empty() {
+            return Err("qBit paused add requires a pre-computed info hash".into());
+        }
+        let hash_lc = info_hash.to_ascii_lowercase();
+
+        let outcome = self.add_torrent(url, &hash_lc).await?;
+        // Explicit resume so a duplicate-add that landed on a stopped
+        // torrent starts flowing metadata. Matches the pattern in
+        // `add_torrent_with_file_filter`.
+        let _ = self.resume(&hash_lc).await;
+
+        match self
+            .wait_for_metadata(&hash_lc, Duration::from_secs(10))
+            .await
+        {
+            Ok(files) => {
+                // Mark every file skipped so the torrent idles until
+                // the caller flips selections back via set_file_wanted.
+                let all_ids: Vec<usize> = (0..files.len()).collect();
+                if !all_ids.is_empty() {
+                    self.set_file_priority(&hash_lc, &all_ids, 0).await?;
+                }
+            }
+            Err(_) => {
+                // Metadata timeout — leave the torrent running at
+                // default priorities. Handler will see an empty /
+                // not-yet-populated file list on the GET preview
+                // endpoint and surface the timeout dialog to the
+                // user. No data loss, just a UX prompt.
+            }
+        }
+
+        Ok(outcome)
+    }
+
     /// Add a torrent, wait for metadata, invoke `pick`, and mark the
     /// rest as skip.
     ///
