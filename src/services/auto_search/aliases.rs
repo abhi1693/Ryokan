@@ -7,6 +7,9 @@
 //! `sibling_match_rejects`.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
+
+use regex_lite::Regex;
 
 use crate::services::anilist::AnimeDetail;
 
@@ -82,6 +85,236 @@ pub fn collect_aliases(detail: &AnimeDetail) -> Vec<String> {
         detail.title_english.clone(),
         detail.title_native.clone(),
     ])
+}
+
+// ── Sequel / part variant aliases (issue #84) ─────────────────────────────
+//
+// Motivating bug: auto-searching a sequel cour or a numbered movie entry
+// often produces zero results on Nyaa even when a canonical release exists,
+// because Nyaa's search is AND-tokenized across the query. An AL alias like
+// `Sono Bisque Doll wa Koi wo Suru 2nd Season` forces every returned title
+// to carry the tokens {2nd, season}, which shuts out MiniMTBB/YURASUKA/
+// Okay-Subs releases that name the same cour `S2` or `S02`. Same shape for
+// movie trilogies: AL says `Kizumonogatari II: Nekketsu-hen`; MTBB names
+// their files `Kizumonogatari - 02`. Nyaa never unions these.
+//
+// The fix: detect a sequel/part marker in the alias, extract a franchise
+// base, and emit three synthetic aliases covering the release-group
+// conventions actually observed in the wild (`S{N}`, `S{NN}`, `- {NN}`).
+// These variants feed into BOTH the query-generation side (so Nyaa sees
+// queries that actually match the groups' titling) and the alias list
+// passed to `matches_target` (so a release matching via the variant isn't
+// rejected by the token-overlap filter).
+//
+// The variant set is kept to three forms specifically because every
+// variant is a net new HTTP round-trip per sweep — see mod.rs's
+// `build_queries_mixed` for the canonical-full / variant-collapsed
+// query shape that keeps the per-sweep query count bounded.
+//
+// Sibling rejection remains the safety net against cross-cour false
+// positives — if base = "Kizumonogatari" and we find `Kizumonogatari -
+// 01`, that release would match our Part 2 variant alias but the sibling
+// list includes Parts 1 and 3, and the episode-number parser still has to
+// see `02` on the filename for Part 2 to win.
+
+static RE_ORDINAL_SEASON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+(\d+)(?:st|nd|rd|th)\s+Season\s*$").unwrap());
+static RE_WORD_SEASON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(.+?)\s+(First|Second|Third|Fourth|Fifth|Sixth)\s+Season\s*$").unwrap()
+});
+static RE_SEASON_N: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+Season\s+(\d+)\s*$").unwrap());
+static RE_S_N: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+S(\d{1,2})\s*$").unwrap());
+static RE_PART_N: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+Part\s+(\d+)(?::\s+.+)?\s*$").unwrap());
+static RE_PART_ROMAN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(.+?)\s+Part\s+(II|III|IV|V|VI|VII|VIII|IX|X)(?::\s+.+)?\s*$").unwrap()
+});
+// Roman numeral at the tail, optionally followed by `: subtitle`. Excludes
+// plain "I" — a single trailing letter is too often an initial (e.g.
+// `Magical Girl Lyrical Nanoha A's`; less extreme, `Slam Dunk I`-style
+// false matches on a short initial). The II..X range is what trilogy /
+// tetralogy naming actually uses.
+static RE_ROMAN_TAIL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(.+?)\s+(II|III|IV|V|VI|VII|VIII|IX|X)(?::\s+.+)?\s*$").unwrap()
+});
+
+fn ordinal_word_to_n(word: &str) -> Option<u32> {
+    match word.to_ascii_lowercase().as_str() {
+        "first" => Some(1),
+        "second" => Some(2),
+        "third" => Some(3),
+        "fourth" => Some(4),
+        "fifth" => Some(5),
+        "sixth" => Some(6),
+        _ => None,
+    }
+}
+
+fn roman_to_n(roman: &str) -> Option<u32> {
+    match roman.to_ascii_uppercase().as_str() {
+        "I" => Some(1),
+        "II" => Some(2),
+        "III" => Some(3),
+        "IV" => Some(4),
+        "V" => Some(5),
+        "VI" => Some(6),
+        "VII" => Some(7),
+        "VIII" => Some(8),
+        "IX" => Some(9),
+        "X" => Some(10),
+        _ => None,
+    }
+}
+
+fn n_to_roman(n: u32) -> Option<&'static str> {
+    match n {
+        1 => Some("I"),
+        2 => Some("II"),
+        3 => Some("III"),
+        4 => Some("IV"),
+        5 => Some("V"),
+        6 => Some("VI"),
+        7 => Some("VII"),
+        8 => Some("VIII"),
+        9 => Some("IX"),
+        10 => Some("X"),
+        _ => None,
+    }
+}
+
+/// Parse the alias's tail for a sequel/part marker and return the
+/// franchise base and position number. Only the marker at the very end
+/// of the alias is recognized (optionally followed by `: subtitle` for
+/// the part/roman conventions that carry a sub-title), so mid-string
+/// false positives like `Persona 5 the Animation` don't trip `RE_S_N`.
+fn extract_sequel_position(alias: &str) -> Option<(String, u32)> {
+    // Ordinal-season and word-season come first because they strictly
+    // embed the position number — matching them is unambiguous.
+    if let Some(cap) = RE_ORDINAL_SEASON.captures(alias) {
+        let base = cap.get(1)?.as_str().trim();
+        let n: u32 = cap.get(2)?.as_str().parse().ok()?;
+        if !base.is_empty() && (1..=20).contains(&n) {
+            return Some((base.to_string(), n));
+        }
+    }
+    if let Some(cap) = RE_WORD_SEASON.captures(alias) {
+        let base = cap.get(1)?.as_str().trim();
+        let n = ordinal_word_to_n(cap.get(2)?.as_str())?;
+        if !base.is_empty() {
+            return Some((base.to_string(), n));
+        }
+    }
+    if let Some(cap) = RE_SEASON_N.captures(alias) {
+        let base = cap.get(1)?.as_str().trim();
+        let n: u32 = cap.get(2)?.as_str().parse().ok()?;
+        if !base.is_empty() && (1..=20).contains(&n) {
+            return Some((base.to_string(), n));
+        }
+    }
+    if let Some(cap) = RE_S_N.captures(alias) {
+        let base = cap.get(1)?.as_str().trim();
+        let n: u32 = cap.get(2)?.as_str().parse().ok()?;
+        if !base.is_empty() && (1..=20).contains(&n) {
+            return Some((base.to_string(), n));
+        }
+    }
+    if let Some(cap) = RE_PART_N.captures(alias) {
+        let base = cap.get(1)?.as_str().trim();
+        let n: u32 = cap.get(2)?.as_str().parse().ok()?;
+        if !base.is_empty() && (1..=20).contains(&n) {
+            return Some((base.to_string(), n));
+        }
+    }
+    if let Some(cap) = RE_PART_ROMAN.captures(alias) {
+        let base = cap.get(1)?.as_str().trim();
+        let n = roman_to_n(cap.get(2)?.as_str())?;
+        if !base.is_empty() {
+            return Some((base.to_string(), n));
+        }
+    }
+    if let Some(cap) = RE_ROMAN_TAIL.captures(alias) {
+        let base = cap.get(1)?.as_str().trim();
+        let n = roman_to_n(cap.get(2)?.as_str())?;
+        // RE_ROMAN_TAIL only captures II..X, so n ≥ 2 here.
+        if !base.is_empty() {
+            return Some((base.to_string(), n));
+        }
+    }
+    None
+}
+
+/// Distinctiveness guardrail for sequel-variant generation. A base that's
+/// one short word (`Gundam`) would produce variants that substring-match
+/// every unrelated Gundam entry, so those bases are rejected — the
+/// sibling-rejection precompute still catches most cross-hit cases, but
+/// keeping generic variants out of the query list is cheaper than
+/// chasing every false-positive that flows through sibling rejection.
+fn is_distinctive_base(base: &str) -> bool {
+    let normalized = normalize_title(base);
+    let token_count = normalized.split_whitespace().count();
+    if token_count >= 2 {
+        return true;
+    }
+    // Single-token base: require at least 7 characters. Picks up
+    // `Overlord` (8), `Danmachi` (8), `Kizumonogatari` (14),
+    // `Monogatari` (10); still rejects `Gundam` (6), `Naruto` (6),
+    // `Bleach` (6) — the 6-char generic franchises where a bare
+    // `{name} S2` would substring-match several unrelated entries.
+    normalized.chars().count() >= 7
+}
+
+/// Generate synthetic alias variants for sequel / part markers. Given an
+/// alias carrying a season or part marker, emits the four release-group
+/// shorthand forms that Nyaa's AND-tokenized search uses: `S{N}`, `S{NN}`,
+/// `- {NN}`, and `{base} {roman}`. Feeds into both query generation (so
+/// Nyaa returns the groups' shorthand titles) and `matches_target`'s
+/// alias list (so the shorthand titles survive the token-overlap filter).
+///
+/// Each variant is a **net new HTTP round-trip** per sweep because queries
+/// run sequentially through `nyaa::search`, so the variant set is kept
+/// deliberately small. Covered conventions:
+/// * `S{N}` / `S{NN}` — MTBB/MiniMTBB/Okay-Subs/YURASUKA.
+/// * `- {NN}` — movie trilogies (Kizumonogatari) and episode-style batches.
+/// * `{base} {roman}` — Overlord IV / Date A Live IV / Danmachi IV and
+///   every other franchise whose releases carry the Roman numeral in
+///   the filename. Only fires when the AL canonical alias does NOT
+///   already contain that Roman form; if AL already gives us `Overlord
+///   IV`, the canonical query covers the Roman-numbered release and the
+///   variant would just duplicate it.
+///
+/// Returns an empty Vec when no input alias carries a recognizable
+/// marker, or when every candidate base fails the distinctiveness gate.
+pub fn sequel_variant_aliases(aliases: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for alias in aliases {
+        let Some((base, pos)) = extract_sequel_position(alias) else {
+            continue;
+        };
+        if !is_distinctive_base(&base) {
+            continue;
+        }
+        out.push(format!("{} S{}", base, pos));
+        out.push(format!("{} S{:02}", base, pos));
+        out.push(format!("{} - {:02}", base, pos));
+        if let Some(roman) = n_to_roman(pos) {
+            // Skip when the canonical alias this variant came from
+            // already ends in `{base} {roman}` — common for Overlord-
+            // style AL titles where the Roman numeral IS the marker.
+            // No duplicate query emitted, but variants from aliases
+            // with a different marker convention (e.g. `Overlord
+            // Season 4` → `Overlord IV`) still fire.
+            let duplicate = alias
+                .to_ascii_lowercase()
+                .trim_end()
+                .ends_with(&format!(" {}", roman.to_ascii_lowercase()));
+            if !duplicate {
+                out.push(format!("{} {}", base, roman));
+            }
+        }
+    }
+    dedupe_strings(out)
 }
 
 /// Distinctive titles of this series' siblings (sequels, prequels, side
@@ -681,6 +914,206 @@ mod tests {
             false,
             47,
         ));
+    }
+
+    // ── #84 — sequel-variant alias generation ─────────────────────────
+    //
+    // These pin the shorthand-marker generator against the two motivating
+    // cases (Sono Bisque Doll S2 and the Kizumonogatari trilogy) plus the
+    // distinctiveness guardrail (generic franchise names like `Gundam`
+    // don't produce variants that would substring-match unrelated series).
+
+    #[test]
+    fn sequel_variants_generate_s2_and_s02_from_ordinal_season() {
+        let input = vec!["Sono Bisque Doll wa Koi wo Suru 2nd Season".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(
+            variants
+                .iter()
+                .any(|v| v == "Sono Bisque Doll wa Koi wo Suru S2")
+        );
+        assert!(
+            variants
+                .iter()
+                .any(|v| v == "Sono Bisque Doll wa Koi wo Suru S02")
+        );
+        assert!(
+            variants
+                .iter()
+                .any(|v| v == "Sono Bisque Doll wa Koi wo Suru - 02")
+        );
+        // Roman-numeral variant bridges AL-uses-ordinal to release-uses-
+        // Roman (e.g. a group naming the same cour `Sono Bisque Doll ... II`).
+        assert!(
+            variants
+                .iter()
+                .any(|v| v == "Sono Bisque Doll wa Koi wo Suru II")
+        );
+    }
+
+    #[test]
+    fn sequel_variants_skip_roman_when_alias_already_ends_in_roman() {
+        // AL canonical already carries the Roman numeral (`Overlord IV`
+        // is how AL lists the 4th season), so emitting `Overlord IV` as
+        // a variant would just duplicate the canonical query. The S{N}
+        // / S{NN} / `- {NN}` variants still fire for groups using season-
+        // N conventions.
+        let input = vec!["Overlord IV".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(variants.iter().any(|v| v == "Overlord S4"));
+        assert!(variants.iter().any(|v| v == "Overlord S04"));
+        assert!(variants.iter().any(|v| v == "Overlord - 04"));
+        assert!(
+            !variants.iter().any(|v| v == "Overlord IV"),
+            "duplicate Roman variant must be suppressed, got {:?}",
+            variants
+        );
+    }
+
+    #[test]
+    fn sequel_variants_generate_movie_trilogy_hyphen_number() {
+        // AL canonical: `Kizumonogatari II: Nekketsu-hen`. The target
+        // variant MTBB actually ships is `Kizumonogatari - 02`.
+        let input = vec!["Kizumonogatari II: Nekketsu-hen".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(variants.iter().any(|v| v == "Kizumonogatari - 02"));
+        assert!(variants.iter().any(|v| v == "Kizumonogatari S2"));
+        assert!(variants.iter().any(|v| v == "Kizumonogatari S02"));
+    }
+
+    #[test]
+    fn sequel_variants_generate_short_s_forms_for_part_numbered() {
+        let input = vec!["Some Long Title Part 3".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(variants.iter().any(|v| v == "Some Long Title - 03"));
+        assert!(variants.iter().any(|v| v == "Some Long Title S3"));
+        assert!(variants.iter().any(|v| v == "Some Long Title S03"));
+    }
+
+    #[test]
+    fn sequel_variants_cap_at_four_per_qualifying_alias() {
+        // Each HTTP round-trip per sweep is a real cost. Pin the upper
+        // bound at 4 variants per qualifying input alias (S{N}, S{NN},
+        // - {NN}, and the Roman form when it's not already the alias'
+        // own tail) so a future expansion of the variant list is a
+        // conscious decision, not an accidental query-count multiplier.
+        let ordinal_input = vec!["Some Long Title Part 3".to_string()];
+        let ordinal_variants = sequel_variant_aliases(&ordinal_input);
+        assert_eq!(
+            ordinal_variants.len(),
+            4,
+            "ordinal-marker alias should produce 4 variants, got {:?}",
+            ordinal_variants
+        );
+        // When the Roman variant is suppressed (canonical already ends
+        // in the Roman form), the count drops to 3.
+        let roman_input = vec!["Overlord IV".to_string()];
+        let roman_variants = sequel_variant_aliases(&roman_input);
+        assert_eq!(
+            roman_variants.len(),
+            3,
+            "Roman-canonical alias should produce 3 variants, got {:?}",
+            roman_variants
+        );
+    }
+
+    #[test]
+    fn sequel_variants_handle_word_season_second() {
+        // `Monogatari Second Season` is the real AL alias for S2 of the
+        // Monogatari franchise. The ordinal-word pattern handles it.
+        let input = vec!["Monogatari Second Season".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(variants.iter().any(|v| v == "Monogatari S2"));
+        assert!(variants.iter().any(|v| v == "Monogatari - 02"));
+    }
+
+    #[test]
+    fn sequel_variants_reject_short_generic_base() {
+        // `Gundam` as a base is too generic — the variants would
+        // substring-match unrelated Gundam entries. The guardrail must
+        // keep those out of the query list.
+        let input = vec!["Gundam Season 2".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(
+            variants.is_empty(),
+            "short generic base should be rejected, got {:?}",
+            variants
+        );
+    }
+
+    #[test]
+    fn sequel_variants_skip_alias_without_marker() {
+        let input = vec!["Some Title Without Any Marker".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(variants.is_empty(), "got {:?}", variants);
+    }
+
+    #[test]
+    fn sequel_variants_dedupe_across_multi_alias_input() {
+        // Same base, two marker conventions in different aliases — the
+        // per-convention output should be deduped by the final pass.
+        let input = vec![
+            "Some Long Title 2nd Season".to_string(),
+            "Some Long Title Season 2".to_string(),
+        ];
+        let variants = sequel_variant_aliases(&input);
+        let s2_count = variants
+            .iter()
+            .filter(|v| *v == "Some Long Title S2")
+            .count();
+        assert_eq!(s2_count, 1, "duplicate S2 variant, got {:?}", variants);
+    }
+
+    #[test]
+    fn matches_target_accepts_movie_trilogy_hyphen_number_via_variant() {
+        // End-to-end: the Part 2 target's alias list is augmented with
+        // `sequel_variant_aliases`, and an MTBB-shaped release for
+        // `Kizumonogatari - 02` must now pass the filter.
+        let primary = vec!["Kizumonogatari II: Nekketsu-hen".to_string()];
+        let variants = sequel_variant_aliases(&primary);
+        let all_aliases: Vec<String> = primary.iter().chain(variants.iter()).cloned().collect();
+        let precompute = SiblingRejectPrecompute::build(&all_aliases, &[]);
+        let release = "[MTBB] Kizumonogatari - 02 [BD 1080p FLAC].mkv";
+        assert!(
+            matches_target(
+                release,
+                &all_aliases,
+                &precompute,
+                &SearchTarget::Single,
+                0,
+                false,
+                0,
+            ),
+            "MTBB Kizumonogatari Part 2 release must match via sequel variant"
+        );
+    }
+
+    #[test]
+    fn matches_target_rejects_wrong_trilogy_entry_via_alias_overlap() {
+        // The variant alias list DOES make the Part 2 target receptive to
+        // `Kizumonogatari - 02`, but it must NOT also accept `- 01` /
+        // `- 03` — that would be wrong-entry routing within the trilogy.
+        // Token overlap with the variant `Kizumonogatari - 02` is only
+        // 1/2 = 0.5 (< 0.6 threshold) for a `- 01` release — the canonical
+        // AL alias has too many extra tokens to reach the threshold on
+        // its own either. Pins the correct rejection.
+        let primary = vec!["Kizumonogatari II: Nekketsu-hen".to_string()];
+        let variants = sequel_variant_aliases(&primary);
+        let all_aliases: Vec<String> = primary.iter().chain(variants.iter()).cloned().collect();
+        let no_siblings = SiblingRejectPrecompute::build(&all_aliases, &[]);
+        let wrong_entry = "[MTBB] Kizumonogatari - 01 [BD 1080p FLAC].mkv";
+        assert!(
+            !matches_target(
+                wrong_entry,
+                &all_aliases,
+                &no_siblings,
+                &SearchTarget::Single,
+                0,
+                false,
+                0,
+            ),
+            "wrong trilogy entry must not match Part 2 target via variants"
+        );
     }
 
     #[test]

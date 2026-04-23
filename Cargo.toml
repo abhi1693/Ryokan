@@ -1,6 +1,6 @@
 [package]
 name = "ryokan"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2024"
 rust-version = "1.95"
 
@@ -48,6 +48,13 @@ reqwest = { version = "0.13", features = ["json", "cookies", "query", "form", "m
 # sidesteps that and is the idiomatic choice for object-safe async
 # traits. Added for the DownloadClient trait (#63 Phase 1).
 async-trait = "0.1"
+
+# Bounded-concurrency stream combinators (`StreamExt::buffer_unordered`)
+# used by the Nyaa search fan-out to run two queries concurrently under
+# the `NYAA_CONCURRENCY` semaphore. `futures-util` is already in the
+# transitive dep tree via reqwest/tokio; listing it directly is a ~zero-
+# size addition that keeps the import stable against transitive churn.
+futures-util = "0.3"
 
 # HTML scraping
 scraper = "0.26"

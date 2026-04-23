@@ -39,6 +39,35 @@ static RE_BATCH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:e?\d{1,4}|s\d{1,2}e\d{1,4})\s*[-~]\s*(?:e?\d{1,4}|\d{1,4})\b").unwrap()
 });
 
+/// Capture-groups version of `RE_BATCH` used to post-filter matches
+/// where the left digit is larger than the right. A plain `\d-\d` range
+/// regex flags `Mob Psycho 100 - 03` as a batch because `100` looks
+/// like the start of an episode range. Real episode ranges are always
+/// `left < right` (`01-12`, `01-100`), so the numeric check rejects
+/// title-number + episode false positives while keeping legitimate
+/// ranges intact.
+static RE_BATCH_RANGE_CAPTURES: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:e)?(\d{1,4})(?:v\d+)?\s*[-~]\s*(?:e)?(\d{1,4})(?:v\d+)?\b").unwrap()
+});
+
+fn has_valid_batch_range(text: &str) -> bool {
+    RE_BATCH_RANGE_CAPTURES.captures_iter(text).any(|cap| {
+        let left = cap
+            .get(1)
+            .and_then(|m| m.as_str().parse::<u32>().ok())
+            .unwrap_or(0);
+        let right = cap
+            .get(2)
+            .and_then(|m| m.as_str().parse::<u32>().ok())
+            .unwrap_or(0);
+        // Real episode ranges are ascending with both numbers small
+        // enough to be plausible episode counts. `left < right` rules
+        // out title-number + episode (`100 - 03`, `100 - 12`); the
+        // `<= 9999` is implicit via the `\d{1,4}` capture bound.
+        left > 0 && left < right
+    })
+}
+
 /// Season-marker-immediately-followed-by-bracket pattern. Catches the
 /// Kaizoku-style convention where a pack is named `[Group] Series
 /// Season N (Descriptor)` with no episode number between the season
@@ -313,7 +342,7 @@ pub(super) fn detect_batch(title: &str) -> bool {
     for re in super::RE_SEASON_MARKER_MASK.iter() {
         masked = re.replace_all(&masked, " ").to_string();
     }
-    RE_BATCH.is_match(&masked)
+    (RE_BATCH.is_match(&masked) && has_valid_batch_range(&masked))
         || RE_BATCH_SEASON_BRACKET.is_match(&lower)
         || lower.contains(" batch")
         || lower.contains(" complete")
@@ -401,5 +430,64 @@ mod detect_batch_tests {
     #[test]
     fn part_parens_detected_as_batch() {
         assert!(detect_batch("[Group] Series Part 2 (1080p)"));
+    }
+
+    // ── False-positive reproductions for the Mob Psycho III case ─────
+    //
+    // User reported 2026-04-23: single-episode Mob Psycho III / S3
+    // releases were surfacing with `batch` badges in interactive
+    // search. The common shape is a Roman numeral / `S3` / `III`
+    // franchise marker followed by a dashed single episode.
+
+    #[test]
+    fn subsplease_s3_single_episode_not_batch() {
+        assert!(!detect_batch(
+            "[SubsPlease] Mob Psycho 100 S3 - 10v2 (1080p) [3B717070].mkv"
+        ));
+    }
+
+    #[test]
+    fn shouryureppa_s3_single_episode_not_batch() {
+        // No dash between the `S3` marker and the episode digit — just
+        // whitespace. RE_BATCH_SEASON_BRACKET shouldn't fire because
+        // the `(` / `[` anchor is separated from `s3` by ` 03 1080p`.
+        assert!(!detect_batch(
+            "[ShouryuuReppa] Mob Psycho 100 S3 03 1080p [HEVC][x265][10bit][AAC]"
+        ));
+    }
+
+    #[test]
+    fn metaljerk_roman_single_episode_not_batch() {
+        // `III 03` — Roman sequel marker followed by a single episode.
+        // No range, no batch keyword, no season+bracket anchor.
+        assert!(!detect_batch(
+            "[Metaljerk] Mob Psycho 100 III 03 [1080p] [CR] (English Dub)"
+        ));
+    }
+
+    #[test]
+    fn horriblesubs_dash_single_episode_not_batch() {
+        assert!(!detect_batch(
+            "[HorribleSubs] Mob Psycho 100 - 03 [1080p].mkv"
+        ));
+    }
+
+    #[test]
+    fn title_number_followed_by_episode_not_a_range() {
+        // Guard against the generalization of the HorribleSubs bug:
+        // any `<big> - <small>` that looks like an episode range but
+        // is really a show-title number followed by an episode number
+        // must be rejected (`100 - 05`, `555 - 08`, etc.).
+        assert!(!detect_batch(
+            "[Group] Mob Psycho 100 - 05 [720p][x265].mkv"
+        ));
+        assert!(!detect_batch("[Group] Kamen Rider 555 - 08 [1080p].mkv"));
+    }
+
+    #[test]
+    fn real_range_01_100_still_batch() {
+        // One-Piece-style long-range batches still hit `left < right`
+        // and pass.
+        assert!(detect_batch("[Group] One Piece - 01-100 (1080p)"));
     }
 }
