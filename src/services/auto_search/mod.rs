@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
+use futures_util::stream::{self, StreamExt};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
@@ -28,7 +29,7 @@ mod search_target;
 use aliases::{SiblingRejectPrecompute, sibling_match_rejects};
 pub use aliases::{
     collect_aliases, collect_extended_aliases, collect_sibling_aliases, dedupe_strings,
-    matches_target, normalize_title, token_overlap_ratio, token_set,
+    matches_target, normalize_title, sequel_variant_aliases, token_overlap_ratio, token_set,
 };
 pub use pack_detection::{
     TRANSITIVE_WALK_MAX_FETCHES, detect_sibling_entries_in_pack,
@@ -79,10 +80,15 @@ pub async fn find_all_for_target(
     _allow_batch: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let aliases = collect_aliases(detail);
+    let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
     let queries = append_custom_tokens(
-        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
+        build_queries_mixed(
+            &canonical_aliases,
+            &variant_aliases,
+            target,
+            !series_ctx.restrict_user.is_empty(),
+        ),
         &series_ctx.custom_tokens,
     );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
@@ -367,7 +373,7 @@ pub async fn collect_scored_batches_for_target(
     target: &SearchTarget,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let aliases = collect_aliases(detail);
+    let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
@@ -432,7 +438,12 @@ pub async fn collect_scored_batches_for_target(
     // Standard query sweep — picks up any batches that happen to surface
     // on Nyaa page 1 alongside the singles.
     let queries = append_custom_tokens(
-        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
+        build_queries_mixed(
+            &canonical_aliases,
+            &variant_aliases,
+            target,
+            !series_ctx.restrict_user.is_empty(),
+        ),
         &series_ctx.custom_tokens,
     );
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
@@ -563,10 +574,15 @@ async fn collect_scored_for_target(
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
 ) -> Vec<SearchResult> {
-    let aliases = collect_aliases(detail);
+    let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
     let queries = append_custom_tokens(
-        build_queries_from_aliases(&aliases, target, !series_ctx.restrict_user.is_empty()),
+        build_queries_mixed(
+            &canonical_aliases,
+            &variant_aliases,
+            target,
+            !series_ctx.restrict_user.is_empty(),
+        ),
         &series_ctx.custom_tokens,
     );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
@@ -895,15 +911,33 @@ struct InteractiveQueryCtx<'a> {
 }
 
 /// Run a set of queries against Nyaa page 1, collecting valid candidates.
+///
+/// Queries run concurrently under the process-wide `nyaa::NYAA_CONCURRENCY`
+/// semaphore — `buffer_unordered` starts up to `NYAA_BUFFER` futures in
+/// parallel, each acquires a Nyaa permit before its HTTP request, so the
+/// actual in-flight outbound request count never exceeds
+/// `nyaa::NYAA_MAX_CONCURRENCY` regardless of how many `run_queries`
+/// callers are active simultaneously. The buffer is larger than the
+/// semaphore so a freed permit is always handed off to an already-
+/// polling future, keeping the pipeline saturated.
+///
+/// Response ordering changes vs. the previous sequential loop — two
+/// queries that surface the same release may resolve in either order,
+/// so the `seen.insert` dedup now attributes the "winning" copy to
+/// whichever query happened to land first. Downstream code scores
+/// candidates independently and sorts by score, so the attribution
+/// shift is invisible in the final output.
 async fn run_queries(
     queries: &[String],
     ctx: AutoQueryCtx<'_>,
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
-    for category in ctx.categories {
-        for query in queries {
-            let opts = SearchOptions {
+    let opts_list: Vec<SearchOptions> = ctx
+        .categories
+        .iter()
+        .flat_map(|category| {
+            queries.iter().map(move |query| SearchOptions {
                 query: query.clone(),
                 category: category.clone(),
                 filter: "0".to_string(),
@@ -911,62 +945,69 @@ async fn run_queries(
                 preferred_groups: ctx.preferred_groups.to_vec(),
                 preferred_resolution: ctx.preferred_resolution.to_string(),
                 prefer_subs: true,
-            };
+            })
+        })
+        .collect();
 
-            let resp = match nyaa::search(&opts, 1).await {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+    let responses: Vec<_> = stream::iter(opts_list)
+        .map(|opts| async move { nyaa::search(&opts, 1).await })
+        .buffer_unordered(nyaa::NYAA_BUFFER)
+        .collect()
+        .await;
 
-            for result in resp.results {
-                let dedupe_key = if !result.info_hash.is_empty() {
-                    result.info_hash.clone()
-                } else {
-                    result.title.to_lowercase()
-                };
-                if !seen.insert(dedupe_key) {
-                    continue;
-                }
-                // SeaDex trusts its AniList-ID-based curation over any
-                // title heuristic. A hash match here means the release
-                // is the community-curated best for this series, even
-                // if its Nyaa title carries a season marker that would
-                // otherwise fail `matches_target` (e.g. smol's
-                // `Monogatari (Season 9)` release for a Kizumonogatari
-                // Part 2 target).
-                //
-                // Batch filter runs unconditionally even for SeaDex
-                // matches: an episode-search target with `allow_batch=
-                // false` is an explicit "don't pull batches during
-                // per-episode search" request from the user, and
-                // silently letting SeaDex-curated batches through would
-                // bypass that setting. SeaDex bypasses *heuristic* title
-                // matching, not the user's batch-allowed policy.
-                if !ctx.allow_batch && result.is_batch {
-                    continue;
-                }
-                let is_seadex_best = is_seadex_match(&result.info_hash, ctx.seadex_hashes);
-                if !is_seadex_best {
-                    if !matches_target(
-                        &result.title,
-                        ctx.aliases,
-                        ctx.sibling_precompute,
-                        ctx.target,
-                        ctx.expected_season,
-                        ctx.batch_episode_match && result.is_batch,
-                        ctx.absolute_offset,
-                    ) {
-                        continue;
-                    }
-                } else {
-                    tracing::debug!(
-                        "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
-                        result.title,
-                        result.info_hash
-                    );
-                }
-                candidates.push(result);
+    for resp in responses {
+        let results = match resp {
+            Ok(v) => v.results,
+            Err(_) => continue,
+        };
+        for result in results {
+            let dedupe_key = if !result.info_hash.is_empty() {
+                result.info_hash.clone()
+            } else {
+                result.title.to_lowercase()
+            };
+            if !seen.insert(dedupe_key) {
+                continue;
             }
+            // SeaDex trusts its AniList-ID-based curation over any
+            // title heuristic. A hash match here means the release
+            // is the community-curated best for this series, even
+            // if its Nyaa title carries a season marker that would
+            // otherwise fail `matches_target` (e.g. smol's
+            // `Monogatari (Season 9)` release for a Kizumonogatari
+            // Part 2 target).
+            //
+            // Batch filter runs unconditionally even for SeaDex
+            // matches: an episode-search target with `allow_batch=
+            // false` is an explicit "don't pull batches during
+            // per-episode search" request from the user, and
+            // silently letting SeaDex-curated batches through would
+            // bypass that setting. SeaDex bypasses *heuristic* title
+            // matching, not the user's batch-allowed policy.
+            if !ctx.allow_batch && result.is_batch {
+                continue;
+            }
+            let is_seadex_best = is_seadex_match(&result.info_hash, ctx.seadex_hashes);
+            if !is_seadex_best {
+                if !matches_target(
+                    &result.title,
+                    ctx.aliases,
+                    ctx.sibling_precompute,
+                    ctx.target,
+                    ctx.expected_season,
+                    ctx.batch_episode_match && result.is_batch,
+                    ctx.absolute_offset,
+                ) {
+                    continue;
+                }
+            } else {
+                tracing::debug!(
+                    "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
+                    result.title,
+                    result.info_hash
+                );
+            }
+            candidates.push(result);
         }
     }
 }
@@ -981,9 +1022,11 @@ async fn run_queries_interactive(
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
-    for category in ctx.categories {
-        for query in queries {
-            let opts = SearchOptions {
+    let opts_list: Vec<SearchOptions> = ctx
+        .categories
+        .iter()
+        .flat_map(|category| {
+            queries.iter().map(move |query| SearchOptions {
                 query: query.clone(),
                 category: category.clone(),
                 filter: "0".to_string(),
@@ -991,78 +1034,83 @@ async fn run_queries_interactive(
                 preferred_groups: ctx.preferred_groups.to_vec(),
                 preferred_resolution: ctx.preferred_resolution.to_string(),
                 prefer_subs: true,
-            };
+            })
+        })
+        .collect();
 
-            let resp = match nyaa::search(&opts, 1).await {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+    let responses: Vec<_> = stream::iter(opts_list)
+        .map(|opts| async move { nyaa::search(&opts, 1).await })
+        .buffer_unordered(nyaa::NYAA_BUFFER)
+        .collect()
+        .await;
 
-            for result in resp.results {
-                let dedupe_key = if !result.info_hash.is_empty() {
-                    result.info_hash.clone()
-                } else {
-                    result.title.to_lowercase()
-                };
-                if !seen.insert(dedupe_key) {
-                    continue;
-                }
-                // SeaDex trusts its AniList-ID-based curation over any
-                // title heuristic. If this hash is in the set, skip all
-                // alias / season / episode checks below — the unconditional
-                // `season_mismatch` in particular drops releases like
-                // smol's `Monogatari (Season 9)` for a Kizumonogatari Part
-                // 2 target, even though SeaDex has already confirmed the
-                // AniList ID match.
-                if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
-                    tracing::debug!(
-                        "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
-                        result.title,
-                        result.info_hash
-                    );
-                    candidates.push(result);
-                    continue;
-                }
-                // Relaxed alias matching: lower threshold than auto search
-                let normalized_title = normalize_title(&result.title);
-                let title_tokens = token_set(&normalized_title);
-                let alias_match = ctx.aliases.iter().any(|alias| {
-                    let normalized_alias = normalize_title(alias);
-                    normalized_title.contains(&normalized_alias)
-                        || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
-                });
-                if !alias_match {
-                    continue;
-                }
-                // Sibling rejection: same sequel/prequel guard as the auto
-                // path — a release that matches a sibling more tightly than
-                // us is almost certainly for the sibling.
-                if sibling_match_rejects(&normalized_title, &title_tokens, ctx.sibling_precompute) {
-                    continue;
-                }
-                // Season check: reject results clearly from a different season
-                if season_mismatch(&result.title, ctx.expected_season) {
-                    continue;
-                }
-                // Episode check for single-episode targets (allow batches through).
-                // #30 — A release passes if its parsed number matches either the
-                // relative target (AL's per-cour numbering) OR the absolute
-                // number `target + absolute_offset` (what SubsPlease-style TV
-                // releases use for sequel cours, e.g. JJK S3 E9 shipped as
-                // "Jujutsu Kaisen - 56" with offset 47). When offset is 0 this
-                // collapses to the legacy strict-relative behavior.
-                if let SearchTarget::Episode(target_ep) = ctx.target
-                    && !result.is_batch
-                {
-                    let parsed = parse_release_numbers(&result.title);
-                    if !parsed.is_empty()
-                        && !episode_match(&parsed, *target_ep, ctx.absolute_offset)
-                    {
-                        continue;
-                    }
-                }
-                candidates.push(result);
+    for resp in responses {
+        let results = match resp {
+            Ok(v) => v.results,
+            Err(_) => continue,
+        };
+        for result in results {
+            let dedupe_key = if !result.info_hash.is_empty() {
+                result.info_hash.clone()
+            } else {
+                result.title.to_lowercase()
+            };
+            if !seen.insert(dedupe_key) {
+                continue;
             }
+            // SeaDex trusts its AniList-ID-based curation over any
+            // title heuristic. If this hash is in the set, skip all
+            // alias / season / episode checks below — the unconditional
+            // `season_mismatch` in particular drops releases like
+            // smol's `Monogatari (Season 9)` for a Kizumonogatari Part
+            // 2 target, even though SeaDex has already confirmed the
+            // AniList ID match.
+            if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
+                tracing::debug!(
+                    "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
+                    result.title,
+                    result.info_hash
+                );
+                candidates.push(result);
+                continue;
+            }
+            // Relaxed alias matching: lower threshold than auto search
+            let normalized_title = normalize_title(&result.title);
+            let title_tokens = token_set(&normalized_title);
+            let alias_match = ctx.aliases.iter().any(|alias| {
+                let normalized_alias = normalize_title(alias);
+                normalized_title.contains(&normalized_alias)
+                    || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
+            });
+            if !alias_match {
+                continue;
+            }
+            // Sibling rejection: same sequel/prequel guard as the auto
+            // path — a release that matches a sibling more tightly than
+            // us is almost certainly for the sibling.
+            if sibling_match_rejects(&normalized_title, &title_tokens, ctx.sibling_precompute) {
+                continue;
+            }
+            // Season check: reject results clearly from a different season
+            if season_mismatch(&result.title, ctx.expected_season) {
+                continue;
+            }
+            // Episode check for single-episode targets (allow batches through).
+            // #30 — A release passes if its parsed number matches either the
+            // relative target (AL's per-cour numbering) OR the absolute
+            // number `target + absolute_offset` (what SubsPlease-style TV
+            // releases use for sequel cours, e.g. JJK S3 E9 shipped as
+            // "Jujutsu Kaisen - 56" with offset 47). When offset is 0 this
+            // collapses to the legacy strict-relative behavior.
+            if let SearchTarget::Episode(target_ep) = ctx.target
+                && !result.is_batch
+            {
+                let parsed = parse_release_numbers(&result.title);
+                if !parsed.is_empty() && !episode_match(&parsed, *target_ep, ctx.absolute_offset) {
+                    continue;
+                }
+            }
+            candidates.push(result);
         }
     }
 }
@@ -1093,11 +1141,17 @@ fn build_group_queries(
     target: &SearchTarget,
     preferred_groups: &[String],
 ) -> Vec<String> {
-    let aliases = collect_aliases(detail);
+    // Skip `collect_aliases_with_variants` here — that helper also
+    // builds the combined own+variant list (for `matches_target`'s
+    // alias pool), which `build_group_queries` never consumes. Fetch
+    // the two pieces we actually need directly and leave the combined
+    // allocation to the call sites that use it.
+    let canonical_aliases = collect_aliases(detail);
+    let variant_aliases = sequel_variant_aliases(&canonical_aliases);
     let mut queries = Vec::new();
 
     for group in preferred_groups {
-        for alias in &aliases {
+        for alias in &canonical_aliases {
             match target {
                 SearchTarget::Single => {
                     queries.push(format!("{} {}", group, alias));
@@ -1105,6 +1159,21 @@ fn build_group_queries(
                 SearchTarget::Episode(ep) => {
                     queries.push(format!("{} {} - {:02}", group, alias, ep));
                     queries.push(format!("{} {} {:02}", group, alias, ep));
+                }
+            }
+        }
+        // Variants run collapsed: one query per (group × variant). Every
+        // Nyaa query is a sequential HTTP round-trip, and the two-form
+        // fan-out on canonical aliases already covers the hyphen vs
+        // bare-number convention; variants emit the zero-padded form
+        // only because it's the most common release-group shape.
+        for variant in &variant_aliases {
+            match target {
+                SearchTarget::Single => {
+                    queries.push(format!("{} {}", group, variant));
+                }
+                SearchTarget::Episode(ep) => {
+                    queries.push(format!("{} {} {:02}", group, variant, ep));
                 }
             }
         }
@@ -1278,6 +1347,41 @@ fn append_custom_tokens(queries: Vec<String>, tokens: &str) -> Vec<String> {
 /// the zero-padded episode form (`title 09`) for Episode targets, the
 /// bare alias for Single targets — cutting the per-alias query count
 /// 4→1 (Episode) and 2→1 (Single).
+/// Compute canonical aliases, variant aliases, and the combined match
+/// list for a detail. The canonical aliases run through the full query
+/// fan-out (`build_queries_from_aliases` with the call-site's `collapsed`
+/// flag); the variants run through a single-query collapsed path to keep
+/// the per-sweep Nyaa HTTP round-trip count bounded — each query is a
+/// sequential network hit inside `run_queries`, so a 6-extra-aliases ×
+/// 4-queries-per-alias fan-out doubled the end-to-end search latency
+/// visibly in the wild (issue #84 follow-up).
+fn collect_aliases_with_variants(detail: &AnimeDetail) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let canonical = collect_aliases(detail);
+    let variants = sequel_variant_aliases(&canonical);
+    let combined = if variants.is_empty() {
+        canonical.clone()
+    } else {
+        dedupe_strings(canonical.iter().chain(variants.iter()).cloned().collect())
+    };
+    (combined, canonical, variants)
+}
+
+/// Build the per-sweep query list — canonical aliases at full fan-out,
+/// variants collapsed to one query each. See the docstring on
+/// `collect_aliases_with_variants` for the latency rationale.
+fn build_queries_mixed(
+    canonical: &[String],
+    variants: &[String],
+    target: &SearchTarget,
+    collapsed: bool,
+) -> Vec<String> {
+    let mut queries = build_queries_from_aliases(canonical, target, collapsed);
+    if !variants.is_empty() {
+        queries.extend(build_queries_from_aliases(variants, target, true));
+    }
+    dedupe_strings(queries)
+}
+
 fn build_queries_from_aliases(
     aliases: &[String],
     target: &SearchTarget,

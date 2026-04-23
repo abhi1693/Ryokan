@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 const NYAA_BASE: &str = "https://nyaa.si";
 
@@ -18,6 +19,33 @@ static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .build()
         .expect("building the Nyaa search reqwest client should not fail")
 });
+
+/// Process-global concurrency cap for outbound Nyaa HTTP requests. Every
+/// `search` / `fetch_view_page` call must acquire a permit before firing
+/// its request, so the total in-flight count across the entire process
+/// never exceeds `NYAA_MAX_CONCURRENCY` regardless of how many
+/// auto-search / RSS-sync / upgrade-sweep callers are running
+/// concurrently. Two permits is the sweet spot — one is no-gain vs.
+/// today's sequential behavior, and anything ≥ 5 has tripped
+/// Cloudflare on nyaa.si in past reports. Two roughly doubles
+/// single-search throughput while staying well under every known
+/// rate-limit anecdote.
+///
+/// The permit is acquired INSIDE `search` / `fetch_view_page` rather
+/// than at the caller site so every outbound request goes through it,
+/// including the description-body fetcher in `source_description` and
+/// the SeaDex-view-URL fetcher. A caller-side semaphore would be easy
+/// to forget on a new code path; here it's unmissable.
+pub const NYAA_MAX_CONCURRENCY: usize = 2;
+static NYAA_CONCURRENCY: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(NYAA_MAX_CONCURRENCY));
+
+/// Buffer size for callers running queries through
+/// `futures_util::stream::buffer_unordered`. Set to 4× the semaphore's
+/// permit count so that whenever a permit frees, a future is already
+/// polling and ready to grab it — pure pipelining, no effect on peak
+/// outbound concurrency because the semaphore is the hard cap.
+pub const NYAA_BUFFER: usize = NYAA_MAX_CONCURRENCY * 4;
 
 mod scraper;
 
@@ -134,6 +162,10 @@ pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, S
         );
     }
 
+    let _permit = NYAA_CONCURRENCY
+        .acquire()
+        .await
+        .expect("nyaa semaphore should never be closed");
     let html = HTTP_CLIENT
         .get(&url)
         .send()
@@ -305,6 +337,10 @@ pub async fn fetch_view_result(
     view_url: &str,
     opts: &SearchOptions,
 ) -> Result<SearchResult, String> {
+    let _permit = NYAA_CONCURRENCY
+        .acquire()
+        .await
+        .expect("nyaa semaphore should never be closed");
     let html = HTTP_CLIENT
         .get(view_url)
         .send()
