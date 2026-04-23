@@ -236,7 +236,11 @@
 @media (min-width: 641px) {
     .results-table thead th {
         position: sticky;
-        top: 0;
+        /* The top nav is `position: sticky; top: 0; height: 56px` on
+           desktop (topbar.css), so our header must pin BELOW it or it
+           vanishes behind the nav as you scroll. Matching 56px keeps
+           the header edge-to-edge with the nav bottom. */
+        top: 56px;
         z-index: 15;
         background: var(--bg-elevated);
     }
