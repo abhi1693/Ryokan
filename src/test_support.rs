@@ -96,22 +96,36 @@ pub(crate) async fn seed_series(db: &SqlitePool, anilist_id: i64, title: &str) -
         .expect("fetch seeded series id")
 }
 
-/// Seed one `grabbed_torrents` row. Sets the `state` to `"pending"`
-/// (the default) unless the caller passes a different value. Returns
-/// the auto-generated id.
+/// Seed one `grabbed_torrents` row with the given episode-numbers
+/// list. Passing an empty slice defaults to `[1]` so simple single-
+/// episode tests can skip the argument. Writes `state = 'pending'`;
+/// callers that need `imported` / `failed` / `replaced` should
+/// `UPDATE` the row after seeding. Returns the auto-generated id.
 pub(crate) async fn seed_grabbed_torrent(
     db: &SqlitePool,
     series_id: i64,
     hash: &str,
     torrent_name: &str,
+    episode_numbers: &[i32],
 ) -> i64 {
+    // `grabbed_torrents.episode_numbers` is a JSON-encoded array
+    // (matches the production schema). Serialize with serde_json so
+    // we don't hand-build the string and accidentally quote numbers.
+    let eps_default: Vec<i32> = vec![1];
+    let eps = if episode_numbers.is_empty() {
+        &eps_default[..]
+    } else {
+        episode_numbers
+    };
+    let eps_json = serde_json::to_string(eps).expect("serialize episode_numbers");
     sqlx::query(
         "INSERT INTO grabbed_torrents (series_id, hash, torrent_name, episode_numbers, state) \
-         VALUES (?, ?, ?, '[1]', 'pending')",
+         VALUES (?, ?, ?, ?, 'pending')",
     )
     .bind(series_id)
     .bind(hash)
     .bind(torrent_name)
+    .bind(eps_json)
     .execute(db)
     .await
     .expect("seed grabbed_torrent");

@@ -259,8 +259,15 @@ impl DownloadClient for RtorrentClient {
         // malformed URLs with an RPC-level error; only rtorrent
         // swallowed them). Reject anything that isn't a magnet URI
         // or an http(s) URL before burning an XML-RPC round trip.
-        let looks_valid =
-            url.starts_with("magnet:") || url.starts_with("http://") || url.starts_with("https://");
+        // Lowercase the scheme first so `MAGNET:` / `HTTP://` also
+        // match — RFC 3986 schemes are case-insensitive. Internal
+        // Ryokan call sites always emit lowercase, but third-party
+        // integrations (a future torznab-pushed release, a hand-
+        // edited feed URL) might not.
+        let lowered = url.trim().to_ascii_lowercase();
+        let looks_valid = lowered.starts_with("magnet:")
+            || lowered.starts_with("http://")
+            || lowered.starts_with("https://");
         if !looks_valid {
             return Err(format!(
                 "rtorrent add rejected url={url}: expected magnet: / http:// / https:// scheme"
@@ -767,17 +774,13 @@ pub(crate) enum XmlValue {
     /// which accept an entire `.torrent` file as a base64 blob —
     /// these are the canonical ways to hand a tiny synthetic
     /// `.torrent` to rtorrent without serving it over HTTP or
-    /// sharing a filesystem mount with the rtorrent container. Value
-    /// is the raw bytes; the encoder handles base64 conversion.
-    ///
-    /// Currently constructed only by the `live_smoke_narrowed` test,
-    /// but kept in the production `XmlValue` enum (vs. a test-only
-    /// variant) because the encoder's match on `XmlValue` is
-    /// exhaustive and splitting the variant set would force ugly
-    /// cfg-gating on every match arm. The production encoder path
-    /// is test-verified and ready if a future feature (e.g. a
-    /// "load .torrent from local path" UI action) needs it.
-    #[allow(dead_code)]
+    /// sharing a filesystem mount with the rtorrent container.
+    /// Test-only for now (used by `live_smoke_narrowed` and friends);
+    /// gated behind `#[cfg(test)]` both here and in the encoder
+    /// match arm so the production binary doesn't ship a speculative
+    /// feature. Promote to unconditional if a UI feature later needs
+    /// to load `.torrent` bytes directly.
+    #[cfg(test)]
     Base64(Vec<u8>),
 }
 
@@ -841,6 +844,7 @@ fn encode_value(v: &XmlValue, out: &mut String) {
             }
             out.push_str("</data></array>");
         }
+        #[cfg(test)]
         XmlValue::Base64(bytes) => {
             use base64::{Engine, engine::general_purpose};
             out.push_str("<base64>");
@@ -1568,21 +1572,27 @@ mod tests {
         let client = RtorrentClient::new(rpc_url, "", "", label);
 
         // Compute the infohash client-side by SHA1'ing the bencoded
-        // `info` dict. Hand-parse just enough bencode to find it.
-        let info_hash = bencode_info_hash(&bytes).expect("extract infohash from .torrent");
+        // `info` dict (shared helper in test_helpers).
+        let info_hash = super::super::test_helpers::bencode_info_hash(&bytes)
+            .expect("extract infohash from .torrent");
         let hash_uc = info_hash.to_ascii_uppercase();
 
-        // `load.raw_verbose` (no `_start`) loads the torrent into the
-        // main view without auto-starting it — which is what we need
-        // for tests that verify paused state or write file priorities
-        // before any content transfer. Post-load commands (e.g. the
-        // `d.custom1.set` label) run during load. We explicitly
-        // avoid `load.raw_start_verbose` here because it races with
-        // a post-command `d.stop` — the start happens before the
-        // post-command applies.
+        // `load.raw_start_verbose` auto-starts the torrent, which is
+        // necessary for rtorrent to populate `d.base_path` — required
+        // by `add_torrent_with_file_filter`'s metadata-readiness
+        // poll (sibling smoke). Then we explicitly pause via the
+        // trait's pause method so the torrent ends up in the soft-
+        // paused state (`is_active=false`, `is_open=true`) that
+        // `client.resume()` → `d.resume` can cleanly undo.
+        //
+        // Post-load commands passed to `load.raw_start_verbose` run
+        // BEFORE the session-level auto-start scheduler fires, so a
+        // post-command `d.pause` races and sometimes doesn't stick.
+        // Pausing from the outside after a short settle is more
+        // reliable.
         client
             .call(
-                "load.raw_verbose",
+                "load.raw_start_verbose",
                 &[
                     XmlValue::String(String::new()),
                     XmlValue::Base64(bytes),
@@ -1590,18 +1600,17 @@ mod tests {
                 ],
             )
             .await
-            .expect("load.raw_verbose failed");
+            .expect("load.raw_start_verbose failed");
 
-        // Some rtorrent configs auto-start loaded torrents (via
-        // `schedule2 = load,...,d.start=` or similar). Post-load
-        // commands passed to `load.raw_verbose` run at load time but
-        // BEFORE any session-level auto-start scheduler. Call `d.stop`
-        // explicitly so the test can observe Paused state.
+        // Wait for the torrent to register in the main view, then
+        // pause it explicitly. Poll because rtorrent's post-load
+        // bookkeeping is async: the hash needs to appear via
+        // `d.multicall2` before `d.pause` addresses anything.
         let hash_uc_clone = hash_uc.clone();
-        for _ in 0..10 {
+        for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             if client
-                .call("d.stop", &[XmlValue::String(hash_uc_clone.clone())])
+                .call("d.pause", &[XmlValue::String(hash_uc_clone.clone())])
                 .await
                 .is_ok()
             {
@@ -1610,58 +1619,6 @@ mod tests {
         }
 
         info_hash.to_ascii_lowercase()
-    }
-
-    /// Compute the v1 infohash of a .torrent by SHA1'ing the raw
-    /// bencoded `info` dict. Minimal hand-parse — finds the `4:info`
-    /// key at the top level, then slices the bencoded dict that
-    /// follows. Doesn't validate the rest of the .torrent structure;
-    /// assumes well-formed input from `transmission-create`.
-    fn bencode_info_hash(bytes: &[u8]) -> Option<String> {
-        // Top-level structure is `d...e`; look for `4:info` and grab
-        // the bencoded dict that follows.
-        let key = b"4:info";
-        let start = find_subslice(bytes, key)? + key.len();
-        let end = bencode_end(bytes, start)?;
-        let info_slice = &bytes[start..end];
-        let mut hasher = sha1_smol::Sha1::new();
-        hasher.update(info_slice);
-        Some(hasher.digest().to_string())
-    }
-
-    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack.windows(needle.len()).position(|w| w == needle)
-    }
-
-    /// Given a bencoded value starting at `start`, return the index
-    /// just past its end. Handles dicts (`d...e`), lists (`l...e`),
-    /// ints (`i...e`), and byte-strings (`N:...`) — the full bencode
-    /// grammar. Returns None on malformed input.
-    fn bencode_end(bytes: &[u8], start: usize) -> Option<usize> {
-        let mut i = start;
-        if i >= bytes.len() {
-            return None;
-        }
-        match bytes[i] {
-            b'd' | b'l' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'e' {
-                    i = bencode_end(bytes, i)?;
-                }
-                if i < bytes.len() { Some(i + 1) } else { None }
-            }
-            b'i' => {
-                let e = find_subslice(&bytes[i..], b"e")? + i;
-                Some(e + 1)
-            }
-            b'0'..=b'9' => {
-                let colon = bytes[i..].iter().position(|&b| b == b':')? + i;
-                let len_str = std::str::from_utf8(&bytes[i..colon]).ok()?;
-                let len: usize = len_str.parse().ok()?;
-                Some(colon + 1 + len)
-            }
-            _ => None,
-        }
     }
 
     /// Live smoke covering `add_torrent_with_file_filter` narrowing

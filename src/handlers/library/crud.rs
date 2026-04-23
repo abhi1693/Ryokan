@@ -1182,12 +1182,22 @@ mod tests {
         // empty so the handler's "delete media folder" step no-ops
         // (we're testing torrent cleanup, not filesystem removal).
         let series_id = test_support::seed_series(&pool, 12345, "D1 Test Series").await;
-        let _gid_a =
-            test_support::seed_grabbed_torrent(&pool, series_id, &hash_a, "d1-test-a.torrent")
-                .await;
-        let _gid_b =
-            test_support::seed_grabbed_torrent(&pool, series_id, &hash_b, "d1-test-b.torrent")
-                .await;
+        let _gid_a = test_support::seed_grabbed_torrent(
+            &pool,
+            series_id,
+            &hash_a,
+            "d1-test-a.torrent",
+            &[1],
+        )
+        .await;
+        let _gid_b = test_support::seed_grabbed_torrent(
+            &pool,
+            series_id,
+            &hash_b,
+            "d1-test-b.torrent",
+            &[2],
+        )
+        .await;
         assert_eq!(
             test_support::count_grabs_for_series(&pool, series_id).await,
             2,

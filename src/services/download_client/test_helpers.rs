@@ -58,14 +58,15 @@ pub(crate) fn build_named_torrent(name: &str) -> Option<(tempfile::TempDir, Path
 /// Upload a local `.torrent` file to qBit via the multipart
 /// `torrents/add` endpoint with `paused=true` and `stopped=true`
 /// (qBit 5.x renamed the flag — pass both to survive either
-/// version), scoped to the given category. Returns the infohash
-/// qBit assigned after polling `list_scoped` for appearance.
+/// version), scoped to the given category. Computes the v1 infohash
+/// up front from the `.torrent` bytes and polls for that *specific*
+/// hash to confirm registration — safe to call multiple times
+/// against the same category (unlike a first-in-category lookup,
+/// which would race).
 ///
-/// Shared between `qbittorrent::tests::live_smoke_*` and
-/// handler-level Wave 2 integration tests. The production
-/// `QbitClient::add_torrent` only accepts URL strings (magnet/HTTP);
-/// this helper injects a synthetic file-backed torrent via the
-/// multipart route that production code doesn't use.
+/// Returns the confirmed hash once qBit has it. Shared between
+/// `qbittorrent::tests::live_smoke_*` and handler-level Wave 2
+/// integration tests.
 pub(crate) async fn upload_torrent_file_qbit(
     base_url: &str,
     user: &str,
@@ -73,6 +74,13 @@ pub(crate) async fn upload_torrent_file_qbit(
     category: &str,
     torrent_path: &std::path::Path,
 ) -> String {
+    let bytes = std::fs::read(torrent_path).expect("read .torrent");
+    // Pre-compute the expected infohash so we poll for a specific
+    // hash rather than trusting "whatever's in the category first."
+    let expected = bencode_info_hash(&bytes)
+        .expect("bencode_info_hash on uploaded .torrent")
+        .to_ascii_lowercase();
+
     let client = reqwest::Client::builder()
         .cookie_store(true)
         .build()
@@ -84,7 +92,6 @@ pub(crate) async fn upload_torrent_file_qbit(
         .await
         .expect("qBit login");
     assert_eq!(login.status(), 200, "qBit login failed");
-    let bytes = std::fs::read(torrent_path).expect("read .torrent");
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name("testpack.torrent")
         .mime_str("application/x-bittorrent")
@@ -102,29 +109,86 @@ pub(crate) async fn upload_torrent_file_qbit(
         .expect("qBit add");
     assert_eq!(resp.status(), 200, "qBit add returned {}", resp.status());
 
-    // qBit's add endpoint doesn't return the hash directly; poll
-    // by category to find the newly-added torrent.
+    // Poll `/torrents/info?hashes=<expected>` — qBit filters by hash
+    // directly, so we don't care about category isolation. Concurrent
+    // tests sharing a category are safe.
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let list_resp = client
-            .get(format!(
-                "{base_url}/api/v2/torrents/info?category={category}"
-            ))
+            .get(format!("{base_url}/api/v2/torrents/info?hashes={expected}"))
             .send()
             .await
-            .expect("qBit list");
-        let torrents: Vec<serde_json::Value> = list_resp.json().await.expect("qBit list json");
-        // Return the FIRST torrent matching this category — callers
-        // that upload multiple torrents to the same category must
-        // use distinct categories per torrent or capture before the
-        // second upload.
-        if let Some(first) = torrents.first()
-            && let Some(hash) = first.get("hash").and_then(|v| v.as_str())
-        {
-            return hash.to_string();
+            .expect("qBit info-by-hash");
+        let torrents: Vec<serde_json::Value> =
+            list_resp.json().await.expect("qBit info-by-hash json");
+        if torrents.iter().any(|t| {
+            t.get("hash")
+                .and_then(|v| v.as_str())
+                .map(|h| h.eq_ignore_ascii_case(&expected))
+                .unwrap_or(false)
+        }) {
+            return expected;
         }
     }
-    panic!("uploaded torrent never appeared in category {category}");
+    panic!("uploaded torrent {expected} never registered in qBit");
+}
+
+/// Compute the v1 infohash of a `.torrent` by SHA1'ing the raw
+/// bencoded `info` dict. Minimal hand-parse — finds the `4:info`
+/// key at the top level, then slices the bencoded dict that
+/// follows. Doesn't validate the rest of the `.torrent` structure;
+/// assumes well-formed input from `transmission-create` (which all
+/// test helpers in this module produce).
+///
+/// Shared between the rtorrent smoke (where `load.raw_start_verbose`
+/// returns 0 rather than echoing back the hash, so we compute it
+/// ourselves) and `upload_torrent_file_qbit` (which uses it to poll
+/// qBit's `/torrents/info` for a specific hash rather than
+/// first-in-category — makes the helper safe to call multiple times
+/// against the same category).
+pub(crate) fn bencode_info_hash(bytes: &[u8]) -> Option<String> {
+    let key = b"4:info";
+    let start = find_subslice(bytes, key)? + key.len();
+    let end = bencode_end(bytes, start)?;
+    let info_slice = &bytes[start..end];
+    let mut hasher = sha1_smol::Sha1::new();
+    hasher.update(info_slice);
+    Some(hasher.digest().to_string())
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Given a bencoded value starting at `start`, return the index
+/// just past its end. Handles dicts (`d...e`), lists (`l...e`),
+/// ints (`i...e`), and byte-strings (`N:...`) — the full bencode
+/// grammar. Returns `None` on malformed input.
+fn bencode_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    if i >= bytes.len() {
+        return None;
+    }
+    match bytes[i] {
+        b'd' | b'l' => {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'e' {
+                i = bencode_end(bytes, i)?;
+            }
+            if i < bytes.len() { Some(i + 1) } else { None }
+        }
+        b'i' => {
+            let e = find_subslice(&bytes[i..], b"e")? + i;
+            Some(e + 1)
+        }
+        b'0'..=b'9' => {
+            let colon = bytes[i..].iter().position(|&b| b == b':')? + i;
+            let len_str = std::str::from_utf8(&bytes[i..colon]).ok()?;
+            let len: usize = len_str.parse().ok()?;
+            Some(colon + 1 + len)
+        }
+        _ => None,
+    }
 }
 
 fn build_inner(name: &str, with_name_file: bool) -> Option<(tempfile::TempDir, PathBuf)> {

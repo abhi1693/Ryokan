@@ -747,7 +747,8 @@ mod tests {
         // handler looks up.
         let anilist_id: i64 = 54321;
         let series_id = test_support::seed_series(&pool, anilist_id, "D2/D3 Test Series").await;
-        test_support::seed_grabbed_torrent(&pool, series_id, &hash, "d2-d3-test.torrent").await;
+        test_support::seed_grabbed_torrent(&pool, series_id, &hash, "d2-d3-test.torrent", &[1])
+            .await;
         assert_eq!(
             test_support::count_grabs_for_series(&pool, series_id).await,
             1,

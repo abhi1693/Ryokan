@@ -88,17 +88,6 @@ ammonia = "4"
 # Anime release title tokenization (wraps bundled anitomy C++ lib, compiled via cc)
 anitomy = "0.2"
 
-# Base64 encoding. Used by:
-# * rtorrent's XML-RPC encoder for `XmlValue::Base64` (needed to pass
-#   `.torrent` file contents to `load.raw_start_verbose` — the canonical
-#   way to load a local torrent without filesystem or HTTP round-trip).
-# * The `live_smoke_narrowed` test for Deluge (`core.add_torrent_file`
-#   takes a base64-encoded payload too).
-# Declared as a direct dep rather than relying on the transitive pull
-# via reqwest so the use sites don't depend on reqwest's internal choice
-# of base64 version.
-base64 = "0.22"
-
 [dev-dependencies]
 # Used only by the env-gated live_smoke tests for the DownloadClient
 # impls — each smoke creates a synthetic multi-file .torrent in a
@@ -111,3 +100,12 @@ tempfile = "3"
 # returns 0 on success rather than echoing back the hash. Test-only;
 # BitTorrent's v1 spec mandates SHA-1 here so we can't swap to sha2.
 sha1_smol = "1"
+# Base64 encoding. Used by:
+# * The rtorrent XML-RPC encoder's `XmlValue::Base64` variant, which is
+#   itself `#[cfg(test)]`-gated and only constructed by
+#   `live_smoke_narrowed`'s `load.raw_verbose` upload path.
+# * The `live_smoke_narrowed` test for Deluge, where
+#   `core.add_torrent_file` takes a base64-encoded payload.
+# Test-only for now; promote to a direct prod dep if/when a UI feature
+# loads `.torrent` bytes from disk.
+base64 = "0.22"
