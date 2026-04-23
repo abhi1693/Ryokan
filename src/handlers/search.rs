@@ -304,7 +304,6 @@ pub async fn grab_release(
         let is_batch = form.is_batch.unwrap_or(false);
         let state_task = state.clone();
         let client_task = client.clone();
-        let url_task = form.url.clone();
         tokio::spawn(async move {
             let Some((series, eps)) =
                 crate::services::rss::match_library_title(&state_task.db, &title, is_batch).await
@@ -431,11 +430,6 @@ pub async fn grab_release(
                     .await;
                 });
             }
-
-            // Suppress unused-variable warning when grab_id is None
-            // (record_grab returned Err) — the if-let above already
-            // guards auto_expand on it.
-            let _ = url_task;
         });
     }
 

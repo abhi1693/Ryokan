@@ -445,6 +445,14 @@ async fn import_torrent(
         std::collections::BTreeMap::new();
     let mut imported_count = 0_usize;
 
+    // Old grab ids we've marked as replaced during this import pass,
+    // paired with the new `grab.id` that superseded them. Deduped via
+    // HashSet so a batch that covers 12 episodes doesn't issue 12
+    // identical UPDATEs against the same old grab row. Flushed once
+    // after the file loop.
+    let mut grabs_to_mark_replaced: std::collections::HashSet<i64> =
+        std::collections::HashSet::new();
+
     for (file_idx, file) in &video_files {
         // Route this file: prefer the routes table (Phase 2 batch
         // auto-expansion), fall back to `grab.series_id` for legacy
@@ -750,11 +758,19 @@ async fn import_torrent(
             // swapped out by a Kaizoku batch had no way to tell the
             // upgrade actually happened — old rows looked identical to
             // user-cancelled grabs.
+            // `client.delete` still runs inside the per-episode loop
+            // because it's cheap-ish (one RPC per torrent) and the old
+            // hash may repeat across per-episode finds — but qBit's
+            // delete is idempotent on an already-removed hash, so the
+            // repeat is harmless. The expensive SQL UPDATE for
+            // `mark_replaced` is deferred to a post-loop flush so a
+            // batch grab that covers 12 episodes doesn't UPDATE the
+            // same old grab 12 times.
             for old_grab in &old_grabs {
                 if !old_grab.hash.is_empty() {
                     let _ = client.delete(&old_grab.hash, true).await;
                 }
-                let _ = grabbed_torrents::mark_replaced(&state.db, old_grab.id, grab.id).await;
+                grabs_to_mark_replaced.insert(old_grab.id);
             }
 
             // Per-episode history counterpart: flip the old grab's
@@ -763,6 +779,9 @@ async fn import_torrent(
             // mirrors what the Downloads tab shows. Without this the
             // old Kaizoku row and the new SubsPlease row both read
             // 'completed' in grab history, hiding the upgrade chain.
+            // Stays inside the loop since episode_grab_history is
+            // keyed on (series_id, episode_number) — one UPDATE per
+            // episode is correct, not redundant.
             let _ =
                 episode_tags::mark_grab_history_replaced(&state.db, target_series_id, ep_num).await;
         }
@@ -940,6 +959,14 @@ async fn import_torrent(
 
     if imported_count == 0 {
         return Ok(false);
+    }
+
+    // Flush the `grabbed_torrents.state = 'replaced'` updates collected
+    // during the file loop. One UPDATE per distinct old grab instead
+    // of one-per-episode so a batch that covered 12 episodes doesn't
+    // run 12 identical write-identical-row UPDATEs.
+    for old_grab_id in &grabs_to_mark_replaced {
+        let _ = grabbed_torrents::mark_replaced(&state.db, *old_grab_id, grab.id).await;
     }
 
     // Series-level artifacts (tvshow.nfo + poster) run once per unique

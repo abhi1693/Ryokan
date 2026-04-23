@@ -514,13 +514,19 @@ pub async fn set_monitoring(
             (form.auto_grab.unwrap_or(false) && auto_grab_on_add) || search_on_change;
 
         if should_search {
+            // Only the add-series flow has metadata hydration in
+            // flight — that path passes `form.auto_grab = true`. A
+            // pure monitoring-toggle (flipped by the user on an
+            // already-tracked series) has nothing to wait for, so
+            // skip the 3s delay and kick off the search immediately.
+            // Reduces the "user flips monitoring then closes the tab"
+            // race window and makes the interactive case feel instant.
+            let needs_hydration_delay = form.auto_grab.unwrap_or(false);
             let state_clone = state.clone();
             tokio::spawn(async move {
-                // Small delay to let metadata hydration finish. Not
-                // strictly needed on a monitoring-only toggle (no
-                // hydration pending) but harmless and keeps the two
-                // call paths consistent.
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if needs_hydration_delay {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
                 let _ = auto_search_series(
                     axum::extract::State(state_clone),
                     axum::extract::Path(series_id),
