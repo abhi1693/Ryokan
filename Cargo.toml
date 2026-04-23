@@ -4,6 +4,26 @@ version = "1.3.1"
 edition = "2024"
 rust-version = "1.95"
 
+[features]
+# Opt-in re-export of `crate::test_support::*` as a public module so
+# integration tests under `tests/` can drive the same in-memory pool,
+# AppState scaffolding, and seeding helpers unit tests already rely on.
+# Without the flag `test_support` stays crate-private; with it the
+# module is visible to dependents (i.e. integration test targets).
+# Not enabled by default — release binaries and Docker images compile
+# without the helpers. CI flips it on for the test step.
+test-support = []
+
+# Each integration test target under `tests/` lists the `test-support`
+# feature in `required-features` so a plain `cargo test` (without the
+# flag) silently skips them instead of failing the build. This keeps
+# the crate buildable both ways: production/Docker builds stay clean,
+# and CI's `cargo test --features test-support` picks up everything.
+[[test]]
+name = "pr0_foundation"
+path = "tests/pr0_foundation.rs"
+required-features = ["test-support"]
+
 [dependencies]
 # Web framework + async runtime
 axum = { version = "0.8", features = ["macros"] }
@@ -116,3 +136,23 @@ sha1_smol = "1"
 # Test-only for now; promote to a direct prod dep if/when a UI feature
 # loads `.torrent` bytes from disk.
 base64 = "0.22"
+
+# ── Test-coverage-expansion (issue-# to be filed) infrastructure ──
+#
+# wiremock: HTTP mock server that stands in for reqwest's targets. Used
+# by the upcoming auth/arr-compat/provider/download-client test waves
+# to exercise HTTP-backed paths without a live daemon and without a
+# DI refactor — the mocks run on a real tokio listener that reqwest
+# talks to normally. Sonarr's Mock<IHttpClient> pattern maps here
+# almost directly.
+wiremock = "0.6"
+# insta: snapshot testing with `cargo insta review` for explicit
+# updates. Target use is the Sonarr/Radarr compat JSON responses,
+# whose shape is a contract Seerr depends on and silently-drifting
+# fields are one of the most user-visible regressions the suite can
+# catch.
+insta = { version = "1", features = ["json"] }
+# rstest: parameterized tests via #[case] attributes, flattening the
+# existing one-fn-per-case pattern in the classification pipeline
+# into tabular data. Equivalent to C#'s [TestCase].
+rstest = "0.26"

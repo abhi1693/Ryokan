@@ -1,0 +1,33 @@
+---
+source: src/handlers/radarr_compat/tests/system.rs
+expression: body
+---
+{
+  "appData": "",
+  "appName": "Ryokan",
+  "authentication": "none",
+  "branch": "main",
+  "buildTime": "2024-01-01T00:00:00Z",
+  "isAdmin": false,
+  "isDebug": false,
+  "isDocker": false,
+  "isLinux": true,
+  "isMono": false,
+  "isNetCore": true,
+  "isOsx": false,
+  "isProduction": true,
+  "isUserInteractive": false,
+  "isWindows": false,
+  "migrationVersion": 0,
+  "mode": "default",
+  "osName": "linux",
+  "osVersion": "",
+  "packageUpdateMechanism": "builtIn",
+  "runtimeName": "",
+  "runtimeVersion": "",
+  "sqliteVersion": "",
+  "startTime": "2024-01-01T00:00:00Z",
+  "startupPath": "",
+  "urlBase": "/radarr",
+  "version": "5.2.6.8376"
+}

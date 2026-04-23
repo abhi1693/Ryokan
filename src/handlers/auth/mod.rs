@@ -28,8 +28,8 @@ use crate::services::logger;
 // process restart resets the state, but an attacker sustaining 5/min across
 // restarts is indistinguishable from an unlimited attacker in practice.
 
-const LOGIN_WINDOW: Duration = Duration::from_secs(60);
-const LOGIN_MAX_FAILURES: usize = 5;
+pub(crate) const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const LOGIN_MAX_FAILURES: usize = 5;
 /// Hard cap — past this many failures in the window, we stop running
 /// `verify_user` entirely and return an immediate throttled response.
 /// The soft cap (LOGIN_MAX_FAILURES) still equalizes wall time with a
@@ -37,7 +37,7 @@ const LOGIN_MAX_FAILURES: usize = 5;
 /// hard cap is a DoS guard for the pathological case where a single key
 /// keeps hammering the endpoint — past the hard cap we'd rather leak a
 /// faint timing side channel than burn 50 ms of CPU per attempt forever.
-const LOGIN_HARD_CAP: usize = 20;
+pub(crate) const LOGIN_HARD_CAP: usize = 20;
 
 static LOGIN_FAILURES: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -46,7 +46,7 @@ static LOGIN_FAILURES: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> =
 /// so the login handler can choose between "equalize timing by running
 /// bcrypt anyway" (soft) and "abort before any CPU work" (hard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LoginCheck {
+pub(crate) enum LoginCheck {
     /// Under the soft cap — run the full verify path.
     Allow,
     /// Over the soft cap but under the hard cap. The caller still runs
@@ -60,7 +60,7 @@ enum LoginCheck {
 /// entries for `key` as a side effect, and drops the map entry entirely
 /// when its Vec empties out so rotated usernames / spoofed X-F-F values
 /// can't grow LOGIN_FAILURES unboundedly (one idle key per probe forever).
-fn login_check(key: &str) -> LoginCheck {
+pub(crate) fn login_check(key: &str) -> LoginCheck {
     let mut guard = LOGIN_FAILURES.lock().unwrap();
     let cutoff = Instant::now() - LOGIN_WINDOW;
     let (count, empty) = {
@@ -85,7 +85,7 @@ fn login_check(key: &str) -> LoginCheck {
 /// idle keys (IPs/usernames that failed once an hour ago and never came
 /// back) don't linger forever — the per-request sweep in `login_check`
 /// only reaches buckets that are actively being touched.
-pub(crate) fn sweep_login_failures() {
+pub fn sweep_login_failures() {
     let mut guard = LOGIN_FAILURES.lock().unwrap();
     let cutoff = Instant::now() - LOGIN_WINDOW;
     guard.retain(|_, v| {
@@ -95,7 +95,7 @@ pub(crate) fn sweep_login_failures() {
 }
 
 /// Record a failed login attempt against `key`.
-fn login_record_failure(key: &str) {
+pub(crate) fn login_record_failure(key: &str) {
     let mut guard = LOGIN_FAILURES.lock().unwrap();
     let entry = guard.entry(key.to_string()).or_default();
     let cutoff = Instant::now() - LOGIN_WINDOW;
@@ -106,7 +106,7 @@ fn login_record_failure(key: &str) {
 /// Reset the counter for `key` after a successful login so a
 /// legitimate user who mistyped a few times isn't locked out by
 /// their own prior failures.
-fn login_clear(key: &str) {
+pub(crate) fn login_clear(key: &str) {
     let mut guard = LOGIN_FAILURES.lock().unwrap();
     guard.remove(key);
 }
@@ -136,8 +136,20 @@ static TRUST_PROXY_HEADERS: LazyLock<bool> = LazyLock::new(|| {
 /// peer. When the flag is unset, ignores both headers and uses the TCP
 /// peer directly so a direct-exposure deploy can't be bypassed by a
 /// spoofed header.
+///
+/// Thin wrapper around [`client_ip_from_request_with_trust`] that reads
+/// the `TRUST_PROXY_HEADERS` LazyLock. Split so tests can drive both
+/// trust values without racing the process-wide env-var snapshot.
 fn client_ip_from_request(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
-    if *TRUST_PROXY_HEADERS {
+    client_ip_from_request_with_trust(headers, peer, *TRUST_PROXY_HEADERS)
+}
+
+pub(crate) fn client_ip_from_request_with_trust(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trust: bool,
+) -> String {
+    if trust {
         if let Some(h) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
             && let Some(first) = h.split(',').next()
         {
@@ -233,21 +245,29 @@ fn get_session_token(req: &Request<Body>) -> Option<String> {
 }
 
 fn set_session_cookie(token: &str) -> String {
-    let secure = if *COOKIE_SECURE { "; Secure" } else { "" };
+    set_session_cookie_with_secure(token, *COOKIE_SECURE)
+}
+
+pub(crate) fn set_session_cookie_with_secure(token: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
     format!(
         "session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800{}",
-        token, secure
+        token, secure_attr
     )
 }
 
 fn clear_session_cookie() -> String {
+    clear_session_cookie_with_secure(*COOKIE_SECURE)
+}
+
+pub(crate) fn clear_session_cookie_with_secure(secure: bool) -> String {
     // Match the Secure attribute on the set path — some browsers refuse to
     // clear a Secure cookie from a non-Secure response, but the reverse is
     // harmless, so mirror whatever the set path emitted.
-    let secure = if *COOKIE_SECURE { "; Secure" } else { "" };
+    let secure_attr = if secure { "; Secure" } else { "" };
     format!(
         "session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
-        secure
+        secure_attr
     )
 }
 
@@ -256,7 +276,7 @@ fn clear_session_cookie() -> String {
 /// Extract the host portion (without scheme or port) from an Origin or
 /// Referer header value. Returns None if the value is not a well-formed
 /// absolute URL we can reason about.
-fn url_host(value: &str) -> Option<String> {
+pub(crate) fn url_host(value: &str) -> Option<String> {
     // Strip scheme.
     let after_scheme = value.split_once("://").map(|(_, rest)| rest)?;
     // Host ends at the first `/`, `?`, `#`, or end of string.
@@ -278,26 +298,27 @@ fn url_host(value: &str) -> Option<String> {
     Some(host_only.to_ascii_lowercase())
 }
 
-fn host_of(req: &Request<Body>) -> Option<String> {
+pub(crate) fn host_of(req: &Request<Body>) -> Option<String> {
     let raw = req.headers().get(header::HOST)?.to_str().ok()?;
     let host_only = raw.split_once(':').map(|(h, _)| h).unwrap_or(raw);
     Some(host_only.to_ascii_lowercase())
 }
 
 /// Build the set of hosts that are acceptable matches for an Origin or
-/// Referer check. Always includes the `Host` header. When
-/// `RYOKAN_TRUSTED_PROXY` is set, also includes every entry in
+/// Referer check. Always includes the `Host` header. When `trust` is
+/// set (driven by `RYOKAN_TRUSTED_PROXY` in production, or an
+/// explicit flag in tests), also includes every entry in
 /// `X-Forwarded-Host` so a reverse proxy that rewrites the upstream Host
 /// header doesn't break every form POST — the browser sees the
 /// externally-visible host and sends it in Origin, while the backend sees
 /// the rewritten upstream name in Host, so without this check the two
 /// never match and every POST is rejected as "origin host mismatch".
-fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
+pub(crate) fn allowed_host_matches_with_trust(req: &Request<Body>, trust: bool) -> Vec<String> {
     let mut hosts = Vec::new();
     if let Some(h) = host_of(req) {
         hosts.push(h);
     }
-    if *TRUST_PROXY_HEADERS
+    if trust
         && let Some(raw) = req
             .headers()
             .get("x-forwarded-host")
@@ -326,12 +347,19 @@ fn allowed_host_matches(req: &Request<Body>) -> Vec<String> {
 /// Returns `Ok(())` if the method is safe (GET/HEAD/OPTIONS) or the
 /// request is same-origin. Returns `Err` with a short reason otherwise.
 fn verify_same_origin(req: &Request<Body>) -> Result<(), &'static str> {
+    verify_same_origin_with_trust(req, *TRUST_PROXY_HEADERS)
+}
+
+pub(crate) fn verify_same_origin_with_trust(
+    req: &Request<Body>,
+    trust: bool,
+) -> Result<(), &'static str> {
     match *req.method() {
         Method::GET | Method::HEAD | Method::OPTIONS => return Ok(()),
         _ => {}
     }
 
-    let hosts = allowed_host_matches(req);
+    let hosts = allowed_host_matches_with_trust(req, trust);
     if hosts.is_empty() {
         return Err("missing Host header");
     }
@@ -684,3 +712,25 @@ pub async fn logout(State(state): State<AppState>, req: Request<Body>) -> impl I
         .expect("logout-redirect response uses only static headers, should always build")
         .into_response()
 }
+
+// ---------- Test helpers ----------
+
+/// Seed a specific failure timestamp against `key`. Test-only —
+/// lets throttle tests pre-load old timestamps to exercise the
+/// window-expiration sweep without sleeping for real wall time.
+#[cfg(test)]
+pub(crate) fn seed_login_failure_for_test(key: &str, at: Instant) {
+    let mut guard = LOGIN_FAILURES.lock().unwrap();
+    guard.entry(key.to_string()).or_default().push(at);
+}
+
+/// Read the recorded failure count for `key` — test-only inspection
+/// helper. Returns 0 when the key has no bucket.
+#[cfg(test)]
+pub(crate) fn login_failure_count_for_test(key: &str) -> usize {
+    let guard = LOGIN_FAILURES.lock().unwrap();
+    guard.get(key).map(|v| v.len()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests;

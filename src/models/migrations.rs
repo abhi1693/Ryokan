@@ -2090,4 +2090,284 @@ mod tests {
                 .expect("fetch uploader");
         assert_eq!(uploader, "", "fresh install starts with the default empty");
     }
+
+    // ─── Idempotency + schema shape (PR 6) ──────────────────────────
+
+    async fn fresh_migrated_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        migrate(&pool).await.expect("migrate must succeed");
+        pool
+    }
+
+    async fn table_exists(db: &SqlitePool, table: &str) -> bool {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
+            > 0
+    }
+
+    #[tokio::test]
+    async fn migrate_on_empty_db_succeeds() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        migrate(&db).await.expect("first migrate should succeed");
+    }
+
+    #[tokio::test]
+    async fn migrate_is_idempotent_on_second_invocation() {
+        // The CREATE TABLE IF NOT EXISTS + ALTER TABLE … ADD COLUMN
+        // with .ok() pattern is the whole point of in-code migrations
+        // — running migrate() twice on the same pool must not error.
+        // A refactor that swaps in a stricter IF NOT EXISTS variant
+        // (or forgets .ok() on a new ALTER) would trip this test.
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        migrate(&db).await.expect("first migrate");
+        migrate(&db)
+            .await
+            .expect("second migrate must also succeed");
+    }
+
+    #[tokio::test]
+    async fn migrate_creates_core_tables() {
+        // Spot-check the load-bearing tables — adding a new one is
+        // fine, but silently dropping one of these is the kind of
+        // regression that lives undetected until a user reports data
+        // loss. Limit the list to a handful of foundational ones
+        // rather than every single table to avoid churn noise when
+        // schema evolves.
+        let db = fresh_migrated_pool().await;
+        for table in [
+            "users",
+            "sessions",
+            "config",
+            "series",
+            "grabbed_torrents",
+            "grabbed_torrent_series",
+            "episode_quality_tags",
+            "episode_grab_history",
+            "rss_seen",
+            "logs",
+        ] {
+            assert!(
+                table_exists(&db, table).await,
+                "core table `{table}` missing after migrate"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn foreign_keys_pragma_is_enabled_after_migrate() {
+        // sqlx enables `PRAGMA foreign_keys = ON` by default, but
+        // that default is a design dependency several migrations and
+        // models rely on (rss_seen NO ACTION handling, series
+        // CASCADE, etc.). Pinning here so a future sqlx upgrade that
+        // changed the default would fail this test loudly rather
+        // than silently corrupting child-table state.
+        let db = fresh_migrated_pool().await;
+        let pragma: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&db)
+            .await
+            .expect("PRAGMA foreign_keys should read");
+        assert_eq!(pragma, 1, "foreign_keys pragma must be ON");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_series_cascades_to_grabbed_torrents() {
+        // Per the schema, grabbed_torrents.series_id has ON DELETE
+        // CASCADE. Removing a series must take its grabs with it or
+        // the DB ends up with orphaned grab rows that lookup paths
+        // fail on.
+        let db = fresh_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+             VALUES (1, 'Show', 'Show', 'show')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let series_id: i64 = sqlx::query_scalar("SELECT id FROM series WHERE anilist_id = 1")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO grabbed_torrents (series_id, hash, torrent_name, episode_numbers, state) \
+             VALUES (?, 'h1', 'name', '[1]', 'pending')",
+        )
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        sqlx::query("DELETE FROM series WHERE id = ?")
+            .bind(series_id)
+            .execute(&db)
+            .await
+            .expect("series delete should succeed");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents WHERE series_id = ?")
+                .bind(series_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "grabbed_torrents row must CASCADE with series"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_series_cascades_to_episode_quality_tags() {
+        let db = fresh_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+             VALUES (2, 'Show', 'Show', 'show')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let series_id: i64 = sqlx::query_scalar("SELECT id FROM series WHERE anilist_id = 2")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO episode_quality_tags (series_id, episode_number, quality_tag) \
+             VALUES (?, 1, 'WEBDL-1080p')",
+        )
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        sqlx::query("DELETE FROM series WHERE id = ?")
+            .bind(series_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM episode_quality_tags WHERE series_id = ?")
+                .bind(series_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn rss_seen_is_no_action_not_cascade_on_series() {
+        // The FK policy for `rss_seen.series_id` is deliberately
+        // `NO ACTION`, not CASCADE — the audit trail survives a
+        // series deletion. series::remove is responsible for
+        // NULL-ing out rss_seen.series_id BEFORE the series row
+        // delete to satisfy the FK constraint. This test exercises
+        // the "survive the delete" half of that contract — setting
+        // series_id = NULL first, then deleting the series row,
+        // then confirming rss_seen still has its bookkeeping row.
+        let db = fresh_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+             VALUES (3, 'Show', 'Show', 'show')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let series_id: i64 = sqlx::query_scalar("SELECT id FROM series WHERE anilist_id = 3")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO rss_seen (item_key, series_id, series_title) VALUES (?, ?, ?)")
+            .bind("guid-keep")
+            .bind(series_id)
+            .bind("Show")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // Per series::remove: NULL out the FK first, THEN delete the
+        // series row. Without this two-step, the DELETE errors on FK
+        // constraint failure.
+        sqlx::query("UPDATE rss_seen SET series_id = NULL WHERE series_id = ?")
+            .bind(series_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM series WHERE id = ?")
+            .bind(series_id)
+            .execute(&db)
+            .await
+            .expect("delete after NULL-out should succeed");
+
+        // The audit row survives — same guid, series_id now NULL,
+        // series_title kept for reference.
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM rss_seen WHERE item_key = 'guid-keep'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "rss_seen audit row must survive series delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_series_delete_without_null_out_fails_fk_constraint() {
+        // The counter-test: attempting to delete a series without
+        // first NULL-ing out `rss_seen.series_id` must fail with a
+        // FK constraint error. Pins the invariant that series::remove
+        // relies on — if a future refactor drops the NO ACTION policy
+        // on rss_seen, this test catches it.
+        let db = fresh_migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+             VALUES (4, 'Show', 'Show', 'show')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let series_id: i64 = sqlx::query_scalar("SELECT id FROM series WHERE anilist_id = 4")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO rss_seen (item_key, series_id, series_title) VALUES (?, ?, ?)")
+            .bind("guid-fail")
+            .bind(series_id)
+            .bind("Show")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let result = sqlx::query("DELETE FROM series WHERE id = ?")
+            .bind(series_id)
+            .execute(&db)
+            .await;
+        assert!(
+            result.is_err(),
+            "delete without NULL-out must fail FK constraint (got {result:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_creates_schema_migrations_table() {
+        let db = fresh_migrated_pool().await;
+        // Not populated by `migrate()` directly — created on first
+        // use by `ensure_schema_migrations_table` in group_source_map.
+        // Run that seed path to ensure the table exists + is
+        // writable.
+        group_source_map::seed_defaults(&db)
+            .await
+            .expect("seed_defaults should succeed");
+        assert!(
+            table_exists(&db, "schema_migrations").await,
+            "schema_migrations table should exist after seed pass"
+        );
+    }
 }

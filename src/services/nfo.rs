@@ -777,4 +777,78 @@ mod tests {
         assert!(!xml.contains("<art>"));
         assert!(!xml.contains("<poster>"));
     }
+
+    // ─── xml_escape + strip_html_tags (pure-helper gap coverage) ───────
+
+    #[test]
+    fn xml_escape_replaces_the_four_canonical_entities() {
+        assert_eq!(super::xml_escape("a & b"), "a &amp; b");
+        assert_eq!(super::xml_escape("<tag>"), "&lt;tag&gt;");
+        assert_eq!(
+            super::xml_escape("she said \"hi\""),
+            "she said &quot;hi&quot;"
+        );
+    }
+
+    #[test]
+    fn xml_escape_escapes_ampersand_before_tag_chars() {
+        // Canonical "escape & first" ordering — if `<` were escaped
+        // before `&`, the subsequent `&` pass would turn the emitted
+        // `&lt;` into `&amp;lt;`, double-escaping every tag char.
+        assert_eq!(super::xml_escape("<a&b>"), "&lt;a&amp;b&gt;");
+    }
+
+    #[test]
+    fn xml_escape_is_idempotent_on_already_escaped_text() {
+        // An already-escaped string re-escapes the `&amp;` prefix —
+        // that's expected behavior (xml_escape doesn't claim
+        // idempotence, it claims "output is valid XML"), so pin it so
+        // a future "optimize" that swaps to a one-shot scan catches
+        // the change.
+        assert_eq!(super::xml_escape("&amp;"), "&amp;amp;");
+    }
+
+    #[test]
+    fn xml_escape_preserves_plain_ascii_and_unicode() {
+        assert_eq!(super::xml_escape("plain text"), "plain text");
+        assert_eq!(super::xml_escape("日本語"), "日本語");
+        assert_eq!(super::xml_escape(""), "");
+    }
+
+    #[test]
+    fn xml_escape_preserves_apostrophe_intentionally() {
+        // Apostrophe (single quote) is not in the escape list.
+        // The encoder's output goes into element text and double-
+        // quoted attribute values — HTML/XML doesn't require
+        // escaping `'` in either context, and leaving it raw keeps
+        // NFO titles like "Don't Look" readable rather than rendering
+        // as "Don&apos;t Look" in Jellyfin's UI.
+        assert_eq!(super::xml_escape("Don't"), "Don't");
+    }
+
+    #[test]
+    fn strip_html_tags_removes_inline_tags_and_collapses_whitespace() {
+        let input = "A <b>bold</b> claim<br>and another.";
+        assert_eq!(super::strip_html_tags(input), "A bold claim and another.");
+    }
+
+    #[test]
+    fn strip_html_tags_handles_unmatched_trailing_open_bracket_as_literal() {
+        // Input ends mid-tag — the buffered chars should flush as
+        // literal content rather than disappear silently. Matches
+        // the docstring invariant on `strip_html_tags`.
+        let input = "broken <open-tag-never-closed";
+        let out = super::strip_html_tags(input);
+        assert!(
+            out.contains("open-tag-never-closed"),
+            "unmatched trailing tag content should survive as literal: got {out}"
+        );
+    }
+
+    #[test]
+    fn strip_html_tags_on_plain_text_is_identity_modulo_whitespace() {
+        // No tags — function collapses runs of whitespace into single
+        // spaces but keeps the words themselves intact.
+        assert_eq!(super::strip_html_tags("hello   world"), "hello world");
+    }
 }

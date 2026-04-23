@@ -2034,3 +2034,14 @@ mod tests {
         eprintln!("state-progress smoke passed");
     }
 }
+
+/// Wire-level XML-RPC trait coverage via `wiremock`. The existing
+/// inline tests above cover the XML-RPC codec (encode/decode,
+/// i4/i8 variants, fault extraction) thoroughly. This submodule
+/// fills the gap on the trait-method side — the rtorrent quirks
+/// that matter for correctness: uppercase-hash wire contract,
+/// silent-0-return-on-dup pre-check via `hash_exists`, mandatory
+/// `d.update_priorities` flush after `f.priority.set`, and the
+/// base_path-empty fallback for closed/restarted torrents.
+#[cfg(test)]
+mod wiremock_tests;

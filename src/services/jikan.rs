@@ -997,3 +997,275 @@ fn format_ten_point_score(score: f64) -> String {
     }
     format!("{}/10", s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── parse_jikan_error ────────────────────────────────────────
+
+    #[test]
+    fn parse_jikan_error_extracts_first_sentence_of_message_on_429() {
+        // Jikan error bodies carry a verbose message + docs link.
+        // The impl trims to the first sentence so the log line stays
+        // short and actionable.
+        let body = r#"{"status":429,"type":"RateLimitException","message":"You are being rate limited. See docs at https://docs.api.jikan.moe"}"#;
+        let err = parse_jikan_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body);
+        assert!(err.starts_with("Jikan rate-limited"));
+        assert!(err.contains("You are being rate limited"));
+        assert!(!err.contains("https://"));
+    }
+
+    #[test]
+    fn parse_jikan_error_includes_status_code_on_non_429() {
+        let body = r#"{"status":404,"message":"Resource does not exist"}"#;
+        let err = parse_jikan_error(reqwest::StatusCode::NOT_FOUND, body);
+        assert!(err.contains("404"));
+        assert!(err.contains("Resource does not exist"));
+    }
+
+    #[test]
+    fn parse_jikan_error_falls_back_to_snippet_on_non_json_body() {
+        // HTML error pages from a CDN in front of Jikan — no
+        // `message` field to extract.
+        let body = "<html><body>502 Bad Gateway</body></html>";
+        let err = parse_jikan_error(reqwest::StatusCode::BAD_GATEWAY, body);
+        assert!(err.contains("502"));
+        assert!(err.contains("<html>") || err.contains("Bad Gateway"));
+    }
+
+    #[test]
+    fn parse_jikan_error_caps_non_json_snippet_length() {
+        // 500 chars of noise — must not flood the log line.
+        let body = "x".repeat(500);
+        let err = parse_jikan_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, &body);
+        // Impl caps at 120 chars of body + the "Jikan HTTP N:" prefix.
+        assert!(
+            err.len() < 200,
+            "error should be capped; got {} bytes: {err}",
+            err.len()
+        );
+    }
+
+    // ─── is_rate_limited ──────────────────────────────────────────
+
+    #[test]
+    fn is_rate_limited_true_on_429_status() {
+        assert!(is_rate_limited(reqwest::StatusCode::TOO_MANY_REQUESTS, ""));
+    }
+
+    #[test]
+    fn is_rate_limited_false_on_other_statuses() {
+        assert!(!is_rate_limited(reqwest::StatusCode::OK, ""));
+        assert!(!is_rate_limited(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            ""
+        ));
+        assert!(!is_rate_limited(reqwest::StatusCode::NOT_FOUND, ""));
+    }
+
+    // ─── parse_air_year ───────────────────────────────────────────
+
+    #[test]
+    fn parse_air_year_extracts_year_from_iso_date() {
+        assert_eq!(
+            parse_air_year(Some("2024-03-15T00:00:00+00:00")),
+            Some(2024)
+        );
+    }
+
+    #[test]
+    fn parse_air_year_returns_none_on_missing_input() {
+        assert_eq!(parse_air_year(None), None);
+    }
+
+    #[test]
+    fn parse_air_year_returns_none_on_malformed_input() {
+        assert_eq!(parse_air_year(Some("not-a-date")), None);
+        assert_eq!(parse_air_year(Some("")), None);
+    }
+
+    // ─── score_class ──────────────────────────────────────────────
+
+    #[test]
+    fn score_class_maps_ten_point_scale_to_color_tiers() {
+        // Ten-point bands: 9+ purple, 7..9 green, >5..7 yellow, else red.
+        assert_eq!(score_class(Some(9), true), "tag-score-purple");
+        assert_eq!(score_class(Some(8), true), "tag-score-green");
+        assert_eq!(score_class(Some(6), true), "tag-score-yellow");
+        assert_eq!(score_class(Some(5), true), "tag-score-red");
+    }
+
+    #[test]
+    fn score_class_maps_percentage_scale_to_color_tiers() {
+        // Hundred-point bands: 85+ purple, 75..85 green, >65..75 yellow, else red.
+        assert_eq!(score_class(Some(90), false), "tag-score-purple");
+        assert_eq!(score_class(Some(80), false), "tag-score-green");
+        assert_eq!(score_class(Some(70), false), "tag-score-yellow");
+        assert_eq!(score_class(Some(50), false), "tag-score-red");
+    }
+
+    #[test]
+    fn score_class_none_is_red_on_both_scales() {
+        // "Unrated" is a signal the user should be cautious about —
+        // red matches that — not a neutral state.
+        assert_eq!(score_class(None, true), "tag-score-red");
+        assert_eq!(score_class(None, false), "tag-score-red");
+    }
+
+    // ─── prettify_label / normalize_enum_label ────────────────────
+
+    #[test]
+    fn prettify_label_uppercases_and_unsnakes() {
+        assert_eq!(prettify_label("currently_airing"), "CURRENTLY AIRING");
+    }
+
+    #[test]
+    fn normalize_enum_label_handles_empty_input() {
+        let (enum_value, display) = normalize_enum_label(None);
+        assert_eq!(enum_value, "");
+        assert_eq!(display, "");
+    }
+
+    #[test]
+    fn normalize_enum_label_produces_stable_enum_and_human_display() {
+        // Jikan returns "Currently Airing" with spaces; the AniList-
+        // compatible shape uses "CURRENTLY_AIRING". normalize_enum_label
+        // produces both from a single raw input so call sites can
+        // pick whichever they need.
+        let (enum_value, display) = normalize_enum_label(Some("Currently Airing".into()));
+        assert_eq!(enum_value, "CURRENTLY_AIRING");
+        assert_eq!(display, "CURRENTLY AIRING");
+    }
+
+    // ─── non_empty ────────────────────────────────────────────────
+
+    #[test]
+    fn non_empty_returns_primary_when_present() {
+        assert_eq!(non_empty("primary", "fallback"), "primary");
+    }
+
+    #[test]
+    fn non_empty_returns_fallback_when_primary_empty() {
+        assert_eq!(non_empty("", "fallback"), "fallback");
+    }
+
+    // ─── parse_duration_minutes ───────────────────────────────────
+
+    #[test]
+    fn parse_duration_minutes_handles_hr_min_combinations() {
+        // Jikan's actual format is comma-separated: "1 hr, 30 min" /
+        // "24 min" / "1 hr" / "2 hrs". The parser splits on comma
+        // and accumulates each part — a single-string "1 hr 30 min"
+        // (no comma) doesn't match either the " hr" or " min" suffix
+        // on the whole string and parses as None.
+        assert_eq!(parse_duration_minutes(Some("1 hr, 30 min")), Some(90));
+        assert_eq!(parse_duration_minutes(Some("24 min")), Some(24));
+        assert_eq!(parse_duration_minutes(Some("1 hr")), Some(60));
+        assert_eq!(parse_duration_minutes(Some("2 hrs")), Some(120));
+    }
+
+    #[test]
+    fn parse_duration_minutes_returns_none_on_unrecognized_format() {
+        // Jikan also uses "Unknown" for series where no episode
+        // duration is set. Must not mis-parse to 0 — callers
+        // distinguish None from Some(0).
+        assert_eq!(parse_duration_minutes(Some("Unknown")), None);
+        assert_eq!(parse_duration_minutes(None), None);
+        assert_eq!(parse_duration_minutes(Some("")), None);
+    }
+
+    // ─── first_image_url ──────────────────────────────────────────
+
+    #[test]
+    fn first_image_url_prefers_webp_large_over_webp_image() {
+        let images = SearchImages {
+            jpg: None,
+            webp: Some(ImageSet {
+                large_image_url: Some("https://cdn.example.com/large.webp".into()),
+                image_url: Some("https://cdn.example.com/medium.webp".into()),
+            }),
+        };
+        assert_eq!(
+            first_image_url(Some(&images)),
+            "https://cdn.example.com/large.webp"
+        );
+    }
+
+    #[test]
+    fn first_image_url_falls_back_from_webp_to_jpg_large() {
+        let images = SearchImages {
+            jpg: Some(ImageSet {
+                large_image_url: Some("https://cdn.example.com/art.jpg".into()),
+                image_url: None,
+            }),
+            webp: None,
+        };
+        assert_eq!(
+            first_image_url(Some(&images)),
+            "https://cdn.example.com/art.jpg"
+        );
+    }
+
+    #[test]
+    fn first_image_url_returns_empty_string_when_no_urls_present() {
+        let images = SearchImages {
+            jpg: Some(ImageSet {
+                large_image_url: None,
+                image_url: None,
+            }),
+            webp: None,
+        };
+        assert_eq!(first_image_url(Some(&images)), "");
+        assert_eq!(first_image_url(None), "");
+    }
+
+    // ─── format_ten_point_score ───────────────────────────────────
+
+    #[test]
+    fn format_ten_point_score_trims_trailing_zeros() {
+        assert_eq!(format_ten_point_score(8.5), "8.5/10");
+        assert_eq!(format_ten_point_score(9.0), "9/10");
+        assert_eq!(format_ten_point_score(7.50), "7.5/10");
+    }
+
+    #[test]
+    fn format_ten_point_score_rounds_to_two_decimal_places() {
+        assert_eq!(format_ten_point_score(8.456), "8.46/10");
+        assert_eq!(format_ten_point_score(8.444), "8.44/10");
+    }
+
+    // ─── build_description ────────────────────────────────────────
+
+    #[test]
+    fn build_description_joins_synopsis_and_background_with_blank_line() {
+        let s = Some("The story of a girl.".to_string());
+        let b = Some("Based on the novel by X.".to_string());
+        let result = build_description(&s, &b);
+        assert!(result.contains("The story of a girl."));
+        assert!(result.contains("Based on the novel by X."));
+    }
+
+    #[test]
+    fn build_description_omits_background_when_empty_or_whitespace() {
+        let s = Some("synopsis only".to_string());
+        let b = Some("   ".to_string());
+        assert_eq!(build_description(&s, &b), "synopsis only");
+    }
+
+    #[test]
+    fn build_description_returns_empty_when_both_missing() {
+        assert_eq!(build_description(&None, &None), "");
+    }
+
+    // ─── estimate_next_airing ─────────────────────────────────────
+
+    #[test]
+    fn estimate_next_airing_fires_only_for_currently_airing_status() {
+        // Only status strings containing "currently" (case-insensitive)
+        // get the next-airing estimate — finished/upcoming shouldn't.
+        assert!(estimate_next_airing(&Some("Currently Airing".into()), None).is_some());
+        assert!(estimate_next_airing(&Some("Finished Airing".into()), None).is_none());
+        assert!(estimate_next_airing(&None, None).is_none());
+    }
+}

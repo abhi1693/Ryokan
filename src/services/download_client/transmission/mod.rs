@@ -1344,3 +1344,13 @@ mod tests {
         eprintln!("state-progress smoke passed");
     }
 }
+
+/// Wire-level Transmission RPC coverage via `wiremock`. Covers the
+/// Transmission-specific quirks (X-Transmission-Session-Id 409
+/// handshake + mid-stream rotation, `torrent-duplicate` envelope
+/// signal inside a success result, `files-wanted` /
+/// `files-unwanted` array API, `delete-local-data` flag on
+/// `torrent-remove`) against a mock `/transmission/rpc` endpoint.
+/// Parallel structure to qBit and Deluge wiremock trees.
+#[cfg(test)]
+mod wiremock_tests;

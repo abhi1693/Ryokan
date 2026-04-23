@@ -1481,3 +1481,14 @@ mod tests {
         eprintln!("state-progress smoke passed");
     }
 }
+
+/// Wire-level tests backed by `wiremock` — covers the trait methods
+/// (add_torrent, list_scoped, get_files, pause/resume/delete,
+/// set_file_wanted) against a mock HTTP server, filling the
+/// request-construction gap that Sonarr's proxy-layer mocking
+/// deliberately skips. Separate top-level submodule rather than
+/// living inside the existing `tests` module so wiremock's
+/// `tokio::test`-based server spin-up doesn't entangle with the
+/// pure-function tests above.
+#[cfg(test)]
+mod wiremock_tests;

@@ -1,0 +1,13 @@
+---
+source: src/handlers/radarr_compat/tests/system.rs
+expression: body
+---
+[
+  {
+    "accessible": true,
+    "freeSpace": 0,
+    "id": 1,
+    "path": "/media",
+    "unmappedFolders": []
+  }
+]

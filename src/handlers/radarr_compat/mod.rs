@@ -35,3 +35,6 @@ pub async fn require_api_key(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests;
