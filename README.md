@@ -36,7 +36,7 @@ This project's being actively developed. Expect some occasional bugs. See [Relea
 docker compose up -d
 ```
 
-Listens on port `8978`. On first run, go to `http://localhost:8978` to create an admin account. Multi-arch images are published for `linux/amd64` and `linux/arm64`, so the same tag works on x86 servers, Raspberry Pi 4/5, Apple Silicon Macs under Docker Desktop, Intel Macs under Docker Desktop, and Windows under Docker Desktop (WSL2 backend — the default). Docker Desktop's Windows-containers mode is not supported.
+Listens on port `8978`. On first run, go to `http://localhost:8978` to create an admin account. Multi-arch images are published for `linux/amd64` and `linux/arm64`, so the same tag works on x86 servers, Raspberry Pi 4/5, Apple Silicon Macs under Docker Desktop, Intel Macs under Docker Desktop, and Windows under Docker Desktop (WSL2 backend, the default). Docker Desktop's Windows-containers mode is not supported.
 
 ### Enabling post-processing
 
@@ -45,7 +45,7 @@ Ryokan's post-processor reads completed torrents from your download client and i
 1. Uncomment the two optional volume lines in `docker-compose.yml`:
    - `/srv/downloads:/downloads` (host path where your download client writes completed torrents)
    - `/srv/media/anime:/media/anime` (host path to your anime library root)
-2. In **Settings → Connections**, open the field for your active download client (qBittorrent / Deluge / Transmission / rTorrent) and set *Download Path (as seen by Ryokan)* to the right-hand side (e.g. `/downloads`). Note that some clients write to a subdirectory — the `linuxserver/transmission` image defaults to `/downloads/complete`, and many `rtorrent.rc` setups move finished torrents into a per-label subdirectory like `/downloads/completed/ryokan/`.
+2. In **Settings → Connections**, open the field for your active download client (qBittorrent / Deluge / Transmission / rTorrent) and set *Download Path (as seen by Ryokan)* to the right-hand side (e.g. `/downloads`). Note that some clients write to a subdirectory: the `linuxserver/transmission` image defaults to `/downloads/complete`, and many `rtorrent.rc` setups move finished torrents into a per-label subdirectory like `/downloads/completed/ryokan/`.
 3. In **Settings → Media**, set *Media root* to the right-hand side (e.g. `/media/anime`).
 4. For Docker: set `PUID` / `PGID` in `docker-compose.yml` to the UID/GID that owns those host directories (run `id -u` / `id -g` on the host to find them). Ryokan drops privileges to that user at startup so imported files end up with the right ownership for Jellyfin and the rest of your *arr stack to read.
 
@@ -59,7 +59,7 @@ cargo run
 
 Creates `data/ryokan.db` on first run and listens on `0.0.0.0:8978`.
 
-The local build path is primarily tested on Linux (CI gate). macOS should work with `xcode-select --install` + `brew install cmake`, and Windows should work with the MSVC build tools plus `cmake`, but neither is covered by CI — if you hit a build break on a non-Linux host, Docker is the supported fallback.
+The local build path is primarily tested on Linux (CI gate). macOS should work with `xcode-select --install` + `brew install cmake`, and Windows should work with the MSVC build tools plus `cmake`, but neither is covered by CI. If you hit a build break on a non-Linux host, Docker is the supported fallback.
 
 ## Environment variables
 
@@ -126,7 +126,7 @@ Ryokan wipes the `users` and `sessions` tables on startup, so the browser redire
 sqlite3 data/ryokan.db "DELETE FROM users; DELETE FROM sessions;"
 ```
 
-Start Ryokan and create a new admin account. Config (Jellyfin / download-client credentials, media root, CFs) survives either recovery path — only the admin account and active sessions get wiped.
+Start Ryokan and create a new admin account. Config (Jellyfin / download-client credentials, media root, CFs) survives either recovery path; only the admin account and active sessions get wiped.
 
 ## Self-hosting Jikan
 
