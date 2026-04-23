@@ -30,3 +30,22 @@ jobs:
         run: cargo build --workspace --locked --verbose
       - name: Test
         run: cargo test --workspace --locked --verbose
+
+  msrv:
+    # Verify the crate still builds on the declared MSRV. Cargo.toml's
+    # `rust-version = "1.95"` is otherwise decorative — the main `build`
+    # job uses `stable`, so a dep bump that silently requires a newer
+    # toolchain would pass CI while leaving users pinned to 1.95 stranded.
+    # Build-only (no test / clippy / fmt) because those produce
+    # noisy MSRV-unrelated churn on older toolchains and the signal we
+    # care about here is strictly "does the code compile on 1.95?"
+    name: MSRV (1.95)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: Build on MSRV
+        run: cargo build --workspace --locked --verbose
