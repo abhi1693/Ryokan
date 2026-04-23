@@ -297,8 +297,11 @@
         const btnFlat = $('grab-picker-view-flat');
         const btnTree = $('grab-picker-view-tree');
         if (!btnFlat || !btnTree || !session) return;
-        btnFlat.classList.toggle('active', session.view === 'flat');
-        btnTree.classList.toggle('active', session.view === 'tree');
+        const flatActive = session.view === 'flat';
+        btnFlat.classList.toggle('active', flatActive);
+        btnTree.classList.toggle('active', !flatActive);
+        btnFlat.setAttribute('aria-selected', flatActive ? 'true' : 'false');
+        btnTree.setAttribute('aria-selected', flatActive ? 'false' : 'true');
     }
 
     // ─── Toolbar actions (Level A convenience buttons, decision #11) ─

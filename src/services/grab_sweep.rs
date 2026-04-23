@@ -128,13 +128,27 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
 
     let all: Vec<usize> = (0..file_count).collect();
     if let Err(e) = client.set_file_wanted(&row.info_hash, &all, true).await {
+        // Skip the resume. Cross-client asymmetry: Deluge /
+        // Transmission / rtorrent add with files defaulting to
+        // wanted, so a failed `set_file_wanted(all=true)` leaves
+        // those clients in the right state and `resume()` starts
+        // the download. qBit's `add_torrent_paused` sets every
+        // file to priority 0, so a failed `set_file_wanted` here
+        // means resuming would flip the torrent to "running with
+        // nothing downloading" silently. The pending row is about
+        // to be deleted so there's no automated retry; resuming
+        // the qBit case would require manual intervention from
+        // the Downloads page to recover. Better to leave the
+        // torrent in whatever stopped / defaults state the client
+        // has it in and surface the failure via the warn log.
         tracing::warn!(
             target: "ryokan::services::grab_sweep",
             preview_id = %row.preview_id,
             info_hash = %row.info_hash,
             error = %e,
-            "auto-commit set_file_wanted(all=true) failed; resume attempt will still fire"
+            "auto-commit set_file_wanted(all=true) failed; skipping resume — user can recover from the Downloads page"
         );
+        return;
     }
 
     if let Err(e) = client.resume(&row.info_hash).await {
@@ -161,8 +175,79 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
 mod tests {
     use super::*;
     use crate::models::pending_grabs::HEARTBEAT_TTL_SECS;
+    use crate::services::download_client::{
+        AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+    };
     use crate::test_support::{build_test_app_state, in_memory_pool};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Recording mock `DownloadClient` for auto-commit happy-path tests.
+    /// Captures every `set_file_wanted` and `resume` call so the test
+    /// can assert the exact sequence fired against the right info_hash.
+    /// Only the two methods the sweep actually calls do real work; the
+    /// rest return stubbed values to satisfy the trait.
+    #[derive(Default)]
+    struct RecordingClient {
+        set_wanted_calls: Mutex<Vec<(String, Vec<usize>, bool)>>,
+        resume_calls: Mutex<Vec<String>>,
+        set_wanted_fails: bool,
+    }
+
+    #[async_trait]
+    impl DownloadClient for RecordingClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("mock".into())
+        }
+        async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+            Ok(AddOutcome::Added)
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _url: &str,
+            _hash: &str,
+            _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<SelectiveOutcome, String> {
+            Ok(SelectiveOutcome::FullDownload)
+        }
+        async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+            Ok(vec![])
+        }
+        async fn pause(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, hash: &str) -> Result<(), String> {
+            self.resume_calls.lock().unwrap().push(hash.to_string());
+            Ok(())
+        }
+        async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_file_wanted(
+            &self,
+            hash: &str,
+            files: &[usize],
+            wanted: bool,
+        ) -> Result<(), String> {
+            self.set_wanted_calls
+                .lock()
+                .unwrap()
+                .push((hash.to_string(), files.to_vec(), wanted));
+            if self.set_wanted_fails {
+                Err("simulated set_file_wanted failure".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            "QBittorrent"
+        }
+    }
 
     fn now_unix() -> i64 {
         SystemTime::now()
@@ -263,6 +348,115 @@ mod tests {
         let count = sweep_once(&state).await.unwrap();
         assert_eq!(count, 1);
         assert!(pending_grabs::get(&db, "stale").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sweep_auto_commits_happy_path_marks_all_wanted_and_resumes() {
+        // Happy-path regression guard: a stale row with a file list
+        // and a configured client must trigger
+        // `set_file_wanted(all, wanted=true)` followed by
+        // `resume`, both keyed on the row's info_hash. A refactor
+        // that silently drops either call would leave the
+        // torrent stuck paused with defaults after the row is
+        // deleted — no retry path.
+        let db = in_memory_pool().await;
+        pending_grabs::create(
+            &db,
+            "stale",
+            "hash-happy",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
+        // 3-file list drives file_count=3 so the 0..3 index slice is
+        // non-empty and the set_file_wanted call actually fires.
+        pending_grabs::set_file_list(
+            &db,
+            "stale",
+            "[{\"name\":\"a.mkv\",\"size\":1},{\"name\":\"b.mkv\",\"size\":2},{\"name\":\"c.mkv\",\"size\":3}]",
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE pending_grabs SET heartbeat_at = ?")
+            .bind(now_unix() - HEARTBEAT_TTL_SECS - 5)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let client = Arc::new(RecordingClient::default());
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+        let count = sweep_once(&state).await.unwrap();
+        assert_eq!(count, 1);
+        assert!(pending_grabs::get(&db, "stale").await.unwrap().is_none());
+
+        let wanted = client.set_wanted_calls.lock().unwrap().clone();
+        assert_eq!(
+            wanted,
+            vec![("hash-happy".to_string(), vec![0, 1, 2], true)],
+            "expected one set_file_wanted call marking every file wanted"
+        );
+        let resumed = client.resume_calls.lock().unwrap().clone();
+        assert_eq!(
+            resumed,
+            vec!["hash-happy".to_string()],
+            "expected one resume call on the row's info_hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_resume_when_set_file_wanted_fails() {
+        // qBit-asymmetry guard: `add_torrent_paused` on qBit leaves
+        // every file at priority 0, so if `set_file_wanted(all,
+        // true)` fails the sweep must NOT call `resume` — otherwise
+        // we'd flip the torrent to "running with nothing
+        // downloading" with no automated recovery. Deluge/
+        // Transmission/rtorrent would be safe to resume in this
+        // failure mode, but the sweep is one code path so we take
+        // the conservative route that works for every client.
+        let db = in_memory_pool().await;
+        pending_grabs::create(
+            &db,
+            "stale",
+            "hash-fail",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+        )
+        .await
+        .unwrap();
+        pending_grabs::set_file_list(&db, "stale", "[{\"name\":\"a.mkv\",\"size\":1}]")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE pending_grabs SET heartbeat_at = ?")
+            .bind(now_unix() - HEARTBEAT_TTL_SECS - 5)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let client = Arc::new(RecordingClient {
+            set_wanted_fails: true,
+            ..Default::default()
+        });
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+        let count = sweep_once(&state).await.unwrap();
+        assert_eq!(count, 1);
+        assert!(pending_grabs::get(&db, "stale").await.unwrap().is_none());
+
+        assert_eq!(
+            client.set_wanted_calls.lock().unwrap().len(),
+            1,
+            "set_file_wanted should have been attempted once"
+        );
+        assert!(
+            client.resume_calls.lock().unwrap().is_empty(),
+            "resume must NOT be called after set_file_wanted failure (qBit asymmetry)"
+        );
     }
 
     #[tokio::test]
