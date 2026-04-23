@@ -1244,10 +1244,241 @@ mod tests {
         }
         eprintln!("C2 re-narrow verified");
 
+        // A7: delete with delete_files=true removes torrent + files
         client
             .delete(&info_hash, true)
             .await
-            .expect("cleanup delete failed");
+            .expect("delete(hash, true) failed");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after = client
+            .list_scoped()
+            .await
+            .expect("list_scoped after delete(true) failed");
+        assert!(
+            !after
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&info_hash)),
+            "A7: torrent must not survive delete(_, true)"
+        );
+        eprintln!("A7 delete(true) verified");
         eprintln!("narrowed-smoke passed");
+    }
+
+    /// Live smoke for B2: Deluge `list_scoped` filters by the Label
+    /// plugin label, so a torrent with a *different* label must not
+    /// surface. Uploads one Ryokan-labeled and one foreign-labeled
+    /// torrent, asserts only the Ryokan one appears in `list_scoped`.
+    ///
+    ///     RYOKAN_DELUGE_E2E=1 cargo test \
+    ///       deluge::tests::live_smoke_scoped_exclusion -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live Deluge at localhost:8112 + transmission-create"]
+    async fn live_smoke_scoped_exclusion() {
+        if std::env::var("RYOKAN_DELUGE_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_DELUGE_E2E=1 to run against localhost:8112)");
+            return;
+        }
+        let Some((_tmp1, torrent1)) =
+            super::super::test_helpers::build_named_torrent("ryokan-scoped-test")
+        else {
+            return;
+        };
+        let Some((_tmp2, torrent2)) =
+            super::super::test_helpers::build_named_torrent("other-tool-test")
+        else {
+            return;
+        };
+        let base_url = "http://localhost:8112";
+        let password = "deluge";
+        let ryokan_label = "ryokan-e2e-scope";
+        let foreign_label = "other-tool-scope";
+
+        let ryokan_hash =
+            upload_torrent_file_deluge(base_url, password, ryokan_label, &torrent1).await;
+        let foreign_hash =
+            upload_torrent_file_deluge(base_url, password, foreign_label, &torrent2).await;
+        eprintln!("ryokan={ryokan_hash} foreign={foreign_hash}");
+        assert_ne!(ryokan_hash, foreign_hash);
+
+        let client = DelugeClient::new(base_url, password, ryokan_label);
+        let list = client
+            .list_scoped()
+            .await
+            .expect("list_scoped should succeed");
+
+        assert!(
+            list.iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&ryokan_hash)),
+            "B2: Ryokan-labeled torrent must appear in list_scoped"
+        );
+        assert!(
+            !list
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&foreign_hash)),
+            "B2: foreign-labeled torrent must NOT appear (found {foreign_hash})"
+        );
+        eprintln!("B2 scoped exclusion verified");
+
+        client
+            .delete(&ryokan_hash, true)
+            .await
+            .expect("cleanup ryokan");
+        let foreign_client = DelugeClient::new(base_url, password, foreign_label);
+        foreign_client
+            .delete(&foreign_hash, true)
+            .await
+            .expect("cleanup foreign");
+        eprintln!("scoped-exclusion smoke passed");
+    }
+
+    /// Error-path live smoke (F1 / F2 / F3) against Deluge.
+    #[tokio::test]
+    #[ignore = "requires live Deluge at localhost:8112"]
+    async fn live_smoke_error_paths() {
+        if std::env::var("RYOKAN_DELUGE_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let client = DelugeClient::new("http://localhost:8112", "deluge", "ryokan-e2e-errs");
+        let fake_hash = "0000000000000000000000000000000000000000";
+
+        let result = client.delete(fake_hash, false).await;
+        eprintln!("F1 Deluge delete(non-existent) → {result:?}");
+
+        let result = client.get_files(fake_hash).await;
+        eprintln!("F2 Deluge get_files(non-existent) → {result:?}");
+        if let Ok(files) = result {
+            assert!(files.is_empty(), "F2: Ok result must be empty");
+        }
+
+        let result = client
+            .add_torrent("this-is-not-a-valid-url-or-magnet", fake_hash)
+            .await;
+        eprintln!("F3 Deluge add(malformed) → {result:?}");
+        assert!(
+            result.is_err(),
+            "F3: add_torrent with malformed URL must return Err (got {result:?})"
+        );
+
+        eprintln!("error-paths smoke passed");
+    }
+
+    /// E1+E2 live smoke for Deluge: state transitions through
+    /// pause→resume→pause, progress sanity in [0.0, 1.0].
+    #[tokio::test]
+    #[ignore = "requires live Deluge at localhost:8112 + transmission-create"]
+    async fn live_smoke_state_progress() {
+        if std::env::var("RYOKAN_DELUGE_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let Some((_tmp, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let base_url = "http://localhost:8112";
+        let password = "deluge";
+        let label = "ryokan-e2e-state";
+
+        let info_hash = upload_torrent_file_deluge(base_url, password, label, &torrent_path).await;
+        let client = DelugeClient::new(base_url, password, label);
+
+        async fn poll_until_state(
+            client: &DelugeClient,
+            hash: &str,
+            acceptable: &[DownloadItemState],
+        ) -> DownloadItem {
+            for _ in 0..30 {
+                let list = client.list_scoped().await.expect("list_scoped");
+                if let Some(t) = list
+                    .iter()
+                    .find(|t| t.hash.eq_ignore_ascii_case(hash))
+                    .cloned()
+                    && acceptable.contains(&t.state_kind)
+                {
+                    return t;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let list = client.list_scoped().await.expect("list_scoped");
+            list.iter()
+                .find(|t| t.hash.eq_ignore_ascii_case(hash))
+                .cloned()
+                .unwrap_or_else(|| panic!("torrent never appeared"))
+        }
+
+        // Uploaded with add_paused=true → expect Paused.
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[DownloadItemState::Paused, DownloadItemState::PausedComplete],
+        )
+        .await;
+        eprintln!(
+            "E1 Deluge paused: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(
+            matches!(
+                t.state_kind,
+                DownloadItemState::Paused | DownloadItemState::PausedComplete
+            ),
+            "E1: Paused expected, got {:?} ({})",
+            t.state_kind,
+            t.state
+        );
+        assert!(
+            (0.0..=1.0).contains(&t.progress),
+            "E2 progress: {}",
+            t.progress
+        );
+
+        client.resume(&info_hash).await.expect("resume");
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[
+                DownloadItemState::Downloading,
+                DownloadItemState::DownloadingStalled,
+                DownloadItemState::DownloadingQueued,
+                DownloadItemState::CheckingDownload,
+            ],
+        )
+        .await;
+        eprintln!(
+            "E1 Deluge resumed: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(
+            matches!(
+                t.state_kind,
+                DownloadItemState::Downloading
+                    | DownloadItemState::DownloadingStalled
+                    | DownloadItemState::DownloadingQueued
+                    | DownloadItemState::CheckingDownload
+            ),
+            "E1: Downloading* expected after resume, got {:?} ({})",
+            t.state_kind,
+            t.state
+        );
+
+        client.pause(&info_hash).await.expect("pause");
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[DownloadItemState::Paused, DownloadItemState::PausedComplete],
+        )
+        .await;
+        eprintln!(
+            "E1 Deluge re-paused: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(matches!(
+            t.state_kind,
+            DownloadItemState::Paused | DownloadItemState::PausedComplete
+        ));
+
+        client.delete(&info_hash, true).await.expect("cleanup");
+        eprintln!("state-progress smoke passed");
     }
 }

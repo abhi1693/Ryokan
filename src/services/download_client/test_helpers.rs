@@ -21,7 +21,7 @@ use std::path::PathBuf;
 /// missing). Returns `None` with a printed skip message if
 /// `transmission-create` isn't installed.
 ///
-/// File layout (7 files, mirrors a typical anime batch):
+/// The default file layout (7 files, mirrors a typical anime batch):
 /// * `testpack/episode_1.mkv` .. `episode_5.mkv` — 8 KB each, the
 ///   "wanted" subset for narrowing tests.
 /// * `testpack/sample.mkv` — 2 KB, what `pick_wanted_file_indices`
@@ -33,6 +33,29 @@ use std::path::PathBuf;
 /// without ever attempting to actually download content (the fake
 /// tracker URL is unreachable anyway).
 pub(crate) fn build_testpack_torrent() -> Option<(tempfile::TempDir, PathBuf)> {
+    build_inner("testpack", false)
+}
+
+/// Like [`build_testpack_torrent`] but takes a unique name and
+/// injects it as file content so multiple calls produce *distinct*
+/// infohashes. The directory name is baked into one file
+/// (`pack_name.txt`) so two invocations with different `name`
+/// arguments produce torrents whose `info` dicts differ →
+/// different SHA-1 → different hashes.
+///
+/// Used by tests that need two or more torrents in the client at
+/// once (e.g. B2 list_scoped exclusion: one Ryokan-scoped and one
+/// non-Ryokan, both present in the client, only the first should
+/// appear in `list_scoped`).
+///
+/// File count is 8 (the canonical 7 + `pack_name.txt`), which is
+/// why this is a separate function rather than reusing
+/// [`build_testpack_torrent`]'s 7-file assertion.
+pub(crate) fn build_named_torrent(name: &str) -> Option<(tempfile::TempDir, PathBuf)> {
+    build_inner(name, true)
+}
+
+fn build_inner(name: &str, with_name_file: bool) -> Option<(tempfile::TempDir, PathBuf)> {
     if std::process::Command::new("transmission-create")
         .arg("--version")
         .output()
@@ -42,15 +65,19 @@ pub(crate) fn build_testpack_torrent() -> Option<(tempfile::TempDir, PathBuf)> {
         return None;
     }
     let tmp = tempfile::tempdir().expect("tempdir creation failed");
-    let pack_dir = tmp.path().join("testpack");
-    std::fs::create_dir(&pack_dir).expect("create testpack dir");
+    let pack_dir = tmp.path().join(name);
+    std::fs::create_dir(&pack_dir).expect("create pack dir");
     for i in 1..=5 {
         std::fs::write(pack_dir.join(format!("episode_{i}.mkv")), vec![0u8; 8192])
             .expect("write episode file");
     }
     std::fs::write(pack_dir.join("sample.mkv"), vec![0u8; 2048]).expect("write sample");
     std::fs::write(pack_dir.join("readme.txt"), b"test readme").expect("write readme");
-    let torrent_path = tmp.path().join("testpack.torrent");
+    if with_name_file {
+        // Name-specific content so distinct names produce distinct hashes.
+        std::fs::write(pack_dir.join("pack_name.txt"), name.as_bytes()).expect("write pack_name");
+    }
+    let torrent_path = tmp.path().join(format!("{name}.torrent"));
     let output = std::process::Command::new("transmission-create")
         .args([
             "-o",

@@ -251,6 +251,22 @@ impl DownloadClient for RtorrentClient {
     }
 
     async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        // Up-front URL-shape validation. rtorrent's `load.start_verbose`
+        // silently accepts garbage-string inputs and returns 0 (success)
+        // without actually creating a torrent — caller can't tell a
+        // typo'd URL from a real add. Surfaced 2026-04-23 as an #85
+        // parity gap (qBit / Deluge / Transmission all reject
+        // malformed URLs with an RPC-level error; only rtorrent
+        // swallowed them). Reject anything that isn't a magnet URI
+        // or an http(s) URL before burning an XML-RPC round trip.
+        let looks_valid =
+            url.starts_with("magnet:") || url.starts_with("http://") || url.starts_with("https://");
+        if !looks_valid {
+            return Err(format!(
+                "rtorrent add rejected url={url}: expected magnet: / http:// / https:// scheme"
+            ));
+        }
+
         // Pre-check — rtorrent silently accepts duplicate adds so we
         // need to detect them ourselves. The cost is one extra
         // multicall, which is cheap relative to the magnet load that
@@ -1556,20 +1572,42 @@ mod tests {
         let info_hash = bencode_info_hash(&bytes).expect("extract infohash from .torrent");
         let hash_uc = info_hash.to_ascii_uppercase();
 
-        // load.raw_start_verbose takes (target, raw_bytes, *commands).
-        // Commands run post-load; stop and set label atomically.
+        // `load.raw_verbose` (no `_start`) loads the torrent into the
+        // main view without auto-starting it — which is what we need
+        // for tests that verify paused state or write file priorities
+        // before any content transfer. Post-load commands (e.g. the
+        // `d.custom1.set` label) run during load. We explicitly
+        // avoid `load.raw_start_verbose` here because it races with
+        // a post-command `d.stop` — the start happens before the
+        // post-command applies.
         client
             .call(
-                "load.raw_start_verbose",
+                "load.raw_verbose",
                 &[
                     XmlValue::String(String::new()),
                     XmlValue::Base64(bytes),
-                    XmlValue::String(format!("d.stop={hash_uc}")),
                     XmlValue::String(format!("d.custom1.set={label}")),
                 ],
             )
             .await
-            .expect("load.raw_start_verbose failed");
+            .expect("load.raw_verbose failed");
+
+        // Some rtorrent configs auto-start loaded torrents (via
+        // `schedule2 = load,...,d.start=` or similar). Post-load
+        // commands passed to `load.raw_verbose` run at load time but
+        // BEFORE any session-level auto-start scheduler. Call `d.stop`
+        // explicitly so the test can observe Paused state.
+        let hash_uc_clone = hash_uc.clone();
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if client
+                .call("d.stop", &[XmlValue::String(hash_uc_clone.clone())])
+                .await
+                .is_ok()
+            {
+                break;
+            }
+        }
 
         info_hash.to_ascii_lowercase()
     }
@@ -1744,10 +1782,229 @@ mod tests {
         }
         eprintln!("C2 re-narrow verified");
 
+        // A7: delete with delete_files=true removes torrent + files
         client
             .delete(&info_hash, true)
             .await
-            .expect("cleanup delete failed");
+            .expect("delete(hash, true) failed");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after = client
+            .list_scoped()
+            .await
+            .expect("list_scoped after delete(true) failed");
+        assert!(
+            !after
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&info_hash)),
+            "A7: torrent must not survive delete(_, true)"
+        );
+        eprintln!("A7 delete(true) verified");
         eprintln!("narrowed-smoke passed");
+    }
+
+    /// Live smoke for B2: rtorrent `list_scoped` filters by the
+    /// `custom1` field (the ruTorrent "Label" convention).
+    /// A torrent with a different `custom1` value must not surface.
+    ///
+    ///     RYOKAN_RTORRENT_E2E=1 cargo test \
+    ///       rtorrent::tests::live_smoke_scoped_exclusion -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live rtorrent via ruTorrent at localhost:8081 + transmission-create"]
+    async fn live_smoke_scoped_exclusion() {
+        if std::env::var("RYOKAN_RTORRENT_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_RTORRENT_E2E=1 to run against localhost:8081)");
+            return;
+        }
+        let Some((_tmp1, torrent1)) =
+            super::super::test_helpers::build_named_torrent("ryokan-scoped-test")
+        else {
+            return;
+        };
+        let Some((_tmp2, torrent2)) =
+            super::super::test_helpers::build_named_torrent("other-tool-test")
+        else {
+            return;
+        };
+        let rpc_url = "http://localhost:8081/RPC2";
+        let ryokan_label = "ryokan-e2e-scope";
+        let foreign_label = "other-tool-scope";
+
+        let ryokan_hash = upload_torrent_file_rtorrent(rpc_url, ryokan_label, &torrent1).await;
+        let foreign_hash = upload_torrent_file_rtorrent(rpc_url, foreign_label, &torrent2).await;
+        eprintln!("ryokan={ryokan_hash} foreign={foreign_hash}");
+        assert_ne!(ryokan_hash, foreign_hash);
+
+        // rtorrent needs a brief moment to register custom1 labels
+        // after load.raw_start_verbose runs the post-load commands.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let client = RtorrentClient::new(rpc_url, "", "", ryokan_label);
+        let list = client.list_scoped().await.expect("list_scoped");
+
+        assert!(
+            list.iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&ryokan_hash)),
+            "B2: Ryokan-labeled torrent must appear"
+        );
+        assert!(
+            !list
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&foreign_hash)),
+            "B2: foreign-labeled torrent must NOT appear (found {foreign_hash})"
+        );
+        eprintln!("B2 scoped exclusion verified");
+
+        client
+            .delete(&ryokan_hash, true)
+            .await
+            .expect("cleanup ryokan");
+        let foreign_client = RtorrentClient::new(rpc_url, "", "", foreign_label);
+        foreign_client
+            .delete(&foreign_hash, true)
+            .await
+            .expect("cleanup foreign");
+        eprintln!("scoped-exclusion smoke passed");
+    }
+
+    /// Error-path live smoke (F1 / F2 / F3) against rtorrent.
+    #[tokio::test]
+    #[ignore = "requires live rtorrent via ruTorrent at localhost:8081"]
+    async fn live_smoke_error_paths() {
+        if std::env::var("RYOKAN_RTORRENT_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let client = RtorrentClient::new("http://localhost:8081/RPC2", "", "", "ryokan-e2e-errs");
+        let fake_hash = "0000000000000000000000000000000000000000";
+
+        let result = client.delete(fake_hash, false).await;
+        eprintln!("F1 rtorrent delete(non-existent) → {result:?}");
+
+        let result = client.get_files(fake_hash).await;
+        eprintln!("F2 rtorrent get_files(non-existent) → {result:?}");
+        if let Ok(files) = result {
+            assert!(files.is_empty(), "F2: Ok result must be empty");
+        }
+
+        let result = client
+            .add_torrent("this-is-not-a-valid-url-or-magnet", fake_hash)
+            .await;
+        eprintln!("F3 rtorrent add(malformed) → {result:?}");
+        // Fixed 2026-04-23: rtorrent's `add_torrent` now rejects
+        // non-magnet / non-http(s) URLs up front. Before the fix
+        // `load.start_verbose` silently returned 0 (success) on
+        // garbage strings, which would have let a typo'd URL appear
+        // to succeed from Ryokan's side while creating no torrent.
+        // This smoke fails regression-detection if that validation
+        // is removed.
+        assert!(
+            result.is_err(),
+            "F3: add_torrent with malformed URL must return Err (got {result:?})"
+        );
+
+        eprintln!("error-paths smoke passed");
+    }
+
+    /// E1+E2 live smoke for rtorrent.
+    #[tokio::test]
+    #[ignore = "requires live rtorrent via ruTorrent at localhost:8081 + transmission-create"]
+    async fn live_smoke_state_progress() {
+        if std::env::var("RYOKAN_RTORRENT_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let Some((_tmp, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let rpc_url = "http://localhost:8081/RPC2";
+        let label = "ryokan-e2e-state";
+
+        let info_hash = upload_torrent_file_rtorrent(rpc_url, label, &torrent_path).await;
+        let client = RtorrentClient::new(rpc_url, "", "", label);
+
+        async fn poll_until_state(
+            client: &RtorrentClient,
+            hash: &str,
+            acceptable: &[DownloadItemState],
+        ) -> DownloadItem {
+            for _ in 0..30 {
+                let list = client.list_scoped().await.expect("list_scoped");
+                if let Some(t) = list
+                    .iter()
+                    .find(|t| t.hash.eq_ignore_ascii_case(hash))
+                    .cloned()
+                    && acceptable.contains(&t.state_kind)
+                {
+                    return t;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let list = client.list_scoped().await.expect("list_scoped");
+            list.iter()
+                .find(|t| t.hash.eq_ignore_ascii_case(hash))
+                .cloned()
+                .unwrap_or_else(|| panic!("torrent never appeared"))
+        }
+
+        // Uploaded with d.stop post-command → expect Paused.
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[DownloadItemState::Paused, DownloadItemState::PausedComplete],
+        )
+        .await;
+        eprintln!(
+            "E1 rtorrent paused: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(matches!(
+            t.state_kind,
+            DownloadItemState::Paused | DownloadItemState::PausedComplete
+        ));
+        assert!((0.0..=1.0).contains(&t.progress));
+
+        client.resume(&info_hash).await.expect("resume");
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[
+                DownloadItemState::Downloading,
+                DownloadItemState::DownloadingStalled,
+                DownloadItemState::DownloadingQueued,
+                DownloadItemState::CheckingDownload,
+            ],
+        )
+        .await;
+        eprintln!(
+            "E1 rtorrent resumed: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(matches!(
+            t.state_kind,
+            DownloadItemState::Downloading
+                | DownloadItemState::DownloadingStalled
+                | DownloadItemState::DownloadingQueued
+                | DownloadItemState::CheckingDownload
+        ));
+
+        client.pause(&info_hash).await.expect("pause");
+        let t = poll_until_state(
+            &client,
+            &info_hash,
+            &[DownloadItemState::Paused, DownloadItemState::PausedComplete],
+        )
+        .await;
+        eprintln!(
+            "E1 rtorrent re-paused: state={:?} ({}) progress={}",
+            t.state_kind, t.state, t.progress
+        );
+        assert!(matches!(
+            t.state_kind,
+            DownloadItemState::Paused | DownloadItemState::PausedComplete
+        ));
+
+        client.delete(&info_hash, true).await.expect("cleanup");
+        eprintln!("state-progress smoke passed");
     }
 }
