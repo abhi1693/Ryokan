@@ -292,14 +292,19 @@ pub(super) fn rescore_for_auto_search_with_breakdown(
 
     match target {
         SearchTarget::Single => {
-            if lower.contains("movie") || lower.contains("special") || lower.contains("ova") {
+            // Movie / Special / OVA bonus and Batch penalty both
+            // assume the user is looking for a single-unit target.
+            // In explicit batch-search mode every candidate is a batch
+            // for the same series, so both signals are meaningless
+            // and would uniformly lift or lower the whole slate. Gate
+            // both on `!batch_search_mode` so batch-grab rankings are
+            // driven by quality + alias match + seeders, not by the
+            // presence of "Movie" / "OVA" keywords in the batch title.
+            if !batch_search_mode
+                && (lower.contains("movie") || lower.contains("special") || lower.contains("ova"))
+            {
                 add(&mut parts, "Movie / Special / OVA", 8, None);
             }
-            // Only penalize batches when the user is looking for a
-            // single-unit target (movie, OVA, single-episode special).
-            // Suppress on explicit batch-search paths — every candidate
-            // is a batch there, so the penalty is meaningless and just
-            // pollutes the displayed breakdown.
             if result.is_batch && !batch_search_mode {
                 add(&mut parts, "Batch Penalty (single target)", -5, None);
             }

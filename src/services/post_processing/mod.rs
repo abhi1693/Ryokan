@@ -965,6 +965,15 @@ async fn import_torrent(
     // during the file loop. One UPDATE per distinct old grab instead
     // of one-per-episode so a batch that covered 12 episodes doesn't
     // run 12 identical write-identical-row UPDATEs.
+    //
+    // Deliberately placed AFTER the `imported_count == 0` early return
+    // above: if zero files actually landed (cross-fs copy failure, disk
+    // full, permission denied across the whole set), we don't flip old
+    // grabs to 'replaced' — they stay 'imported' and the upgrade chain
+    // isn't misrepresented. A pre-earlier version ran the marks inline
+    // with each file op, which would flip old grabs even on a total
+    // failure. Net effect of this placement: orphaned-replace rows
+    // can't appear when the replacement never materialized.
     for old_grab_id in &grabs_to_mark_replaced {
         let _ = grabbed_torrents::mark_replaced(&state.db, *old_grab_id, grab.id).await;
     }

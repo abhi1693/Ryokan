@@ -72,23 +72,28 @@ function searchAnilist() {
                 const isMal = r.source === 'mal';
                 const sourceLabel = isMal ? 'MAL' : 'AniList';
                 // External link to the provider page matching whichever
-                // source served the row. MAL uses id_mal (always set for
-                // Jikan-served rows); AL uses the AniList id. Stops
-                // click-propagation to the row so clicking the title
-                // link doesn't also fire an accidental Add if we add a
-                // row-click later.
+                // source served the row. AL rows use the AniList id.
+                // MAL rows need `id_mal` — if a MAL-served row somehow
+                // arrives without one (shouldn't happen from Jikan, but
+                // defensively), fall back to rendering the cover/title
+                // as plain non-link markup rather than an href pointing
+                // at myanimelist.net with an AL id, which 404s.
                 const externalHref = isMal
-                    ? `https://myanimelist.net/anime/${r.id_mal || r.id}`
+                    ? (r.id_mal ? `https://myanimelist.net/anime/${r.id_mal}` : null)
                     : `https://anilist.co/anime/${r.id}`;
+                const coverMarkup = externalHref
+                    ? `<a href="${escAttr(externalHref)}" target="_blank" rel="noopener" class="anilist-cover-link" title="Open on ${escAttr(sourceLabel)}">
+                            <img src="${escAttr(r.cover_url)}" alt="" class="anilist-cover" loading="lazy">
+                        </a>`
+                    : `<img src="${escAttr(r.cover_url)}" alt="" class="anilist-cover" loading="lazy">`;
+                const titleMarkup = externalHref
+                    ? `<a href="${escAttr(externalHref)}" target="_blank" rel="noopener" class="anilist-title-link" title="Open on ${escAttr(sourceLabel)}">${escHtml(title)}</a>`
+                    : escHtml(title);
                 return `
                     <div class="anilist-result">
-                        <a href="${escAttr(externalHref)}" target="_blank" rel="noopener" class="anilist-cover-link" title="Open on ${escAttr(sourceLabel)}">
-                            <img src="${escAttr(r.cover_url)}" alt="" class="anilist-cover" loading="lazy">
-                        </a>
+                        ${coverMarkup}
                         <div class="anilist-info">
-                            <p class="anilist-title">
-                                <a href="${escAttr(externalHref)}" target="_blank" rel="noopener" class="anilist-title-link" title="Open on ${escAttr(sourceLabel)}">${escHtml(title)}</a>
-                            </p>
+                            <p class="anilist-title">${titleMarkup}</p>
                             <p class="anilist-subtitle">${escHtml(subtitle)}</p>
                             <div class="anilist-meta">
                                 <span class="tag tag-res">${escHtml((r.format || 'TBA').replace(/_/g, ' '))}</span>
