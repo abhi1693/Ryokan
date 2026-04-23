@@ -660,29 +660,34 @@ async fn import_torrent(
                     .await
                     .unwrap_or_default();
 
+            // No matching prior grab row but disk has a file for this
+            // SxxExx slot — treat it as an **orphan upgrade**. The disk
+            // state is ground truth: a file exists, the user is grabbing
+            // something new, they expect the new file to replace what's
+            // there. Covers three historical shapes where the DB row
+            // doesn't line up:
+            //   1. Legacy batch grabs whose `episode_numbers` was
+            //      mis-parsed from the release title before the current
+            //      batch_episode_numbers logic existed (e.g. Kaizoku
+            //      Season 3 packs stored as [3] instead of [1..12] —
+            //      `find_imported_for_episode(series, 1)` misses them).
+            //   2. Files manually dropped into the library from outside
+            //      Ryokan (pre-existing rips, migration from another
+            //      PVR) — no grab row ever existed.
+            //   3. The original grab's row is in state='pending'
+            //      (torrent stuck, crash mid-import) — not 'imported',
+            //      so find_imported skips it.
+            // The `mark_replaced` step is skipped when old_grabs is
+            // empty — the new row simply replaces on disk without a
+            // chain pointer. The replacing grab still shows up as
+            // 'imported' in history; there's just no "replaced by"
+            // backlink because nothing in the DB was the predecessor.
             if old_grabs.is_empty() {
-                // On-disk file exists with the same SxxExx tag but no
-                // prior grabbed_torrents row in state='imported' covers
-                // this episode. Three common shapes here:
-                //   1. User re-ran the same grab (file was just put
-                //      there by an earlier tick of this same grab).
-                //   2. The original grab's row sits in state='pending'
-                //      because it never cleared import (torrent stuck,
-                //      ffprobe timeout, crash, etc.) — find_imported
-                //      skips it and we can't tell an upgrade apart
-                //      from the re-run case.
-                //   3. The original import came from outside Ryokan
-                //      (manual drop into the library) so no row
-                //      existed to find.
-                // In every case we skip — writing do_file_op would
-                // overwrite the existing file silently. But log so the
-                // user can tell it's the why-not-importing path
-                // instead of a totally silent drop.
                 logger::info(
                     &state.db,
                     LogCategory::PostProcess,
                     &format!(
-                        "Skipping '{}' — S{:02}E{:02} already on disk but no imported grab to replace",
+                        "Orphan upgrade: '{}' replacing S{:02}E{:02} file on disk (no prior imported grab)",
                         filename_only, season, ep_num
                     ),
                     &format!(
@@ -693,7 +698,6 @@ async fn import_torrent(
                     ),
                 )
                 .await;
-                continue;
             }
 
             // Remove old file(s) and their NFOs to make way for the upgrade.
