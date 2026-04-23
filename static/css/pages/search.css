@@ -10,7 +10,15 @@
 
 .results-table {
     width: 100%;
-    border-collapse: collapse;
+    /* `separate` (not `collapse`) is load-bearing for the sticky header
+       below: with collapsed borders the browser can't apply
+       `position: sticky` to <th> because collapsed borders are a shared
+       resource between adjacent cells, so the th is layout-bound to
+       the row beneath it. `border-spacing: 0` keeps the visual
+       identical to the old collapsed layout; the row-separator lines
+       come from `td { border-bottom }` below, same as before. */
+    border-collapse: separate;
+    border-spacing: 0;
     font-size: 13px;
 }
 
