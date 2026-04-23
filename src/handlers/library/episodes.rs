@@ -780,4 +780,102 @@ mod tests {
         );
         eprintln!("D2/D3 integration verified");
     }
+
+    // ─── CI-gated episode-handler coverage (PR 7) ────────────────
+    //
+    // Directly-called handler tests that don't need a live
+    // download client. Complements the env-gated d1/d2/d3 tests
+    // above; those prove the client-backed paths, these prove the
+    // DB-only paths that run whenever the client isn't involved
+    // (404 on unknown series, grab-history pass-through,
+    // resolve_tracked_series lookup semantics).
+    mod episodes_ci {
+        use super::super::*;
+        use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+        use axum::extract::{Path, State};
+        use axum::http::StatusCode;
+        use axum::response::Json as AxumJson;
+
+        // ─── get_episode_grab_history ────────────────────────────
+
+        #[tokio::test]
+        async fn get_episode_grab_history_returns_empty_for_series_without_grabs() {
+            let db = in_memory_pool().await;
+            let anilist_id: i64 = 100;
+            let _ = seed_series(&db, anilist_id, "New Show").await;
+            let state = build_test_app_state(db, None);
+            let AxumJson(history) = get_episode_grab_history(State(state), Path((anilist_id, 1)))
+                .await
+                .expect("empty history should be Ok, not error");
+            assert!(history.is_empty());
+        }
+
+        #[tokio::test]
+        async fn get_episode_grab_history_rejects_untracked_series_with_400() {
+            // Series not in library → 400, not a silent empty list.
+            // Caller expects a clear "you asked about a series I
+            // don't track" signal rather than a success-with-zero-
+            // rows that might be mistaken for "no grabs yet."
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let err = get_episode_grab_history(State(state), Path((99_999, 1)))
+                .await
+                .expect_err("unknown series should 400");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+            assert!(err.1.contains("not in library"));
+        }
+
+        #[tokio::test]
+        async fn get_episode_grab_history_accepts_internal_id_path() {
+            // The path parameter can be either an AniList id or an
+            // internal series id — resolve_tracked_series handles
+            // both. Pin the dual-lookup so a refactor that narrows
+            // it to AL-only would break the Library UI's internal-id
+            // links.
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 101, "Show").await;
+            let state = build_test_app_state(db, None);
+            let AxumJson(history) = get_episode_grab_history(
+                State(state),
+                // Pass the INTERNAL series id, not the anilist_id.
+                Path((series_id, 1)),
+            )
+            .await
+            .expect("internal id lookup should work");
+            assert!(history.is_empty());
+        }
+
+        // ─── delete_episode_file (no-client path) ─────────────────
+
+        #[tokio::test]
+        async fn delete_episode_file_on_unknown_series_returns_error_status() {
+            // `delete_episode_file` returns `(StatusCode, Json<Value>)`
+            // directly — no Result wrapper — with an `ok: false` body.
+            // The specific status depends on the resolve path: in
+            // an offline test env, `resolve_series_context` fails
+            // before reaching the "series not in library" branch
+            // (AniList unreachable → 502). Either way, the handler
+            // must emit a 4xx/5xx with a structured JSON body so
+            // the UI can show the reason; silently succeeding on an
+            // unknown id would delete phantom files.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let (status, body) = delete_episode_file(State(state), Path((99_999, 1))).await;
+            assert!(
+                status.is_client_error() || status.is_server_error(),
+                "unknown series must be an error status, got {status}"
+            );
+            assert_eq!(body.0["ok"], false);
+        }
+
+        // `series_episodes_json` + `mark_episode_failed` are
+        // deliberately not covered here: both call
+        // `resolve_series_context` which unconditionally consults
+        // AniList + metadata_cache on the first miss, so exercising
+        // them from a cold in-memory DB just hits AniList. Covering
+        // them requires either wiremock'ing the AniList client
+        // (punted with the rest of the HTTP-backed provider
+        // tests) or seeding the provider_metadata_cache table,
+        // which is a separate plan item.
+    }
 }
