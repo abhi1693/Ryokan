@@ -1009,4 +1009,245 @@ mod tests {
         );
         eprintln!("smoke passed");
     }
+
+    /// Upload a local `.torrent` file to Deluge via JSON-RPC
+    /// `core.add_torrent_file` with base64-encoded bytes. Returns
+    /// the infohash Deluge assigned. Handles the Deluge quirks:
+    /// `auth.login` then `web.connect(host_id)` before `core.*`
+    /// calls work (documented in `deluge.rs`'s file header and the
+    /// CLAUDE.md download-client quirks). Adds with `add_paused=True`
+    /// so the torrent doesn't try to download bogus content, and
+    /// applies the caller's label via the Label plugin post-add.
+    ///
+    /// Test-only; raw `reqwest::Client` with its own cookie jar to
+    /// avoid reaching inside `DelugeClient` just to piggyback on its
+    /// session state.
+    async fn upload_torrent_file_deluge(
+        base_url: &str,
+        password: &str,
+        label: &str,
+        torrent_path: &std::path::Path,
+    ) -> String {
+        use serde_json::{Value, json};
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .expect("reqwest client");
+
+        async fn rpc(
+            client: &reqwest::Client,
+            base_url: &str,
+            method: &str,
+            params: Value,
+        ) -> Value {
+            let resp = client
+                .post(format!("{base_url}/json"))
+                .json(&json!({
+                    "method": method,
+                    "params": params,
+                    "id": 0,
+                }))
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("Deluge {method} transport: {e}"));
+            assert_eq!(
+                resp.status(),
+                200,
+                "Deluge {method} returned HTTP {}",
+                resp.status()
+            );
+            resp.json::<Value>()
+                .await
+                .unwrap_or_else(|e| panic!("Deluge {method} json parse: {e}"))
+        }
+
+        // 1. auth.login → session cookie
+        let login = rpc(
+            &client,
+            base_url,
+            "auth.login",
+            json!([password.to_string()]),
+        )
+        .await;
+        assert_eq!(
+            login.get("result").and_then(|v| v.as_bool()),
+            Some(true),
+            "Deluge auth.login returned: {login}"
+        );
+
+        // 2. web.get_hosts → pick the first (usually only) host
+        let hosts = rpc(&client, base_url, "web.get_hosts", json!([])).await;
+        let host_id = hosts
+            .get("result")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|h| h.as_array())
+            .and_then(|h| h.first())
+            .and_then(|v| v.as_str())
+            .expect("Deluge web.get_hosts returned no usable host id")
+            .to_string();
+
+        // 3. web.connect(host_id) — required before core.* calls work
+        rpc(&client, base_url, "web.connect", json!([host_id])).await;
+
+        // 4. core.add_torrent_file(filename, base64_filedump, options)
+        use base64::{Engine, engine::general_purpose};
+        let bytes = std::fs::read(torrent_path).expect("read .torrent");
+        let b64 = general_purpose::STANDARD.encode(&bytes);
+        let add_resp = rpc(
+            &client,
+            base_url,
+            "core.add_torrent_file",
+            json!(["testpack.torrent", b64, {"add_paused": true}]),
+        )
+        .await;
+        let hash = add_resp
+            .get("result")
+            .and_then(|v| v.as_str())
+            .expect("Deluge core.add_torrent_file missing hash result")
+            .to_string();
+
+        // 5. Apply the Label plugin label so list_scoped() round-trips.
+        //    core.enable_plugin is idempotent if already on.
+        rpc(&client, base_url, "core.enable_plugin", json!(["Label"])).await;
+        rpc(&client, base_url, "label.add", json!([label.to_string()])).await; // may fail if label already exists; ignore
+        rpc(
+            &client,
+            base_url,
+            "label.set_torrent",
+            json!([hash.clone(), label.to_string()]),
+        )
+        .await;
+
+        hash
+    }
+
+    /// Live smoke covering `add_torrent_with_file_filter` narrowing
+    /// (C1) and the re-narrow preservation contract (C2) against
+    /// Deluge. Mirrors `qbittorrent::tests::live_smoke_narrowed` in
+    /// intent; differences are at the wire-protocol layer only.
+    ///
+    ///     RYOKAN_DELUGE_E2E=1 cargo test \
+    ///       deluge::tests::live_smoke_narrowed -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live Deluge at localhost:8112 + transmission-create"]
+    async fn live_smoke_narrowed() {
+        if std::env::var("RYOKAN_DELUGE_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_DELUGE_E2E=1 to run against localhost:8112)");
+            return;
+        }
+        let Some((_tmp_guard, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let base_url = "http://localhost:8112";
+        let password = "deluge";
+        let label = "ryokan-e2e-narrow";
+
+        let info_hash = upload_torrent_file_deluge(base_url, password, label, &torrent_path).await;
+        eprintln!("uploaded testpack hash={info_hash}");
+
+        let client = DelugeClient::new(base_url, password, label);
+
+        let files = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files should return metadata immediately");
+        assert_eq!(
+            files.len(),
+            7,
+            "synthetic testpack should have 7 files (5 episodes + sample + readme), got {}",
+            files.len()
+        );
+        assert!(
+            files.iter().all(|f| f.wanted),
+            "all files should start wanted=true before narrow"
+        );
+
+        // C1: narrow to episode files only
+        let episode_indices: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.name.contains("episode_").then_some(i))
+            .collect();
+        assert_eq!(episode_indices.len(), 5, "expected 5 episode files");
+
+        let expected_episode_indices = episode_indices.clone();
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
+        let outcome = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_episode_indices.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C1 failed");
+
+        match outcome {
+            SelectiveOutcome::Filtered(kept) => {
+                let mut sorted_kept = kept.clone();
+                sorted_kept.sort_unstable();
+                let mut sorted_expected = episode_indices.clone();
+                sorted_expected.sort_unstable();
+                assert_eq!(
+                    sorted_kept, sorted_expected,
+                    "C1 Filtered(kept) should equal the pick indices"
+                );
+            }
+            SelectiveOutcome::FullDownload => {
+                panic!("C1 expected Filtered narrow, got FullDownload");
+            }
+        }
+
+        let files_after_c1 = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files after C1 failed");
+        for (i, f) in files_after_c1.iter().enumerate() {
+            let should_be_wanted = episode_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C1 post-narrow: file [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C1 narrowing verified");
+
+        // C2: re-narrow with expanded pick (add sample.mkv)
+        let expanded_indices: Vec<usize> = files_after_c1
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                (f.name.contains("episode_") || f.name.contains("sample")).then_some(i)
+            })
+            .collect();
+        assert_eq!(expanded_indices.len(), 6);
+
+        let expected_expanded = expanded_indices.clone();
+        let outcome2 = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_expanded.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C2 failed");
+        assert!(matches!(outcome2, SelectiveOutcome::Filtered(_)));
+
+        let files_after_c2 = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files after C2 failed");
+        for (i, f) in files_after_c2.iter().enumerate() {
+            let should_be_wanted = expanded_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C2 post-renarrow: file [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C2 re-narrow verified");
+
+        client
+            .delete(&info_hash, true)
+            .await
+            .expect("cleanup delete failed");
+        eprintln!("narrowed-smoke passed");
+    }
 }

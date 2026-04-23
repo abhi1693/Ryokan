@@ -888,4 +888,218 @@ mod tests {
         );
         eprintln!("smoke passed");
     }
+
+    /// Upload a local `.torrent` to Transmission via `torrent-add`
+    /// RPC with the `metainfo` field (base64-encoded bytes), applying
+    /// `paused=true` and the Ryokan label at add time. Returns the
+    /// infohash Transmission assigned.
+    ///
+    /// Handles Transmission's CSRF session handshake: first request
+    /// returns HTTP 409 with an `X-Transmission-Session-Id` header
+    /// that must be echoed on every subsequent request. Documented
+    /// in `transmission.rs`'s file header and in CLAUDE.md's
+    /// download-client quirks.
+    async fn upload_torrent_file_transmission(
+        base_url: &str,
+        user: &str,
+        pass: &str,
+        label: &str,
+        torrent_path: &std::path::Path,
+    ) -> String {
+        use base64::{Engine, engine::general_purpose};
+        use serde_json::{Value, json};
+        let client = reqwest::Client::builder().build().expect("reqwest client");
+        let bytes = std::fs::read(torrent_path).expect("read .torrent");
+        let b64 = general_purpose::STANDARD.encode(&bytes);
+
+        let body = json!({
+            "method": "torrent-add",
+            "arguments": {
+                "metainfo": b64,
+                "paused": true,
+                "labels": [label.to_string()],
+            },
+        });
+
+        // First attempt — expect 409 + session header.
+        let first = client
+            .post(format!("{base_url}/transmission/rpc"))
+            .basic_auth(user, Some(pass))
+            .json(&body)
+            .send()
+            .await
+            .expect("transmission first POST");
+        let session_id = first
+            .headers()
+            .get("X-Transmission-Session-Id")
+            .map(|v| v.to_str().expect("session id utf8").to_string());
+        // If Transmission returned 200 already (no auth required), use it.
+        let resp: Value = if first.status() == 200 {
+            first.json().await.expect("transmission first json")
+        } else {
+            assert_eq!(
+                first.status(),
+                409,
+                "Transmission expected 409 for CSRF handshake, got {}",
+                first.status()
+            );
+            let sid =
+                session_id.expect("Transmission 409 without X-Transmission-Session-Id header");
+            let retry = client
+                .post(format!("{base_url}/transmission/rpc"))
+                .basic_auth(user, Some(pass))
+                .header("X-Transmission-Session-Id", sid)
+                .json(&body)
+                .send()
+                .await
+                .expect("transmission retry POST");
+            assert_eq!(
+                retry.status(),
+                200,
+                "Transmission retry returned HTTP {}",
+                retry.status()
+            );
+            retry.json().await.expect("transmission retry json")
+        };
+
+        // Response shape: {"result": "success",
+        //                  "arguments": {"torrent-added": {"hashString": "...", ...}}}
+        // or              {"result": "success",
+        //                  "arguments": {"torrent-duplicate": {"hashString": "...", ...}}}
+        assert_eq!(
+            resp.get("result").and_then(|v| v.as_str()),
+            Some("success"),
+            "Transmission torrent-add result: {resp}"
+        );
+        let args = resp.get("arguments").expect("missing arguments");
+        let added = args
+            .get("torrent-added")
+            .or_else(|| args.get("torrent-duplicate"))
+            .expect("neither torrent-added nor torrent-duplicate in response");
+        added
+            .get("hashString")
+            .and_then(|v| v.as_str())
+            .expect("missing hashString")
+            .to_string()
+    }
+
+    /// Live smoke covering `add_torrent_with_file_filter` narrowing
+    /// (C1) and the re-narrow preservation contract (C2) against
+    /// Transmission. Mirrors the qBit/Deluge equivalents at the
+    /// intent layer; differs at the wire-protocol layer (CSRF
+    /// session handshake, `files-wanted`/`files-unwanted` file
+    /// priority shape).
+    ///
+    ///     RYOKAN_TRANSMISSION_E2E=1 cargo test \
+    ///       transmission::tests::live_smoke_narrowed -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live Transmission at localhost:9091 + transmission-create"]
+    async fn live_smoke_narrowed() {
+        if std::env::var("RYOKAN_TRANSMISSION_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_TRANSMISSION_E2E=1 to run against localhost:9091)");
+            return;
+        }
+        let Some((_tmp_guard, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let base_url = "http://localhost:9091";
+        let user = "transmission";
+        let pass = "transmission";
+        let label = "ryokan-e2e-narrow";
+
+        let info_hash =
+            upload_torrent_file_transmission(base_url, user, pass, label, &torrent_path).await;
+        eprintln!("uploaded testpack hash={info_hash}");
+
+        let client = TransmissionClient::new(base_url, user, pass, label);
+
+        let files = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files should return metadata immediately");
+        assert_eq!(
+            files.len(),
+            7,
+            "synthetic testpack should have 7 files, got {}",
+            files.len()
+        );
+        assert!(
+            files.iter().all(|f| f.wanted),
+            "all files should start wanted=true before narrow"
+        );
+
+        let episode_indices: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.name.contains("episode_").then_some(i))
+            .collect();
+        assert_eq!(episode_indices.len(), 5, "expected 5 episode files");
+
+        let expected_episode_indices = episode_indices.clone();
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
+        let outcome = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_episode_indices.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C1 failed");
+
+        match outcome {
+            SelectiveOutcome::Filtered(kept) => {
+                let mut sorted_kept = kept.clone();
+                sorted_kept.sort_unstable();
+                let mut sorted_expected = episode_indices.clone();
+                sorted_expected.sort_unstable();
+                assert_eq!(sorted_kept, sorted_expected);
+            }
+            SelectiveOutcome::FullDownload => panic!("C1 expected Filtered, got FullDownload"),
+        }
+
+        let files_after_c1 = client.get_files(&info_hash).await.expect("get_files C1");
+        for (i, f) in files_after_c1.iter().enumerate() {
+            let should_be_wanted = episode_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C1 post-narrow: [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C1 narrowing verified");
+
+        let expanded_indices: Vec<usize> = files_after_c1
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                (f.name.contains("episode_") || f.name.contains("sample")).then_some(i)
+            })
+            .collect();
+        assert_eq!(expanded_indices.len(), 6);
+
+        let expected_expanded = expanded_indices.clone();
+        let outcome2 = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_expanded.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C2 failed");
+        assert!(matches!(outcome2, SelectiveOutcome::Filtered(_)));
+
+        let files_after_c2 = client.get_files(&info_hash).await.expect("get_files C2");
+        for (i, f) in files_after_c2.iter().enumerate() {
+            let should_be_wanted = expanded_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C2 post-renarrow: [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C2 re-narrow verified");
+
+        client
+            .delete(&info_hash, true)
+            .await
+            .expect("cleanup delete failed");
+        eprintln!("narrowed-smoke passed");
+    }
 }

@@ -21,6 +21,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 pub mod qbittorrent;
 
 /// Stub Deluge implementation. Exists during Phase 1 to compile-check

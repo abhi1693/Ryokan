@@ -746,6 +746,23 @@ pub(crate) enum XmlValue {
     Int(i64),
     Bool(bool),
     Array(Vec<XmlValue>),
+    /// Raw binary payload, encoded as XML-RPC `<base64>` on the
+    /// wire. Needed for `load.raw_start_verbose` / `load.raw_verbose`
+    /// which accept an entire `.torrent` file as a base64 blob —
+    /// these are the canonical ways to hand a tiny synthetic
+    /// `.torrent` to rtorrent without serving it over HTTP or
+    /// sharing a filesystem mount with the rtorrent container. Value
+    /// is the raw bytes; the encoder handles base64 conversion.
+    ///
+    /// Currently constructed only by the `live_smoke_narrowed` test,
+    /// but kept in the production `XmlValue` enum (vs. a test-only
+    /// variant) because the encoder's match on `XmlValue` is
+    /// exhaustive and splitting the variant set would force ugly
+    /// cfg-gating on every match arm. The production encoder path
+    /// is test-verified and ready if a future feature (e.g. a
+    /// "load .torrent from local path" UI action) needs it.
+    #[allow(dead_code)]
+    Base64(Vec<u8>),
 }
 
 impl XmlValue {
@@ -807,6 +824,12 @@ fn encode_value(v: &XmlValue, out: &mut String) {
                 encode_value(inner, out);
             }
             out.push_str("</data></array>");
+        }
+        XmlValue::Base64(bytes) => {
+            use base64::{Engine, engine::general_purpose};
+            out.push_str("<base64>");
+            out.push_str(&general_purpose::STANDARD.encode(bytes));
+            out.push_str("</base64>");
         }
     }
     out.push_str("</value>");
@@ -1506,5 +1529,225 @@ mod tests {
             "torrent must not survive delete"
         );
         eprintln!("smoke passed");
+    }
+
+    /// Upload a local `.torrent` to rtorrent via the XML-RPC
+    /// `load.raw_start_verbose` method, which accepts the entire
+    /// `.torrent` payload as a `<base64>` blob — the canonical
+    /// rtorrent pattern for loading a local torrent without a
+    /// filesystem mount or HTTP round-trip. Stops (pauses) the
+    /// torrent immediately after load so it doesn't try to download
+    /// fake content from the bogus tracker. Applies the Ryokan
+    /// label via `d.custom1.set` after load.
+    ///
+    /// Returns the infohash rtorrent assigned (extracted from the
+    /// torrent's bencode — the only way since `load.raw_start_verbose`
+    /// returns 0 on success, not the hash).
+    async fn upload_torrent_file_rtorrent(
+        rpc_url: &str,
+        label: &str,
+        torrent_path: &std::path::Path,
+    ) -> String {
+        let bytes = std::fs::read(torrent_path).expect("read .torrent");
+        let client = RtorrentClient::new(rpc_url, "", "", label);
+
+        // Compute the infohash client-side by SHA1'ing the bencoded
+        // `info` dict. Hand-parse just enough bencode to find it.
+        let info_hash = bencode_info_hash(&bytes).expect("extract infohash from .torrent");
+        let hash_uc = info_hash.to_ascii_uppercase();
+
+        // load.raw_start_verbose takes (target, raw_bytes, *commands).
+        // Commands run post-load; stop and set label atomically.
+        client
+            .call(
+                "load.raw_start_verbose",
+                &[
+                    XmlValue::String(String::new()),
+                    XmlValue::Base64(bytes),
+                    XmlValue::String(format!("d.stop={hash_uc}")),
+                    XmlValue::String(format!("d.custom1.set={label}")),
+                ],
+            )
+            .await
+            .expect("load.raw_start_verbose failed");
+
+        info_hash.to_ascii_lowercase()
+    }
+
+    /// Compute the v1 infohash of a .torrent by SHA1'ing the raw
+    /// bencoded `info` dict. Minimal hand-parse — finds the `4:info`
+    /// key at the top level, then slices the bencoded dict that
+    /// follows. Doesn't validate the rest of the .torrent structure;
+    /// assumes well-formed input from `transmission-create`.
+    fn bencode_info_hash(bytes: &[u8]) -> Option<String> {
+        // Top-level structure is `d...e`; look for `4:info` and grab
+        // the bencoded dict that follows.
+        let key = b"4:info";
+        let start = find_subslice(bytes, key)? + key.len();
+        let end = bencode_end(bytes, start)?;
+        let info_slice = &bytes[start..end];
+        let mut hasher = sha1_smol::Sha1::new();
+        hasher.update(info_slice);
+        Some(hasher.digest().to_string())
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Given a bencoded value starting at `start`, return the index
+    /// just past its end. Handles dicts (`d...e`), lists (`l...e`),
+    /// ints (`i...e`), and byte-strings (`N:...`) — the full bencode
+    /// grammar. Returns None on malformed input.
+    fn bencode_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let mut i = start;
+        if i >= bytes.len() {
+            return None;
+        }
+        match bytes[i] {
+            b'd' | b'l' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'e' {
+                    i = bencode_end(bytes, i)?;
+                }
+                if i < bytes.len() { Some(i + 1) } else { None }
+            }
+            b'i' => {
+                let e = find_subslice(&bytes[i..], b"e")? + i;
+                Some(e + 1)
+            }
+            b'0'..=b'9' => {
+                let colon = bytes[i..].iter().position(|&b| b == b':')? + i;
+                let len_str = std::str::from_utf8(&bytes[i..colon]).ok()?;
+                let len: usize = len_str.parse().ok()?;
+                Some(colon + 1 + len)
+            }
+            _ => None,
+        }
+    }
+
+    /// Live smoke covering `add_torrent_with_file_filter` narrowing
+    /// (C1) and the re-narrow preservation contract (C2) against
+    /// rtorrent. Mirrors the qBit/Deluge/Transmission equivalents;
+    /// differences are XML-RPC encoding and rtorrent's mandatory
+    /// `d.update_priorities` call after file-priority writes.
+    ///
+    ///     RYOKAN_RTORRENT_E2E=1 cargo test \
+    ///       rtorrent::tests::live_smoke_narrowed -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live rtorrent via ruTorrent at localhost:8081 + transmission-create"]
+    async fn live_smoke_narrowed() {
+        if std::env::var("RYOKAN_RTORRENT_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_RTORRENT_E2E=1 to run against localhost:8081)");
+            return;
+        }
+        let Some((_tmp_guard, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let rpc_url = "http://localhost:8081/RPC2";
+        let label = "ryokan-e2e-narrow";
+
+        let info_hash = upload_torrent_file_rtorrent(rpc_url, label, &torrent_path).await;
+        eprintln!("uploaded testpack hash={info_hash}");
+
+        let client = RtorrentClient::new(rpc_url, "", "", label);
+
+        // rtorrent needs a moment to register files after load — poll
+        // briefly until metadata is visible via get_files.
+        let mut files = Vec::new();
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            match client.get_files(&info_hash).await {
+                Ok(f) if !f.is_empty() => {
+                    files = f;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert_eq!(
+            files.len(),
+            7,
+            "synthetic testpack should have 7 files, got {}",
+            files.len()
+        );
+        assert!(
+            files.iter().all(|f| f.wanted),
+            "all files should start wanted=true before narrow"
+        );
+
+        let episode_indices: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.name.contains("episode_").then_some(i))
+            .collect();
+        assert_eq!(episode_indices.len(), 5, "expected 5 episode files");
+
+        let expected_episode_indices = episode_indices.clone();
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
+        let outcome = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_episode_indices.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C1 failed");
+
+        match outcome {
+            SelectiveOutcome::Filtered(kept) => {
+                let mut sorted_kept = kept.clone();
+                sorted_kept.sort_unstable();
+                let mut sorted_expected = episode_indices.clone();
+                sorted_expected.sort_unstable();
+                assert_eq!(sorted_kept, sorted_expected);
+            }
+            SelectiveOutcome::FullDownload => panic!("C1 expected Filtered, got FullDownload"),
+        }
+
+        let files_after_c1 = client.get_files(&info_hash).await.expect("get_files C1");
+        for (i, f) in files_after_c1.iter().enumerate() {
+            let should_be_wanted = episode_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C1 post-narrow: [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C1 narrowing verified");
+
+        let expanded_indices: Vec<usize> = files_after_c1
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                (f.name.contains("episode_") || f.name.contains("sample")).then_some(i)
+            })
+            .collect();
+        assert_eq!(expanded_indices.len(), 6);
+
+        let expected_expanded = expanded_indices.clone();
+        let outcome2 = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_expanded.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C2 failed");
+        assert!(matches!(outcome2, SelectiveOutcome::Filtered(_)));
+
+        let files_after_c2 = client.get_files(&info_hash).await.expect("get_files C2");
+        for (i, f) in files_after_c2.iter().enumerate() {
+            let should_be_wanted = expanded_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C2 post-renarrow: [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C2 re-narrow verified");
+
+        client
+            .delete(&info_hash, true)
+            .await
+            .expect("cleanup delete failed");
+        eprintln!("narrowed-smoke passed");
     }
 }

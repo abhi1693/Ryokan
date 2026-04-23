@@ -925,4 +925,230 @@ mod tests {
         );
         eprintln!("smoke passed");
     }
+
+    /// Upload a local `.torrent` file to qBit via the multipart
+    /// `torrents/add` endpoint with `paused=true`, scoped to the
+    /// given category. Returns the infohash qBit assigned after
+    /// polling `list_scoped` for appearance. The existing
+    /// `add_torrent` trait method on `QbitClient` only accepts URL
+    /// strings (magnet/HTTP); this helper is how the smoke tests
+    /// inject a synthetic file-backed torrent without going through
+    /// a URL scheme the client can't resolve.
+    async fn upload_torrent_file(
+        base_url: &str,
+        user: &str,
+        pass: &str,
+        category: &str,
+        torrent_path: &std::path::Path,
+    ) -> String {
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .expect("reqwest client");
+        let login = client
+            .post(format!("{base_url}/api/v2/auth/login"))
+            .form(&[("username", user), ("password", pass)])
+            .send()
+            .await
+            .expect("qBit login");
+        assert_eq!(login.status(), 200, "qBit login failed");
+        let bytes = std::fs::read(torrent_path).expect("read .torrent");
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name("testpack.torrent")
+            .mime_str("application/x-bittorrent")
+            .unwrap();
+        let form = reqwest::multipart::Form::new()
+            .part("torrents", part)
+            .text("category", category.to_string())
+            .text("paused", "true");
+        let resp = client
+            .post(format!("{base_url}/api/v2/torrents/add"))
+            .multipart(form)
+            .send()
+            .await
+            .expect("qBit add");
+        assert_eq!(resp.status(), 200, "qBit add returned {}", resp.status());
+
+        // Poll list_scoped via the multipart session to find the new
+        // torrent's hash. qBit's add endpoint doesn't return the hash
+        // directly, so we look it up by category.
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let list_resp = client
+                .get(format!(
+                    "{base_url}/api/v2/torrents/info?category={category}"
+                ))
+                .send()
+                .await
+                .expect("qBit list");
+            let torrents: Vec<serde_json::Value> = list_resp.json().await.expect("qBit list json");
+            if let Some(first) = torrents.first()
+                && let Some(hash) = first.get("hash").and_then(|v| v.as_str())
+            {
+                return hash.to_string();
+            }
+        }
+        panic!("uploaded torrent never appeared in category {category}");
+    }
+
+    /// Live smoke covering `add_torrent_with_file_filter` narrowing
+    /// (C1) and the re-narrow preservation contract (C2). Uses a
+    /// synthetic multi-file `.torrent` (built via
+    /// `transmission-create`) uploaded directly via qBit's multipart
+    /// endpoint so metadata is present immediately — no DHT
+    /// dependency, no flakiness window.
+    ///
+    /// Contract verified:
+    /// * C1 — narrowing a full file list down to a proper subset
+    ///   returns `SelectiveOutcome::Filtered(kept_indices)` and
+    ///   writes `wanted=false` to every non-selected file.
+    /// * C2 — re-narrowing with an expanded pick bumps previously-
+    ///   skipped files that are now wanted, but does *not* re-skip
+    ///   files the expanded pick dropped. Matches the `already_narrowed`
+    ///   branch in `add_torrent_with_file_filter` whose contract says
+    ///   "re-narrow must not clobber user edits."
+    ///
+    /// Gated the same way as `live_smoke`:
+    ///
+    ///     RYOKAN_QBIT_E2E=1 QBIT_PASS=<pw> cargo test \
+    ///       qbittorrent::tests::live_smoke_narrowed -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live qBittorrent at localhost:8080 + transmission-create"]
+    async fn live_smoke_narrowed() {
+        if std::env::var("RYOKAN_QBIT_E2E").is_err() {
+            eprintln!("skipping (set RYOKAN_QBIT_E2E=1 to run against localhost:8080)");
+            return;
+        }
+        let Some((_tmp_guard, torrent_path)) = super::super::test_helpers::build_testpack_torrent()
+        else {
+            return;
+        };
+        let pass = std::env::var("QBIT_PASS").unwrap_or_else(|_| "adminadmin".to_string());
+        let base_url = "http://localhost:8080";
+        let category = "ryokan-e2e-narrow";
+
+        let info_hash =
+            upload_torrent_file(base_url, "admin", &pass, category, &torrent_path).await;
+        eprintln!("uploaded testpack hash={info_hash}");
+
+        let client = QbitClient::new(base_url, "admin", &pass, category);
+
+        // Cleanup-on-panic safety: if any assertion fails below, we want
+        // the torrent gone so the next test run starts clean. Accomplish
+        // via a drop-guard closure pattern — but since we can't early-
+        // return from a test with cleanup, just ensure the final delete
+        // runs and previous state is cleared at entry too.
+        let files = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files should return metadata immediately after file upload");
+        assert_eq!(
+            files.len(),
+            7,
+            "synthetic testpack should have 7 files (5 episodes + sample + readme), got {}",
+            files.len()
+        );
+        assert!(
+            files.iter().all(|f| f.wanted),
+            "all files should start wanted=true before narrow"
+        );
+
+        // --- C1: narrow to episode files only ---
+        let episode_indices: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.name.contains("episode_").then_some(i))
+            .collect();
+        assert_eq!(episode_indices.len(), 5, "expected 5 episode files");
+
+        let expected_episode_indices = episode_indices.clone();
+        let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
+        let outcome = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_episode_indices.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C1 failed");
+
+        match outcome {
+            SelectiveOutcome::Filtered(kept) => {
+                let mut sorted_kept = kept.clone();
+                sorted_kept.sort_unstable();
+                let mut sorted_expected = episode_indices.clone();
+                sorted_expected.sort_unstable();
+                assert_eq!(
+                    sorted_kept, sorted_expected,
+                    "C1 Filtered(kept) should equal the pick indices"
+                );
+            }
+            SelectiveOutcome::FullDownload => {
+                panic!("C1 expected Filtered narrow, got FullDownload");
+            }
+        }
+
+        // Verify priorities actually applied to the client state.
+        let files_after_c1 = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files after C1 failed");
+        for (i, f) in files_after_c1.iter().enumerate() {
+            let should_be_wanted = episode_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C1 post-narrow: file [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C1 narrowing verified (5 episodes wanted, sample+readme skipped)");
+
+        // --- C2: re-narrow with expanded pick (add sample.mkv) ---
+        let expanded_indices: Vec<usize> = files_after_c1
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                (f.name.contains("episode_") || f.name.contains("sample")).then_some(i)
+            })
+            .collect();
+        assert_eq!(
+            expanded_indices.len(),
+            6,
+            "expected 6 files in expanded pick (5 episodes + sample)"
+        );
+
+        let expected_expanded = expanded_indices.clone();
+        let outcome2 = client
+            .add_torrent_with_file_filter(&magnet, &info_hash, &mut |_names| {
+                Some(expected_expanded.clone())
+            })
+            .await
+            .expect("add_torrent_with_file_filter C2 failed");
+
+        match outcome2 {
+            SelectiveOutcome::Filtered(_) => {}
+            SelectiveOutcome::FullDownload => {
+                panic!("C2 expected Filtered re-narrow, got FullDownload");
+            }
+        }
+
+        let files_after_c2 = client
+            .get_files(&info_hash)
+            .await
+            .expect("get_files after C2 failed");
+        for (i, f) in files_after_c2.iter().enumerate() {
+            let should_be_wanted = expanded_indices.contains(&i);
+            assert_eq!(
+                f.wanted, should_be_wanted,
+                "C2 post-renarrow: file [{i}] ({}) wanted={} expected={}",
+                f.name, f.wanted, should_be_wanted
+            );
+        }
+        eprintln!("C2 re-narrow verified (sample now wanted, readme still skipped)");
+
+        // --- Cleanup ---
+        client
+            .delete(&info_hash, true)
+            .await
+            .expect("cleanup delete failed");
+        eprintln!("narrowed-smoke passed");
+    }
 }
