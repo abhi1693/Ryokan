@@ -926,76 +926,6 @@ mod tests {
         eprintln!("smoke passed");
     }
 
-    /// Upload a local `.torrent` file to qBit via the multipart
-    /// `torrents/add` endpoint with `paused=true`, scoped to the
-    /// given category. Returns the infohash qBit assigned after
-    /// polling `list_scoped` for appearance. The existing
-    /// `add_torrent` trait method on `QbitClient` only accepts URL
-    /// strings (magnet/HTTP); this helper is how the smoke tests
-    /// inject a synthetic file-backed torrent without going through
-    /// a URL scheme the client can't resolve.
-    async fn upload_torrent_file(
-        base_url: &str,
-        user: &str,
-        pass: &str,
-        category: &str,
-        torrent_path: &std::path::Path,
-    ) -> String {
-        let client = reqwest::Client::builder()
-            .cookie_store(true)
-            .build()
-            .expect("reqwest client");
-        let login = client
-            .post(format!("{base_url}/api/v2/auth/login"))
-            .form(&[("username", user), ("password", pass)])
-            .send()
-            .await
-            .expect("qBit login");
-        assert_eq!(login.status(), 200, "qBit login failed");
-        let bytes = std::fs::read(torrent_path).expect("read .torrent");
-        let part = reqwest::multipart::Part::bytes(bytes)
-            .file_name("testpack.torrent")
-            .mime_str("application/x-bittorrent")
-            .unwrap();
-        // qBit 5.x renamed `paused` → `stopped` on the add endpoint;
-        // pass both so the test works against 4.x and 5.x without
-        // version probing (matches the `add_torrent` impl's pattern
-        // of sending both pause and stop names).
-        let form = reqwest::multipart::Form::new()
-            .part("torrents", part)
-            .text("category", category.to_string())
-            .text("paused", "true")
-            .text("stopped", "true");
-        let resp = client
-            .post(format!("{base_url}/api/v2/torrents/add"))
-            .multipart(form)
-            .send()
-            .await
-            .expect("qBit add");
-        assert_eq!(resp.status(), 200, "qBit add returned {}", resp.status());
-
-        // Poll list_scoped via the multipart session to find the new
-        // torrent's hash. qBit's add endpoint doesn't return the hash
-        // directly, so we look it up by category.
-        for _ in 0..10 {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let list_resp = client
-                .get(format!(
-                    "{base_url}/api/v2/torrents/info?category={category}"
-                ))
-                .send()
-                .await
-                .expect("qBit list");
-            let torrents: Vec<serde_json::Value> = list_resp.json().await.expect("qBit list json");
-            if let Some(first) = torrents.first()
-                && let Some(hash) = first.get("hash").and_then(|v| v.as_str())
-            {
-                return hash.to_string();
-            }
-        }
-        panic!("uploaded torrent never appeared in category {category}");
-    }
-
     /// Live smoke covering `add_torrent_with_file_filter` narrowing
     /// (C1) and the re-narrow preservation contract (C2). Uses a
     /// synthetic multi-file `.torrent` (built via
@@ -1032,8 +962,14 @@ mod tests {
         let base_url = "http://localhost:8080";
         let category = "ryokan-e2e-narrow";
 
-        let info_hash =
-            upload_torrent_file(base_url, "admin", &pass, category, &torrent_path).await;
+        let info_hash = super::super::test_helpers::upload_torrent_file_qbit(
+            base_url,
+            "admin",
+            &pass,
+            category,
+            &torrent_path,
+        )
+        .await;
         eprintln!("uploaded testpack hash={info_hash}");
 
         let client = QbitClient::new(base_url, "admin", &pass, category);
@@ -1200,10 +1136,22 @@ mod tests {
         let ryokan_category = "ryokan-e2e-scope";
         let foreign_category = "other-tool-scope";
 
-        let ryokan_hash =
-            upload_torrent_file(base_url, "admin", &pass, ryokan_category, &torrent1).await;
-        let foreign_hash =
-            upload_torrent_file(base_url, "admin", &pass, foreign_category, &torrent2).await;
+        let ryokan_hash = super::super::test_helpers::upload_torrent_file_qbit(
+            base_url,
+            "admin",
+            &pass,
+            ryokan_category,
+            &torrent1,
+        )
+        .await;
+        let foreign_hash = super::super::test_helpers::upload_torrent_file_qbit(
+            base_url,
+            "admin",
+            &pass,
+            foreign_category,
+            &torrent2,
+        )
+        .await;
         eprintln!("ryokan={ryokan_hash} foreign={foreign_hash}");
         assert_ne!(
             ryokan_hash, foreign_hash,
@@ -1323,8 +1271,14 @@ mod tests {
         let base_url = "http://localhost:8080";
         let category = "ryokan-e2e-state";
 
-        let info_hash =
-            upload_torrent_file(base_url, "admin", &pass, category, &torrent_path).await;
+        let info_hash = super::super::test_helpers::upload_torrent_file_qbit(
+            base_url,
+            "admin",
+            &pass,
+            category,
+            &torrent_path,
+        )
+        .await;
         let client = QbitClient::new(base_url, "admin", &pass, category);
 
         // qBit 5.x ignores the `paused` / `stopped` multipart flag on

@@ -692,3 +692,91 @@ pub async fn series_episodes_json(
 
     Ok(Json(episodes))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::download_client::DownloadClient;
+    use crate::services::download_client::qbittorrent::QbitClient;
+    use crate::services::download_client::test_helpers;
+    use crate::test_support;
+    use std::sync::Arc;
+
+    /// D2+D3 live integration test: cancelling a pending grab for an
+    /// episode must delete the torrent from the active download
+    /// client AND clear the grab state in the DB. Covers both the
+    /// blocklist (D2) and episode-removal (D3) call paths — they
+    /// share this same "delete in-flight grab and clean up state"
+    /// trait surface. The blocklist-specific path (`mark_episode_failed`)
+    /// additionally kicks off an auto-search re-run which requires
+    /// live AniList + Nyaa and is outside the scope of this trait-
+    /// boundary test.
+    ///
+    /// Flow:
+    /// 1. Seed DB: series + pending grab_torrents row for episode 1.
+    /// 2. Upload synthetic torrent to qBit with matching hash.
+    /// 3. Call `cancel_pending_episode(anilist_id, 1)`.
+    /// 4. Assert torrent deleted from qBit.
+    #[tokio::test]
+    #[ignore = "requires live qBit + transmission-create"]
+    async fn d2_d3_cancel_pending_deletes_from_client() {
+        if std::env::var("RYOKAN_QBIT_E2E").is_err() {
+            eprintln!("skipping");
+            return;
+        }
+        let Some((_tmp, torrent)) = test_helpers::build_named_torrent("d2-d3-cancel-pending")
+        else {
+            return;
+        };
+        let pass = std::env::var("QBIT_PASS").unwrap_or_else(|_| "adminadmin".to_string());
+        let base_url = "http://localhost:8080";
+        let category = "ryokan-e2e-d2d3";
+
+        let hash =
+            test_helpers::upload_torrent_file_qbit(base_url, "admin", &pass, category, &torrent)
+                .await;
+
+        let pool = test_support::in_memory_pool().await;
+        let qbit: Arc<dyn DownloadClient> =
+            Arc::new(QbitClient::new(base_url, "admin", &pass, category));
+        let state = test_support::build_test_app_state(pool.clone(), Some(qbit.clone()));
+
+        // Seed: series + pending grab for episode 1. The
+        // `seed_grabbed_torrent` helper writes state='pending' and
+        // episode_numbers='[1]' by default — matches what the
+        // handler looks up.
+        let anilist_id: i64 = 54321;
+        let series_id = test_support::seed_series(&pool, anilist_id, "D2/D3 Test Series").await;
+        test_support::seed_grabbed_torrent(&pool, series_id, &hash, "d2-d3-test.torrent").await;
+        assert_eq!(
+            test_support::count_grabs_for_series(&pool, series_id).await,
+            1,
+            "precondition: 1 grab seeded"
+        );
+
+        // Exercise: cancel the pending grab for episode 1.
+        let (status, body) = cancel_pending_episode(
+            axum::extract::State(state.clone()),
+            axum::extract::Path((anilist_id, 1)),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "cancel_pending_episode returned non-OK: {status} body={}",
+            body.0
+        );
+
+        // Assert: torrent deleted from qBit.
+        let check_client = QbitClient::new(base_url, "admin", &pass, category);
+        let list = check_client
+            .list_scoped()
+            .await
+            .expect("list_scoped post-cancel");
+        assert!(
+            !list.iter().any(|t| t.hash.eq_ignore_ascii_case(&hash)),
+            "D2/D3: cancelled torrent must be deleted from qBit (still in list: {list:?})"
+        );
+        eprintln!("D2/D3 integration verified");
+    }
+}

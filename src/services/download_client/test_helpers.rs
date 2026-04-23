@@ -55,6 +55,78 @@ pub(crate) fn build_named_torrent(name: &str) -> Option<(tempfile::TempDir, Path
     build_inner(name, true)
 }
 
+/// Upload a local `.torrent` file to qBit via the multipart
+/// `torrents/add` endpoint with `paused=true` and `stopped=true`
+/// (qBit 5.x renamed the flag — pass both to survive either
+/// version), scoped to the given category. Returns the infohash
+/// qBit assigned after polling `list_scoped` for appearance.
+///
+/// Shared between `qbittorrent::tests::live_smoke_*` and
+/// handler-level Wave 2 integration tests. The production
+/// `QbitClient::add_torrent` only accepts URL strings (magnet/HTTP);
+/// this helper injects a synthetic file-backed torrent via the
+/// multipart route that production code doesn't use.
+pub(crate) async fn upload_torrent_file_qbit(
+    base_url: &str,
+    user: &str,
+    pass: &str,
+    category: &str,
+    torrent_path: &std::path::Path,
+) -> String {
+    let client = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("reqwest client");
+    let login = client
+        .post(format!("{base_url}/api/v2/auth/login"))
+        .form(&[("username", user), ("password", pass)])
+        .send()
+        .await
+        .expect("qBit login");
+    assert_eq!(login.status(), 200, "qBit login failed");
+    let bytes = std::fs::read(torrent_path).expect("read .torrent");
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name("testpack.torrent")
+        .mime_str("application/x-bittorrent")
+        .unwrap();
+    let form = reqwest::multipart::Form::new()
+        .part("torrents", part)
+        .text("category", category.to_string())
+        .text("paused", "true")
+        .text("stopped", "true");
+    let resp = client
+        .post(format!("{base_url}/api/v2/torrents/add"))
+        .multipart(form)
+        .send()
+        .await
+        .expect("qBit add");
+    assert_eq!(resp.status(), 200, "qBit add returned {}", resp.status());
+
+    // qBit's add endpoint doesn't return the hash directly; poll
+    // by category to find the newly-added torrent.
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let list_resp = client
+            .get(format!(
+                "{base_url}/api/v2/torrents/info?category={category}"
+            ))
+            .send()
+            .await
+            .expect("qBit list");
+        let torrents: Vec<serde_json::Value> = list_resp.json().await.expect("qBit list json");
+        // Return the FIRST torrent matching this category — callers
+        // that upload multiple torrents to the same category must
+        // use distinct categories per torrent or capture before the
+        // second upload.
+        if let Some(first) = torrents.first()
+            && let Some(hash) = first.get("hash").and_then(|v| v.as_str())
+        {
+            return hash.to_string();
+        }
+    }
+    panic!("uploaded torrent never appeared in category {category}");
+}
+
 fn build_inner(name: &str, with_name_file: bool) -> Option<(tempfile::TempDir, PathBuf)> {
     if std::process::Command::new("transmission-create")
         .arg("--version")
