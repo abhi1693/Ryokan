@@ -756,6 +756,15 @@ async fn import_torrent(
                 }
                 let _ = grabbed_torrents::mark_replaced(&state.db, old_grab.id, grab.id).await;
             }
+
+            // Per-episode history counterpart: flip the old grab's
+            // episode_grab_history row for this specific ep from
+            // 'completed' to 'replaced' so the episode detail modal
+            // mirrors what the Downloads tab shows. Without this the
+            // old Kaizoku row and the new SubsPlease row both read
+            // 'completed' in grab history, hiding the upgrade chain.
+            let _ =
+                episode_tags::mark_grab_history_replaced(&state.db, target_series_id, ep_num).await;
         }
 
         match do_file_op(&cfg.post_processing_mode, &src, &dest_video).await {

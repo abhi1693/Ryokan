@@ -202,6 +202,7 @@ function renderGrabHistory(entries, epNum) {
     for (const e of entries) {
         const stateClass = e.state === 'failed' ? 'grab-state-failed'
             : e.state === 'removed' ? 'grab-state-removed'
+            : e.state === 'replaced' ? 'grab-state-replaced'
             : e.state === 'completed' ? 'grab-state-completed'
             : 'grab-state-grabbed';
         // Only active 'grabbed' rows can be manually failed — once

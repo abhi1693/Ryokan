@@ -722,6 +722,39 @@ pub async fn clear_episode_tag(
     Ok(())
 }
 
+/// Flip the latest `completed` grab_history row for (series_id, ep) to
+/// `replaced` — the per-episode counterpart of
+/// `grabbed_torrents::mark_replaced`. Called by post-processing when an
+/// upgrade lands on an episode that already had an import, so the
+/// episode detail modal can distinguish "the old grab was superseded"
+/// from "the old grab was user-cancelled" (which stays `removed`).
+///
+/// Only touches the most recent `completed` row — older entries from
+/// prior grab cycles stay as-is (they've already gone through their
+/// own lifecycle). If no `completed` row exists (orphan upgrade case
+/// covered by post_processing's disk-as-truth path), this is a no-op.
+pub async fn mark_grab_history_replaced(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE episode_grab_history
+         SET state = 'replaced', updated_at = CURRENT_TIMESTAMP
+         WHERE id = (
+             SELECT id FROM episode_grab_history
+             WHERE series_id = ? AND episode_number = ? AND state = 'completed'
+             ORDER BY grabbed_at DESC
+             LIMIT 1
+         )",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Clear episode quality tags and mark grab history as "removed" for all episodes
 /// associated with a grabbed torrent (identified by series_id + episode_numbers).
 ///

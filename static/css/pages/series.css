@@ -1008,6 +1008,8 @@
 
 .grab-state-removed { color: var(--text-dim); font-weight: 600; }
 
+.grab-state-replaced { color: var(--orange); font-weight: 600; }
+
 .btn-mark-failed {
     font-size: 11px;
     padding: 3px 8px;
