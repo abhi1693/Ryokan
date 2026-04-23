@@ -40,6 +40,13 @@ pub const NYAA_MAX_CONCURRENCY: usize = 2;
 static NYAA_CONCURRENCY: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(NYAA_MAX_CONCURRENCY));
 
+/// Buffer size for callers running queries through
+/// `futures_util::stream::buffer_unordered`. Set to 4× the semaphore's
+/// permit count so that whenever a permit frees, a future is already
+/// polling and ready to grab it — pure pipelining, no effect on peak
+/// outbound concurrency because the semaphore is the hard cap.
+pub const NYAA_BUFFER: usize = NYAA_MAX_CONCURRENCY * 4;
+
 mod scraper;
 
 use scraper::{parse_results, parse_view_page, sanitize_query_for_nyaa};

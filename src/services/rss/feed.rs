@@ -39,33 +39,74 @@ static RE_BATCH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:e?\d{1,4}|s\d{1,2}e\d{1,4})\s*[-~]\s*(?:e?\d{1,4}|\d{1,4})\b").unwrap()
 });
 
-/// Capture-groups version of `RE_BATCH` used to post-filter matches
-/// where the left digit is larger than the right. A plain `\d-\d` range
-/// regex flags `Mob Psycho 100 - 03` as a batch because `100` looks
-/// like the start of an episode range. Real episode ranges are always
-/// `left < right` (`01-12`, `01-100`), so the numeric check rejects
-/// title-number + episode false positives while keeping legitimate
-/// ranges intact.
-static RE_BATCH_RANGE_CAPTURES: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:e)?(\d{1,4})(?:v\d+)?\s*[-~]\s*(?:e)?(\d{1,4})(?:v\d+)?\b").unwrap()
-});
+/// Matches any digit-run in the text. Used as a starting anchor for
+/// the overlapping range scan in `has_valid_batch_range` — every
+/// digit-run gets a chance to be the left side of a `\d+-\d+` pair,
+/// so a leading title-number (`Mob Psycho 100`) that can't be a valid
+/// left side doesn't prevent a later valid pair (`01-12`) from firing.
+/// Without the overlapping scan, `captures_iter`'s leftmost-non-
+/// overlapping match would consume `100 - 01` in `100 - 01-12` and
+/// leave the real `01-12` unreachable.
+static RE_BATCH_LEFT_DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d{1,4}").unwrap());
 
+/// Pattern applied to the slice AFTER each candidate left-digit run:
+/// matches `[vN]? \s* [-~] \s* [e]? (right_digits) [vN]?`, anchored at
+/// the start of the tail. `(?:v\d+)?` on both sides accepts `v2`
+/// version markers; the capture is the right-side digit count.
+///
+/// This regex doesn't need the `s\d{1,2}e\d{1,4}` branch the original
+/// `RE_BATCH` carries — it only runs AFTER the `RE_SEASON_MARKER_MASK`
+/// pass has stripped `s\d{1,2}` tokens, so a title like `S01E01-E12`
+/// arrives here as `  E01-E12`, and the `e?\d` alternatives on both
+/// sides cover that shape.
+static RE_BATCH_RIGHT_AFTER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:v\d+)?\s*[-~]\s*(?:e)?(\d{1,4})(?:v\d+)?\b").unwrap());
+
+/// Post-filter for `RE_BATCH`: return true only if the matched text
+/// contains *some* `\d+-\d+` pair whose left side is a plausible
+/// episode-range start (`left > 0 && left < right`). A plain `\d-\d`
+/// regex flags `Mob Psycho 100 - 03` as a batch because `100` looks
+/// like the start of a range. Real episode ranges are always
+/// ascending (`01-12`, `01-100`), so the numeric check rejects
+/// title-number + episode false positives.
+///
+/// Overlapping scan: `captures_iter` would consume `100 - 01` as the
+/// leftmost match and leave the cursor past `01`, so the genuine
+/// `01-12` range in `Mob Psycho 100 - 01-12` would never be tried.
+/// Scanning over every `\d{1,4}` start via `find_iter` gives every
+/// digit-run a chance to be the left side, so the real range still
+/// gets evaluated even when an earlier title number is present.
 fn has_valid_batch_range(text: &str) -> bool {
-    RE_BATCH_RANGE_CAPTURES.captures_iter(text).any(|cap| {
-        let left = cap
-            .get(1)
-            .and_then(|m| m.as_str().parse::<u32>().ok())
-            .unwrap_or(0);
-        let right = cap
-            .get(2)
-            .and_then(|m| m.as_str().parse::<u32>().ok())
-            .unwrap_or(0);
-        // Real episode ranges are ascending with both numbers small
-        // enough to be plausible episode counts. `left < right` rules
-        // out title-number + episode (`100 - 03`, `100 - 12`); the
-        // `<= 9999` is implicit via the `\d{1,4}` capture bound.
-        left > 0 && left < right
-    })
+    let bytes = text.as_bytes();
+    for m in RE_BATCH_LEFT_DIGITS.find_iter(text) {
+        // Word-boundary check at the left digit's start — mirrors the
+        // `\b` RE_BATCH uses on the left side. A digit embedded in a
+        // word (`bd1080p`) is not a range candidate.
+        if m.start() > 0 {
+            let prev = bytes[m.start() - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                continue;
+            }
+        }
+        let Ok(left) = m.as_str().parse::<u32>() else {
+            continue;
+        };
+        if left == 0 {
+            continue;
+        }
+        let tail = &text[m.end()..];
+        let Some(cap) = RE_BATCH_RIGHT_AFTER.captures(tail) else {
+            continue;
+        };
+        let right = match cap.get(1).and_then(|s| s.as_str().parse::<u32>().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+        if left < right {
+            return true;
+        }
+    }
+    false
 }
 
 /// Season-marker-immediately-followed-by-bracket pattern. Catches the
@@ -489,5 +530,17 @@ mod detect_batch_tests {
         // One-Piece-style long-range batches still hit `left < right`
         // and pass.
         assert!(detect_batch("[Group] One Piece - 01-100 (1080p)"));
+    }
+
+    #[test]
+    fn title_number_followed_by_real_range_still_batch() {
+        // Pins the overlapping-range scan in `has_valid_batch_range`:
+        // a title number (`100`) followed by a real episode range
+        // (`01-12`) must NOT cause the real range to be missed. With
+        // the earlier `captures_iter` approach, `100 - 01` was
+        // consumed first (failed `left<right`), leaving `01-12`
+        // unreachable and the release mis-detected as a single.
+        assert!(detect_batch("[Group] Mob Psycho 100 - 01-12 [BD]"));
+        assert!(detect_batch("[Group] Kamen Rider 555 - 01-50 [BD]"));
     }
 }

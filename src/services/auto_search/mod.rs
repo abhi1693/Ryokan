@@ -933,11 +933,6 @@ async fn run_queries(
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
-    // Keep a slightly wider buffer than the semaphore so a freed permit
-    // finds an already-polling future ready to pick it up — pure
-    // pipelining win with no effect on peak concurrency.
-    const NYAA_BUFFER: usize = nyaa::NYAA_MAX_CONCURRENCY * 4;
-
     let opts_list: Vec<SearchOptions> = ctx
         .categories
         .iter()
@@ -956,7 +951,7 @@ async fn run_queries(
 
     let responses: Vec<_> = stream::iter(opts_list)
         .map(|opts| async move { nyaa::search(&opts, 1).await })
-        .buffer_unordered(NYAA_BUFFER)
+        .buffer_unordered(nyaa::NYAA_BUFFER)
         .collect()
         .await;
 
@@ -1027,10 +1022,6 @@ async fn run_queries_interactive(
     seen: &mut HashSet<String>,
     candidates: &mut Vec<SearchResult>,
 ) {
-    // Same bounded-concurrency shape as `run_queries`. See the docstring
-    // there for the buffer-vs-semaphore rationale.
-    const NYAA_BUFFER: usize = nyaa::NYAA_MAX_CONCURRENCY * 4;
-
     let opts_list: Vec<SearchOptions> = ctx
         .categories
         .iter()
@@ -1049,7 +1040,7 @@ async fn run_queries_interactive(
 
     let responses: Vec<_> = stream::iter(opts_list)
         .map(|opts| async move { nyaa::search(&opts, 1).await })
-        .buffer_unordered(NYAA_BUFFER)
+        .buffer_unordered(nyaa::NYAA_BUFFER)
         .collect()
         .await;
 
@@ -1150,7 +1141,13 @@ fn build_group_queries(
     target: &SearchTarget,
     preferred_groups: &[String],
 ) -> Vec<String> {
-    let (_aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
+    // Skip `collect_aliases_with_variants` here — that helper also
+    // builds the combined own+variant list (for `matches_target`'s
+    // alias pool), which `build_group_queries` never consumes. Fetch
+    // the two pieces we actually need directly and leave the combined
+    // allocation to the call sites that use it.
+    let canonical_aliases = collect_aliases(detail);
+    let variant_aliases = sequel_variant_aliases(&canonical_aliases);
     let mut queries = Vec::new();
 
     for group in preferred_groups {
