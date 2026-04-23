@@ -661,7 +661,38 @@ async fn import_torrent(
                     .unwrap_or_default();
 
             if old_grabs.is_empty() {
-                // No older import record — likely a re-run of the same grab. Skip.
+                // On-disk file exists with the same SxxExx tag but no
+                // prior grabbed_torrents row in state='imported' covers
+                // this episode. Three common shapes here:
+                //   1. User re-ran the same grab (file was just put
+                //      there by an earlier tick of this same grab).
+                //   2. The original grab's row sits in state='pending'
+                //      because it never cleared import (torrent stuck,
+                //      ffprobe timeout, crash, etc.) — find_imported
+                //      skips it and we can't tell an upgrade apart
+                //      from the re-run case.
+                //   3. The original import came from outside Ryokan
+                //      (manual drop into the library) so no row
+                //      existed to find.
+                // In every case we skip — writing do_file_op would
+                // overwrite the existing file silently. But log so the
+                // user can tell it's the why-not-importing path
+                // instead of a totally silent drop.
+                logger::info(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Skipping '{}' — S{:02}E{:02} already on disk but no imported grab to replace",
+                        filename_only, season, ep_num
+                    ),
+                    &format!(
+                        "series_id={}, existing_files={}, grab_id={}",
+                        target_series_id,
+                        existing_for_ep.len(),
+                        grab.id
+                    ),
+                )
+                .await;
                 continue;
             }
 
