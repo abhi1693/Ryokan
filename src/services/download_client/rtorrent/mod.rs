@@ -590,6 +590,14 @@ impl DownloadClient for RtorrentClient {
         let files = self.file_list(info_hash).await?;
         Ok(files
             .into_iter()
+            // During metadata fetch rtorrent exposes a single
+            // `<UPPERCASE-HASH>.meta` placeholder (size 1) before the
+            // real file list arrives. The `DownloadClient` trait
+            // contract says an empty `get_files` = metadata not ready,
+            // so filter the placeholder out or the preview endpoint
+            // flips to `status: ready` with one fake file and the
+            // picker modal renders a checkbox next to a .meta stub.
+            .filter(|f| !f.path.ends_with(".meta"))
             .map(|f| {
                 let progress = if f.size_chunks > 0 {
                     (f.completed_chunks as f64 / f.size_chunks as f64).clamp(0.0, 1.0)

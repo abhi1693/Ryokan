@@ -51,7 +51,8 @@ use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
 use services::{
-    custom_formats::CompiledCfCache, download_client::DownloadClient, jellyfin::JellyfinClient,
+    custom_formats::CompiledCfCache, download_client::DownloadClient,
+    interactive_search_cache::InteractiveSearchCache, jellyfin::JellyfinClient,
     progress::ProgressRegistry,
 };
 
@@ -85,6 +86,12 @@ pub struct AppState {
     /// middleware still hits the DB on the setup-pending path so a fresh
     /// `/setup` submission is picked up on the very next request.
     pub users_exist: Arc<std::sync::atomic::AtomicBool>,
+    /// 5-minute TTL cache for interactive-search results so rapid
+    /// reloads of the modal during UI iteration reuse the previous
+    /// Nyaa hit. Scoped to interactive-search only; auto-search,
+    /// RSS, and manual grabs continue to hit Nyaa directly. See
+    /// [`services::interactive_search_cache`] for key shape + TTL.
+    pub interactive_search_cache: InteractiveSearchCache,
 }
 
 impl FromRef<AppState> for SqlitePool {
