@@ -223,6 +223,11 @@ function grabRelease(url, btn) {
             seeders: Number(row.dataset.seeders) || 0,
             group: row.dataset.group || '',
             infoHash: row.dataset.infoHash || '',
+            // Carry the search-hit's batch classification through to
+            // the preview POST so the backend's grab-row write uses
+            // the listing's flag instead of a file-count proxy (which
+            // mis-flags .mkv+.ass+.srt single-episode releases).
+            isBatch: isBatch,
         });
         return;
     }

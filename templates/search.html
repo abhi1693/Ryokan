@@ -143,7 +143,10 @@ window.searchState = {
     hasMore: {% if searched %}{{ has_next }}{% else %}false{% endif %},
     totalResults: {% if searched %}{{ results.len() }}{% else %}0{% endif %},
     searched: {{ searched }},
-    grabPreviewMode: "{{ grab_preview_mode }}",
+    // Enum of two values — emit as literal strings so a future unvalidated
+    // config value can't land inside a JS string context via template
+    // interpolation (Askama auto-escapes HTML entities, not JS sequences).
+    grabPreviewMode: {% if grab_preview_mode == "never" %}"never"{% else %}"batches_only"{% endif %},
 };
 </script>
 <script src="/static/js/grab_picker.js" defer></script>

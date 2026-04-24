@@ -532,6 +532,10 @@
                 size: ctx.size || '',
                 seeders: ctx.seeders != null ? Number(ctx.seeders) : null,
                 group: ctx.group || '',
+                // Forward the search-hit's batch flag so the backend's
+                // grab-row write picks it up verbatim instead of
+                // inferring from file count.
+                is_batch: !!ctx.isBatch,
             },
         };
         if (ctx.seriesId) body.series_id = Number(ctx.seriesId);

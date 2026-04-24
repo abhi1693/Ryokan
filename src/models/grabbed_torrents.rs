@@ -20,27 +20,30 @@ pub struct GrabbedTorrent {
 
 /// Record a torrent grab for post-processing.
 ///
-/// Three outcomes, all returning `Ok(Some(grab_id))` so callers can
-/// attach `grabbed_torrent_series` route rows without re-querying:
+/// Outcomes:
 ///
-///  1. **Fresh insert.** No prior active row for this hash — a new
-///     grab row is inserted at state `pending`.
-///  2. **Reactivation.** A prior row with the same non-empty hash
-///     exists in state `pending` or `imported`. That row is flipped
-///     back to `pending`, `imported_at` and `qbit_content_path` are
-///     cleared, and `series_id` / `episode_numbers` / `torrent_name`
+///  1. **Fresh insert** → `Ok(Some(new_id))`. No prior active row for
+///     this hash — a new grab row is inserted at state `pending`.
+///  2. **Reactivation** → `Ok(Some(existing_id))`. A prior row with the
+///     same non-empty hash exists in state `imported`. That row is
+///     flipped back to `pending`, `imported_at` and `qbit_content_path`
+///     are cleared, and `series_id` / `episode_numbers` / `torrent_name`
 ///     / `is_batch` are refreshed to the new request. Post-processing
 ///     will re-import the torrent as if it were fresh. This handles
 ///     the "I deleted the library file, re-grabbed the same release,
 ///     nothing happened" drift case — without it, the `INSERT OR
 ///     IGNORE` silently swallowed the second grab and the episode tag
 ///     would get stuck at `grabbed` forever.
-///  3. **Empty-hash pass-through.** Hash is empty (legacy grab
-///     paths). Partial index excludes empty-hash rows, so a fresh
-///     insert always succeeds and no dedup/reactivation happens.
-///
-/// `Ok(None)` is no longer returned — any successful path now carries
-/// the affected row's id, and a real DB error bubbles up as `Err`.
+///  3. **Pending-row dedup** → `Ok(None)`. A prior row exists in state
+///     `pending`. Another flow (typically post-processing mid-import)
+///     is actively working on this hash and we must not clobber its
+///     columns. Callers treat `None` as "in-flight, leave it alone"
+///     and skip any follow-up route/tag writes.
+///  4. **Empty-hash pass-through** → `Ok(Some(new_id))`. Hash is empty
+///     (legacy grab paths). Partial index excludes empty-hash rows, so
+///     a fresh insert always succeeds. A DB error after the empty-hash
+///     insert (e.g. FK violation on `series_id`) surfaces as
+///     `Ok(None)` so the anomaly is visible rather than papered over.
 ///
 /// `is_batch` is the caller's view (from the Nyaa listing or search
 /// hit) of whether the release is a batch/season pack. Persisted so

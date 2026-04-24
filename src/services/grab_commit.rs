@@ -236,8 +236,22 @@ async fn run_auto_expand(
         release_group: String::new(),
         size_bytes: 0,
     };
-    let _ = auto_expand::expand_from_files(
+    // `expand_from_files` returns `newly_added_siblings: usize` and
+    // handles its own per-sibling error logging; we only surface the
+    // count here so a zero-sibling detection run is visible in the
+    // logs alongside a match-heavy one. Matches the style of the
+    // two DB fetches above which log their outcomes explicitly.
+    let newly_added = auto_expand::expand_from_files(
         &db, &filenames, &detail, series_id, &ep_nums, grab_id, &title, &ctx,
     )
     .await;
+    if newly_added > 0 {
+        logger::info(
+            &db,
+            LogCategory::Grab,
+            &format!("grab auto-expand added {newly_added} sibling series from '{title}'"),
+            &info_hash,
+        )
+        .await;
+    }
 }

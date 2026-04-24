@@ -165,7 +165,11 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
     // the sweep still deletes the pending row so it doesn't loop.
     let release_title = crate::handlers::grab::extract_release_title(&row.release_metadata_json)
         .unwrap_or_else(|| row.info_hash.clone());
-    let is_batch = file_count > 1;
+    // Search-hit batch flag is the authoritative source; the
+    // file-count fallback only fires for pre-fix modal payloads
+    // (see `extract_release_is_batch`).
+    let is_batch = crate::handlers::grab::extract_release_is_batch(&row.release_metadata_json)
+        .unwrap_or(file_count > 1);
     let all_filenames: Vec<String> = files.into_iter().map(|f| f.name).collect();
     crate::services::grab_commit::commit_grab_and_expand(
         state,

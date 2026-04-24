@@ -174,6 +174,25 @@ pub(crate) fn extract_release_title(release_metadata_json: &str) -> Option<Strin
     }
 }
 
+/// Pull the `is_batch` flag out of the modal's `release_metadata_json`
+/// blob. This is the authoritative source — it reflects the search-hit
+/// listing's batch classification, not the file count — so the post-
+/// download classifier's Layer 4 temporal inference (finished ≥ 1 year
+/// ago + batch ⇒ BluRay) gets the same signal as the non-interactive
+/// auto-search path. Using `files.len() > 1` as a proxy mis-flags a
+/// single-episode release delivered as `.mkv` + `.ass` + `.srt` (common
+/// with SubsPlease-style releases) as a batch, which would wrongly
+/// BluRay-infer on a finished-series WEB release during reclassification.
+/// Returns `None` when the modal posted a blob without the field; the
+/// caller's file-count fallback is fine for older modal payloads.
+pub(crate) fn extract_release_is_batch(release_metadata_json: &str) -> Option<bool> {
+    if release_metadata_json.trim().is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(release_metadata_json).ok()?;
+    value.get("is_batch").and_then(|v| v.as_bool())
+}
+
 fn generate_preview_id() -> String {
     let bytes: [u8; 16] = rand::random();
     hex::encode(bytes)
@@ -606,7 +625,11 @@ pub async fn grab_confirm(
     // no library attribution and no retry path.
     let release_title =
         extract_release_title(&row.release_metadata_json).unwrap_or_else(|| row.info_hash.clone());
-    let is_batch = total > 1;
+    // Prefer the search-hit's batch flag; fall back to file count for
+    // payloads from older modals that didn't forward it. The fallback
+    // is imperfect (`.mkv + subs` produces false positives) but only
+    // fires when a modal predating the fix reaches an updated server.
+    let is_batch = extract_release_is_batch(&row.release_metadata_json).unwrap_or(total > 1);
     let selected_filenames: Vec<String> = wanted
         .iter()
         .filter_map(|&i| files.get(i).map(|f| f.name.clone()))
@@ -1032,6 +1055,44 @@ mod tests {
         // uses the info_hash stand-in rather than writing a blank
         // `torrent_name`.
         assert_eq!(extract_release_title("{\"title\":\"   \"}"), None);
+    }
+
+    #[tokio::test]
+    async fn extract_release_is_batch_prefers_metadata_over_file_count() {
+        // Regression guard on the PR 90 review fix (§1): callers must
+        // not proxy `is_batch` off `files.len() > 1`, because a single-
+        // episode release shipped as `.mkv + .ass + .srt` has three
+        // files but is NOT a batch. Layer 4 reclassification would
+        // then wrongly infer BluRay on a finished-series WEB release.
+        // The authoritative source is the search-hit listing's batch
+        // flag, which the modal forwards through `release_metadata.is_batch`.
+
+        // `None` when no metadata → caller falls back to file count.
+        assert_eq!(extract_release_is_batch(""), None);
+        assert_eq!(extract_release_is_batch("{\"title\":\"x\"}"), None);
+
+        // Explicit `false` → single-episode release; caller MUST NOT
+        // fall back to file-count heuristic.
+        assert_eq!(
+            extract_release_is_batch("{\"title\":\"x\",\"is_batch\":false}"),
+            Some(false)
+        );
+
+        // Explicit `true` → batch.
+        assert_eq!(
+            extract_release_is_batch("{\"title\":\"Pack\",\"is_batch\":true}"),
+            Some(true)
+        );
+
+        // Garbage JSON / wrong types fall through to None so the caller
+        // falls back to the file-count proxy. Better to get a possibly-
+        // wrong default than to panic on a bad payload.
+        assert_eq!(extract_release_is_batch("not json"), None);
+        assert_eq!(
+            extract_release_is_batch("{\"is_batch\":\"yes\"}"),
+            None,
+            "string shouldn't coerce to bool"
+        );
     }
 
     #[tokio::test]
