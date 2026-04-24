@@ -472,86 +472,54 @@
 </div>
 
 {% else if tab == "credits" %}
-<!-- Credits Tab — attribution for the data sources, community curation,
-     mapping datasets, libraries, and typography Ryokan relies on. Read-
-     only; no edit affordances. -->
+<!-- Credits Tab — colophon-style attribution. Prose sections for the
+     single-entry items; a lede + roster hybrid for the metadata
+     section where cramming 4 providers into one paragraph read as
+     dense link-noise. -->
 <div class="credits-content">
-    <p class="credits-intro">
-        Ryokan is an anime PVR that leans on a lot of upstream work —
-        metadata APIs, community-curated release picks, open-source
-        libraries, and a typeface. This page acknowledges them.
-    </p>
-
     <section class="credits-section">
-        <h3>Metadata</h3>
-        <ul class="credits-list">
-            <li>
-                <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">AniList</a>
-                <span class="credits-note">Primary metadata source — series identity, relations, titles, episode counts, artwork.</span>
-            </li>
-            <li>
-                <a href="https://myanimelist.net" target="_blank" rel="noopener noreferrer">MyAnimeList</a>
-                <span class="credits-note">Fallback metadata source via the Jikan API.</span>
-            </li>
-            <li>
-                <a href="https://jikan.moe" target="_blank" rel="noopener noreferrer">Jikan</a>
-                <span class="credits-note">Community-maintained unofficial MAL API. Caches episode and series data on Ryokan's behalf when AniList is unreachable.</span>
-            </li>
-            <li>
-                <a href="https://kitsu.io" target="_blank" rel="noopener noreferrer">Kitsu</a>
-                <span class="credits-note">Second fallback metadata source when both AniList and MAL are unavailable.</span>
-            </li>
-        </ul>
+        <h3>Where the titles come from</h3>
+        <p>
+            Series identity, episode counts, airing status, titles in three languages, and the relationship graphs that let Ryokan follow a franchise through its sequels all come from <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">AniList</a>.
+        </p>
+        <p>
+            AniList gets rate-limited or goes down occasionally, and its per-episode titles (sourced from Crunchyroll) are brittle: on multi-season series they usually only surface for season one. Ryokan fills those gaps by calling <a href="https://myanimelist.net" target="_blank" rel="noopener noreferrer">MyAnimeList</a> through <a href="https://jikan.moe" target="_blank" rel="noopener noreferrer">Jikan</a>'s unofficial wrapper. <a href="https://kitsu.app" target="_blank" rel="noopener noreferrer">Kitsu</a> is only consulted when MAL also doesn't return titles for a given series.
+        </p>
     </section>
 
     <section class="credits-section">
-        <h3>Community curation</h3>
-        <ul class="credits-list">
-            <li>
-                <a href="https://releases.moe" target="_blank" rel="noopener noreferrer">SeaDex</a>
-                <span class="credits-note">Curated list of community-preferred anime release groups, keyed by AniList ID. Powers the optional SeaDex score boost and the <code>Ryokan.SeaDexBestSpecification</code> Custom Format.</span>
-            </li>
-        </ul>
+        <h3>Where the releases come from</h3>
+        <p>
+            Every search result comes from <a href="https://nyaa.si" target="_blank" rel="noopener noreferrer">Nyaa</a>, at least until torznab support ships. Public indexer, no gatekeeping, curated by community tags and the honor system.
+        </p>
     </section>
 
     <section class="credits-section">
-        <h3>Indexers</h3>
-        <ul class="credits-list">
-            <li>
-                <a href="https://nyaa.si" target="_blank" rel="noopener noreferrer">Nyaa</a>
-                <span class="credits-note">Primary torrent indexer for anime releases.</span>
-            </li>
-        </ul>
+        <h3>The shortlist</h3>
+        <p>
+            <a href="https://releases.moe" target="_blank" rel="noopener noreferrer">SeaDex</a> is a community-maintained list of best-available anime releases, keyed by AniList ID. Ryokan reads it either as a score boost on matching releases, or as an opinionated "pick this group" rule via the <code>Ryokan.SeaDexBestSpecification</code> Custom Format. Without SeaDex there's no shortcut to good release groups, just scoring heuristics and whatever groups the user already trusts.
+        </p>
     </section>
 
     <section class="credits-section">
-        <h3>Mappings</h3>
-        <ul class="credits-list">
-            <li>
-                <a href="https://github.com/anibridge/anibridge-mappings" target="_blank" rel="noopener noreferrer">anibridge-mappings</a>
-                <span class="credits-note">Community-maintained TMDB ↔ TVDB ↔ AniList ID mapping dataset. Makes the Sonarr/Radarr shim work — Seerr requests arrive keyed by TMDB ID and need resolving to AniList. MIT-licensed; <a href="/static/licenses/anibridge-mappings-LICENSE.txt" target="_blank" rel="noopener noreferrer">license text</a>.</span>
-            </li>
-        </ul>
+        <h3>The mapping problem</h3>
+        <p>
+            Seerr and other *arr-shaped tools hand Ryokan requests keyed by TMDB. AniList doesn't speak TMDB. The bridge is <a href="https://github.com/anibridge/anibridge-mappings" target="_blank" rel="noopener noreferrer">anibridge-mappings</a>, a community-maintained dataset of TMDB ↔ TVDB ↔ AniList IDs that Ryokan caches locally and refreshes daily. MIT-licensed (<a href="/static/licenses/anibridge-mappings-LICENSE.txt" target="_blank" rel="noopener noreferrer">license text</a>).
+        </p>
     </section>
 
     <section class="credits-section">
-        <h3>Quality profiles</h3>
-        <ul class="credits-list">
-            <li>
-                <a href="https://trash-guides.info" target="_blank" rel="noopener noreferrer">TRaSH Guides</a>
-                <span class="credits-note">The default Custom Formats shipped with Ryokan are vendored from the TRaSH Guides anime profile. Users can install or reset from Settings → Custom Formats. MIT-licensed; <a href="/static/licenses/trash-guides-LICENSE.txt" target="_blank" rel="noopener noreferrer">license text</a>.</span>
-            </li>
-        </ul>
+        <h3>Custom formats</h3>
+        <p>
+            On a fresh install, Ryokan ships 28 Custom Formats already baked in. They come from <a href="https://trash-guides.info" target="_blank" rel="noopener noreferrer">TRaSH Guides</a>, the de-facto quality-profile reference for the whole *arr ecosystem. You can edit them, delete them, or reset to defaults from Settings → Custom Formats. MIT-licensed (<a href="/static/licenses/trash-guides-LICENSE.txt" target="_blank" rel="noopener noreferrer">license text</a>).
+        </p>
     </section>
 
     <section class="credits-section">
-        <h3>Typography</h3>
-        <ul class="credits-list">
-            <li>
-                <a href="https://fonts.google.com/specimen/Murecho" target="_blank" rel="noopener noreferrer">Murecho</a>
-                <span class="credits-note">Display font on the brand mark, page headers, and series detail titles. Self-hosted under <code>static/fonts/</code>, licensed <a href="/static/fonts/Murecho-OFL.txt" target="_blank" rel="noopener noreferrer">SIL Open Font License 1.1</a>.</span>
-            </li>
-        </ul>
+        <h3>Fonts used</h3>
+        <p>
+            The brand mark, page headers, and series titles are set in <a href="https://fonts.google.com/specimen/Murecho" target="_blank" rel="noopener noreferrer">Murecho</a>, a variable mincho-adjacent typeface by Positype. Self-hosted under <code>static/fonts/</code>, licensed <a href="/static/fonts/Murecho-OFL.txt" target="_blank" rel="noopener noreferrer">SIL Open Font License 1.1</a>.
+        </p>
     </section>
 </div>
 {% endif %}

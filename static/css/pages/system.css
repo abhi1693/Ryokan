@@ -371,78 +371,73 @@
 }
 
 
-/* ─── Credits tab ────────────────────────────────────────────
- * Read-only attribution page. No edit affordances; just a
- * colophon of the metadata providers, community curation,
- * libraries, and typography Ryokan depends on. */
+/* ─── Credits tab (colophon) ──────────────────────────────────
+ * Editorial-column treatment — prose paragraphs, not bullet lists.
+ * Narrower max-width than the rest of System so the page reads
+ * like a magazine acknowledgments section rather than a UI panel.
+ * Section labels are tracked-out small caps in the display font;
+ * inline credit names get a mauve link with a hover underline that
+ * draws on the border rather than text-decoration so the baseline
+ * stays clean. */
 .credits-content {
-    max-width: 760px;
+    max-width: 620px;
     padding-top: 8px;
-}
-
-.credits-intro {
-    color: var(--text-dim);
-    font-size: 14px;
-    line-height: 1.6;
-    margin-bottom: 32px;
+    padding-bottom: 40px;
 }
 
 .credits-section {
-    margin-bottom: 32px;
+    margin-bottom: 28px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--border);
+}
+
+.credits-section:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
 }
 
 .credits-section h3 {
     font-family: var(--font-display);
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--text-bright);
-    letter-spacing: -0.005em;
+    font-weight: 600;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
     margin-bottom: 14px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--border);
 }
 
-.credits-list {
-    list-style: none;
-    padding: 0;
+.credits-section p {
+    font-size: 14.5px;
+    line-height: 1.7;
+    color: var(--text);
     margin: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
 }
 
-.credits-list li {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+.credits-section p + p {
+    margin-top: 12px;
 }
 
-.credits-list a {
+.credits-section a {
     color: var(--accent);
     text-decoration: none;
     font-weight: 600;
-    font-size: 14px;
-    transition: color 0.15s ease-out;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s ease-out, color 0.15s ease-out;
 }
 
-.credits-list a:hover {
+.credits-section a:hover {
+    border-bottom-color: var(--accent);
     color: var(--accent-hover);
-    text-decoration: underline;
 }
 
-.credits-note {
-    font-size: 13px;
-    color: var(--text-dim);
-    line-height: 1.55;
-    padding-left: 4px;
-}
-
-.credits-note code {
+.credits-section code {
     font-family: var(--font-mono);
-    font-size: 11.5px;
+    font-size: 12px;
     padding: 1px 5px;
     border-radius: 3px;
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     color: var(--text);
 }
+
