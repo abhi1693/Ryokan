@@ -4,7 +4,14 @@
    direct grab path. Footer + toolbar start hidden — they flip to
    flex once the file list is rendered. Included verbatim by any
    page whose Grab buttons can route through the picker
-   (search.html, series.html). #}
+   (search.html, series.html).
+
+   Include at most once per page — every interactive element below
+   uses a hardcoded global ID (`grab-picker-modal`, `grab-picker-title`,
+   `grab-picker-confirm`, etc.) that grab_picker.js binds to via
+   `document.getElementById`. A second include on the same page would
+   produce duplicate IDs and the JS would silently target the first
+   one only. #}
 <div class="modal-backdrop" id="grab-picker-modal" style="display:none">
     <div class="modal grab-picker-modal" role="dialog" aria-modal="true" aria-labelledby="grab-picker-title">
         <div class="modal-header">

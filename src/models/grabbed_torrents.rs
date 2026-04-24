@@ -26,7 +26,7 @@ pub struct GrabbedTorrent {
 ///     this hash — a new grab row is inserted at state `pending`.
 ///  2. **Reactivation** → `Ok(Some(existing_id))`. A prior row with the
 ///     same non-empty hash exists in state `imported`. That row is
-///     flipped back to `pending`, `imported_at` and `qbit_content_path`
+///     flipped back to `pending`, `imported_at` and `client_content_path`
 ///     are cleared, and `series_id` / `episode_numbers` / `torrent_name`
 ///     / `is_batch` are refreshed to the new request. Post-processing
 ///     will re-import the torrent as if it were fresh. This handles
@@ -104,11 +104,11 @@ pub async fn record_grab(
     // 'imported')`:
     //   A `pending` row means another concurrent flow — most likely
     //   post-processing mid-import — is actively working on the
-    //   torrent. `stamp_qbit_content_path` runs BEFORE `import_torrent`,
+    //   torrent. `stamp_client_content_path` runs BEFORE `import_torrent`,
     //   so at that moment the row is `pending` with a non-empty
-    //   `qbit_content_path`. If we null-clobbered those columns here,
+    //   `client_content_path`. If we null-clobbered those columns here,
     //   the in-flight import would finish on a row that no longer
-    //   knows where qBit left the file. Leaving pending rows alone
+    //   knows where the download client left the file. Leaving pending rows alone
     //   (and returning Ok(None) when the insert is deduped against a
     //   pending row) matches the pre-reactivation "silent dedup"
     //   semantics for the narrow "already in progress" case and only
@@ -1150,7 +1150,7 @@ mod tests {
         // Second grab with same hash against a PENDING row dedups
         // silently — reactivation only runs on 'imported' rows to
         // avoid null-clobbering an in-flight import's
-        // qbit_content_path / imported_at. Returns Ok(None) and the
+        // client_content_path / imported_at. Returns Ok(None) and the
         // existing row's fields are left alone.
         let id2 = record_grab(&db, "racehash", "release b", series_id, &[2], false)
             .await

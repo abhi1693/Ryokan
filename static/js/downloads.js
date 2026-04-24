@@ -25,6 +25,12 @@ function formatEta(seconds) {
 // Keyed off the kebab-case `state_kind` slug from DownloadItemState,
 // so the same label/badge vocabulary renders consistently across
 // qBit, Deluge, Transmission, and rTorrent.
+//
+// A new Rust-side enum variant will serialize to a slug this map
+// doesn't know about. The server-side tests lock the slug contract
+// in place, but nothing forces the JS to stay in sync — so the
+// fallback logs a devtools warning instead of silently shipping
+// a raw kebab slug in the badge.
 function stateLabel(kind) {
     const map = {
         'downloading': 'Downloading',
@@ -39,7 +45,11 @@ function stateLabel(kind) {
         'paused-complete': 'Paused',
         'errored': 'Error',
     };
-    return map[kind] || kind;
+    if (map[kind] === undefined) {
+        console.warn('[downloads] unmapped state_kind slug:', kind);
+        return kind;
+    }
+    return map[kind];
 }
 
 function stateBadgeClass(kind) {
