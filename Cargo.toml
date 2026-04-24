@@ -88,6 +88,20 @@ bcrypt = "0.19"
 rand = "0.10"
 hex = "0.4"
 subtle = "2"
+# AEAD encryption for OAuth tokens stored in `external_accounts`
+# (issue #62 PR A). Pure-Rust, no system deps, ~50 KB compiled.
+# ChaCha20-Poly1305 picked over AES-GCM because it has no hardware-
+# acceleration dependency — runs identically on a Raspberry Pi and an
+# x86_64 server, and the performance difference doesn't matter for
+# encrypting a handful of tokens per sync tick.
+chacha20poly1305 = "0.10"
+# Base64 encoding. Originally added as a dev-only dep for the
+# download-client smokes; promoted to a prod dep in #62 PR A because
+# the `RYOKAN_ENCRYPTION_KEY` env var is base64-encoded and
+# `services::crypto` decodes it at startup. Kept a single declaration
+# here rather than duplicating into `[dev-dependencies]` — prod code
+# and the smokes share one version.
+base64 = "0.22"
 
 # Logging
 tracing = "0.1"
@@ -127,15 +141,6 @@ tempfile = "3"
 # returns 0 on success rather than echoing back the hash. Test-only;
 # BitTorrent's v1 spec mandates SHA-1 here so we can't swap to sha2.
 sha1_smol = "1"
-# Base64 encoding. Used by:
-# * The rtorrent XML-RPC encoder's `XmlValue::Base64` variant, which is
-#   itself `#[cfg(test)]`-gated and only constructed by
-#   `live_smoke_narrowed`'s `load.raw_verbose` upload path.
-# * The `live_smoke_narrowed` test for Deluge, where
-#   `core.add_torrent_file` takes a base64-encoded payload.
-# Test-only for now; promote to a direct prod dep if/when a UI feature
-# loads `.torrent` bytes from disk.
-base64 = "0.22"
 
 # ── Test-coverage-expansion (issue-# to be filed) infrastructure ──
 #

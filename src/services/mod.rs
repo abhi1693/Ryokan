@@ -1,4 +1,5 @@
 pub mod anilist;
+pub mod crypto;
 pub mod download_client;
 pub mod jikan;
 pub mod kitsu;
