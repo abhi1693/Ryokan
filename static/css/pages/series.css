@@ -783,6 +783,12 @@
     transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
+/* Force svg to block so the button's flex center aligns on the
+ * svg's own box rather than its inline-text baseline. Without this
+ * the svg gets vertically shifted by the parent span's font-metric
+ * baseline, which reads as subtle off-center drift. */
+.icon-btn svg { display: block; }
+
 .icon-btn:hover:not(:disabled) {
     border-color: var(--accent);
     transform: translateY(-1px);
