@@ -400,14 +400,22 @@ impl DownloadClient for RtorrentClient {
             delay = (delay * 2).min(Duration::from_millis(500));
         }
 
-        // Poll for metadata — signal is `d.base_path` no longer ending
-        // in `.meta`. See `add_torrent_with_file_filter` for the same
-        // readiness check; reusing the budget keeps latency consistent.
+        // Poll for metadata. `file_list` is the raw `f.multicall`
+        // helper and returns the `<HASH>.meta` placeholder (size 1)
+        // during metadata fetch — `files.is_empty()` is NOT a
+        // sufficient "not ready" signal because the placeholder
+        // satisfies it. The `.meta` filter on the trait-level
+        // `get_files` is a separate layer and doesn't fire here.
+        // Require at least one non-`.meta` entry; rtorrent's
+        // metadata-pending and metadata-arrived states are mutually
+        // exclusive, so one real file means the whole list is real.
         let metadata_start = Instant::now();
         let mut metadata_delay = Duration::from_millis(500);
         let file_count = loop {
             match self.file_list(info_hash).await {
-                Ok(files) if !files.is_empty() => break files.len(),
+                Ok(files) if files.iter().any(|f| !f.path.ends_with(".meta")) => {
+                    break files.len();
+                }
                 Ok(_) => {}
                 Err(e) => {
                     tracing::debug!(

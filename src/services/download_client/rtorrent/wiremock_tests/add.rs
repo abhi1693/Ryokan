@@ -140,8 +140,32 @@ async fn add_torrent_paused_sets_all_files_skip_flushes_and_pauses() {
 
     install_xmlrpc(&server, "load.start_verbose", int_response(0)).await;
 
-    // f.multicall (file_list) returns two files once metadata is
-    // ready. Paths + sizes + priorities + chunk counts.
+    // Metadata-pending state: first f.multicall returns the
+    // `<HASH>.meta` placeholder rtorrent exposes during metadata
+    // fetch. The wait loop MUST NOT exit on this — if it does, the
+    // subsequent f.priority.set fires on the phantom index only,
+    // and real files arrive after at default priority (wanted) and
+    // flow. Guard the regression by forcing the loop through the
+    // placeholder state before real files arrive on the next call.
+    let meta_row = format!(
+        "<array><data>\
+            <value><string>{HASH_UC}.meta</string></value>\
+            <value><i8>1</i8></value>\
+            <value><i8>1</i8></value>\
+            <value><i8>0</i8></value>\
+            <value><i8>1</i8></value>\
+        </data></array>"
+    );
+    Mock::given(method("POST"))
+        .and(path("/RPC2"))
+        .and(body_string_contains("<methodName>f.multicall</methodName>"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(array_response(&[meta_row])))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    // Metadata-arrived state: two real files. The wait loop should
+    // exit here and set priority on both.
     let file_row = "<array><data>\
             <value><string>release/file1.mkv</string></value>\
             <value><i8>1000000</i8></value>\

@@ -46,12 +46,15 @@ pub fn new() -> InteractiveSearchCache {
 /// old queries against since-deleted series.
 pub fn get(cache: &InteractiveSearchCache, key: Key) -> Option<Arc<Vec<SearchResult>>> {
     let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((inserted_at, results)) = guard.get(&key)
-        && inserted_at.elapsed() < INTERACTIVE_SEARCH_TTL
-    {
-        return Some(results.clone());
+    if let Some((inserted_at, results)) = guard.get(&key) {
+        if inserted_at.elapsed() < INTERACTIVE_SEARCH_TTL {
+            return Some(results.clone());
+        }
+        // Stale — evict so the map can't grow unboundedly from
+        // queries against since-deleted series. A plain miss
+        // doesn't touch the map.
+        guard.remove(&key);
     }
-    guard.remove(&key);
     None
 }
 
