@@ -18,6 +18,19 @@ struct SearchTemplate {
     query: String,
     searched: bool,
     has_next: bool,
+    /// Issue #83 — `batches_only` (default) or `never`. Threaded
+    /// through to search.js via window.searchState so the Grab button
+    /// can bypass the modal when the user's set it to `never`.
+    grab_preview_mode: String,
+}
+
+async fn load_grab_preview_mode(state: &AppState) -> String {
+    crate::models::config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.grab_preview_mode)
+        .unwrap_or_else(|| "batches_only".to_string())
 }
 
 #[derive(Deserialize)]
@@ -120,13 +133,14 @@ async fn build_opts(
     }
 }
 
-pub async fn search_page(State(_state): State<AppState>) -> Html<String> {
+pub async fn search_page(State(state): State<AppState>) -> Html<String> {
     let template = SearchTemplate {
         page: "search".to_string(),
         results: Vec::new(),
         query: String::new(),
         searched: false,
         has_next: false,
+        grab_preview_mode: load_grab_preview_mode(&state).await,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -184,12 +198,14 @@ pub async fn search_submit(
         &std::collections::HashSet::new(),
     );
 
+    let grab_preview_mode = load_grab_preview_mode(&state).await;
     let template = SearchTemplate {
         page: "search".to_string(),
         results: response.results,
         query: form.query,
         searched: true,
         has_next: response.has_next,
+        grab_preview_mode,
     };
     Html(template.render().unwrap_or_default())
 }

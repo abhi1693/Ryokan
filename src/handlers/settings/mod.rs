@@ -220,6 +220,12 @@ pub struct SettingsForm {
     seadex_enabled: Option<String>,
     default_custom_query_tokens: Option<String>,
     default_restrict_to_uploader: Option<String>,
+    /// Issue #83 — interactive file-picker trigger policy. `batches_only`
+    /// (default) opens the modal for multi-file torrents; `never`
+    /// preserves 1.3.0 one-click behavior. Omitted from forms before
+    /// PR C → falls back to the existing config value (or default).
+    #[serde(default)]
+    grab_preview_mode: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -619,6 +625,20 @@ pub async fn settings_submit(
                 .as_ref()
                 .map(|c| c.default_restrict_to_uploader.clone())
                 .unwrap_or_default()
+        },
+        // #83 — Interactive file-picker lives on the Integrations tab
+        // alongside the other download-client knobs. Preserve on
+        // other-tab saves. Unknown values coerce to `batches_only`.
+        grab_preview_mode: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
+            match form.grab_preview_mode.as_deref().unwrap_or("") {
+                "never" => "never".to_string(),
+                _ => "batches_only".to_string(),
+            }
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.grab_preview_mode.clone())
+                .unwrap_or_else(|| "batches_only".to_string())
         },
     };
 

@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::models::pending_grabs;
 use crate::services::download_client::{self, AddOutcome};
+use crate::services::grab_commit;
 
 /// POST body for `/api/grab/preview`.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -94,6 +95,12 @@ pub struct GrabPreviewStatus {
     /// retry/defaults dialog.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// True when at least one `grabbed_torrents` row for the preview's
+    /// info_hash is in `state='failed'`. Modal renders an inline
+    /// "previously blocklisted" warning + an Unblock-and-continue
+    /// button that sends `unblock: true` on confirm (plan decision #12).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocklisted: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -113,6 +120,16 @@ pub struct GrabConfirmForm {
     /// leaves every file at priority 0 and confirmation is what
     /// flips the selection back on).
     pub wanted_indices: Vec<usize>,
+    /// `true` when the user explicitly clicked "Unblock and continue"
+    /// on the inline blocklist warning in the modal. Flips every
+    /// prior `state='failed'` row for this hash to `state='replaced'`
+    /// with a back-pointer to the new grab id. Omitted / `false`
+    /// leaves the blocklist entries alone — the new grab still goes
+    /// through (the partial UNIQUE index on `(hash) WHERE state IN
+    /// ('pending', 'imported')` doesn't exclude 'failed' rows), but
+    /// the Downloads-page blocked list keeps showing the old entry.
+    #[serde(default)]
+    pub unblock: bool,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -137,6 +154,43 @@ pub struct GrabConfirmResult {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct GrabCancelForm {
     pub preview_id: String,
+}
+
+/// Pluck the user-visible release title out of the `release_metadata_json`
+/// blob the modal posted on preview. Handles both the expected
+/// `{"title": "..."}` shape and the defensive "metadata was garbage"
+/// case by returning `None` so the caller can fall back to the
+/// info-hash as a stand-in.
+pub(crate) fn extract_release_title(release_metadata_json: &str) -> Option<String> {
+    if release_metadata_json.trim().is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(release_metadata_json).ok()?;
+    let title = value.get("title")?.as_str()?.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.into())
+    }
+}
+
+/// Pull the `is_batch` flag out of the modal's `release_metadata_json`
+/// blob. This is the authoritative source — it reflects the search-hit
+/// listing's batch classification, not the file count — so the post-
+/// download classifier's Layer 4 temporal inference (finished ≥ 1 year
+/// ago + batch ⇒ BluRay) gets the same signal as the non-interactive
+/// auto-search path. Using `files.len() > 1` as a proxy mis-flags a
+/// single-episode release delivered as `.mkv` + `.ass` + `.srt` (common
+/// with SubsPlease-style releases) as a batch, which would wrongly
+/// BluRay-infer on a finished-series WEB release during reclassification.
+/// Returns `None` when the modal posted a blob without the field; the
+/// caller's file-count fallback is fine for older modal payloads.
+pub(crate) fn extract_release_is_batch(release_metadata_json: &str) -> Option<bool> {
+    if release_metadata_json.trim().is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(release_metadata_json).ok()?;
+    value.get("is_batch").and_then(|v| v.as_bool())
 }
 
 fn generate_preview_id() -> String {
@@ -395,6 +449,14 @@ pub async fn grab_preview_status(
         serde_json::from_str(&row.release_metadata_json).unwrap_or(serde_json::Value::Null)
     };
 
+    // Blocklist status is read once per poll. Cheap single-row
+    // SELECT on an indexed hash; keeps the modal's "previously
+    // blocklisted" banner accurate even if the user unblocks the
+    // release from Downloads mid-poll.
+    let blocklisted = crate::models::grabbed_torrents::is_blocklisted(&state.db, &row.info_hash)
+        .await
+        .unwrap_or(false);
+
     // Error takes precedence over fetching/ready. If the spawned
     // metadata-fetch task marked an error, surface it immediately so
     // the modal can offer retry/defaults without waiting for the TTL
@@ -406,6 +468,7 @@ pub async fn grab_preview_status(
             release_metadata,
             file_list: Vec::new(),
             error: row.error_message,
+            blocklisted,
         }));
     }
 
@@ -416,6 +479,7 @@ pub async fn grab_preview_status(
             release_metadata,
             file_list: Vec::new(),
             error: String::new(),
+            blocklisted,
         }));
     }
 
@@ -426,6 +490,7 @@ pub async fn grab_preview_status(
         release_metadata,
         file_list,
         error: String::new(),
+        blocklisted,
     }))
 }
 
@@ -548,11 +613,53 @@ pub async fn grab_confirm(
     // running — resume is idempotent.
     let resume_error = client.resume(&row.info_hash).await.err();
 
+    // Library attribution (PR C). Writes the `grabbed_torrents` row
+    // and kicks off sibling auto-expand on the user-selected subset —
+    // files the user unchecked are excluded from the sibling-detection
+    // file list so a deselected sibling (user unchecked all its
+    // episodes) doesn't get a ghost library row. Decision #7.
+    //
+    // We run this BEFORE deleting the pending row so a DB panic inside
+    // commit leaves the pending row for the sweep to retry; if we
+    // deleted first, a failure mid-commit would strand the grab with
+    // no library attribution and no retry path.
+    let release_title =
+        extract_release_title(&row.release_metadata_json).unwrap_or_else(|| row.info_hash.clone());
+    // Prefer the search-hit's batch flag; fall back to file count for
+    // payloads from older modals that didn't forward it. The fallback
+    // is imperfect (`.mkv + subs` produces false positives) but only
+    // fires when a modal predating the fix reaches an updated server.
+    let is_batch = extract_release_is_batch(&row.release_metadata_json).unwrap_or(total > 1);
+    let selected_filenames: Vec<String> = wanted
+        .iter()
+        .filter_map(|&i| files.get(i).map(|f| f.name.clone()))
+        .collect();
+    let new_grab_id = grab_commit::commit_grab_and_expand(
+        &state,
+        &row,
+        selected_filenames,
+        &release_title,
+        is_batch,
+    )
+    .await;
+
+    // Inline unblock (plan decision #12). When the user clicked
+    // "Unblock and continue" on the blocklisted-release warning,
+    // flip the old `state='failed'` rows for this hash to
+    // `state='replaced'` with a back-pointer to the fresh grab so
+    // the Downloads-page blocked list drops the stale entry. No-op
+    // when there's no new grab id (dedup hit, missing series
+    // context) — we don't want to clear the blocklist without a
+    // fresh row to point at.
+    if form.unblock
+        && let Some(new_id) = new_grab_id
+    {
+        let _ = crate::models::grabbed_torrents::unblock_by_hash(&state.db, &row.info_hash, new_id)
+            .await;
+    }
+
     // Drop the pending row — the user has committed, so the sweep
-    // should never revisit this preview_id. Grab-row write happens
-    // separately via the existing post-processing pipeline (PR C
-    // scope). For now the caller takes the confirmation as "the
-    // torrent is running with your selections applied."
+    // should never revisit this preview_id.
     pending_grabs::delete(&state.db, &form.preview_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -621,7 +728,61 @@ pub async fn grab_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::download_client::{
+        AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+    };
     use crate::test_support::{build_test_app_state, in_memory_pool};
+    use async_trait::async_trait;
+
+    /// Minimal DownloadClient stub that accepts every call. Used by
+    /// caller-level tests that need `grab_confirm` to clear
+    /// `require_download_client` + `set_file_wanted` + `resume`
+    /// without actually hitting a running qBittorrent.
+    struct NoopClient;
+
+    #[async_trait]
+    impl DownloadClient for NoopClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("noop".into())
+        }
+        async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+            Ok(AddOutcome::Added)
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _url: &str,
+            _hash: &str,
+            _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<SelectiveOutcome, String> {
+            Ok(SelectiveOutcome::FullDownload)
+        }
+        async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+            Ok(vec![])
+        }
+        async fn pause(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_file_wanted(
+            &self,
+            _hash: &str,
+            _files: &[usize],
+            _wanted: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            "QBittorrent"
+        }
+    }
 
     // Unit tests against the handler functions directly (not via a
     // live Axum router) so we can assert on concrete response types
@@ -709,6 +870,7 @@ mod tests {
             Json(GrabConfirmForm {
                 preview_id: "".to_string(),
                 wanted_indices: vec![0],
+                unblock: false,
             }),
         )
         .await;
@@ -724,6 +886,7 @@ mod tests {
             Json(GrabConfirmForm {
                 preview_id: "nope".to_string(),
                 wanted_indices: vec![],
+                unblock: false,
             }),
         )
         .await;
@@ -742,6 +905,7 @@ mod tests {
             Json(GrabConfirmForm {
                 preview_id: "pid-1".to_string(),
                 wanted_indices: vec![],
+                unblock: false,
             }),
         )
         .await;
@@ -925,5 +1089,215 @@ mod tests {
             matches!(res, Err((StatusCode::BAD_REQUEST, _))),
             "error-row dedup suppression failed; got {res:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn extract_release_title_handles_missing_and_present_shapes() {
+        // Defensive: modal posts release_metadata with title; a
+        // browser extension or curl probe could send garbage. We
+        // never want a bad payload to take down the grab-commit
+        // helper, so extract_release_title returns Option and
+        // callers fall back to info_hash.
+        assert_eq!(extract_release_title(""), None);
+        assert_eq!(extract_release_title("not json at all"), None);
+        assert_eq!(extract_release_title("{\"size\":\"1 GB\"}"), None);
+        assert_eq!(
+            extract_release_title("{\"title\":\"[Group] Show - 01.mkv\"}"),
+            Some("[Group] Show - 01.mkv".into())
+        );
+        // Whitespace-only title falls through to None so the caller
+        // uses the info_hash stand-in rather than writing a blank
+        // `torrent_name`.
+        assert_eq!(extract_release_title("{\"title\":\"   \"}"), None);
+    }
+
+    #[tokio::test]
+    async fn extract_release_is_batch_prefers_metadata_over_file_count() {
+        // Regression guard on the PR 90 review fix (§1): callers must
+        // not proxy `is_batch` off `files.len() > 1`, because a single-
+        // episode release shipped as `.mkv + .ass + .srt` has three
+        // files but is NOT a batch. Layer 4 reclassification would
+        // then wrongly infer BluRay on a finished-series WEB release.
+        // The authoritative source is the search-hit listing's batch
+        // flag, which the modal forwards through `release_metadata.is_batch`.
+
+        // `None` when no metadata → caller falls back to file count.
+        assert_eq!(extract_release_is_batch(""), None);
+        assert_eq!(extract_release_is_batch("{\"title\":\"x\"}"), None);
+
+        // Explicit `false` → single-episode release; caller MUST NOT
+        // fall back to file-count heuristic.
+        assert_eq!(
+            extract_release_is_batch("{\"title\":\"x\",\"is_batch\":false}"),
+            Some(false)
+        );
+
+        // Explicit `true` → batch.
+        assert_eq!(
+            extract_release_is_batch("{\"title\":\"Pack\",\"is_batch\":true}"),
+            Some(true)
+        );
+
+        // Garbage JSON / wrong types fall through to None so the caller
+        // falls back to the file-count proxy. Better to get a possibly-
+        // wrong default than to panic on a bad payload.
+        assert_eq!(extract_release_is_batch("not json"), None);
+        assert_eq!(
+            extract_release_is_batch("{\"is_batch\":\"yes\"}"),
+            None,
+            "string shouldn't coerce to bool"
+        );
+    }
+
+    #[tokio::test]
+    async fn grab_confirm_honors_release_metadata_is_batch_over_file_count() {
+        // Caller-level regression guard for the PR 90 bug fix. A future
+        // refactor could silently re-introduce `files.len() > 1` at the
+        // confirm call site without the `extract_release_is_batch` unit
+        // test failing (the helper would keep returning `Some(false)`,
+        // the caller would just ignore it). This test exercises the
+        // full path: 3 files posted (`.mkv + .ass + .srt`), explicit
+        // `is_batch: false` in release_metadata → asserts the written
+        // grabbed_torrents row has `is_batch = 0`, not 1.
+        let db = in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 303, "Single Episode Series").await;
+        let hash = VALID_HASH;
+        let release_metadata = serde_json::json!({
+            "title": "[Group] Single Ep - 05 [1080p]",
+            "size": "1.2 GB",
+            "seeders": 100,
+            "group": "Group",
+            "is_batch": false,
+        });
+        let file_list = serde_json::json!([
+            {"name": "[Group] Single Ep - 05 [1080p].mkv", "size": 1_000_000_000_i64},
+            {"name": "[Group] Single Ep - 05 [1080p].en.ass", "size": 20_000},
+            {"name": "[Group] Single Ep - 05 [1080p].en.srt", "size": 18_000},
+        ]);
+        pending_grabs::create(
+            &db,
+            "pid-subs",
+            hash,
+            "qbittorrent",
+            None,
+            Some(series_id),
+            &release_metadata.to_string(),
+            true,
+        )
+        .await
+        .unwrap();
+        pending_grabs::set_file_list(&db, "pid-subs", &file_list.to_string())
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db.clone(), Some(std::sync::Arc::new(NoopClient)));
+        let res = grab_confirm(
+            State(state),
+            Json(GrabConfirmForm {
+                preview_id: "pid-subs".into(),
+                wanted_indices: vec![0, 1, 2],
+                unblock: false,
+            }),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "confirm should succeed with NoopClient: {res:?}"
+        );
+
+        let is_batch: i64 =
+            sqlx::query_scalar("SELECT is_batch FROM grabbed_torrents WHERE hash = ?")
+                .bind(hash)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            is_batch, 0,
+            "release_metadata.is_batch=false MUST beat the files.len()>1 proxy"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_status_surfaces_blocklist_flag() {
+        // A prior grab of the same hash with state='failed' should
+        // flip `blocklisted: true` on the preview response so the
+        // modal can render the inline unblock banner. Plan decision
+        // #12.
+        let db = in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 101, "Test Series").await;
+        // Seed a failed grab row on the hash we're about to preview.
+        let grab_id = crate::models::grabbed_torrents::record_grab(
+            &db,
+            VALID_HASH,
+            "earlier grab",
+            series_id,
+            &[1],
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        crate::models::grabbed_torrents::mark_failed(&db, grab_id)
+            .await
+            .unwrap();
+        // Open a preview on the same hash.
+        pending_grabs::create(
+            &db,
+            "pid-blocked",
+            VALID_HASH,
+            "qbittorrent",
+            None,
+            Some(series_id),
+            "{\"title\":\"Test Release\"}",
+            true,
+        )
+        .await
+        .unwrap();
+
+        let state = build_test_app_state(db, None);
+        let resp = grab_preview_status(State(state), Path("pid-blocked".to_string()))
+            .await
+            .expect("preview status should succeed");
+        assert!(
+            resp.blocklisted,
+            "blocklisted flag should fire when a failed row exists for the hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn unblock_by_hash_flips_failed_to_replaced() {
+        // Direct check on the model helper — confirm path wiring
+        // covered separately. Verifies the UPDATE targets only
+        // state='failed' rows and writes the back-pointer.
+        let db = in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 202, "Other Series").await;
+        let stale = crate::models::grabbed_torrents::record_grab(
+            &db,
+            VALID_HASH,
+            "old",
+            series_id,
+            &[],
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        crate::models::grabbed_torrents::mark_failed(&db, stale)
+            .await
+            .unwrap();
+
+        let affected = crate::models::grabbed_torrents::unblock_by_hash(&db, VALID_HASH, 99999)
+            .await
+            .unwrap();
+        assert_eq!(affected, 1);
+
+        let (state, replaced_by): (String, Option<i64>) =
+            sqlx::query_as("SELECT state, replaced_by_grab_id FROM grabbed_torrents WHERE id = ?")
+                .bind(stale)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(state, "replaced");
+        assert_eq!(replaced_by, Some(99999));
     }
 }

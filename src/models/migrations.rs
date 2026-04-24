@@ -1826,6 +1826,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // Issue #83 — interactive file-picker trigger policy. Values:
+    // `batches_only` (default) or `never`. Pre-existing DBs get the
+    // default on-read through the `NOT NULL DEFAULT 'batches_only'`
+    // column, so no per-row backfill is needed.
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN grab_preview_mode TEXT NOT NULL DEFAULT 'batches_only'",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     Ok(())
 }
 

@@ -170,14 +170,43 @@
         if (toolbar) toolbar.style.display = 'flex';
         if (footer) footer.style.display = 'flex';
 
-        if (session.view === 'tree') {
-            body.innerHTML = renderTreeView();
-        } else {
-            body.innerHTML = renderFlatView();
-        }
+        const banner = (session.blocklisted && !session.unblockAcked)
+            ? renderBlocklistBanner()
+            : '';
+        const list = (session.view === 'tree') ? renderTreeView() : renderFlatView();
+        body.innerHTML = banner + list;
         attachRowHandlers();
+        attachBlocklistHandlers();
         updateSelectionTotal();
         updateViewToggle();
+    }
+
+    function renderBlocklistBanner() {
+        return `
+            <div class="grab-picker-blocklist-banner" role="alert">
+                <div class="grab-picker-blocklist-text">
+                    <strong>Previously blocklisted.</strong>
+                    This release is in the blocked list from an earlier grab.
+                    Clicking <em>Unblock and continue</em> will clear the old
+                    blocklist entry and start a fresh grab with your
+                    selections. Closing this modal leaves the blocklist alone.
+                </div>
+                <button type="button" class="btn btn-primary" data-grab-picker-action="unblock">
+                    Unblock and continue
+                </button>
+            </div>
+        `;
+    }
+
+    function attachBlocklistHandlers() {
+        const btn = document.querySelector('[data-grab-picker-action="unblock"]');
+        if (btn) {
+            btn.addEventListener('click', () => {
+                if (!session) return;
+                session.unblockAcked = true;
+                renderFileList();
+            });
+        }
     }
 
     function renderFlatView() {
@@ -379,6 +408,8 @@
                 }
                 if (data.status === 'ready') {
                     session.files = data.file_list || [];
+                    session.blocklisted = !!data.blocklisted;
+                    session.unblockAcked = session.unblockAcked || false;
                     session.wanted = new Set();
                     for (let i = 0; i < session.files.length; i++) session.wanted.add(i);
                     const unwanted = computeDefaultUnwanted(session.files);
@@ -421,7 +452,15 @@
         fetch('/api/grab/confirm', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ preview_id: session.previewId, wanted_indices: wantedIndices }),
+            body: JSON.stringify({
+                preview_id: session.previewId,
+                wanted_indices: wantedIndices,
+                // Carry the user's acknowledgement of the inline
+                // blocklist warning through to the backend so it can
+                // flip the old failed rows to `replaced` alongside
+                // the fresh grab write.
+                unblock: !!session.unblockAcked,
+            }),
         })
         .then(async r => {
             const data = await r.json().catch(() => ({}));
@@ -493,6 +532,10 @@
                 size: ctx.size || '',
                 seeders: ctx.seeders != null ? Number(ctx.seeders) : null,
                 group: ctx.group || '',
+                // Forward the search-hit's batch flag so the backend's
+                // grab-row write picks it up verbatim instead of
+                // inferring from file count.
+                is_batch: !!ctx.isBatch,
             },
         };
         if (ctx.seriesId) body.series_id = Number(ctx.seriesId);

@@ -10,6 +10,14 @@
                 </select>
                 <span class="form-hint">Ryokan talks to one client at a time. Switching cancels any pending grabs queued against the previous client.</span>
             </div>
+            <div class="form-group">
+                <label for="grab_preview_mode">Interactive file picker</label>
+                <select name="grab_preview_mode" id="grab_preview_mode">
+                    <option value="batches_only" {% if config.grab_preview_mode != "never" %}selected{% endif %}>Batches only (default)</option>
+                    <option value="never" {% if config.grab_preview_mode == "never" %}selected{% endif %}>Never</option>
+                </select>
+                <span class="form-hint">When set to <em>Batches only</em>, multi-file torrents open a modal where you can uncheck files (samples, NCOPs, extras) before the grab commits. Single-file torrents always skip the modal. Set to <em>Never</em> for 1.3.0-style one-click grabs.</span>
+            </div>
         </fieldset>
 
         <fieldset id="qbit-fieldset" {% if config.active_client != "qbittorrent" %}style="display:none"{% endif %}>
