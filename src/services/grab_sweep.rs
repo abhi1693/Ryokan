@@ -25,8 +25,6 @@
 
 use std::time::Duration;
 
-use serde_json::Value;
-
 use crate::AppState;
 use crate::models::pending_grabs;
 
@@ -108,14 +106,12 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
         return;
     };
 
-    // Parse the file list just enough to count entries. The full
-    // shape (`Vec<PreviewFile>`) lives in `handlers::grab` — we
-    // don't need the filenames here, only the length so we can
-    // build the `0..len` index slice for `set_file_wanted`.
-    let file_count: usize = serde_json::from_str::<Value>(&row.file_list_json)
-        .ok()
-        .and_then(|v| v.as_array().map(|a| a.len()))
-        .unwrap_or(0);
+    // Parse the file list — we need the filenames for auto-expand
+    // and the length for the `0..len` index slice passed to
+    // `set_file_wanted`.
+    let files: Vec<crate::handlers::grab::PreviewFile> =
+        serde_json::from_str(&row.file_list_json).unwrap_or_default();
+    let file_count = files.len();
     if file_count == 0 {
         tracing::warn!(
             target: "ryokan::services::grab_sweep",
@@ -161,6 +157,24 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
         );
         return;
     }
+
+    // Library attribution (PR C). Walkaway means the user got every
+    // file wanted, so the full file list is passed to auto-expand —
+    // unlike the confirm path which passes only the user-selected
+    // subset. Failures inside `commit_grab_and_expand` are logged;
+    // the sweep still deletes the pending row so it doesn't loop.
+    let release_title = crate::handlers::grab::extract_release_title(&row.release_metadata_json)
+        .unwrap_or_else(|| row.info_hash.clone());
+    let is_batch = file_count > 1;
+    let all_filenames: Vec<String> = files.into_iter().map(|f| f.name).collect();
+    crate::services::grab_commit::commit_grab_and_expand(
+        state,
+        row,
+        all_filenames,
+        &release_title,
+        is_batch,
+    )
+    .await;
 
     tracing::info!(
         target: "ryokan::services::grab_sweep",

@@ -577,6 +577,52 @@ pub async fn get_blocked(
         .collect())
 }
 
+/// Is this infohash currently blocklisted? True when at least one
+/// `grabbed_torrents` row exists for the hash with `state = 'failed'`.
+/// Checked by the interactive file-picker preview endpoint so the
+/// modal can render the inline-unblock warning (plan decision #12).
+pub async fn is_blocklisted(db: &SqlitePool, hash: &str) -> Result<bool, sqlx::Error> {
+    if hash.is_empty() {
+        return Ok(false);
+    }
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM grabbed_torrents WHERE hash = ? AND state = 'failed' LIMIT 1",
+    )
+    .bind(hash)
+    .fetch_optional(db)
+    .await?;
+    Ok(existing.is_some())
+}
+
+/// Flip every `state='failed'` row for this hash to `state='replaced'`
+/// with a back-pointer to the new grab id. Called by the inline-unblock
+/// path in `handlers::grab::grab_confirm` after `record_grab` writes
+/// the fresh pending row.
+///
+/// Using `replaced` (rather than `removed`) preserves the hash→id
+/// audit trail: the Downloads page's blocklist view filters on
+/// `state='failed'`, and the new pending row's provenance is still
+/// walkable through `replaced_by_grab_id`.
+pub async fn unblock_by_hash(
+    db: &SqlitePool,
+    hash: &str,
+    replaced_by: i64,
+) -> Result<u64, sqlx::Error> {
+    if hash.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "UPDATE grabbed_torrents \
+         SET state = 'replaced', replaced_by_grab_id = ? \
+         WHERE hash = ? AND state = 'failed'",
+    )
+    .bind(replaced_by)
+    .bind(hash)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Mark a grabbed torrent as failed (blocklisted) by matching torrent name and series.
 pub async fn mark_failed_by_name(
     db: &SqlitePool,
