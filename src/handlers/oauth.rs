@@ -69,7 +69,16 @@ const MAL_CLIENT_ID: &str = "5205ccde38839a4afc6b03bbecfaa9c7";
 /// URL fragments on the AL side never touch an HTTP server; the MAL
 /// side query param is public-by-design (MAL's own auth page already
 /// displayed it).
-const ANILIST_REDIRECT_URI: &str = "https://johnthreekay.github.io/Ryokan/auth/anilist/";
+///
+/// AL's redirect URI lives on AniList's developer-settings side (the
+/// app config); we don't include it in the authorize URL because AL's
+/// docs example doesn't, and including it triggered an
+/// `unsupported_grant_type` error against AL's oauth-server backend
+/// post-approval. The URL is documented here for reference (it's the
+/// value the user sets in https://anilist.co/settings/developer
+/// against the `Ryokan` app), but isn't read from code.
+/// MAL's redirect URI *is* sent in the URL — that's required by MAL
+/// and matches their docs.
 const MAL_REDIRECT_URI: &str = "https://johnthreekay.github.io/Ryokan/auth/mal/";
 
 /// Verifier length in base64url characters. RFC 7636 allows 43-128.
@@ -95,10 +104,19 @@ pub async fn anilist_start(State(state): State<AppState>) -> Redirect {
     // Implicit grant: response_type=token. AL returns the access
     // token directly in the URL fragment after user approval, along
     // with our `state` echoed back unchanged.
+    //
+    // `redirect_uri` is deliberately NOT included in the URL — AL's
+    // docs example shows only `client_id` + `response_type` (and
+    // optional `state`), and AL uses the redirect URL configured on
+    // the developer-settings side for the app. Including
+    // `redirect_uri` triggered an `unsupported_grant_type` error
+    // post-approval against AL's `league/oauth2-server` backend
+    // (live-probed 2026-04-24); dropping it lines up the URL with
+    // exactly what AL's docs example shows and what every other
+    // AL integration in the wild sends.
     let url = format!(
-        "https://anilist.co/api/v2/oauth/authorize?client_id={}&redirect_uri={}&response_type=token&state={}",
+        "https://anilist.co/api/v2/oauth/authorize?client_id={}&response_type=token&state={}",
         ANILIST_CLIENT_ID,
-        urlencoding::encode(ANILIST_REDIRECT_URI),
         urlencoding::encode(&csrf_state),
     );
     Redirect::temporary(&url)
@@ -649,11 +667,15 @@ mod tests {
             location.contains("&state="),
             "state nonce must be included in authorize URL: {location}"
         );
-        // Redirect URI must match the broker page exactly — AL
-        // rejects the request with "redirect_uri mismatch" otherwise.
+        // Regression for the 2026-04-24 fix: `redirect_uri` must NOT
+        // be in the URL. AL's docs example doesn't include it (the
+        // app's developer-settings redirect is used instead), and
+        // including it triggered an `unsupported_grant_type` error
+        // post-approval. Keep the assertion negative so a future
+        // refactor that re-adds `redirect_uri` fails this test.
         assert!(
-            location.contains("johnthreekay.github.io%2FRyokan%2Fauth%2Fanilist"),
-            "redirect_uri not URL-encoded correctly: {location}"
+            !location.contains("redirect_uri"),
+            "redirect_uri must be omitted — AL's docs don't include it and including it broke the flow: {location}"
         );
 
         // The state nonce must be stashed for /submit to validate against.
