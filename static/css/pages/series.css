@@ -656,11 +656,11 @@
     border: none;
     border-radius: 0;
     overflow: visible;
-    transition: transform 0.15s ease;
+    transition: transform 0.2s ease-out;
 }
 
 .relation-card:hover {
-    transform: translateY(-2px);
+    transform: translateY(-4px);
 }
 
 .relation-card-cover-wrap {
@@ -668,6 +668,7 @@
 }
 
 .relation-card-cover {
+    position: relative;
     width: 100%;
     aspect-ratio: 85 / 115;
     overflow: hidden;
@@ -675,11 +676,29 @@
     border: 1px solid var(--border-accent);
     border-radius: 8px;
     box-shadow: 0 0 0 1px rgba(255,255,255,0.02) inset;
+    transition: border-color 0.2s ease-out, box-shadow 0.2s ease-out;
+}
+
+/* Bottom vignette on hover — mirrors the library-card treatment so
+ * related-series scanning has the same affordance as the library
+ * grid. Fades in over 0.25s, darkening the bottom ~30% of the cover. */
+.relation-card-cover::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease-out;
+    background: linear-gradient(to top, rgba(15, 15, 19, 0.55) 0%, transparent 30%);
 }
 
 .relation-card:hover .relation-card-cover {
     border-color: var(--accent);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35),
+                0 0 0 1px rgba(203, 166, 247, 0.18);
 }
+
+.relation-card:hover .relation-card-cover::after { opacity: 1; }
 
 .relation-card-cover img {
     width: 100%;
@@ -723,7 +742,10 @@
     overflow: hidden;
     min-height: 2.7em;
     margin-bottom: 6px;
+    transition: color 0.2s ease-out;
 }
+
+.relation-card:hover .relation-card-title { color: var(--accent); }
 
 .relation-card-meta {
     display: flex;
