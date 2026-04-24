@@ -204,7 +204,7 @@
             {# Badge counts `downloaded_count` (on_disk OR state=completed)
                instead of `on_disk_count` (media_root-only), so the
                `N / total` count ticks forward for post-proc-off
-               torrents the moment qBit reports complete. #}
+               torrents the moment the download client reports complete. #}
             {% if ep_total > 0 %}
             <span class="season-badge {% if downloaded_count >= ep_total %}season-badge-complete{% else if downloaded_count > 0 %}season-badge-partial{% else %}season-badge-missing{% endif %}">
                 {{ downloaded_count }} / {{ ep_total }}
@@ -499,8 +499,8 @@
 
 <!-- Remove-from-library confirmation modal — dedicated destructive variant,
      not a ryokanConfirm call. The shared confirm modal is too compact to sell
-     the stakes of a library remove (folder deletion, qBit side-effects,
-     Jellyfin cleanup). This one inlines the concrete path, file count, and
+     the stakes of a library remove (folder deletion, download-client
+     side-effects, Jellyfin cleanup). This one inlines the concrete path, file count, and
      size so the user can read exactly what is about to disappear. -->
 <div class="modal-backdrop" id="remove-series-modal" style="display:none">
     <div class="modal remove-series-modal">
@@ -541,7 +541,7 @@
                 {% else %}
                 <li>The series folder will be deleted from disk.</li>
                 {% endif %}
-                <li>Every torrent for this series will be removed from <strong>qBittorrent</strong>.</li>
+                <li>Every torrent for this series will be removed from <strong>the download client</strong>.</li>
                 <li>Imported episodes and the <strong>Jellyfin</strong> folder will be gone.</li>
             </ul>
             <p class="remove-series-final-warning">This cannot be undone.</p>
@@ -576,6 +576,10 @@
 // completion checkmark, because there's no post-processing pass to wait
 // on — advance_state_without_import flips the state directly (#14).
 window.POST_PROCESSING_ENABLED = {% if post_processing_enabled %}true{% else %}false{% endif %};
+window.GRAB_PREVIEW_MODE = {% if grab_preview_mode == "never" %}"never"{% else %}"batches_only"{% endif %};
 </script>
+<script src="/static/js/grab_picker.js" defer></script>
 <script src="/static/js/series.js" defer></script>
+
+{% include "partials/grab_picker_modal.html" %}
 {% endblock %}

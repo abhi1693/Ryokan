@@ -284,6 +284,10 @@ pub async fn series_detail(
         .as_ref()
         .map(|c| c.post_processing_enabled)
         .unwrap_or(false);
+    let grab_preview_mode = cfg
+        .as_ref()
+        .map(|c| c.grab_preview_mode.clone())
+        .unwrap_or_else(|| "batches_only".to_string());
     let template = SeriesTemplate {
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
@@ -312,6 +316,7 @@ pub async fn series_detail(
         default_custom_query_tokens,
         default_restrict_to_uploader,
         post_processing_enabled,
+        grab_preview_mode,
     };
     Html(template.render().unwrap_or_default())
 }

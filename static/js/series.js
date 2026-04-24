@@ -139,10 +139,10 @@ function showEpisodeDetail(epNum, btn) {
 
     // Two stable slots the grab-history loader patches in place once
     // data arrives: the library-side file path (media_root-relative,
-    // rendered here when on_disk) and the qBit-side content_path
-    // (rendered by renderGrabHistory if the current grab has a
-    // qbit_content_path). Both can coexist when post-processing uses
-    // hardlinks — the user wants to see both; the Sonarr dual-path
+    // rendered here when on_disk) and the download-client-side
+    // content_path (rendered by renderGrabHistory if the current grab
+    // has a client_content_path). Both can coexist when post-processing
+    // uses hardlinks — the user wants to see both; the Sonarr dual-path
     // split (#14 follow-up) makes this possible.
     const mediaRoot = document.getElementById('series-data').dataset.mediaRoot || '';
     const folderName = document.getElementById('series-data').dataset.folderName || '';
@@ -154,10 +154,11 @@ function showEpisodeDetail(epNum, btn) {
         (libraryPath
             ? '<div class="ep-detail-row ep-detail-full"><span class="ep-detail-label">Library path</span><span class="ep-detail-value ep-detail-path">' + escHtml(libraryPath) + '</span></div>'
             : '<div class="ep-detail-row ep-detail-full" id="ep-detail-library-placeholder"><span class="ep-detail-label">Library path</span><span class="ep-detail-value" style="color:var(--text-dim)">Not in library root</span></div>') +
-        // qBit path row is always rendered as a placeholder; renderGrabHistory
-        // fills it in when the current grab has a qbit_content_path. Hidden
-        // until then so empty state doesn't render for pre-qBit-complete rows.
-        '<div class="ep-detail-row ep-detail-full" id="ep-detail-qbit-path" style="display:none"><span class="ep-detail-label">Output path</span><span class="ep-detail-value ep-detail-path" id="ep-detail-qbit-path-value"></span></div>' +
+        // Client path row is always rendered as a placeholder;
+        // renderGrabHistory fills it in when the current grab has a
+        // client_content_path. Hidden until then so empty state doesn't
+        // render for rows whose torrent hasn't finished downloading yet.
+        '<div class="ep-detail-row ep-detail-full" id="ep-detail-client-path" style="display:none"><span class="ep-detail-label">Output path</span><span class="ep-detail-value ep-detail-path" id="ep-detail-client-path-value"></span></div>' +
         // The Size row starts with the on-disk file size and is
         // patched in place by `renderGrabHistory` once the grab
         // history loads: if the latest grab was a batch, the row is
@@ -257,18 +258,18 @@ function renderGrabHistory(entries, epNum) {
         }
     }
 
-    // Dual-path display: if the current grab has a qBit content path
-    // (populated by post-processing when qBit reports complete), reveal
-    // the qBit path row in the detail header. Shown whenever present —
-    // with post-proc on + hardlink mode both paths point at the same
-    // bytes but are still worth surfacing so the operator can find the
-    // torrent in qBit without guessing.
-    if (current && current.qbit_content_path) {
-        const qbitRow = document.getElementById('ep-detail-qbit-path');
-        const qbitValue = document.getElementById('ep-detail-qbit-path-value');
-        if (qbitRow && qbitValue) {
-            qbitValue.textContent = current.qbit_content_path;
-            qbitRow.style.display = '';
+    // Dual-path display: if the current grab has a client content path
+    // (populated by post-processing when the torrent reports complete),
+    // reveal the client path row in the detail header. Shown whenever
+    // present — with post-proc on + hardlink mode both paths point at
+    // the same bytes but are still worth surfacing so the operator can
+    // find the torrent in the download client without guessing.
+    if (current && current.client_content_path) {
+        const clientRow = document.getElementById('ep-detail-client-path');
+        const clientValue = document.getElementById('ep-detail-client-path-value');
+        if (clientRow && clientValue) {
+            clientValue.textContent = current.client_content_path;
+            clientRow.style.display = '';
         }
     }
 }
@@ -383,7 +384,7 @@ async function cancelPendingEpisode() {
     if (!epNum) return;
     const confirmed = await window.ryokanConfirm({
         title: 'Cancel pending grab',
-        body: `Remove the in-flight torrent for Episode ${epNum} from qBittorrent and mark it cancelled? This will delete any downloaded data and will not trigger a re-search.`,
+        body: `Remove the in-flight torrent for Episode ${epNum} from the download client and mark it cancelled? This will delete any downloaded data and will not trigger a re-search.`,
         yesLabel: 'Cancel grab',
         noLabel: 'Keep',
     });
@@ -712,9 +713,39 @@ function renderInteractiveResults(results, epNum) {
 function grabInteractiveResult(epNum, idx, btn) {
     const result = _isearchResults[idx];
     if (!result) return;
+    const url = result.magnet || result.torrent || '';
+
+    // Issue #83 — batch releases open the file-picker modal so the
+    // user can narrow to the episodes they actually want. Single-file
+    // releases always take the direct /api/series/.../grab path
+    // (nothing to pick). `grab_preview_mode = 'never'` opts out
+    // globally and keeps 1.3.0-style one-click behavior.
+    const previewMode = window.GRAB_PREVIEW_MODE || 'batches_only';
+    if (result.is_batch
+        && previewMode !== 'never'
+        && typeof window.openGrabPicker === 'function'
+        && result.info_hash) {
+        window.openGrabPicker(url, {
+            title: result.title || '',
+            size: result.size || '',
+            seeders: Number(result.seeders) || 0,
+            group: result.group || '',
+            infoHash: result.info_hash || '',
+            seriesId: SD.dbId || null,
+            isBatch: true,
+            onConfirm: function () {
+                updateEpisodeRow(epNum, 'grabbed', result.group);
+                ensureDlPollRunning();
+                refreshEpisodeRows({ force: true });
+                const ismodal = document.getElementById('isearch-modal');
+                if (ismodal) ismodal.style.display = 'none';
+            },
+        });
+        return;
+    }
+
     btn.disabled = true;
     btn.textContent = 'Grabbing…';
-    const url = result.magnet || result.torrent || '';
     fetch(`/api/series/${SD.id}/grab/${epNum}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -823,9 +854,35 @@ function renderInteractiveBatchResults(results) {
 function grabInteractiveBatchResult(idx, btn) {
     const result = _ibatchResults[idx];
     if (!result) return;
+    const url = result.magnet || result.torrent || '';
+
+    // Issue #83 — every result in the interactive batch search is a
+    // batch by definition, so the file-picker modal opens unless the
+    // user has opted out globally via `grab_preview_mode = 'never'`.
+    const previewMode = window.GRAB_PREVIEW_MODE || 'batches_only';
+    if (previewMode !== 'never'
+        && typeof window.openGrabPicker === 'function'
+        && result.info_hash) {
+        window.openGrabPicker(url, {
+            title: result.title || '',
+            size: result.size || '',
+            seeders: Number(result.seeders) || 0,
+            group: result.group || '',
+            infoHash: result.info_hash || '',
+            seriesId: SD.dbId || null,
+            isBatch: true,
+            onConfirm: function () {
+                ensureDlPollRunning();
+                refreshEpisodeRows({ force: true });
+                const ismodal = document.getElementById('isearch-modal');
+                if (ismodal) ismodal.style.display = 'none';
+            },
+        });
+        return;
+    }
+
     btn.disabled = true;
     btn.textContent = 'Grabbing…';
-    const url = result.magnet || result.torrent || '';
     fetch(`/api/series/${SD.id}/grab-batch`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1587,8 +1644,8 @@ function patchEpisodeRows(episodes, force) {
             delete qualityCell.dataset.originalHtml;
         } else if (ep.quality_state === 'grabbed') {
             // Episode was just grabbed (or is still queued). Show a 0%
-            // progress bar — the poller will update it once qBit reports
-            // real progress.
+            // progress bar — the poller will update it once the
+            // download client reports real progress.
             row.classList.remove('ep-row-have', 'ep-row-missing');
             row.classList.add('ep-row-queued');
             if (!showingProgress) {
@@ -1678,10 +1735,12 @@ function pollDownloadProgress() {
                     if (!qualityCell.dataset.originalHtml) {
                         qualityCell.dataset.originalHtml = qualityCell.innerHTML;
                     }
-                    const isComplete = item.state.includes('UP') || item.state === 'uploading' || item.progress >= 1.0;
+                    const kind = item.state_kind || '';
+                    const isComplete = kind.startsWith('seeding') || kind === 'paused-complete'
+                        || kind === 'checking-seed' || item.progress >= 1.0;
                     if (isComplete) {
                         if (window.POST_PROCESSING_ENABLED) {
-                            // qBit finished but post-processing hasn't imported
+                            // Torrent finished but post-processing hasn't imported
                             // the release into the library yet. Show a full bar with
                             // an "Importing..." label so the user isn't staring at a
                             // stale 0.0% until the next post-processing tick.

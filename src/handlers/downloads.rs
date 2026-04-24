@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::models::grabbed_torrents;
+use crate::services::download_client::DownloadItemState;
 
 struct QueueTorrentView {
     hash: String,
@@ -59,30 +60,32 @@ fn format_eta(seconds: i64) -> String {
     }
 }
 
-fn state_label(state: &str) -> &str {
-    match state {
-        "uploading" | "stalledUP" | "forcedUP" => "Seeding",
-        "downloading" | "forcedDL" => "Downloading",
-        "stalledDL" => "Stalled",
-        "pausedDL" | "pausedUP" => "Paused",
-        "queuedDL" | "queuedUP" => "Queued",
-        "checkingDL" | "checkingUP" => "Checking",
-        "error" => "Error",
-        "missingFiles" => "Missing Files",
-        "moving" => "Moving",
-        "metaDL" => "Fetching metadata",
-        "allocating" => "Allocating",
-        _ => state,
+fn state_label(kind: DownloadItemState) -> &'static str {
+    match kind {
+        DownloadItemState::Downloading => "Downloading",
+        DownloadItemState::DownloadingStalled => "Stalled",
+        DownloadItemState::DownloadingQueued => "Queued",
+        DownloadItemState::CheckingDownload => "Checking",
+        DownloadItemState::Seeding | DownloadItemState::SeedingStalled => "Seeding",
+        DownloadItemState::SeedingQueued => "Queued",
+        DownloadItemState::CheckingSeed => "Checking",
+        DownloadItemState::Paused | DownloadItemState::PausedComplete => "Paused",
+        DownloadItemState::Errored => "Error",
     }
 }
 
-fn state_badge_class(state: &str) -> &str {
-    match state {
-        "uploading" | "stalledUP" | "forcedUP" | "pausedUP" => "log-badge-info",
-        "downloading" | "forcedDL" => "log-badge-debug",
-        "pausedDL" | "queuedDL" | "queuedUP" | "stalledDL" => "log-badge-warn",
-        "error" | "missingFiles" => "log-badge-error",
-        _ => "",
+fn state_badge_class(kind: DownloadItemState) -> &'static str {
+    match kind {
+        DownloadItemState::Downloading => "log-badge-debug",
+        DownloadItemState::DownloadingStalled
+        | DownloadItemState::DownloadingQueued
+        | DownloadItemState::SeedingQueued
+        | DownloadItemState::Paused => "log-badge-warn",
+        DownloadItemState::Seeding
+        | DownloadItemState::SeedingStalled
+        | DownloadItemState::PausedComplete => "log-badge-info",
+        DownloadItemState::Errored => "log-badge-error",
+        DownloadItemState::CheckingDownload | DownloadItemState::CheckingSeed => "",
     }
 }
 
@@ -94,9 +97,12 @@ fn torrent_to_view(t: &crate::services::download_client::DownloadItem) -> QueueT
         progress_pct: format!("{:.1}", t.progress * 100.0),
         speed_display: format_speed(t.dlspeed),
         eta_display: format_eta(t.eta),
-        state_label: state_label(&t.state).to_string(),
-        state_badge_class: state_badge_class(&t.state).to_string(),
-        is_paused: t.state.starts_with("paused"),
+        state_label: state_label(t.state_kind).to_string(),
+        state_badge_class: state_badge_class(t.state_kind).to_string(),
+        is_paused: matches!(
+            t.state_kind,
+            DownloadItemState::Paused | DownloadItemState::PausedComplete
+        ),
     }
 }
 
@@ -146,17 +152,18 @@ pub async fn downloads_page(
             Some(c) => match c.list_scoped().await {
                 Ok(mut torrents) => {
                     // Sort: downloading first, then by progress descending.
+                    let is_downloading = |k: DownloadItemState| {
+                        matches!(
+                            k,
+                            DownloadItemState::Downloading
+                                | DownloadItemState::DownloadingStalled
+                                | DownloadItemState::DownloadingQueued
+                                | DownloadItemState::CheckingDownload
+                        )
+                    };
                     torrents.sort_by(|a, b| {
-                        let a_down = if a.state.contains("DL") || a.state == "downloading" {
-                            0
-                        } else {
-                            1
-                        };
-                        let b_down = if b.state.contains("DL") || b.state == "downloading" {
-                            0
-                        } else {
-                            1
-                        };
+                        let a_down = if is_downloading(a.state_kind) { 0 } else { 1 };
+                        let b_down = if is_downloading(b.state_kind) { 0 } else { 1 };
                         a_down.cmp(&b_down).then(
                             b.progress
                                 .partial_cmp(&a.progress)
@@ -223,11 +230,11 @@ pub struct BlocklistRemoveForm {
     path = "/api/downloads/pause",
     tag = "Downloads",
     summary = "Pause a torrent",
-    description = "Pause an active torrent download in qBittorrent.",
+    description = "Pause an active torrent download in the configured download client.",
     request_body = TorrentActionForm,
     responses(
         (status = 200, description = "Torrent paused", body = serde_json::Value),
-        (status = 400, description = "qBittorrent not configured"),
+        (status = 400, description = "Download client not configured"),
     ),
 )]
 pub async fn api_pause_torrent(
@@ -256,11 +263,11 @@ pub async fn api_pause_torrent(
     path = "/api/downloads/resume",
     tag = "Downloads",
     summary = "Resume a torrent",
-    description = "Resume a paused torrent download in qBittorrent.",
+    description = "Resume a paused torrent download in the configured download client.",
     request_body = TorrentActionForm,
     responses(
         (status = 200, description = "Torrent resumed", body = serde_json::Value),
-        (status = 400, description = "qBittorrent not configured"),
+        (status = 400, description = "Download client not configured"),
     ),
 )]
 pub async fn api_resume_torrent(
@@ -289,11 +296,11 @@ pub async fn api_resume_torrent(
     path = "/api/downloads/delete",
     tag = "Downloads",
     summary = "Delete a torrent",
-    description = "Remove a torrent from qBittorrent. Optionally delete downloaded files.",
+    description = "Remove a torrent from the configured download client. Optionally delete downloaded files.",
     request_body = TorrentDeleteForm,
     responses(
         (status = 200, description = "Torrent deleted", body = serde_json::Value),
-        (status = 400, description = "qBittorrent not configured"),
+        (status = 400, description = "Download client not configured"),
     ),
 )]
 pub async fn api_delete_torrent(
@@ -337,4 +344,81 @@ pub async fn api_blocklist_remove(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mirror of the exhaustive-match pattern in
+    // `services::download_client::tests::all_variants_with_slugs` —
+    // a new enum variant has to be added to the inner match before
+    // the test compiles, which forces both state_label and
+    // state_badge_class to get an explicit mapping instead of
+    // falling through to a fallback arm.
+    fn all_variants_with_expected() -> Vec<(DownloadItemState, &'static str, &'static str, bool)> {
+        // (variant, expected_label, expected_badge_class, expected_is_paused)
+        use DownloadItemState::*;
+        fn _exhaustive(v: DownloadItemState) {
+            match v {
+                Downloading | DownloadingStalled | DownloadingQueued | CheckingDownload => {}
+                Seeding | SeedingStalled | SeedingQueued | CheckingSeed => {}
+                Paused | PausedComplete => {}
+                Errored => {}
+            }
+        }
+        vec![
+            (Downloading, "Downloading", "log-badge-debug", false),
+            (DownloadingStalled, "Stalled", "log-badge-warn", false),
+            (DownloadingQueued, "Queued", "log-badge-warn", false),
+            (CheckingDownload, "Checking", "", false),
+            (Seeding, "Seeding", "log-badge-info", false),
+            (SeedingStalled, "Seeding", "log-badge-info", false),
+            (SeedingQueued, "Queued", "log-badge-warn", false),
+            (CheckingSeed, "Checking", "", false),
+            (Paused, "Paused", "log-badge-warn", true),
+            (PausedComplete, "Paused", "log-badge-info", true),
+            (Errored, "Error", "log-badge-error", false),
+        ]
+    }
+
+    #[test]
+    fn state_label_covers_every_variant() {
+        for (v, label, _, _) in all_variants_with_expected() {
+            assert_eq!(state_label(v), label, "label mismatch for {v:?}");
+        }
+    }
+
+    #[test]
+    fn state_badge_class_covers_every_variant() {
+        for (v, _, badge, _) in all_variants_with_expected() {
+            assert_eq!(state_badge_class(v), badge, "badge mismatch for {v:?}");
+        }
+    }
+
+    #[test]
+    fn torrent_view_is_paused_flag_matches_enum() {
+        // Drives the pause/resume button on the queue row. Reading
+        // a client-native "paused" prefix from the legacy
+        // `state.starts_with("paused")` path would silently break
+        // for Transmission (numeric states) and rtorrent (computed
+        // strings) — the derivation has to go through state_kind.
+        for (v, _, _, expected_paused) in all_variants_with_expected() {
+            let item = crate::services::download_client::DownloadItem {
+                hash: "a".repeat(40),
+                name: "Release".to_string(),
+                size: 0,
+                progress: 0.0,
+                dlspeed: 0,
+                state: String::new(),
+                category: String::new(),
+                eta: 0,
+                save_path: String::new(),
+                content_path: String::new(),
+                state_kind: v,
+            };
+            let view = torrent_to_view(&item);
+            assert_eq!(view.is_paused, expected_paused, "is_paused for {v:?}");
+        }
+    }
 }

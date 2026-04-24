@@ -176,14 +176,12 @@ pub enum SelectiveOutcome {
 
 /// A torrent as seen through the `DownloadClient` trait.
 ///
-/// **JSON shape**: field layout matches the pre-refactor qBit
-/// `Torrent` byte-for-byte so `templates/downloads.html` and the
-/// frontend's state-label map (`templates/downloads.html:84-99`) keep
-/// working without changes during Phase 1. `state` is the client-
-/// native string (qBit: `"stalledUP"`, etc.); `state_kind` is the
-/// normalized enum for internal state-matching but not serialized.
-/// Phase 2+ may promote `state_kind` to the serialized shape when
-/// the downloads UI generalizes.
+/// **JSON shape**: `state` is the client-native string (qBit:
+/// `"stalledUP"`, Deluge: `"Downloading"`, Transmission: `"4"`,
+/// rtorrent: computed), kept around for debug / tooltip use.
+/// `state_kind` is the normalized cross-client enum — this is what
+/// UI code should drive off so the Downloads page behaves the same
+/// regardless of which client is active.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DownloadItem {
     pub hash: String,
@@ -191,7 +189,8 @@ pub struct DownloadItem {
     pub size: i64,
     pub progress: f64,
     pub dlspeed: i64,
-    /// Client-native state string for UI display.
+    /// Client-native state string. Exposed for diagnostics; UI code
+    /// should prefer `state_kind` for cross-client consistency.
     pub state: String,
     pub category: String,
     pub eta: i64,
@@ -202,9 +201,11 @@ pub struct DownloadItem {
     /// Empty when metadata isn't ready yet.
     #[serde(default)]
     pub content_path: String,
-    /// Normalized state for internal matching. Not serialized — the
-    /// UI still reads the native `state` string during Phase 1.
-    #[serde(skip, default)]
+    /// Normalized state across every download client. Serialized as a
+    /// kebab-case slug (`"downloading"`, `"seeding-stalled"`, etc.) so
+    /// the JS state-label + badge-class maps can live on the
+    /// normalized vocabulary rather than any client's native strings.
+    #[serde(default)]
     pub state_kind: DownloadItemState,
 }
 
@@ -223,13 +224,17 @@ pub struct DownloadFile {
     pub wanted: bool,
 }
 
-/// Normalized torrent state. 10 variants preserving the DL-vs-UL /
-/// stalled / queued / checking distinctions the Downloads UI's
-/// label map (`templates/downloads.html:84-99`) depends on. Each
-/// impl maps its native state strings into this enum inside the
+/// Normalized torrent state — 11 variants that every download
+/// client impl maps its native state vocabulary into. Serialized as
+/// a kebab-case slug on the wire (`"downloading-stalled"`,
+/// `"paused-complete"`, etc.) so the Downloads-page UI can key label
+/// and badge-class maps off a single cross-client vocabulary rather
+/// than mapping each client's distinct state strings separately.
+/// Each impl maps its native state strings into this enum inside the
 /// client's `list_scoped` implementation; `DownloadItem.state` keeps
 /// the native string around for UI display so Phase 1 is a drop-in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
 pub enum DownloadItemState {
     #[default]
     Downloading,
@@ -613,5 +618,125 @@ mod tests {
         assert!(!CheckingDownload.is_complete());
         assert!(!Paused.is_complete());
         assert!(!Errored.is_complete());
+    }
+
+    #[test]
+    fn state_is_errored_only_errored_variant() {
+        use DownloadItemState::*;
+        assert!(Errored.is_errored());
+        for v in [
+            Downloading,
+            DownloadingStalled,
+            DownloadingQueued,
+            CheckingDownload,
+            Seeding,
+            SeedingStalled,
+            SeedingQueued,
+            CheckingSeed,
+            Paused,
+            PausedComplete,
+        ] {
+            assert!(!v.is_errored(), "{v:?} should not be errored");
+        }
+    }
+
+    // The exhaustive match inside this helper is the one and only
+    // place new `DownloadItemState` variants have to be registered
+    // for cross-layer tests — the array returned is what every
+    // contract test below iterates over. Adding a new variant without
+    // also adding a match arm here fails to compile.
+    fn all_variants_with_slugs() -> Vec<(DownloadItemState, &'static str)> {
+        fn _slug(v: DownloadItemState) -> &'static str {
+            match v {
+                DownloadItemState::Downloading => "downloading",
+                DownloadItemState::DownloadingStalled => "downloading-stalled",
+                DownloadItemState::DownloadingQueued => "downloading-queued",
+                DownloadItemState::CheckingDownload => "checking-download",
+                DownloadItemState::Seeding => "seeding",
+                DownloadItemState::SeedingStalled => "seeding-stalled",
+                DownloadItemState::SeedingQueued => "seeding-queued",
+                DownloadItemState::CheckingSeed => "checking-seed",
+                DownloadItemState::Paused => "paused",
+                DownloadItemState::PausedComplete => "paused-complete",
+                DownloadItemState::Errored => "errored",
+            }
+        }
+        use DownloadItemState::*;
+        let list = [
+            Downloading,
+            DownloadingStalled,
+            DownloadingQueued,
+            CheckingDownload,
+            Seeding,
+            SeedingStalled,
+            SeedingQueued,
+            CheckingSeed,
+            Paused,
+            PausedComplete,
+            Errored,
+        ];
+        list.into_iter().map(|v| (v, _slug(v))).collect()
+    }
+
+    #[test]
+    fn state_kebab_slugs_are_stable_and_distinct() {
+        let variants = all_variants_with_slugs();
+        let mut seen = std::collections::HashSet::new();
+        for (v, expected_slug) in &variants {
+            let actual = serde_json::to_value(v).unwrap();
+            let actual_slug = actual
+                .as_str()
+                .unwrap_or_else(|| panic!("{v:?} didn't serialize to a string"));
+            assert_eq!(
+                actual_slug, *expected_slug,
+                "{v:?} slug drifted — JS state-label map keys off the kebab vocabulary"
+            );
+            assert!(
+                seen.insert(actual_slug.to_string()),
+                "duplicate slug {actual_slug:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_kebab_slugs_roundtrip_through_serde() {
+        // DownloadItem carries state_kind; the queue endpoint
+        // serializes it over the wire and the JS sort / label / badge
+        // maps key off the slug. Verify the wire format roundtrips
+        // exactly — a silent rename (say, via removing `#[serde(...)]`)
+        // would break the JS without any compile-time signal.
+        for (v, slug) in all_variants_with_slugs() {
+            let json = serde_json::json!(slug);
+            let parsed: DownloadItemState = serde_json::from_value(json).unwrap_or_else(|e| {
+                panic!("slug {slug:?} failed to deserialize back into {v:?}: {e}")
+            });
+            assert_eq!(parsed, v);
+        }
+    }
+
+    #[test]
+    fn download_item_wire_shape_carries_state_kind() {
+        // Regression for the PR C badge refactor: state_kind used to
+        // be `#[serde(skip)]` and the JS state-label map keyed off
+        // the client-native `state` string. After switching to the
+        // kebab enum on both sides, state_kind MUST appear on the
+        // wire or the Downloads queue page renders every row with
+        // an empty badge class and "Downloading" label.
+        let item = DownloadItem {
+            hash: "a".repeat(40),
+            name: "Some.Release.mkv".to_string(),
+            size: 1024,
+            progress: 0.5,
+            dlspeed: 0,
+            state: "stalledUP".to_string(),
+            category: "anime".to_string(),
+            eta: 0,
+            save_path: "/downloads".to_string(),
+            content_path: "/downloads/Some.Release.mkv".to_string(),
+            state_kind: DownloadItemState::SeedingStalled,
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["state_kind"], "seeding-stalled");
+        assert_eq!(v["state"], "stalledUP");
     }
 }

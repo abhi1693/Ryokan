@@ -100,12 +100,12 @@ pub struct GrabHistoryEntry {
     /// tracking: this is the "DownloadClientItem.OutputPath" side;
     /// the `file_name` column above is the library path.
     ///
-    /// Field name kept as `qbit_content_path` for now so the series
-    /// modal template reads the same JSON key it did pre-#63; renaming
-    /// can happen later when the UI generalizes past qBit.
+    /// Wire-level field name matches the DB column post-#63. The series
+    /// modal reads `current.client_content_path` to populate the
+    /// "output path" row when post-processing has stamped a result.
     #[serde(default)]
     #[sqlx(default)]
-    pub qbit_content_path: String,
+    pub client_content_path: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -322,7 +322,7 @@ pub async fn get_grab_history(
                        AND COALESCE(gt.client_content_path, '') <> ''
                      ORDER BY gt.grabbed_at DESC
                      LIMIT 1
-                ), '') AS qbit_content_path
+                ), '') AS client_content_path
          FROM episode_grab_history egh
          WHERE egh.series_id = ? AND egh.episode_number = ?
          ORDER BY egh.grabbed_at DESC",
@@ -1074,5 +1074,32 @@ mod tests {
             tag.resolution, "1080p",
             "pinned resolution must not be overwritten"
         );
+    }
+
+    /// Regression for the post-#63 field rename: the JSON field name
+    /// returned by `get_grab_history` must be `client_content_path`,
+    /// not the legacy `qbit_content_path`. The series modal's
+    /// `renderGrabHistory` reads `current.client_content_path` to
+    /// populate the "Output path" row, and a silent rename here
+    /// would hide the whole row with no UI signal.
+    #[test]
+    fn grab_history_entry_serializes_client_content_path() {
+        let entry = GrabHistoryEntry {
+            id: 1,
+            quality_tag: "WEB 1080p".to_string(),
+            release_title: "[Group] Show - 01 [WEB][1080p].mkv".to_string(),
+            release_group: "Group".to_string(),
+            file_name: "Show - S01E01.mkv".to_string(),
+            size_bytes: 1_234_567,
+            is_batch: false,
+            grabbed_at: "2026-04-24T00:00:00Z".to_string(),
+            state: "grabbed".to_string(),
+            client_content_path: "/downloads/Show - 01.mkv".to_string(),
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v["client_content_path"], "/downloads/Show - 01.mkv");
+        // The legacy field name must not re-appear as a shadow alias —
+        // there is only one wire key.
+        assert!(v.get("qbit_content_path").is_none());
     }
 }

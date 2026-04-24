@@ -605,7 +605,7 @@ pub async fn episode_download_progress(
                     &state.db,
                     LogCategory::QBit,
                     &format!(
-                        "Torrent removed in qBittorrent — reconciling '{}'",
+                        "Torrent removed in download client — reconciling '{}'",
                         grab.torrent_name
                     ),
                     &format!(
@@ -631,6 +631,7 @@ pub async fn episode_download_progress(
                 progress: t.progress,
                 speed: t.dlspeed,
                 state: t.state.clone(),
+                state_kind: t.state_kind,
             });
         }
     }
@@ -643,7 +644,14 @@ pub struct EpisodeProgress {
     pub episode: i32,
     pub progress: f64,
     pub speed: i64,
+    /// Client-native state string (qBit: `stalledUP`, Deluge: `Seeding`,
+    /// Transmission: numeric code, rtorrent: computed). Kept for debug
+    /// tooling; UI code should drive off `state_kind` for cross-client
+    /// consistency.
     pub state: String,
+    /// Normalized state slug from [`DownloadItemState`]. See its
+    /// rendered form in the Downloads page state badges.
+    pub state_kind: crate::services::download_client::DownloadItemState,
 }
 
 /// Returns the current episode state for a series as JSON.
@@ -913,5 +921,28 @@ mod tests {
         // (punted with the rest of the HTTP-backed provider
         // tests) or seeding the provider_metadata_cache table,
         // which is a separate plan item.
+
+        #[test]
+        fn episode_progress_wire_shape_carries_both_state_fields() {
+            // The series-page download-progress poller (series.js)
+            // keys off `state_kind` for the "Importing…" transition
+            // check (kind starts with "seeding" → torrent finished).
+            // The client-native `state` string is kept for debug
+            // tooling only. Regression for the PR that added
+            // state_kind: a silent `#[serde(skip)]` or rename would
+            // leave `isComplete` always false and the progress bar
+            // stuck at 100% forever.
+            let p = super::super::EpisodeProgress {
+                episode: 5,
+                progress: 1.0,
+                speed: 0,
+                state: "stalledUP".to_string(),
+                state_kind: crate::services::download_client::DownloadItemState::SeedingStalled,
+            };
+            let v = serde_json::to_value(&p).unwrap();
+            assert_eq!(v["episode"], 5);
+            assert_eq!(v["state"], "stalledUP");
+            assert_eq!(v["state_kind"], "seeding-stalled");
+        }
     }
 }

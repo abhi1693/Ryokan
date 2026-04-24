@@ -33,7 +33,7 @@ struct SeriesTemplate {
     /// Count of episodes whose file is present under `media_root`.
     /// Used by the delete-confirmation copy ("N episode files will
     /// be deleted from disk") — stays literal even when downloaded
-    /// but non-imported torrents exist in qBit's folder.
+    /// but non-imported torrents exist in the download client's folder.
     on_disk_count: i32,
     /// Count of episodes considered "downloaded" for the season badge.
     /// Matches `Episode.downloaded` — on-disk plus state=completed —
@@ -81,6 +81,11 @@ struct SeriesTemplate {
     /// and the completion checkmark, or to skip straight to the
     /// checkmark when post-proc is off (#14).
     post_processing_enabled: bool,
+    /// `grab_preview_mode` from config (`batches_only` or `never`).
+    /// Surfaced to the series page's interactive-search JS so batch
+    /// grabs can route through the file picker per #83, with the same
+    /// opt-out semantics as the main search page.
+    grab_preview_mode: String,
 }
 
 #[derive(Template)]
