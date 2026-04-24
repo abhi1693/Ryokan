@@ -231,8 +231,62 @@ where
     }
 }
 
+/// `--sanitize-db-for-debug` entrypoint. Copies the live DB to a
+/// sibling file with all tokens / passwords / session cookies / user
+/// password hashes blanked, then prints the destination path. Used
+/// by users preparing a DB dump for a bug report so they don't leak
+/// live credentials.
+///
+/// Defaults to operating on `data/ryokan.db` → `data/ryokan-sanitized.db`,
+/// matching the repo's gitignored `data/` convention. Respects
+/// `DATABASE_URL` only if it points at a plain file path (no HTTP /
+/// remote SQLite variants) — bugged-DB sharing only makes sense for
+/// the local file case.
+async fn run_sanitize_cli() {
+    let live = resolve_live_db_path();
+    let out = live.with_file_name(
+        live.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s}-sanitized.db"))
+            .unwrap_or_else(|| "ryokan-sanitized.db".to_string()),
+    );
+
+    match services::sanitize::run_sanitize(&live, &out).await {
+        Ok(summary) => {
+            println!("{summary}");
+        }
+        Err(e) => {
+            eprintln!("sanitize failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn resolve_live_db_path() -> std::path::PathBuf {
+    // Prefer DATABASE_URL when it's a plain sqlite file URL; otherwise
+    // the canonical default. Query strings (`?mode=rwc`) and the
+    // `sqlite://` prefix are stripped so the path handed to
+    // `std::fs::copy` is usable.
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        let without_scheme = url.strip_prefix("sqlite://").unwrap_or(&url);
+        let path_part = without_scheme.split('?').next().unwrap_or(without_scheme);
+        if !path_part.is_empty() {
+            return std::path::PathBuf::from(path_part);
+        }
+    }
+    std::path::PathBuf::from("data/ryokan.db")
+}
+
 #[tokio::main]
 async fn main() {
+    // One-shot CLI modes run BEFORE tracing init so their output isn't
+    // interleaved with startup log lines. Each mode exits the process
+    // on completion; falling through means "boot the server normally."
+    if std::env::args().any(|a| a == "--sanitize-db-for-debug") {
+        run_sanitize_cli().await;
+        std::process::exit(0);
+    }
+
     // Initialize tracing.
     tracing_subscriber::registry()
         .with(

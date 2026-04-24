@@ -6,6 +6,7 @@ pub mod kitsu;
 pub mod media;
 pub mod nyaa;
 pub mod oauth_state;
+pub mod sanitize;
 pub mod scoring;
 
 pub mod jellyfin;
