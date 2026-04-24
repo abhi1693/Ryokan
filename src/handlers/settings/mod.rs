@@ -242,6 +242,29 @@ pub struct JellyfinTestForm {
     jellyfin_api_key: String,
 }
 
+/// Resolve the `grab_preview_mode` value to persist on save.
+///
+/// The picker dropdown lives on the Integrations tab, so Integrations
+/// saves (and the rare no-tab POST) honor the form value, while saves
+/// from other tabs (Quality, Library, etc.) pass through the existing
+/// config value so they can't accidentally reset the picker. Unknown
+/// form values coerce to `batches_only` — the safe default that
+/// matches a fresh install.
+pub(crate) fn resolve_grab_preview_mode(
+    form_value: Option<&str>,
+    tab: Option<&str>,
+    existing: Option<&str>,
+) -> String {
+    if tab == Some("integrations") || tab.is_none() {
+        match form_value.unwrap_or("") {
+            "never" => "never".to_string(),
+            _ => "batches_only".to_string(),
+        }
+    } else {
+        existing.unwrap_or("batches_only").to_string()
+    }
+}
+
 fn normalize_settings_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
         Some("quality") => "quality".to_string(),
@@ -629,17 +652,11 @@ pub async fn settings_submit(
         // #83 — Interactive file-picker lives on the Integrations tab
         // alongside the other download-client knobs. Preserve on
         // other-tab saves. Unknown values coerce to `batches_only`.
-        grab_preview_mode: if form.tab.as_deref() == Some("integrations") || form.tab.is_none() {
-            match form.grab_preview_mode.as_deref().unwrap_or("") {
-                "never" => "never".to_string(),
-                _ => "batches_only".to_string(),
-            }
-        } else {
-            existing_cfg
-                .as_ref()
-                .map(|c| c.grab_preview_mode.clone())
-                .unwrap_or_else(|| "batches_only".to_string())
-        },
+        grab_preview_mode: resolve_grab_preview_mode(
+            form.grab_preview_mode.as_deref(),
+            form.tab.as_deref(),
+            existing_cfg.as_ref().map(|c| c.grab_preview_mode.as_str()),
+        ),
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());
@@ -1310,5 +1327,82 @@ mod tests {
         assert_eq!(extract_trash_description(&wrong_type), None);
 
         assert_eq!(extract_trash_description("not json at all"), None);
+    }
+
+    #[test]
+    fn resolve_grab_preview_mode_integrations_tab_accepts_form_value() {
+        // On the Integrations tab, the form value is the source of
+        // truth. "never" and "batches_only" both persist.
+        assert_eq!(
+            resolve_grab_preview_mode(Some("never"), Some("integrations"), Some("batches_only")),
+            "never"
+        );
+        assert_eq!(
+            resolve_grab_preview_mode(Some("batches_only"), Some("integrations"), Some("never")),
+            "batches_only"
+        );
+    }
+
+    #[test]
+    fn resolve_grab_preview_mode_unknown_form_value_coerces_to_default() {
+        // A garbage form value (hand-crafted POST, dropped `always`
+        // option from the plan doc, etc.) coerces to "batches_only"
+        // so the config can't end up in an unenumerated state.
+        assert_eq!(
+            resolve_grab_preview_mode(Some(""), Some("integrations"), Some("never")),
+            "batches_only"
+        );
+        assert_eq!(
+            resolve_grab_preview_mode(Some("always"), Some("integrations"), Some("never")),
+            "batches_only"
+        );
+        assert_eq!(
+            resolve_grab_preview_mode(None, Some("integrations"), Some("never")),
+            "batches_only"
+        );
+    }
+
+    #[test]
+    fn resolve_grab_preview_mode_other_tabs_preserve_existing() {
+        // A save from the Quality tab (or anywhere else) must not
+        // reset the picker. Critical — the same form shape is
+        // submitted from every tab and the picker field is simply
+        // omitted outside Integrations.
+        assert_eq!(
+            resolve_grab_preview_mode(None, Some("quality"), Some("never")),
+            "never"
+        );
+        assert_eq!(
+            resolve_grab_preview_mode(None, Some("groups"), Some("batches_only")),
+            "batches_only"
+        );
+        // A stray form value from a non-Integrations tab is ignored —
+        // only the existing value matters there.
+        assert_eq!(
+            resolve_grab_preview_mode(Some("never"), Some("library"), Some("batches_only")),
+            "batches_only"
+        );
+    }
+
+    #[test]
+    fn resolve_grab_preview_mode_missing_tab_uses_form_value() {
+        // No tab on the form = the no-tab POST shape; treat like
+        // Integrations so the field round-trips on a "save all" flow.
+        assert_eq!(
+            resolve_grab_preview_mode(Some("never"), None, Some("batches_only")),
+            "never"
+        );
+    }
+
+    #[test]
+    fn resolve_grab_preview_mode_missing_existing_defaults_to_batches_only() {
+        // Pre-PR-C DB rows never wrote the column; reads default to
+        // "batches_only" in the model layer, and the settings
+        // save path must do the same if the read path ever produces
+        // a missing value.
+        assert_eq!(
+            resolve_grab_preview_mode(None, Some("quality"), None),
+            "batches_only"
+        );
     }
 }

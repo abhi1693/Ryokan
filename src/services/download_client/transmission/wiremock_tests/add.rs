@@ -85,14 +85,24 @@ async fn add_torrent_sends_filename_labels_and_paused_flag() {
 }
 
 #[tokio::test]
-async fn add_torrent_paused_flips_paused_flag_to_true() {
+async fn add_torrent_paused_adds_running_then_marks_all_unwanted_and_stops() {
+    // Regression for the paused-add metadata quirk: Transmission's
+    // `paused: true` on `torrent-add` stops the peer handshake,
+    // which blocks libtorrent's metadata-exchange extension from
+    // running, so the modal's `get_files` poll hangs on an empty
+    // array forever. The impl works around this by adding running,
+    // waiting for the `files` array to populate, marking every
+    // index unwanted via `torrent-set` (the Transmission 4.x shape),
+    // then issuing `torrent-stop` — this test pins the sequence.
     let (server, client) = new_fixture().await;
+
+    // torrent-add must use paused=false so metadata exchange runs.
     Mock::given(method("POST"))
         .and(path("/transmission/rpc"))
         .and(header("x-transmission-session-id", TEST_SESSION_ID))
         .and(body_partial_json(json!({
             "method": "torrent-add",
-            "arguments": {"paused": true}
+            "arguments": {"paused": false},
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "result": "success",
@@ -102,6 +112,66 @@ async fn add_torrent_paused_flips_paused_flag_to_true() {
         .expect(1)
         .mount(&server)
         .await;
+
+    // Metadata poll: return a 2-file torrent so the loop exits on
+    // the first iteration.
+    install_rpc(
+        &server,
+        "torrent-get",
+        json!({
+            "torrents": [{
+                "hashString": HASH,
+                "files": [
+                    {"name": "release/file1.mkv", "length": 1_000_000, "bytesCompleted": 0},
+                    {"name": "release/file2.mkv", "length": 2_000_000, "bytesCompleted": 0},
+                ],
+                "fileStats": [
+                    {"wanted": true},
+                    {"wanted": true},
+                ],
+            }],
+        }),
+    )
+    .await;
+
+    // Mark every index unwanted. Transmission takes an array of
+    // indices, not a parallel boolean array.
+    Mock::given(method("POST"))
+        .and(path("/transmission/rpc"))
+        .and(header("x-transmission-session-id", TEST_SESSION_ID))
+        .and(body_partial_json(json!({
+            "method": "torrent-set",
+            "arguments": {
+                "ids": [HASH],
+                "files-unwanted": [0, 1],
+            },
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "result": "success",
+            "arguments": {},
+            "tag": 0,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // torrent-stop after unwanted flags are set.
+    Mock::given(method("POST"))
+        .and(path("/transmission/rpc"))
+        .and(header("x-transmission-session-id", TEST_SESSION_ID))
+        .and(body_partial_json(json!({
+            "method": "torrent-stop",
+            "arguments": {"ids": [HASH]},
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "result": "success",
+            "arguments": {},
+            "tag": 0,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
     client
         .add_torrent_paused(MAGNET, HASH)
         .await

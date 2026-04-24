@@ -457,7 +457,7 @@ pub async fn grab_release(
     path = "/api/torrents",
     tag = "Downloads",
     summary = "List active torrents",
-    description = "Returns all torrents currently in qBittorrent's queue.",
+    description = "Returns all torrents currently in the download client's queue.",
     responses(
         (status = 200, description = "Torrent list", body = Vec<crate::services::download_client::DownloadItem>),
         (status = 400, description = "Download client not configured"),

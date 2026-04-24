@@ -29,6 +29,10 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
         Scoring
     </a>
+    <a href="/system?tab=credits" class="system-tab {% if tab == "credits" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+        Credits
+    </a>
     <a href="/system?tab=debug" class="system-tab {% if tab == "debug" %}active{% endif %}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86l-7.5 13A2 2 0 004.53 20h14.94a2 2 0 001.74-3l-7.5-13a2 2 0 00-3.42 0z"/></svg>
         Debug
@@ -463,7 +467,59 @@
 
     <section class="help-section">
         <h3>Grabbing Releases</h3>
-        <p>Click the <strong>Grab</strong> button next to any result to send it to qBittorrent. The torrent will be added with your configured category. Make sure qBittorrent is running and the connection is configured in Settings.</p>
+        <p>Click the <strong>Grab</strong> button next to any result to send it to your download client. The torrent will be added with your configured scoping label (or category on qBittorrent). Make sure the client is running and the connection is configured in Settings.</p>
+    </section>
+</div>
+
+{% else if tab == "credits" %}
+<!-- Credits Tab — colophon-style attribution. Prose sections for the
+     single-entry items; a lede + roster hybrid for the metadata
+     section where cramming 4 providers into one paragraph read as
+     dense link-noise. -->
+<div class="credits-content">
+    <section class="credits-section">
+        <h3>Where the titles come from</h3>
+        <p>
+            Series identity, episode counts, airing status, titles in three languages, and the relationship graphs that let Ryokan follow a franchise through its sequels all come from <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">AniList</a>.
+        </p>
+        <p>
+            AniList gets rate-limited or goes down occasionally, and its per-episode titles (sourced from Crunchyroll) are brittle: on multi-season series they usually only surface for season one. Ryokan fills those gaps by calling <a href="https://myanimelist.net" target="_blank" rel="noopener noreferrer">MyAnimeList</a> through <a href="https://jikan.moe" target="_blank" rel="noopener noreferrer">Jikan</a>'s unofficial wrapper. <a href="https://kitsu.app" target="_blank" rel="noopener noreferrer">Kitsu</a> is only consulted when MAL also doesn't return titles for a given series.
+        </p>
+    </section>
+
+    <section class="credits-section">
+        <h3>Where the releases come from</h3>
+        <p>
+            Every search result comes from <a href="https://nyaa.si" target="_blank" rel="noopener noreferrer">Nyaa</a>, at least until torznab support ships. Public indexer, no gatekeeping, curated by community tags and the honor system.
+        </p>
+    </section>
+
+    <section class="credits-section">
+        <h3>The shortlist</h3>
+        <p>
+            <a href="https://releases.moe" target="_blank" rel="noopener noreferrer">SeaDex</a> is a community-maintained list of best-available anime releases, keyed by AniList ID. Ryokan reads it either as a score boost on matching releases, or as an opinionated "pick this group" rule via the <code>Ryokan.SeaDexBestSpecification</code> Custom Format. Without SeaDex there's no shortcut to good release groups, just scoring heuristics and whatever groups the user already trusts.
+        </p>
+    </section>
+
+    <section class="credits-section">
+        <h3>The mapping problem</h3>
+        <p>
+            Seerr and other *arr-shaped tools hand Ryokan requests keyed by TMDB. AniList doesn't speak TMDB. The bridge is <a href="https://github.com/anibridge/anibridge-mappings" target="_blank" rel="noopener noreferrer">anibridge-mappings</a>, a community-maintained dataset of TMDB ↔ TVDB ↔ AniList IDs that Ryokan caches locally and refreshes daily. MIT-licensed (<a href="/static/licenses/anibridge-mappings-LICENSE.txt" target="_blank" rel="noopener noreferrer">license text</a>).
+        </p>
+    </section>
+
+    <section class="credits-section">
+        <h3>Custom formats</h3>
+        <p>
+            On a fresh install, Ryokan ships 28 Custom Formats already baked in. They come from <a href="https://trash-guides.info" target="_blank" rel="noopener noreferrer">TRaSH Guides</a>, the de-facto quality-profile reference for the whole *arr ecosystem. You can edit them, delete them, or reset to defaults from Settings → Custom Formats. MIT-licensed (<a href="/static/licenses/trash-guides-LICENSE.txt" target="_blank" rel="noopener noreferrer">license text</a>).
+        </p>
+    </section>
+
+    <section class="credits-section">
+        <h3>Fonts used</h3>
+        <p>
+            The brand mark, page headers, and series titles are set in <a href="https://fonts.google.com/specimen/Murecho" target="_blank" rel="noopener noreferrer">Murecho</a>, a variable mincho-adjacent typeface by Positype. Self-hosted under <code>static/fonts/</code>, licensed <a href="/static/fonts/Murecho-OFL.txt" target="_blank" rel="noopener noreferrer">SIL Open Font License 1.1</a>.
+        </p>
     </section>
 </div>
 {% endif %}

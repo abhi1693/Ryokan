@@ -441,11 +441,77 @@ impl DownloadClient for DelugeClient {
     }
 
     async fn add_torrent_paused(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
-        // Deluge supports `add_paused=True` natively — metadata still
-        // arrives while paused, so no workaround is needed (unlike
-        // qBit 5.x). Callers that want to read the file list should
-        // poll `get_files` after this returns.
-        self.add_torrent_inner(url, info_hash, true).await
+        // Same leaky abstraction qBit 5.x has: Deluge's `add_paused=True`
+        // stops the peer handshake, which in turn prevents the
+        // libtorrent metadata-exchange extension from running — so a
+        // magnet added paused never fetches its `info` dict and
+        // `get_files` returns empty forever. The picker modal's
+        // readiness poll then hangs until the TTL sweep fires.
+        //
+        // Workaround mirrors the qBit impl: add running, wait for
+        // metadata up to the shared 10s budget, then mark every file
+        // as skipped so no content flows. The trait contract's
+        // post-condition ("no file data being downloaded") still
+        // holds; the only leak is that the torrent is technically
+        // active during metadata fetch, typically 1-3s for magnets
+        // with cached tracker responses.
+        if info_hash.is_empty() {
+            // Without a hash we can't poll per-torrent status, so
+            // fall back to the simple paused-add — the caller will
+            // hit the same empty `get_files` problem but at least
+            // we don't block here on a torrent we can't address.
+            return self.add_torrent_inner(url, info_hash, true).await;
+        }
+
+        let outcome = self.add_torrent_inner(url, info_hash, false).await?;
+        let hash_lc = info_hash.to_ascii_lowercase();
+
+        // Poll until the file list is populated. Deluge reports
+        // `files: []` until metadata arrives; we reuse the same
+        // signal `add_torrent_with_file_filter` does.
+        let start = Instant::now();
+        let mut delay = Duration::from_millis(500);
+        let file_count = loop {
+            let status: DelugeRawTorrent = serde_json::from_value(
+                self.connected_rpc("core.get_torrent_status", json!([hash_lc, ["files"]]))
+                    .await?,
+            )
+            .map_err(|e| format!("Deluge metadata-poll parse failed: {e}"))?;
+            if !status.files.is_empty() {
+                break status.files.len();
+            }
+            if start.elapsed() >= METADATA_WAIT_TIMEOUT {
+                // Same fallback as qBit's path: the torrent is left
+                // running with all files at default priority. The
+                // picker sees an empty file list, surfaces a timeout
+                // error to the user, and the sweep auto-commits
+                // everything on TTL. Matches "no path out of the
+                // modal causes the intended grab to be deleted."
+                return Ok(outcome);
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(2));
+        };
+
+        // Mark every file as skipped. `set_torrent_options` takes a
+        // full priority array sized to the file count.
+        let skip_all: Vec<i32> = vec![DELUGE_PRIO_SKIP; file_count];
+        let _: Value = self
+            .connected_rpc(
+                "core.set_torrent_options",
+                json!([[hash_lc.clone()], {"file_priorities": skip_all}]),
+            )
+            .await?;
+
+        // Pause after priorities land. At this point metadata is
+        // fetched and every file is marked skip, so a pause here
+        // can't regress into the "metadata never arrives" hole —
+        // the torrent can sit paused until the user confirms.
+        let _: Value = self
+            .connected_rpc("core.pause_torrent", json!([[hash_lc]]))
+            .await?;
+
+        Ok(outcome)
     }
 
     async fn add_torrent_with_file_filter(

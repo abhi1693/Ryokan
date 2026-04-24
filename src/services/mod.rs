@@ -12,6 +12,7 @@ pub mod auto_expand;
 pub mod auto_search;
 pub mod grab_commit;
 pub mod grab_sweep;
+pub mod interactive_search_cache;
 pub mod logger;
 pub mod progress;
 pub mod quality;

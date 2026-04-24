@@ -298,10 +298,69 @@ impl DownloadClient for TransmissionClient {
     }
 
     async fn add_torrent_paused(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
-        // Transmission supports `paused=true` on `torrent-add` natively,
-        // and metadata continues to flow while paused — no qBit-style
-        // workaround needed.
-        self.add_torrent_inner(url, info_hash, true).await
+        // Same leaky abstraction qBit 5.x and Deluge have: a torrent
+        // added with `paused=true` doesn't initiate peer handshakes,
+        // so libtorrent's metadata-exchange extension never runs and
+        // `files` stays empty. The picker modal's readiness poll hangs
+        // until the TTL sweep fires.
+        //
+        // Workaround mirrors qBit + Deluge: add running, wait for
+        // metadata up to the shared 10s budget, mark every file
+        // `files-unwanted` so no content flows, then `torrent-stop`.
+        // Trait post-condition ("no file data being downloaded") holds
+        // while metadata fetches; the torrent is technically active
+        // during the 1-3s fetch window for magnets with cached
+        // tracker responses.
+        if info_hash.is_empty() {
+            // No hash means we can't address the torrent for the
+            // post-add skip/stop calls. Fall back to native paused-add
+            // — the caller will hit the same empty-files problem but
+            // we don't block here on a torrent we can't target.
+            return self.add_torrent_inner(url, info_hash, true).await;
+        }
+
+        let outcome = self.add_torrent_inner(url, info_hash, false).await?;
+        let hash_lc = info_hash.to_ascii_lowercase();
+
+        // Poll until metadata arrives — `files` non-empty is the
+        // signal `add_torrent_with_file_filter` already uses. Don't
+        // gate on `metadataPercentComplete` alone; Transmission 4.x
+        // reports `1.0` as soon as the info dict lands, which is the
+        // same moment `files` becomes non-empty.
+        let start = Instant::now();
+        let mut delay = Duration::from_millis(500);
+        let file_count = loop {
+            let torrent = self.get_torrent(&hash_lc, &["files"]).await?;
+            if !torrent.files.is_empty() {
+                break torrent.files.len();
+            }
+            if start.elapsed() >= METADATA_WAIT_TIMEOUT {
+                // Leave running with defaults — matches the
+                // qBit/Deluge fallback: picker shows a timeout
+                // error, sweep auto-commits on TTL. No path
+                // silently deletes the user's intended grab.
+                return Ok(outcome);
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(2));
+        };
+
+        // Mark every file unwanted, then stop. `torrent-set` in
+        // Transmission 4.x accepts an array of indices, not a list
+        // of booleans.
+        let all_indices: Vec<usize> = (0..file_count).collect();
+        let _ = self
+            .send(
+                "torrent-set",
+                json!({
+                    "ids": [hash_lc.clone()],
+                    "files-unwanted": all_indices,
+                }),
+            )
+            .await?;
+        let _ = self.send("torrent-stop", json!({"ids": [hash_lc]})).await?;
+
+        Ok(outcome)
     }
 
     async fn add_torrent_with_file_filter(

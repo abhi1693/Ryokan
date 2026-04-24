@@ -73,6 +73,7 @@ fn normalize_system_tab(tab: Option<String>) -> String {
         Some("rss") => "rss".to_string(),
         Some("tasks") => "tasks".to_string(),
         Some("review") => "review".to_string(),
+        Some("credits") => "credits".to_string(),
         _ => "logs".to_string(),
     }
 }

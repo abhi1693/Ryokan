@@ -36,15 +36,24 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     overflow: hidden;
-    transition: border-color 0.15s, transform 0.15s;
+    transition:
+        border-color 0.2s ease-out,
+        transform 0.2s ease-out,
+        box-shadow 0.2s ease-out;
     text-decoration: none;
     color: var(--text);
 }
 
 .series-card:hover {
     border-color: var(--border-accent);
-    transform: translateY(-2px);
+    transform: translateY(-4px);
+    /* Mauve-tinted shadow ring on hover — matches the accent palette
+     * so the lift registers as more than a generic shadow. */
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35),
+                0 0 0 1px rgba(203, 166, 247, 0.18);
 }
+
+.series-card:hover .series-title { color: var(--accent); }
 
 .series-cover {
     position: relative;
@@ -52,6 +61,21 @@
     overflow: hidden;
     background: var(--bg-elevated);
 }
+
+/* Hover vignette — bottom band only. One linear gradient fading up
+ * from the bottom edge, leaving the rest of the cover clear. Reads
+ * like a film-still lower-third shadow. */
+.series-cover::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease-out;
+    background: linear-gradient(to top, rgba(15, 15, 19, 0.55) 0%, transparent 30%);
+}
+
+.series-card:hover .series-cover::after { opacity: 1; }
 
 .series-cover img {
     width: 100%;
@@ -82,6 +106,7 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
     margin-bottom: 6px;
+    transition: color 0.2s ease-out;
 }
 
 .series-meta {

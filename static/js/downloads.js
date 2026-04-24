@@ -22,25 +22,41 @@ function formatEta(seconds) {
     return s + 's';
 }
 
-function stateLabel(state) {
+// Keyed off the kebab-case `state_kind` slug from DownloadItemState,
+// so the same label/badge vocabulary renders consistently across
+// qBit, Deluge, Transmission, and rTorrent.
+//
+// A new Rust-side enum variant will serialize to a slug this map
+// doesn't know about. The server-side tests lock the slug contract
+// in place, but nothing forces the JS to stay in sync — so the
+// fallback logs a devtools warning instead of silently shipping
+// a raw kebab slug in the badge.
+function stateLabel(kind) {
     const map = {
-        'uploading': 'Seeding', 'stalledUP': 'Seeding', 'forcedUP': 'Seeding',
-        'downloading': 'Downloading', 'forcedDL': 'Downloading',
-        'stalledDL': 'Stalled',
-        'pausedDL': 'Paused', 'pausedUP': 'Paused',
-        'queuedDL': 'Queued', 'queuedUP': 'Queued',
-        'checkingDL': 'Checking', 'checkingUP': 'Checking',
-        'error': 'Error', 'missingFiles': 'Missing Files',
-        'moving': 'Moving', 'metaDL': 'Fetching metadata', 'allocating': 'Allocating',
+        'downloading': 'Downloading',
+        'downloading-stalled': 'Stalled',
+        'downloading-queued': 'Queued',
+        'checking-download': 'Checking',
+        'seeding': 'Seeding',
+        'seeding-stalled': 'Seeding',
+        'seeding-queued': 'Queued',
+        'checking-seed': 'Checking',
+        'paused': 'Paused',
+        'paused-complete': 'Paused',
+        'errored': 'Error',
     };
-    return map[state] || state;
+    if (map[kind] === undefined) {
+        console.warn('[downloads] unmapped state_kind slug:', kind);
+        return kind;
+    }
+    return map[kind];
 }
 
-function stateBadgeClass(state) {
-    if (['uploading', 'stalledUP', 'forcedUP', 'pausedUP'].includes(state)) return 'log-badge-info';
-    if (['downloading', 'forcedDL'].includes(state)) return 'log-badge-debug';
-    if (['pausedDL', 'queuedDL', 'queuedUP', 'stalledDL'].includes(state)) return 'log-badge-warn';
-    if (['error', 'missingFiles'].includes(state)) return 'log-badge-error';
+function stateBadgeClass(kind) {
+    if (['seeding', 'seeding-stalled', 'paused-complete'].includes(kind)) return 'log-badge-info';
+    if (kind === 'downloading') return 'log-badge-debug';
+    if (['downloading-stalled', 'downloading-queued', 'seeding-queued', 'paused'].includes(kind)) return 'log-badge-warn';
+    if (kind === 'errored') return 'log-badge-error';
     return '';
 }
 
@@ -57,9 +73,11 @@ function renderQueue(torrents) {
         container.innerHTML = '<div class="logs-empty">No active downloads.</div>';
         return;
     }
+    const isDownloadingKind = (k) => k === 'downloading' || k === 'downloading-stalled'
+        || k === 'downloading-queued' || k === 'checking-download';
     torrents.sort((a, b) => {
-        const aDown = a.state.includes('DL') || a.state === 'downloading' ? 0 : 1;
-        const bDown = b.state.includes('DL') || b.state === 'downloading' ? 0 : 1;
+        const aDown = isDownloadingKind(a.state_kind) ? 0 : 1;
+        const bDown = isDownloadingKind(b.state_kind) ? 0 : 1;
         if (aDown !== bDown) return aDown - bDown;
         return b.progress - a.progress;
     });
@@ -68,14 +86,14 @@ function renderQueue(torrents) {
     html += '</tr></thead><tbody>';
     for (const t of torrents) {
         const pct = (t.progress * 100).toFixed(1);
-        const isPaused = t.state.startsWith('paused');
+        const isPaused = t.state_kind === 'paused' || t.state_kind === 'paused-complete';
         html += `<tr data-hash="${escapeHtml(t.hash)}">`;
         html += `<td><div class="dl-torrent-name">${escapeHtml(t.name)}</div></td>`;
         html += `<td>${formatSize(t.size)}</td>`;
         html += `<td><div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div></td>`;
         html += `<td>${formatSpeed(t.dlspeed)}</td>`;
         html += `<td>${formatEta(t.eta)}</td>`;
-        html += `<td><span class="log-badge ${stateBadgeClass(t.state)}">${stateLabel(t.state)}</span></td>`;
+        html += `<td><span class="log-badge ${stateBadgeClass(t.state_kind)}">${stateLabel(t.state_kind)}</span></td>`;
         html += `<td class="dl-actions">`;
         if (isPaused) {
             html += `<button class="btn btn-ghost btn-sm" onclick="resumeTorrent('${escapeHtml(t.hash)}')" title="Resume"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>`;
@@ -114,7 +132,7 @@ function resumeTorrent(hash) {
 function deleteTorrent(hash) {
     window.ryokanConfirm({
         title: 'Remove torrent',
-        body: 'Remove this torrent from qBittorrent?',
+        body: 'Remove this torrent from the download client?',
         yesLabel: 'Remove',
         noLabel: 'Cancel',
         extras: [{id: 'deleteFiles', label: 'Also delete downloaded files', default: false}],

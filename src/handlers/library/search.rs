@@ -1305,6 +1305,16 @@ pub async fn interactive_search_episode(
     State(state): State<AppState>,
     Path((request_id, episode_number)): Path<(i64, i32)>,
 ) -> Result<Json<Vec<crate::services::nyaa::SearchResult>>, (axum::http::StatusCode, String)> {
+    // 5-minute TTL cache so rapid reloads of the picker modal during
+    // UI iteration don't hammer Nyaa. Scope-limited to interactive
+    // search only; auto-search / RSS / manual grabs still go direct.
+    let cache_key = (request_id, Some(episode_number));
+    if let Some(cached) =
+        crate::services::interactive_search_cache::get(&state.interactive_search_cache, cache_key)
+    {
+        return Ok(Json((*cached).clone()));
+    }
+
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
@@ -1330,6 +1340,11 @@ pub async fn interactive_search_episode(
     // and VCB-Studio as BluRay when the filename alone is silent.
     crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
 
+    crate::services::interactive_search_cache::insert(
+        &state.interactive_search_cache,
+        cache_key,
+        results.clone(),
+    );
     Ok(Json(results))
 }
 
@@ -1356,6 +1371,15 @@ pub async fn interactive_search_batches(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
 ) -> Result<Json<Vec<crate::services::nyaa::SearchResult>>, (axum::http::StatusCode, String)> {
+    // 5-minute TTL cache — see interactive_search_episode for rationale.
+    // `None` episode slot distinguishes batch from per-episode.
+    let cache_key = (request_id, None);
+    if let Some(cached) =
+        crate::services::interactive_search_cache::get(&state.interactive_search_cache, cache_key)
+    {
+        return Ok(Json((*cached).clone()));
+    }
+
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
@@ -1378,6 +1402,11 @@ pub async fn interactive_search_batches(
 
     crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
 
+    crate::services::interactive_search_cache::insert(
+        &state.interactive_search_cache,
+        cache_key,
+        results.clone(),
+    );
     Ok(Json(results))
 }
 

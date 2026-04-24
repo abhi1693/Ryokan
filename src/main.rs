@@ -361,6 +361,7 @@ async fn main() {
         custom_formats: cf_cache,
         progress: ProgressRegistry::new(),
         users_exist,
+        interactive_search_cache: services::interactive_search_cache::new(),
     };
 
     // Initialize download client from saved config. Branches on

@@ -486,7 +486,11 @@
                     body: `${session.wanted.size} of ${session.files.length} files queued`,
                 });
             }
+            const onConfirm = session && session.onConfirm;
             closeModal();
+            if (typeof onConfirm === 'function') {
+                try { onConfirm(data); } catch (e) { console.error('[grab-picker] onConfirm threw:', e); }
+            }
         })
         .catch(err => {
             if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm'; }
@@ -561,6 +565,7 @@
                 view: 'flat',
                 pollTimer: null,
                 heartbeatTimer: null,
+                onConfirm: typeof ctx.onConfirm === 'function' ? ctx.onConfirm : null,
             };
             // Heartbeat immediately so a slow-metadata case doesn't
             // trip the TTL sweep before the first 30s interval fires.

@@ -339,46 +339,45 @@ impl DownloadClient for RtorrentClient {
         Ok(AddOutcome::Added)
     }
 
-    /// Add a torrent and immediately pause it. rtorrent has no native
-    /// `add_paused` flag — post-load commands passed to
-    /// `load.start_verbose` race the session-level auto-start
-    /// scheduler and a post-command `d.pause` sometimes doesn't stick
-    /// (the test helper at the bottom of this file documents the same
-    /// race for the raw-bytes variant). Instead: do the regular
-    /// `add_torrent` + wait until the hash appears in `d.multicall2`,
-    /// then `d.pause` from the outside.
+    /// Add a torrent for the interactive file picker. rtorrent's
+    /// `d.pause` is a soft flag — it lowers upload rates but doesn't
+    /// fully stop peer communication, so a torrent that's paused
+    /// immediately after load can still be fetching chunks by the
+    /// time the user opens the picker modal. The contract the picker
+    /// relies on ("no file data is being downloaded until confirm")
+    /// breaks.
     ///
-    /// Metadata continues to arrive via DHT while `d.pause` is in
-    /// effect — `base_path` still populates once peers deliver the
-    /// `info` dict — so callers can poll `get_files` after this
-    /// returns the same way they would on Deluge / Transmission.
+    /// Workaround mirrors qBit / Deluge / Transmission: add running,
+    /// wait for metadata via the `base_path` `.meta`-sentinel signal,
+    /// set every file's priority to 0 (skip) + mandatory
+    /// `d.update_priorities` flush, then pause. Every file at priority
+    /// 0 means no chunks flow regardless of what pause means; pausing
+    /// afterward just stops the peer churn while the user deliberates.
     async fn add_torrent_paused(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
         let outcome = self.add_torrent(url, info_hash).await?;
 
         if info_hash.is_empty() {
-            // No pre-computed hash → can't address the pause call.
+            // No pre-computed hash → can't address the post-add calls.
             // Caller gets back the Added/AlreadyPresent outcome but
-            // the torrent may be running. Upstream validation
-            // normally ensures info_hash is set for paused adds, but
-            // fall through gracefully rather than hard-failing.
+            // the torrent may be running. Upstream validation normally
+            // ensures info_hash is set for paused adds, but fall
+            // through gracefully rather than hard-failing.
             return Ok(outcome);
         }
 
-        // Don't pause a pre-existing torrent. If the user already
-        // has this release running from a prior grab, pausing it
-        // out from under them is destructive — the handler is
-        // responsible for surfacing the existing state to the modal
-        // instead (same-hash dedup flow, plan decision #6).
+        // Don't touch a pre-existing torrent. If the user already has
+        // this release running from a prior grab, blanket-skipping
+        // all its files out from under them is destructive — the
+        // handler is responsible for surfacing the existing state to
+        // the modal instead (same-hash dedup flow, plan decision #6).
         if outcome == AddOutcome::AlreadyPresent {
             return Ok(outcome);
         }
 
-        // Small settle loop: wait until the hash is visible in the
-        // session before calling `d.pause`. `load.start_verbose`
-        // returns before rtorrent finishes registering the torrent;
-        // pausing too early returns "No such download" on some
-        // versions. Budget 2s — if rtorrent hasn't registered the
-        // torrent in 2s the add has genuinely failed.
+        // Small settle loop: wait until the hash appears in
+        // `d.multicall2`. `load.start_verbose` returns before rtorrent
+        // finishes registering the torrent; subsequent commands
+        // return "No such download" on some versions. Budget 2s.
         let hash_uc = info_hash.to_ascii_uppercase();
         let start = Instant::now();
         let mut delay = Duration::from_millis(100);
@@ -395,14 +394,64 @@ impl DownloadClient for RtorrentClient {
                 }
             }
             if start.elapsed() >= Duration::from_secs(2) {
-                // Torrent never registered — fall through and let
-                // the caller see `Added` or `AlreadyPresent` without
-                // the pause. They can retry or surface the error.
                 return Ok(outcome);
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_millis(500));
         }
+
+        // Poll for metadata. `file_list` is the raw `f.multicall`
+        // helper and returns the `<HASH>.meta` placeholder (size 1)
+        // during metadata fetch — `files.is_empty()` is NOT a
+        // sufficient "not ready" signal because the placeholder
+        // satisfies it. The `.meta` filter on the trait-level
+        // `get_files` is a separate layer and doesn't fire here.
+        // Require at least one non-`.meta` entry; rtorrent's
+        // metadata-pending and metadata-arrived states are mutually
+        // exclusive, so one real file means the whole list is real.
+        let metadata_start = Instant::now();
+        let mut metadata_delay = Duration::from_millis(500);
+        let file_count = loop {
+            match self.file_list(info_hash).await {
+                Ok(files) if files.iter().any(|f| !f.path.ends_with(".meta")) => {
+                    break files.len();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        target: "ryokan::download_client::rtorrent",
+                        error = %e,
+                        "file_list poll failed during paused-add metadata wait"
+                    );
+                }
+            }
+            if metadata_start.elapsed() >= METADATA_WAIT_TIMEOUT {
+                // Timeout fallback matches the other impls: try to
+                // pause the still-metadata-less torrent and return
+                // Added. Picker modal will surface an error on its
+                // polling loop; the sweep auto-commits on TTL.
+                let _ = self.pause(info_hash).await;
+                return Ok(outcome);
+            }
+            tokio::time::sleep(metadata_delay).await;
+            metadata_delay = (metadata_delay * 2).min(Duration::from_secs(2));
+        };
+
+        // Skip every file. Mandatory `d.update_priorities` flush or
+        // the writes don't take effect — the single biggest rtorrent
+        // gotcha this impl exists to paper over.
+        for i in 0..file_count {
+            self.call(
+                "f.priority.set",
+                &[
+                    XmlValue::String(format!("{hash_uc}:f{i}")),
+                    XmlValue::Int(0),
+                ],
+            )
+            .await?;
+        }
+        self.call("d.update_priorities", &[XmlValue::String(hash_uc)])
+            .await?;
 
         self.pause(info_hash).await?;
         Ok(outcome)
@@ -590,6 +639,14 @@ impl DownloadClient for RtorrentClient {
         let files = self.file_list(info_hash).await?;
         Ok(files
             .into_iter()
+            // During metadata fetch rtorrent exposes a single
+            // `<UPPERCASE-HASH>.meta` placeholder (size 1) before the
+            // real file list arrives. The `DownloadClient` trait
+            // contract says an empty `get_files` = metadata not ready,
+            // so filter the placeholder out or the preview endpoint
+            // flips to `status: ready` with one fake file and the
+            // picker modal renders a checkbox next to a .meta stub.
+            .filter(|f| !f.path.ends_with(".meta"))
             .map(|f| {
                 let progress = if f.size_chunks > 0 {
                     (f.completed_chunks as f64 / f.size_chunks as f64).clamp(0.0, 1.0)
