@@ -561,3 +561,165 @@ function refreshJellyfin(btn) {
         ev.returnValue = '';
     });
 })();
+
+// ── External Accounts (AL / MAL, issue #62 PR A) ──────────────────────
+//
+// Three interactions on the Settings → Integrations → External
+// Accounts card:
+//
+//   1. `startExternalAccountLink(provider)` — opens the provider's
+//      OAuth authorize page in a new tab via Ryokan's /start endpoint
+//      (which redirects), then shows a paste-modal for the user to
+//      return to once they have a token/code from the broker page.
+//   2. `saveExternalAccountPrefs()` — fires on any checkbox change
+//      in the linked-state panel; POSTs the whole preference set so
+//      the sync task's next tick picks it up without a full form save.
+//   3. `unlinkExternalAccount()` — confirmation + POST /settings/
+//      oauth/unlink + reload.
+//
+// The paste-modal is built inline to avoid yet another templates/
+// partials/ file for what's essentially a single-field prompt.
+
+function startExternalAccountLink(provider) {
+    // Open the OAuth authorize flow in a new tab so the Settings
+    // page stays loaded behind it — the user will paste their
+    // token/code into the modal here after they finish approving
+    // on AniList / MyAnimeList.
+    window.open(`/settings/oauth/${provider}/start`, '_blank', 'noopener');
+    openExternalAccountPasteModal(provider);
+}
+
+function openExternalAccountPasteModal(provider) {
+    const isAnilist = provider === 'anilist';
+    const providerLabel = isAnilist ? 'AniList' : 'MyAnimeList';
+    const fieldLabel = isAnilist ? 'Access token' : 'Authorization code';
+    const hint = isAnilist
+        ? 'Copy the <strong>access token</strong> displayed on the AniList callback page and paste it below.'
+        : 'Copy the <strong>authorization code</strong> displayed on the MyAnimeList callback page and paste it below.';
+
+    let modal = document.getElementById('ext-accounts-paste-modal');
+    if (modal) modal.remove();
+    modal = document.createElement('div');
+    modal.id = 'ext-accounts-paste-modal';
+    modal.className = 'modal-backdrop';
+    modal.style.display = 'flex';
+    modal.innerHTML = `
+        <div class="modal" role="dialog" aria-modal="true" style="max-width:480px">
+            <div class="modal-header">
+                <div style="font-weight:600;font-size:15px">Link ${providerLabel}</div>
+                <button type="button" class="btn-icon" aria-label="Close" onclick="closeExternalAccountPasteModal()">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding:18px">
+                <p class="form-hint" style="margin-top:0">${hint}</p>
+                <div class="form-group">
+                    <label for="ext-accounts-paste-value">${fieldLabel}</label>
+                    <textarea id="ext-accounts-paste-value" rows="3" style="width:100%;font-family:monospace;font-size:12px"></textarea>
+                </div>
+                <div id="ext-accounts-paste-error" class="form-hint" style="color:var(--red);display:none"></div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+                    <button type="button" class="btn btn-secondary" onclick="closeExternalAccountPasteModal()">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="ext-accounts-paste-submit"
+                        onclick="submitExternalAccountPaste('${provider}')">Link</button>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    setTimeout(() => {
+        const input = document.getElementById('ext-accounts-paste-value');
+        if (input) input.focus();
+    }, 0);
+}
+
+function closeExternalAccountPasteModal() {
+    const modal = document.getElementById('ext-accounts-paste-modal');
+    if (modal) modal.remove();
+}
+
+function submitExternalAccountPaste(provider) {
+    const input = document.getElementById('ext-accounts-paste-value');
+    const err = document.getElementById('ext-accounts-paste-error');
+    const btn = document.getElementById('ext-accounts-paste-submit');
+    const value = (input && input.value || '').trim();
+    if (!value) {
+        if (err) { err.textContent = 'Paste the value from the callback page.'; err.style.display = ''; }
+        return;
+    }
+    if (err) err.style.display = 'none';
+    if (btn) { btn.disabled = true; btn.textContent = 'Linking…'; }
+
+    const body = provider === 'anilist' ? { access_token: value } : { code: value };
+    fetch(`/settings/oauth/${provider}/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    })
+    .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || data.message || `Link failed (${r.status})`);
+        return data;
+    })
+    .then(() => {
+        closeExternalAccountPasteModal();
+        window.location.reload();
+    })
+    .catch((e) => {
+        if (err) {
+            err.textContent = e && e.message ? e.message : 'Link failed';
+            err.style.display = '';
+        }
+        if (btn) { btn.disabled = false; btn.textContent = 'Link'; }
+    });
+}
+
+function unlinkExternalAccount() {
+    if (!window.ryokanConfirm) {
+        // Fallback to native confirm if the shared helper isn't loaded.
+        if (!confirm('Unlink this external account? Imported series stay in your library; user scores and custom-list memberships are cleared.')) {
+            return;
+        }
+        return unlinkExternalAccountConfirmed();
+    }
+    window.ryokanConfirm({
+        title: 'Unlink external account',
+        body: 'Imported series stay in your library. User scores and custom-list memberships are cleared. Re-link to restore them.',
+        yesLabel: 'Unlink',
+        noLabel: 'Cancel',
+    }).then((res) => {
+        if (res && res.ok) unlinkExternalAccountConfirmed();
+    });
+}
+
+function unlinkExternalAccountConfirmed() {
+    fetch('/settings/oauth/unlink', { method: 'POST' })
+        .then((r) => r.json().catch(() => ({})))
+        .then(() => window.location.reload())
+        .catch((e) => console.error('[ext-accounts] unlink failed:', e));
+}
+
+let _extPrefsSaveTimer = null;
+function saveExternalAccountPrefs() {
+    // Debounce so the user toggling three checkboxes in a row doesn't
+    // fire three POSTs back-to-back.
+    if (_extPrefsSaveTimer) clearTimeout(_extPrefsSaveTimer);
+    _extPrefsSaveTimer = setTimeout(() => {
+        const read = (key) => {
+            const el = document.querySelector(`[data-ext-pref="${key}"]`);
+            return el ? el.checked : false;
+        };
+        fetch('/settings/oauth/preferences', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                import_watching: read('import_watching'),
+                import_planning: read('import_planning'),
+                import_paused: read('import_paused'),
+                import_dropped: read('import_dropped'),
+                import_completed: read('import_completed'),
+                skip_already_watched: read('skip_already_watched'),
+            }),
+        })
+        .then((r) => { if (!r.ok) console.error('[ext-accounts] prefs save failed:', r.status); });
+    }, 250);
+}

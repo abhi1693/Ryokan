@@ -582,6 +582,10 @@ async fn main() {
             "/settings/oauth/mal/submit",
             post(handlers::oauth::mal_submit),
         )
+        .route(
+            "/settings/oauth/preferences",
+            post(handlers::oauth::update_preferences),
+        )
         .route("/settings/oauth/unlink", post(handlers::oauth::unlink))
         .route(
             "/settings/groups",

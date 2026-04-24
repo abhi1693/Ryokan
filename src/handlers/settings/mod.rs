@@ -128,6 +128,51 @@ struct SettingsTemplate {
     message: Option<String>,
     error: Option<String>,
     version: &'static str,
+    /// Issue #62 PR A — currently-linked AL or MAL account, if any.
+    /// `None` renders the paired Link buttons; `Some(view)` renders
+    /// the linked-state card with username, preferences checkboxes,
+    /// and Unlink button. The view deliberately excludes tokens —
+    /// plaintext tokens exist only in memory during outbound API
+    /// calls, never in a rendered page.
+    external_account: Option<ExternalAccountView>,
+}
+
+/// Safe-to-render projection of `ExternalAccount`. Holds everything
+/// the Settings → External Accounts card needs and drops the
+/// plaintext token strings.
+pub(crate) struct ExternalAccountView {
+    pub provider: String,
+    pub provider_label: &'static str,
+    pub username: String,
+    pub score_format: String,
+    pub import_watching: bool,
+    pub import_planning: bool,
+    pub import_paused: bool,
+    pub import_dropped: bool,
+    pub import_completed: bool,
+    pub skip_already_watched: bool,
+}
+
+impl ExternalAccountView {
+    pub(crate) fn from_model(a: crate::models::external_accounts::ExternalAccount) -> Self {
+        let provider_label = match a.provider.as_str() {
+            crate::models::external_accounts::PROVIDER_ANILIST => "AniList",
+            crate::models::external_accounts::PROVIDER_MAL => "MyAnimeList",
+            _ => "External",
+        };
+        Self {
+            provider: a.provider,
+            provider_label,
+            username: a.username,
+            score_format: a.score_format,
+            import_watching: a.import_watching,
+            import_planning: a.import_planning,
+            import_paused: a.import_paused,
+            import_dropped: a.import_dropped,
+            import_completed: a.import_completed,
+            skip_already_watched: a.skip_already_watched,
+        }
+    }
 }
 
 fn min_score_display(score: i32) -> String {
@@ -387,17 +432,27 @@ async fn build_settings_template(
     err: Option<String>,
     import_review: Option<ImportReviewView>,
 ) -> SettingsTemplate {
-    // Fan out the four independent lookups — config row, release-group
-    // table, suggestion panel, custom-format list — in parallel. The old
-    // code issued them sequentially so the wall time was the sum of four
-    // round trips even though none depends on the others.
-    let (cfg_res, groups, suggestions, custom_formats) = tokio::join!(
+    // Fan out the five independent lookups — config row, release-group
+    // table, suggestion panel, custom-format list, linked external
+    // account — in parallel. The old code issued them sequentially so
+    // the wall time was the sum of N round trips even though none
+    // depends on the others.
+    let (cfg_res, groups, suggestions, custom_formats, external_account_res) = tokio::join!(
         config::get_config(&state.db),
         load_groups(&state.db),
         load_suggestions(&state.db),
         load_custom_formats_view(&state.db),
+        crate::models::external_accounts::get_current(&state.db),
     );
     let cfg = cfg_res.ok().flatten().unwrap_or_default();
+    // A decrypt failure (tampered blob, key rotation without migration)
+    // surfaces here as `Err` — treat as "nothing linked" for render
+    // and rely on System → Logs to show the real error. The UI path
+    // should never 500 just because the crypto layer hit a snag.
+    let external_account = external_account_res
+        .ok()
+        .flatten()
+        .map(ExternalAccountView::from_model);
 
     // Prefill the CF edit form only when the query param points at a row
     // that actually exists — stale edit links just fall through to the
@@ -431,6 +486,7 @@ async fn build_settings_template(
         message: msg,
         error: err,
         version: env!("CARGO_PKG_VERSION"),
+        external_account,
     }
 }
 
@@ -672,6 +728,11 @@ pub async fn settings_submit(
         let groups = load_groups(&state.db).await;
         let suggestions = load_suggestions(&state.db).await;
         let custom_formats = load_custom_formats_view(&state.db).await;
+        let external_account = crate::models::external_accounts::get_current(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(ExternalAccountView::from_model);
         let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
         let template = SettingsTemplate {
             page: "settings".to_string(),
@@ -686,6 +747,7 @@ pub async fn settings_submit(
             message: None,
             error: Some(format!("Failed to save: {}", e)),
             version: env!("CARGO_PKG_VERSION"),
+            external_account,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -981,6 +1043,11 @@ pub async fn settings_submit(
     let groups = load_groups(&state.db).await;
     let suggestions = load_suggestions(&state.db).await;
     let custom_formats = load_custom_formats_view(&state.db).await;
+    let external_account = crate::models::external_accounts::get_current(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(ExternalAccountView::from_model);
     let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
     let template = SettingsTemplate {
         page: "settings".to_string(),
@@ -1000,6 +1067,7 @@ pub async fn settings_submit(
         message: Some(notices.join(" ")),
         error: None,
         version: env!("CARGO_PKG_VERSION"),
+        external_account,
     };
     Html(template.render().unwrap_or_default())
 }

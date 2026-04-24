@@ -255,6 +255,48 @@ pub async fn mal_submit(
 
 // ── Shared unlink ────────────────────────────────────────────────────
 
+/// Update per-list import preferences on the currently-linked
+/// account. Settings → External Accounts auto-saves checkbox changes
+/// via this endpoint so the sync task's next tick picks them up
+/// without a full settings-form submit.
+#[derive(Deserialize)]
+pub struct PreferencesForm {
+    pub import_watching: bool,
+    pub import_planning: bool,
+    pub import_paused: bool,
+    pub import_dropped: bool,
+    pub import_completed: bool,
+    pub skip_already_watched: bool,
+}
+
+pub async fn update_preferences(
+    State(state): State<AppState>,
+    Json(form): Json<PreferencesForm>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let account = external_accounts::get_current(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "No external account is linked.".into(),
+        ))?;
+    external_accounts::update_preferences(
+        &state.db,
+        account.id,
+        external_accounts::ImportPreferences {
+            import_watching: form.import_watching,
+            import_planning: form.import_planning,
+            import_paused: form.import_paused,
+            import_dropped: form.import_dropped,
+            import_completed: form.import_completed,
+            skip_already_watched: form.skip_already_watched,
+        },
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 pub async fn unlink(State(state): State<AppState>) -> impl IntoResponse {
     let current = external_accounts::get_current(&state.db).await;
     match current {
