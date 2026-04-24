@@ -203,15 +203,17 @@ function grabRelease(url, btn) {
     const row = btn.closest('tr[data-score]') || btn.closest('.result-card');
     const isBatch = !!(row && row.classList.contains('is-batch'));
 
-    // Issue #83 PR B — batch releases open the interactive file
-    // picker. Single-file releases keep the direct /api/grab path
-    // (no files to pick). `grab_preview_mode` is the long-term toggle
-    // (plan decision plan docs) but lands server-side in PR C; for
-    // now the batch-vs-single split is the whole routing decision.
-    // When the picker isn't available on this page (no modal DOM,
-    // no info_hash on the row), fall through to the direct grab so
-    // the button keeps working.
+    // Issue #83 — batch releases open the interactive file picker
+    // unless the user's `grab_preview_mode` config is `never`, in
+    // which case the Grab button takes the direct /api/grab path
+    // for 1.3.0-style one-click behavior. Single-file releases
+    // always bypass the picker (nothing to pick). If the picker
+    // isn't available on this page (no modal DOM, no info_hash
+    // on the row), fall through to the direct grab so the button
+    // keeps working.
+    const previewMode = (window.searchState && window.searchState.grabPreviewMode) || 'batches_only';
     const canPicker = isBatch
+        && previewMode !== 'never'
         && typeof window.openGrabPicker === 'function'
         && row && row.dataset.infoHash;
     if (canPicker) {

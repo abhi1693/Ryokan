@@ -143,6 +143,7 @@ window.searchState = {
     hasMore: {% if searched %}{{ has_next }}{% else %}false{% endif %},
     totalResults: {% if searched %}{{ results.len() }}{% else %}0{% endif %},
     searched: {{ searched }},
+    grabPreviewMode: "{{ grab_preview_mode }}",
 };
 </script>
 <script src="/static/js/grab_picker.js" defer></script>
