@@ -3,17 +3,26 @@
 //!
 //! `LOGIN_FAILURES` is a process-global `Mutex<HashMap<String, _>>`.
 //! Parallel tests can safely share it as long as each test uses its
-//! own unique key namespace — the keys are strings, buckets are
-//! created on demand, and mutations to different keys don't affect
-//! each other. Every test here derives its keys from the test
-//! function name so concurrent runs don't interleave.
+//! own unique key namespace for the MUTATIONS — the keys are
+//! strings, buckets are created on demand, and per-key operations
+//! don't affect other keys.
 //!
-//! For tests that care about "no prior state," a local call to
-//! `reset_login_failures_for_test()` wipes the map; that's
-//! process-wide so only use it when nothing else should race —
-//! currently the empty-state tests guard against a prior-test
-//! leak by inspecting their own key rather than by resetting.
+//! The one wrinkle: `sweep_login_failures()` iterates EVERY bucket
+//! in the map and prunes stale entries regardless of key. So any
+//! test that calls `sweep_login_failures()` races against other
+//! concurrent tests that happen to hold stale entries in their own
+//! buckets mid-setup. Observed in CI (2026-04-24) on the dev branch
+//! where `sweep_login_failures_drops_buckets_that_fully_expire`
+//! running in parallel swept the partial-buckets test's stale entry
+//! between its two `seed_login_failure_for_test` calls, making its
+//! post-seed count assertion fail with 1 instead of 2.
+//!
+//! Fix: `SWEEP_TEST_LOCK`. Every test that either calls sweep OR
+//! seeds a stale-time-stamped entry acquires this lock for its
+//! duration. Tests that only touch fresh entries / their own
+//! record-count paths still run in parallel.
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::handlers::auth::{
@@ -21,6 +30,13 @@ use crate::handlers::auth::{
     login_failure_count_for_test, login_record_failure, seed_login_failure_for_test,
     sweep_login_failures,
 };
+
+/// Serializes tests that touch sweep-visible state (stale entries or
+/// `sweep_login_failures()` calls). See module docstring for the CI
+/// race that motivated this. `unwrap_or_else(|p| p.into_inner())`
+/// recovers from a prior test's panic so one failure doesn't poison
+/// the lock for every subsequent run.
+static SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 // ─── login_check tier thresholds ───────────────────────────────────
 
@@ -127,6 +143,7 @@ fn clearing_one_key_does_not_clear_another() {
 
 #[test]
 fn login_check_prunes_entries_older_than_the_window() {
+    let _guard = SWEEP_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let key = "test:login_check_prunes_entries_older_than_the_window";
     // Seed a failure at "60s + 1ms ago" — past the cutoff.
     let stale = Instant::now() - LOGIN_WINDOW - Duration::from_millis(1);
@@ -157,6 +174,7 @@ fn login_check_keeps_entries_inside_the_window() {
 
 #[test]
 fn sweep_login_failures_drops_buckets_that_fully_expire() {
+    let _guard = SWEEP_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let key = "test:sweep_login_failures_drops_buckets_that_fully_expire";
     let stale = Instant::now() - LOGIN_WINDOW - Duration::from_millis(1);
     seed_login_failure_for_test(key, stale);
@@ -172,6 +190,7 @@ fn sweep_login_failures_drops_buckets_that_fully_expire() {
 
 #[test]
 fn sweep_login_failures_preserves_partial_buckets() {
+    let _guard = SWEEP_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let key = "test:sweep_login_failures_preserves_partial_buckets";
     let stale = Instant::now() - LOGIN_WINDOW - Duration::from_millis(1);
     let fresh = Instant::now() - Duration::from_secs(10);
