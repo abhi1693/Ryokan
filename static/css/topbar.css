@@ -18,11 +18,32 @@
     border-bottom: 1px solid var(--border);
 }
 
+/* Two-span brand mark: 旅館 at Murecho 500 + Ryokan at Murecho 600,
+ * both tracked (0.08em kanji, 0.05em Latin). Mixed case, inline.
+ * The kanji and Latin halves each live in a dedicated span so the
+ * weight + tracking can diverge without the whole mark inheriting
+ * one set of values. Baseline-aligned via inline-flex. */
 .nav-brand {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: var(--font-display);
     font-size: 18px;
-    font-weight: 700;
     color: var(--text-bright);
     text-decoration: none;
+    line-height: 1;
+}
+
+.nav-brand .brand-kanji {
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    line-height: 1;
+}
+
+.nav-brand .brand-latin {
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    line-height: 1;
 }
 
 .nav-links {

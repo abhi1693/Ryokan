@@ -200,10 +200,12 @@
 }
 
 .detail-title {
+    font-family: var(--font-display);
     font-size: 26px;
-    font-weight: 700;
+    font-weight: 800;
+    letter-spacing: -0.015em;
     color: var(--text-bright);
-    line-height: 1.2;
+    line-height: 1.15;
 }
 
 .detail-subtitle {
