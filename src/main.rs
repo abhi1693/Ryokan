@@ -362,6 +362,7 @@ async fn main() {
         progress: ProgressRegistry::new(),
         users_exist,
         interactive_search_cache: services::interactive_search_cache::new(),
+        oauth_state: services::oauth_state::new(),
     };
 
     // Initialize download client from saved config. Branches on
@@ -564,6 +565,24 @@ async fn main() {
             "/settings",
             get(handlers::settings::settings_page).post(handlers::settings::settings_submit),
         )
+        // Issue #62 PR A: AL + MAL OAuth endpoints. `start` GETs
+        // redirect the user to the provider; `submit` POSTs accept
+        // the pasted token/code, validate, and persist via
+        // `external_accounts::link`. `unlink` drops the current row.
+        .route(
+            "/settings/oauth/anilist/start",
+            get(handlers::oauth::anilist_start),
+        )
+        .route(
+            "/settings/oauth/anilist/submit",
+            post(handlers::oauth::anilist_submit),
+        )
+        .route("/settings/oauth/mal/start", get(handlers::oauth::mal_start))
+        .route(
+            "/settings/oauth/mal/submit",
+            post(handlers::oauth::mal_submit),
+        )
+        .route("/settings/oauth/unlink", post(handlers::oauth::unlink))
         .route(
             "/settings/groups",
             post(handlers::settings::settings_groups_upsert),

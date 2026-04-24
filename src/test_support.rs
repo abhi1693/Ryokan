@@ -76,6 +76,7 @@ pub fn build_test_app_state(
         progress: ProgressRegistry::new(),
         users_exist: Arc::new(AtomicBool::new(true)),
         interactive_search_cache: crate::services::interactive_search_cache::new(),
+        oauth_state: crate::services::oauth_state::new(),
     }
 }
 

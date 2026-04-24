@@ -53,7 +53,7 @@ use tokio::sync::RwLock;
 use services::{
     custom_formats::CompiledCfCache, download_client::DownloadClient,
     interactive_search_cache::InteractiveSearchCache, jellyfin::JellyfinClient,
-    progress::ProgressRegistry,
+    oauth_state::OAuthStateStore, progress::ProgressRegistry,
 };
 
 /// Shared application state available to all handlers. Lives in the
@@ -92,6 +92,11 @@ pub struct AppState {
     /// RSS, and manual grabs continue to hit Nyaa directly. See
     /// [`services::interactive_search_cache`] for key shape + TTL.
     pub interactive_search_cache: InteractiveSearchCache,
+    /// In-memory store for pending OAuth attempts (issue #62 PR A).
+    /// Holds the PKCE verifier between MAL's `/start` and `/submit`;
+    /// 10-minute TTL sweeps forgotten flows. See
+    /// [`services::oauth_state`] for scope + lifecycle.
+    pub oauth_state: OAuthStateStore,
 }
 
 impl FromRef<AppState> for SqlitePool {
