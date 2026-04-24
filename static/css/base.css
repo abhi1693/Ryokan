@@ -130,8 +130,9 @@ body {
     }
     body {
         font-size: 16px;
-        
-        padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        /* Match the tabbar's zero padding-bottom (see topbar.css for
+         * why env(safe-area-inset-bottom) is dropped on Android). */
+        padding-bottom: 56px;
     }
     input[type="text"],
     input[type="search"],
@@ -145,7 +146,7 @@ body {
         font-size: 16px;
     }
     .content {
-        padding: 24px 14px calc(80px + env(safe-area-inset-bottom, 0px));
+        padding: 24px 14px 80px;
     }
     .rss-table-controls input,
     .rss-table-controls select {
