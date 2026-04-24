@@ -159,18 +159,22 @@ async fn add_torrent_fires_label_set_torrent_with_caller_hash() {
 }
 
 #[tokio::test]
-async fn add_torrent_paused_uses_add_paused_true_option() {
-    // The interactive-file-picker flow (#83) goes through
-    // add_torrent_paused. Deluge accepts `{add_paused: true}` as
-    // the second positional arg to add_torrent_magnet. Pin the
-    // flag so a refactor can't silently flip it and leak file
-    // data to peers before the user confirms selections.
+async fn add_torrent_paused_adds_running_then_skips_all_files_and_pauses() {
+    // Regression for the paused-add metadata quirk: Deluge's native
+    // `add_paused=true` stops the peer handshake, which in turn
+    // prevents libtorrent's metadata-exchange extension from running,
+    // so `get_files` returns empty forever and the picker modal's
+    // readiness poll hangs. The impl works around this by adding
+    // running, waiting for metadata, setting every file to SKIP
+    // priority (0), then pausing — this test pins the sequence.
     let (server, client) = new_fixture().await;
+
+    // Add with add_paused = FALSE so metadata exchange happens.
     Mock::given(method("POST"))
         .and(path("/json"))
         .and(body_partial_json(json!({
             "method": "core.add_torrent_magnet",
-            "params": [MAGNET, {"add_paused": true}],
+            "params": [MAGNET, {"add_paused": false}],
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "result": HASH,
@@ -180,6 +184,55 @@ async fn add_torrent_paused_uses_add_paused_true_option() {
         .expect(1)
         .mount(&server)
         .await;
+
+    // Metadata poll: return a populated `files` array so the loop
+    // exits on the first iteration.
+    install_rpc(
+        &server,
+        "core.get_torrent_status",
+        json!({
+            "files": [
+                {"path": "release/file1.mkv", "size": 1_000_000},
+                {"path": "release/file2.mkv", "size": 2_000_000},
+            ],
+        }),
+    )
+    .await;
+
+    // Every file marked skip (priority 0) for a 2-file torrent.
+    Mock::given(method("POST"))
+        .and(path("/json"))
+        .and(body_partial_json(json!({
+            "method": "core.set_torrent_options",
+            "params": [[HASH], {"file_priorities": [0, 0]}],
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "result": null,
+            "error": null,
+            "id": 1,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Pause after priorities — the order matters because pausing
+    // before metadata would regress into the "paused = no metadata"
+    // hole the workaround exists to avoid.
+    Mock::given(method("POST"))
+        .and(path("/json"))
+        .and(body_partial_json(json!({
+            "method": "core.pause_torrent",
+            "params": [[HASH]],
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "result": null,
+            "error": null,
+            "id": 1,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
     client
         .add_torrent_paused(MAGNET, HASH)
         .await

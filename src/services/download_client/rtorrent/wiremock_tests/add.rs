@@ -99,6 +99,107 @@ async fn schemes_are_matched_case_insensitively() {
 }
 
 #[tokio::test]
+async fn add_torrent_paused_sets_all_files_skip_flushes_and_pauses() {
+    // Regression for the picker-leakage bug: rtorrent's `d.pause` is
+    // a soft flag — it lowers upload rates but doesn't close peer
+    // connections, so a torrent paused immediately after load could
+    // still be fetching chunks by the time the modal opens. The impl
+    // works around this by waiting for metadata, setting every file's
+    // priority to 0 (skip), issuing the mandatory `d.update_priorities`
+    // flush, and only THEN pausing.
+    //
+    // This test pins the three critical method calls: any refactor
+    // that removes the skip-all, drops the update_priorities flush
+    // (the classic rtorrent "my priorities aren't taking effect"
+    // bug), or pauses without the skip will trip expect(1) here.
+    let (server, client) = new_fixture().await;
+
+    // Pre-add duplicate check (up-to-once) returns empty, so
+    // `add_torrent` proceeds to `load.start_verbose`. Subsequent
+    // `d.multicall2` calls (the settle-loop `hash_exists`) see the
+    // hash present.
+    let present_row =
+        format!("<array><data><value><string>{HASH_UC}</string></value></data></array>");
+    Mock::given(method("POST"))
+        .and(path("/RPC2"))
+        .and(body_string_contains(
+            "<methodName>d.multicall2</methodName>",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(array_response(&[])))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/RPC2"))
+        .and(body_string_contains(
+            "<methodName>d.multicall2</methodName>",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(array_response(&[present_row])))
+        .mount(&server)
+        .await;
+
+    install_xmlrpc(&server, "load.start_verbose", int_response(0)).await;
+
+    // f.multicall (file_list) returns two files once metadata is
+    // ready. Paths + sizes + priorities + chunk counts.
+    let file_row = "<array><data>\
+            <value><string>release/file1.mkv</string></value>\
+            <value><i8>1000000</i8></value>\
+            <value><i8>1</i8></value>\
+            <value><i8>0</i8></value>\
+            <value><i8>1000</i8></value>\
+        </data></array>"
+        .to_string();
+    let file_row2 = "<array><data>\
+            <value><string>release/file2.mkv</string></value>\
+            <value><i8>2000000</i8></value>\
+            <value><i8>1</i8></value>\
+            <value><i8>0</i8></value>\
+            <value><i8>2000</i8></value>\
+        </data></array>"
+        .to_string();
+    install_xmlrpc(
+        &server,
+        "f.multicall",
+        array_response(&[file_row, file_row2]),
+    )
+    .await;
+
+    // The three regression-critical calls — each must fire.
+    Mock::given(method("POST"))
+        .and(path("/RPC2"))
+        .and(body_string_contains(
+            "<methodName>f.priority.set</methodName>",
+        ))
+        .and(body_string_contains("<i8>0</i8>"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(int_response(0)))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/RPC2"))
+        .and(body_string_contains(
+            "<methodName>d.update_priorities</methodName>",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(int_response(0)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/RPC2"))
+        .and(body_string_contains("<methodName>d.pause</methodName>"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(int_response(0)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .add_torrent_paused(MAGNET, HASH_LC)
+        .await
+        .expect("add paused");
+}
+
+#[tokio::test]
 async fn label_command_appears_in_load_start_verbose_body() {
     // The third positional arg to load.start_verbose is the post-
     // load command executed before the torrent starts. Stamping
