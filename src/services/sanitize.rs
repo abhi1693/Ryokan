@@ -46,10 +46,17 @@ pub async fn run_sanitize(live_db: &Path, output: &Path) -> Result<SanitizeSumma
     // a half-stale dump. The shutdown checkpoint flushes WAL into
     // the main DB file, so a stopped server has no `-wal` adjacent
     // (or one of zero size) and this check passes.
-    let wal_path = live_db.with_extension(format!(
-        "{}-wal",
-        live_db.extension().and_then(|e| e.to_str()).unwrap_or("db")
-    ));
+    //
+    // Path derivation: SQLite's WAL filename is the database
+    // filename with a literal `-wal` suffix appended (per the
+    // sqlite docs). `Path::with_extension` would mishandle the
+    // extensionless case (`data/ryokan` → `data/ryokan.db-wal`
+    // instead of the correct `data/ryokan-wal`). Append on the
+    // raw `OsString` so the rule matches exactly regardless of
+    // extension shape.
+    let mut wal_os = live_db.as_os_str().to_owned();
+    wal_os.push("-wal");
+    let wal_path = std::path::PathBuf::from(wal_os);
     if let Ok(meta) = std::fs::metadata(&wal_path)
         && meta.len() > 0
     {
