@@ -42,17 +42,11 @@
         box-shadow 0.2s ease-out;
     text-decoration: none;
     color: var(--text);
-    /* Same compositing-layer trick as the inner img — keeps the card
-     * on the GPU across the hover transition so the browser doesn't
-     * re-rasterize text + border at settle. */
-    transform: translateZ(0);
-    will-change: transform, box-shadow;
-    backface-visibility: hidden;
 }
 
 .series-card:hover {
     border-color: var(--border-accent);
-    transform: translateY(-4px) translateZ(0);
+    transform: translateY(-4px);
     /* Mauve-tinted shadow ring on hover — matches the accent palette
      * so the lift registers as more than a generic shadow. */
     box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35),
@@ -72,26 +66,21 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
-    transition: filter 0.25s ease-out, transform 0.35s ease-out;
-    /* Promote the image to its own GPU compositing layer upfront so
-     * the browser doesn't re-rasterize at final quality when the
-     * hover transition settles — that re-rasterize is what causes
-     * the ~1s "snap to sharp" artifact on card hover. `translateZ(0)`
-     * is the portable trick; `will-change` is the modern hint. */
-    transform: translateZ(0);
-    will-change: transform, filter;
-    backface-visibility: hidden;
+    /* Only filter transitions — no scale transform. `scale()` on a
+     * photographic image causes bilinear-interpolation during the
+     * transition and native-pixel resampling at settle, which reads
+     * as a "snap to sharp" artifact ~1s after hover. Brightness +
+     * saturation are color remaps only; they don't trigger the
+     * sampling-quality flip. */
+    transition: filter 0.25s ease-out;
 }
 
-/* Subtle zoom + brightness lift on cover as the card hovers. Pairs
- * with the card's translateY so the whole tile feels alive, not just
- * repositioned. Transform must keep the translateZ(0) from the base
- * rule so the GPU compositing layer is preserved — without it the
- * browser re-rasterizes the image at final quality when the
- * transition settles, which reads as a ~1s "snap to sharp" artifact. */
+/* Brightness + saturation lift on cover as the card hovers. Pairs
+ * with the card's translateY so the whole tile feels alive without
+ * resampling the image (which would cause the sharpening artifact
+ * on transition end). */
 .series-card:hover .series-cover img {
     filter: brightness(1.08) saturate(1.08);
-    transform: scale(1.03) translateZ(0);
 }
 
 .series-cover-placeholder {
