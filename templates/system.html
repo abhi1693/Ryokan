@@ -29,6 +29,10 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
         Scoring
     </a>
+    <a href="/system?tab=credits" class="system-tab {% if tab == "credits" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+        Credits
+    </a>
     <a href="/system?tab=debug" class="system-tab {% if tab == "debug" %}active{% endif %}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86l-7.5 13A2 2 0 004.53 20h14.94a2 2 0 001.74-3l-7.5-13a2 2 0 00-3.42 0z"/></svg>
         Debug
@@ -464,6 +468,90 @@
     <section class="help-section">
         <h3>Grabbing Releases</h3>
         <p>Click the <strong>Grab</strong> button next to any result to send it to qBittorrent. The torrent will be added with your configured category. Make sure qBittorrent is running and the connection is configured in Settings.</p>
+    </section>
+</div>
+
+{% else if tab == "credits" %}
+<!-- Credits Tab — attribution for the data sources, community curation,
+     mapping datasets, libraries, and typography Ryokan relies on. Read-
+     only; no edit affordances. -->
+<div class="credits-content">
+    <p class="credits-intro">
+        Ryokan is an anime PVR that leans on a lot of upstream work —
+        metadata APIs, community-curated release picks, open-source
+        libraries, and a typeface. This page acknowledges them.
+    </p>
+
+    <section class="credits-section">
+        <h3>Metadata</h3>
+        <ul class="credits-list">
+            <li>
+                <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">AniList</a>
+                <span class="credits-note">Primary metadata source — series identity, relations, titles, episode counts, artwork.</span>
+            </li>
+            <li>
+                <a href="https://myanimelist.net" target="_blank" rel="noopener noreferrer">MyAnimeList</a>
+                <span class="credits-note">Fallback metadata source via the Jikan API.</span>
+            </li>
+            <li>
+                <a href="https://jikan.moe" target="_blank" rel="noopener noreferrer">Jikan</a>
+                <span class="credits-note">Community-maintained unofficial MAL API. Caches episode and series data on Ryokan's behalf when AniList is unreachable.</span>
+            </li>
+            <li>
+                <a href="https://kitsu.io" target="_blank" rel="noopener noreferrer">Kitsu</a>
+                <span class="credits-note">Second fallback metadata source when both AniList and MAL are unavailable.</span>
+            </li>
+        </ul>
+    </section>
+
+    <section class="credits-section">
+        <h3>Community curation</h3>
+        <ul class="credits-list">
+            <li>
+                <a href="https://releases.moe" target="_blank" rel="noopener noreferrer">SeaDex</a>
+                <span class="credits-note">Curated list of community-preferred anime release groups, keyed by AniList ID. Powers the optional SeaDex score boost and the <code>Ryokan.SeaDexBestSpecification</code> Custom Format.</span>
+            </li>
+        </ul>
+    </section>
+
+    <section class="credits-section">
+        <h3>Indexers</h3>
+        <ul class="credits-list">
+            <li>
+                <a href="https://nyaa.si" target="_blank" rel="noopener noreferrer">Nyaa</a>
+                <span class="credits-note">Primary torrent indexer for anime releases.</span>
+            </li>
+        </ul>
+    </section>
+
+    <section class="credits-section">
+        <h3>Mappings</h3>
+        <ul class="credits-list">
+            <li>
+                <a href="https://github.com/anibridge/anibridge-mappings" target="_blank" rel="noopener noreferrer">anibridge-mappings</a>
+                <span class="credits-note">Community-maintained TMDB ↔ TVDB ↔ AniList ID mapping dataset. Makes the Sonarr/Radarr shim work — Seerr requests arrive keyed by TMDB ID and need resolving to AniList. MIT-licensed; <a href="/static/licenses/anibridge-mappings-LICENSE.txt" target="_blank" rel="noopener noreferrer">license text</a>.</span>
+            </li>
+        </ul>
+    </section>
+
+    <section class="credits-section">
+        <h3>Quality profiles</h3>
+        <ul class="credits-list">
+            <li>
+                <a href="https://trash-guides.info" target="_blank" rel="noopener noreferrer">TRaSH Guides</a>
+                <span class="credits-note">The default Custom Formats shipped with Ryokan are vendored from the TRaSH Guides anime profile. Users can install or reset from Settings → Custom Formats. MIT-licensed; <a href="/static/licenses/trash-guides-LICENSE.txt" target="_blank" rel="noopener noreferrer">license text</a>.</span>
+            </li>
+        </ul>
+    </section>
+
+    <section class="credits-section">
+        <h3>Typography</h3>
+        <ul class="credits-list">
+            <li>
+                <a href="https://fonts.google.com/specimen/Murecho" target="_blank" rel="noopener noreferrer">Murecho</a>
+                <span class="credits-note">Display font on the brand mark, page headers, and series detail titles. Self-hosted under <code>static/fonts/</code>, licensed <a href="/static/fonts/Murecho-OFL.txt" target="_blank" rel="noopener noreferrer">SIL Open Font License 1.1</a>.</span>
+            </li>
+        </ul>
     </section>
 </div>
 {% endif %}
