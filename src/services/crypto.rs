@@ -157,26 +157,33 @@ fn write_key_file(path: &Path, key: &[u8; 32]) -> Result<(), String> {
         fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {}", parent.display(), e))?;
     }
-    fs::write(path, key).map_err(|e| format!("could not write {}: {}", path.display(), e))?;
 
-    // Best-effort mode 0600 on Unix. On other platforms (Windows) this
-    // is a no-op and access control falls through to the parent dir's
-    // ACL, which is already user-scoped on a typical install.
+    // On Unix, create with mode 0600 atomically — `fs::write` followed
+    // by `set_permissions` opens a TOCTOU window where the file briefly
+    // exists with umask-default perms (typically 0644). A local user
+    // with read access to `data/` could see the key during that window
+    // on first boot. `OpenOptions::create_new(true).mode(0o600)` makes
+    // the kernel apply 0600 at inode creation time; a concurrent reader
+    // in the gap before the write completes sees an empty file at
+    // worst. On non-Unix platforms (Windows) we fall through to plain
+    // `fs::write` and rely on the parent dir's ACL — already user-scoped
+    // on a typical install.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(path)
-            .map_err(|e| format!("could not stat {}: {}", path.display(), e))?
-            .permissions();
-        perms.set_mode(0o600);
-        if let Err(e) = fs::set_permissions(path, perms) {
-            tracing::warn!(
-                target: "ryokan::crypto",
-                path = %path.display(),
-                error = %e,
-                "could not chmod 0600 on key file — verify manually"
-            );
-        }
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("could not create {}: {}", path.display(), e))?;
+        f.write_all(key)
+            .map_err(|e| format!("could not write {}: {}", path.display(), e))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, key).map_err(|e| format!("could not write {}: {}", path.display(), e))?;
     }
     Ok(())
 }
@@ -230,6 +237,16 @@ pub fn decrypt(ciphertext_with_nonce: &[u8]) -> Result<Vec<u8>, String> {
 /// not valid ciphertext (too short for any real encrypted payload)
 /// so a regression that tries to decrypt a blanked cell fails loudly.
 pub const SANITIZED_SENTINEL: &[u8] = b"[REDACTED]";
+
+/// Force the [`static@KEY`] LazyLock to initialize, paralleling the
+/// `warm_timing_equalizer` pattern in `models::user`. Called at
+/// startup so the first OAuth `/submit` doesn't pay the cold key-
+/// load cost (env-var parse + file read or first-run generation +
+/// 0600 chmod). Cheap to call repeatedly — `LazyLock::force` short-
+/// circuits after the first invocation.
+pub fn warm_key() {
+    LazyLock::force(&KEY);
+}
 
 #[cfg(test)]
 mod tests {
@@ -385,6 +402,21 @@ mod tests {
         assert!(decrypt(&[0u8; 4]).is_err());
         // Nonce-only, no body — Poly1305 tag absent.
         assert!(decrypt(&[0u8; NONCE_LEN]).is_err());
+    }
+
+    #[test]
+    fn decrypt_rejects_sanitized_sentinel() {
+        // The `--sanitize-db-for-debug` CLI overwrites encrypted-token
+        // blobs with `SANITIZED_SENTINEL` (b"[REDACTED]"). The sentinel
+        // is shorter than `NONCE_LEN`, so `decrypt` must fail loudly.
+        // A regression that lengthens the sentinel without checking
+        // this could let a sanitized blob silently decrypt to garbage
+        // plaintext — the sync task would then try to use that as an
+        // OAuth token and confuse the failure mode.
+        assert!(
+            decrypt(SANITIZED_SENTINEL).is_err(),
+            "SANITIZED_SENTINEL must not be a valid AEAD ciphertext"
+        );
     }
 
     /// Minimal stand-in for the `tempfile` crate so we don't add a

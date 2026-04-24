@@ -35,6 +35,32 @@ pub async fn run_sanitize(live_db: &Path, output: &Path) -> Result<SanitizeSumma
             live_db.display()
         ));
     }
+
+    // Detect a live SQLite WAL alongside the DB. Ryokan uses
+    // journal_mode=WAL, so a running server has uncommitted writes
+    // sitting in `<db>-wal` that aren't visible to a plain
+    // `fs::copy`. A sanitized copy taken mid-run could miss the
+    // most recent OAuth link, end up with a stale schema_version,
+    // or worst-case land on a torn page boundary. Refuse with a
+    // clear "stop the server first" rather than silently producing
+    // a half-stale dump. The shutdown checkpoint flushes WAL into
+    // the main DB file, so a stopped server has no `-wal` adjacent
+    // (or one of zero size) and this check passes.
+    let wal_path = live_db.with_extension(format!(
+        "{}-wal",
+        live_db.extension().and_then(|e| e.to_str()).unwrap_or("db")
+    ));
+    if let Ok(meta) = std::fs::metadata(&wal_path)
+        && meta.len() > 0
+    {
+        return Err(format!(
+            "Active SQLite WAL detected at {} — stop the Ryokan server before running sanitize \
+             so the WAL is checkpointed into the main DB file. A copy taken mid-run would miss \
+             uncommitted writes.",
+            wal_path.display()
+        ));
+    }
+
     // Delete any prior sanitized copy first so a repeat run doesn't
     // silently update a stale file under a SQLite write lock from a
     // prior aborted run.

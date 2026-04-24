@@ -803,10 +803,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             -- 'anilist' or 'mal'. CHECK keeps a typo from leaking into
             -- the sync task's provider-dispatch match arms.
             provider TEXT NOT NULL CHECK (provider IN ('anilist', 'mal')),
-            -- Provider's own unique user identifier. AL: Viewer.id
-            -- (numeric, stored as string). MAL: @me.name (username is
-            -- the stable identifier — MAL's numeric id is behind a
-            -- separate API call we don't need).
+            -- Provider's stable, rename-immune user identifier.
+            -- AL: Viewer.id (numeric, stored as string). MAL: id from
+            -- `GET /v2/users/@me?fields=id` (also numeric, also stored
+            -- as string) — MAL usernames are user-mutable, so keying
+            -- on the numeric id is what makes re-link survive a
+            -- rename on the provider side.
             provider_user_id TEXT NOT NULL,
             username TEXT NOT NULL DEFAULT '',
             access_token_encrypted BLOB NOT NULL,

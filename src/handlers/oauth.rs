@@ -37,6 +37,8 @@
 //! AL implicit grant doesn't need one; MAL's "other" app type gets
 //! none since PKCE substitutes.
 
+use std::sync::LazyLock;
+
 use axum::{
     Json,
     extract::State,
@@ -77,14 +79,27 @@ const PKCE_VERIFIER_LEN: usize = 43;
 
 // ── AniList start ────────────────────────────────────────────────────
 
-pub async fn anilist_start() -> Redirect {
+pub async fn anilist_start(State(state): State<AppState>) -> Redirect {
+    // Generate a CSRF state nonce and stash it. The verifier slot
+    // stays empty for AL (implicit grant has no PKCE step), but we
+    // reuse the OAuthAttempt shape so both providers go through the
+    // same validation path at /submit.
+    let csrf_state = generate_state_nonce();
+    oauth_state::stash(
+        &state.oauth_state,
+        PROVIDER_ANILIST,
+        String::new(),
+        csrf_state.clone(),
+    );
+
     // Implicit grant: response_type=token. AL returns the access
-    // token directly in the URL fragment after user approval, so
-    // there's no server-side code exchange step.
+    // token directly in the URL fragment after user approval, along
+    // with our `state` echoed back unchanged.
     let url = format!(
-        "https://anilist.co/api/v2/oauth/authorize?client_id={}&redirect_uri={}&response_type=token",
+        "https://anilist.co/api/v2/oauth/authorize?client_id={}&redirect_uri={}&response_type=token&state={}",
         ANILIST_CLIENT_ID,
         urlencoding::encode(ANILIST_REDIRECT_URI),
+        urlencoding::encode(&csrf_state),
     );
     Redirect::temporary(&url)
 }
@@ -92,21 +107,28 @@ pub async fn anilist_start() -> Redirect {
 // ── MAL start ────────────────────────────────────────────────────────
 
 pub async fn mal_start(State(state): State<AppState>) -> Redirect {
-    // Fresh PKCE verifier per /start call. Overwrites any prior
-    // pending MAL attempt (decision matched in services::oauth_state
-    // — second stash wins, first is discarded).
+    // Fresh PKCE verifier + CSRF state nonce per /start call.
+    // Overwrites any prior pending MAL attempt (decision matched in
+    // services::oauth_state — second stash wins, first is discarded).
     let verifier = generate_pkce_verifier();
-    oauth_state::stash(&state.oauth_state, PROVIDER_MAL, verifier.clone());
+    let csrf_state = generate_state_nonce();
+    oauth_state::stash(
+        &state.oauth_state,
+        PROVIDER_MAL,
+        verifier.clone(),
+        csrf_state.clone(),
+    );
 
     // MAL's authorize URL: response_type=code, code_challenge = the
     // verifier itself (plain method), code_challenge_method explicitly
     // set to `plain` because MAL rejects the request when S256 is
-    // specified (live-probed 2026-04-22).
+    // specified (live-probed 2026-04-22). `state` is the CSRF nonce.
     let url = format!(
-        "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id={}&code_challenge={}&code_challenge_method=plain&redirect_uri={}",
+        "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id={}&code_challenge={}&code_challenge_method=plain&redirect_uri={}&state={}",
         MAL_CLIENT_ID,
         urlencoding::encode(&verifier),
         urlencoding::encode(MAL_REDIRECT_URI),
+        urlencoding::encode(&csrf_state),
     );
     Redirect::temporary(&url)
 }
@@ -119,11 +141,14 @@ pub struct TokenSubmitForm {
     /// Validated by round-tripping through AL's `Viewer` GraphQL
     /// query — an invalid token gets rejected before we persist.
     pub access_token: String,
+    /// CSRF state nonce echoed back by the provider, surfaced on
+    /// the broker page alongside the token, pasted by the user.
+    /// Validated against the value stashed at `/start`.
+    pub state: String,
 }
 
 #[derive(Serialize)]
 pub struct LinkResponse {
-    pub ok: bool,
     pub provider: String,
     pub username: String,
 }
@@ -133,10 +158,29 @@ pub async fn anilist_submit(
     Json(form): Json<TokenSubmitForm>,
 ) -> Result<Json<LinkResponse>, (StatusCode, String)> {
     let token = form.access_token.trim().to_string();
-    if token.is_empty() {
+    let pasted_state = form.state.trim().to_string();
+    if token.is_empty() || pasted_state.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Paste the token from the AniList callback page.".into(),
+            "Paste both the token and the state from the AniList callback page.".into(),
+        ));
+    }
+
+    // CSRF check — pasted state must match the nonce we stashed at
+    // /start. `take` is single-use and TTL-bounded, so a stale
+    // attempt can't be replayed and a missing slot means the user
+    // didn't go through /start (or it expired). Constant-time
+    // comparison via `subtle` to avoid a per-character timing leak;
+    // not strictly necessary for an internal admin-only endpoint
+    // but trivially cheap defense in depth.
+    let attempt = oauth_state::take(&state.oauth_state, PROVIDER_ANILIST).ok_or((
+        StatusCode::BAD_REQUEST,
+        "No pending AniList authorization — start the link flow again.".into(),
+    ))?;
+    if !constant_time_eq(pasted_state.as_bytes(), attempt.state.as_bytes()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "AniList state nonce mismatch — start the link flow again.".into(),
         ));
     }
 
@@ -174,7 +218,6 @@ pub async fn anilist_submit(
     .await;
 
     Ok(Json(LinkResponse {
-        ok: true,
         provider: PROVIDER_ANILIST.into(),
         username: viewer.name,
     }))
@@ -186,6 +229,10 @@ pub async fn anilist_submit(
 pub struct CodeSubmitForm {
     /// Authorization code the user pasted from the MAL broker page.
     pub code: String,
+    /// CSRF state nonce echoed back by MAL, surfaced on the broker
+    /// page alongside the code. Validated against the value stashed
+    /// at `/start`.
+    pub state: String,
 }
 
 pub async fn mal_submit(
@@ -193,17 +240,25 @@ pub async fn mal_submit(
     Json(form): Json<CodeSubmitForm>,
 ) -> Result<Json<LinkResponse>, (StatusCode, String)> {
     let code = form.code.trim().to_string();
-    if code.is_empty() {
+    let pasted_state = form.state.trim().to_string();
+    if code.is_empty() || pasted_state.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Paste the code from the MyAnimeList callback page.".into(),
+            "Paste both the code and the state from the MyAnimeList callback page.".into(),
         ));
     }
 
-    let verifier = oauth_state::take(&state.oauth_state, PROVIDER_MAL).ok_or((
+    let attempt = oauth_state::take(&state.oauth_state, PROVIDER_MAL).ok_or((
         StatusCode::BAD_REQUEST,
         "No pending MyAnimeList authorization — start the link flow again.".into(),
     ))?;
+    if !constant_time_eq(pasted_state.as_bytes(), attempt.state.as_bytes()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "MyAnimeList state nonce mismatch — start the link flow again.".into(),
+        ));
+    }
+    let verifier = attempt.verifier;
 
     let tokens = exchange_mal_code(&code, &verifier).await.map_err(|e| {
         (
@@ -227,7 +282,9 @@ pub async fn mal_submit(
         &state.db,
         LinkRequest {
             provider: PROVIDER_MAL.to_string(),
-            provider_user_id: me.name.clone(),
+            // Numeric MAL id (not username) — stable across renames.
+            // `username` lives separately for display.
+            provider_user_id: me.id.to_string(),
             username: me.name.clone(),
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
@@ -247,7 +304,6 @@ pub async fn mal_submit(
     .await;
 
     Ok(Json(LinkResponse {
-        ok: true,
         provider: PROVIDER_MAL.into(),
         username: me.name,
     }))
@@ -440,13 +496,19 @@ async fn exchange_mal_code(code: &str, verifier: &str) -> Result<MalTokenRespons
 
 #[derive(Deserialize)]
 struct MalUserInfo {
+    /// MAL's numeric account ID. Stable across username changes —
+    /// users can rename on MAL, so storing the username as our
+    /// `provider_user_id` would break re-link detection after a
+    /// rename. Pulled via `?fields=id` on the same `@me` request
+    /// (no extra round-trip).
+    id: i64,
     name: String,
 }
 
 async fn fetch_mal_me(token: &str) -> Result<MalUserInfo, String> {
     let client = http_client();
     let resp = client
-        .get("https://api.myanimelist.net/v2/users/@me")
+        .get("https://api.myanimelist.net/v2/users/@me?fields=id,name")
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
         .header(reqwest::header::USER_AGENT, "Ryokan/0.1")
         .send()
@@ -482,11 +544,44 @@ fn generate_pkce_verifier() -> String {
     encoded.chars().take(PKCE_VERIFIER_LEN).collect()
 }
 
-fn http_client() -> reqwest::Client {
+/// Random URL-safe state nonce for the OAuth `state` parameter.
+/// 32 bytes of entropy → 43 base64url chars; same shape as the
+/// PKCE verifier so the two helpers can share intuitions, but
+/// purposefully a separate function so a future change to one
+/// doesn't silently affect the other.
+fn generate_state_nonce() -> String {
+    use base64::Engine;
+    use rand::Rng;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Constant-time byte comparison. Mirrors the `subtle`-based check
+/// the arr-compat shims use for API key comparison — keeps the
+/// state-validation path free of per-byte short-circuit timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
+
+/// Shared reqwest client for OAuth provider calls. Matches the
+/// `RSS_HTTP_CLIENT` convention in `services::rss::feed` — building
+/// a fresh client per call costs DNS + TLS handshake on first use
+/// and forfeits keep-alive pooling. PR B's token-refresh path will
+/// add a third caller of the same shape.
+static OAUTH_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("reqwest client build")
+});
+
+fn http_client() -> &'static reqwest::Client {
+    &OAUTH_HTTP_CLIENT
 }
 
 fn current_unix_ts() -> i64 {
@@ -524,7 +619,11 @@ mod tests {
 
     #[tokio::test]
     async fn anilist_start_redirects_to_authorize_url() {
-        let redirect = anilist_start().await;
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        let redirect = anilist_start(State(app_state.clone())).await;
         let resp = redirect.into_response();
         assert_eq!(resp.status(), axum::http::StatusCode::TEMPORARY_REDIRECT);
         let location = resp
@@ -546,12 +645,20 @@ mod tests {
             location.contains("response_type=token"),
             "implicit grant response_type missing: {location}"
         );
+        assert!(
+            location.contains("&state="),
+            "state nonce must be included in authorize URL: {location}"
+        );
         // Redirect URI must match the broker page exactly — AL
         // rejects the request with "redirect_uri mismatch" otherwise.
         assert!(
             location.contains("johnthreekay.github.io%2FRyokan%2Fauth%2Fanilist"),
             "redirect_uri not URL-encoded correctly: {location}"
         );
+
+        // The state nonce must be stashed for /submit to validate against.
+        let stashed = oauth_state::take(&app_state.oauth_state, PROVIDER_ANILIST);
+        assert!(stashed.is_some(), "anilist /start must stash a state nonce");
     }
 
     #[tokio::test]
@@ -582,12 +689,74 @@ mod tests {
         assert!(location.contains("response_type=code"));
         assert!(location.contains("code_challenge_method=plain"));
         assert!(location.contains("code_challenge="));
-
-        // A verifier must now be stashed — the submit path needs it.
-        let stashed = oauth_state::take(&state.oauth_state, PROVIDER_MAL);
         assert!(
-            stashed.is_some(),
-            "start must stash verifier for the subsequent submit"
+            location.contains("&state="),
+            "state nonce must be included in authorize URL: {location}"
+        );
+
+        // Both the verifier and the state must now be stashed —
+        // /submit needs both to validate + exchange.
+        let attempt = oauth_state::take(&state.oauth_state, PROVIDER_MAL);
+        let attempt = attempt.expect("start must stash verifier+state for the subsequent submit");
+        assert!(!attempt.verifier.is_empty(), "verifier must be populated");
+        assert!(!attempt.state.is_empty(), "state must be populated");
+    }
+
+    #[tokio::test]
+    async fn anilist_submit_rejects_state_mismatch() {
+        // Pasting a state nonce that doesn't match what was stashed
+        // at /start must fail with 400 — that's the CSRF guard. The
+        // pasted token isn't even sent to AniList; we reject before
+        // any external call.
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        // Simulate a /start by stashing a known state nonce.
+        oauth_state::stash(
+            &app_state.oauth_state,
+            PROVIDER_ANILIST,
+            String::new(),
+            "stashed-state-aaa".into(),
+        );
+
+        let result = anilist_submit(
+            State(app_state.clone()),
+            Json(TokenSubmitForm {
+                access_token: "any-token".into(),
+                state: "wrong-state-bbb".into(),
+            }),
+        )
+        .await;
+
+        let (status, msg) = match result {
+            Err(e) => e,
+            Ok(_) => panic!("submit must reject mismatched state nonce"),
+        };
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            msg.to_lowercase().contains("state nonce mismatch"),
+            "error must call out the CSRF check, got: {msg}"
+        );
+
+        // Even on a mismatch, the stashed attempt is consumed (single-
+        // use) — a second submit returns "no pending authorization."
+        let result_2 = anilist_submit(
+            State(app_state.clone()),
+            Json(TokenSubmitForm {
+                access_token: "any-token".into(),
+                state: "stashed-state-aaa".into(),
+            }),
+        )
+        .await;
+        let (status_2, msg_2) = match result_2 {
+            Err(e) => e,
+            Ok(_) => panic!("second submit must surface 'no pending'"),
+        };
+        assert_eq!(status_2, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            msg_2.to_lowercase().contains("no pending"),
+            "second attempt must surface 'no pending authorization', got: {msg_2}"
         );
     }
 }

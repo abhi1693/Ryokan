@@ -617,6 +617,11 @@ function openExternalAccountPasteModal(provider) {
                     <label for="ext-accounts-paste-value">${fieldLabel}</label>
                     <textarea id="ext-accounts-paste-value" rows="3" style="width:100%;font-family:monospace;font-size:12px"></textarea>
                 </div>
+                <div class="form-group">
+                    <label for="ext-accounts-paste-state">State</label>
+                    <input id="ext-accounts-paste-state" type="text" style="width:100%;font-family:monospace;font-size:12px">
+                    <span class="form-hint">CSRF nonce — required. Both fields appear on the callback page.</span>
+                </div>
                 <div id="ext-accounts-paste-error" class="form-hint" style="color:var(--red);display:none"></div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
                     <button type="button" class="btn btn-secondary" onclick="closeExternalAccountPasteModal()">Cancel</button>
@@ -639,17 +644,24 @@ function closeExternalAccountPasteModal() {
 
 function submitExternalAccountPaste(provider) {
     const input = document.getElementById('ext-accounts-paste-value');
+    const stateInput = document.getElementById('ext-accounts-paste-state');
     const err = document.getElementById('ext-accounts-paste-error');
     const btn = document.getElementById('ext-accounts-paste-submit');
     const value = (input && input.value || '').trim();
-    if (!value) {
-        if (err) { err.textContent = 'Paste the value from the callback page.'; err.style.display = ''; }
+    const stateValue = (stateInput && stateInput.value || '').trim();
+    if (!value || !stateValue) {
+        if (err) {
+            err.textContent = 'Paste both the value and the state from the callback page.';
+            err.style.display = '';
+        }
         return;
     }
     if (err) err.style.display = 'none';
     if (btn) { btn.disabled = true; btn.textContent = 'Linking…'; }
 
-    const body = provider === 'anilist' ? { access_token: value } : { code: value };
+    const body = provider === 'anilist'
+        ? { access_token: value, state: stateValue }
+        : { code: value, state: stateValue };
     fetch(`/settings/oauth/${provider}/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

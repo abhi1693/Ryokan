@@ -244,12 +244,17 @@ where
 /// the local file case.
 async fn run_sanitize_cli() {
     let live = resolve_live_db_path();
-    let out = live.with_file_name(
-        live.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("{s}-sanitized.db"))
-            .unwrap_or_else(|| "ryokan-sanitized.db".to_string()),
-    );
+    // Output lands in the CWD, not next to the live DB. If a user
+    // configured `DATABASE_URL=/etc/ryokan/db.sqlite`, dropping the
+    // sanitized copy at `/etc/ryokan/db-sanitized.sqlite` puts it
+    // squarely in path of any system backup rotation that scans
+    // `/etc`. CWD is where `cargo run` and `docker exec` land by
+    // default — predictable and user-controlled.
+    let stem = live
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ryokan");
+    let out = std::path::PathBuf::from(format!("{stem}-sanitized.db"));
 
     match services::sanitize::run_sanitize(&live, &out).await {
         Ok(summary) => {
@@ -387,6 +392,14 @@ async fn main() {
     // Run it in a blocking task so the ~50ms bcrypt::hash doesn't stall the
     // runtime worker during startup.
     let _ = tokio::task::spawn_blocking(models::user::warm_timing_equalizer).await;
+
+    // Warm the AEAD encryption-key LazyLock (issue #62 PR A). Same
+    // pattern as `warm_timing_equalizer`: pays the cold-start cost
+    // (env-var parse, file read, possible first-run key generation
+    // with a 0600 chmod) at boot rather than during the user's first
+    // OAuth `/submit`. Wrapped in `spawn_blocking` because the
+    // first-run path may write to disk.
+    let _ = tokio::task::spawn_blocking(services::crypto::warm_key).await;
 
     // Warm the Custom Formats cache from disk. Parse failures are logged
     // inside `load_compiled_cfs` and skipped — startup never aborts over

@@ -29,7 +29,13 @@ pub const PROVIDER_MAL: &str = "mal";
 /// A linked external account, with tokens decrypted to plaintext for
 /// outbound use. The DB-at-rest shape is always encrypted; this type
 /// represents the in-memory post-decrypt view the sync task sees.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-implemented to redact `access_token` /
+/// `refresh_token` so a stray `tracing::debug!("{acct:?}")` elsewhere
+/// in the codebase can never leak a token into the `logs` table or
+/// the tracing console. Adding new token-bearing fields requires
+/// updating the redacted Debug impl below.
+#[derive(Clone)]
 pub struct ExternalAccount {
     pub id: i64,
     pub provider: String,
@@ -55,7 +61,10 @@ pub struct ExternalAccount {
 /// Input for [`link`] — the OAuth handler populates one of these
 /// after a successful token exchange + Viewer fetch and hands it to
 /// the model layer to persist.
-#[derive(Debug, Clone)]
+///
+/// `Debug` redacts the token fields, same rationale as
+/// [`ExternalAccount`].
+#[derive(Clone)]
 pub struct LinkRequest {
     pub provider: String,
     pub provider_user_id: String,
@@ -66,12 +75,58 @@ pub struct LinkRequest {
     pub score_format: String,
 }
 
+impl std::fmt::Debug for ExternalAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalAccount")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("provider_user_id", &self.provider_user_id)
+            .field("username", &self.username)
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("access_token_expires_at", &self.access_token_expires_at)
+            .field("score_format", &self.score_format)
+            .field("list_last_synced_at", &self.list_last_synced_at)
+            .field("list_full_resync_at", &self.list_full_resync_at)
+            .field("linked_at", &self.linked_at)
+            .field("import_watching", &self.import_watching)
+            .field("import_planning", &self.import_planning)
+            .field("import_paused", &self.import_paused)
+            .field("import_dropped", &self.import_dropped)
+            .field("import_completed", &self.import_completed)
+            .field("skip_already_watched", &self.skip_already_watched)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for LinkRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkRequest")
+            .field("provider", &self.provider)
+            .field("provider_user_id", &self.provider_user_id)
+            .field("username", &self.username)
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("access_token_expires_at", &self.access_token_expires_at)
+            .field("score_format", &self.score_format)
+            .finish()
+    }
+}
+
 /// Return the currently-linked account, or None if nothing is linked.
 /// Decodes tokens with `services::crypto` — a decryption failure
 /// (tampered blob, key rotation without a migration) surfaces as
 /// `Err` rather than a silent None so the UI can report "re-link
 /// required" instead of "not linked."
 pub async fn get_current(db: &SqlitePool) -> Result<Option<ExternalAccount>, String> {
+    // The one-at-a-time invariant means at most one row exists, so
+    // `ORDER BY linked_at DESC LIMIT 1` is functionally equivalent to
+    // a bare `LIMIT 1` today. The explicit ORDER BY is defensive: if
+    // both UNIQUE(provider) and the `link()` transaction guard were
+    // ever circumvented (manual DB edit, schema migration bug), the
+    // most-recently-linked account is the right row to surface to the
+    // UI. A bare LIMIT 1 would return whichever row sqlite happened
+    // to scan first — implementation-defined and brittle.
     let row: Option<ExternalAccountRaw> = sqlx::query_as::<_, ExternalAccountRaw>(
         "SELECT id, provider, provider_user_id, username,
                 access_token_encrypted, refresh_token_encrypted,
@@ -80,6 +135,7 @@ pub async fn get_current(db: &SqlitePool) -> Result<Option<ExternalAccount>, Str
                 import_watching, import_planning, import_paused,
                 import_dropped, import_completed, skip_already_watched
            FROM external_accounts
+          ORDER BY linked_at DESC
           LIMIT 1",
     )
     .fetch_optional(db)
@@ -101,14 +157,39 @@ pub async fn get_current(db: &SqlitePool) -> Result<Option<ExternalAccount>, Str
 pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
     let now = current_unix_ts();
 
+    // Encrypt outside the transaction — `crypto::encrypt` is pure
+    // CPU + RNG and shouldn't hold a DB write lock while it runs.
+    let access_encrypted = crypto::encrypt(req.access_token.as_bytes())
+        .map_err(|e| format!("encrypt access token: {e}"))?;
+    let refresh_encrypted = crypto::encrypt(req.refresh_token.as_bytes())
+        .map_err(|e| format!("encrypt refresh token: {e}"))?;
+
+    // `BEGIN IMMEDIATE` so the read-check-write sequence below is
+    // atomic. Without this, two concurrent link calls for *different*
+    // providers could both observe `count != 0` as 0 and both
+    // INSERT, breaking the one-at-a-time invariant (decision #10) —
+    // the schema's UNIQUE(provider) would catch a same-provider race
+    // but not a cross-provider one. SQLite's IMMEDIATE acquires the
+    // write lock at BEGIN time, so the second caller blocks here
+    // until the first commits or rolls back.
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| format!("external_accounts BEGIN: {e}"))?;
+
     // Re-link detection first. If a row exists for this (provider,
-    // user_id) pair, refresh its tokens + metadata rather than
-    // trying to insert another and hitting the UNIQUE constraint.
-    if let Some(existing_id) = find_existing_id(db, &req.provider, &req.provider_user_id).await? {
-        let access_encrypted = crypto::encrypt(req.access_token.as_bytes())
-            .map_err(|e| format!("encrypt access token: {e}"))?;
-        let refresh_encrypted = crypto::encrypt(req.refresh_token.as_bytes())
-            .map_err(|e| format!("encrypt refresh token: {e}"))?;
+    // user_id) pair, refresh its tokens + metadata in place rather
+    // than trying to insert another and hitting UNIQUE(provider).
+    let existing_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM external_accounts WHERE provider = ? AND provider_user_id = ? LIMIT 1",
+    )
+    .bind(&req.provider)
+    .bind(&req.provider_user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("external_accounts lookup: {e}"))?;
+
+    if let Some(id) = existing_id {
         sqlx::query(
             "UPDATE external_accounts
                 SET access_token_encrypted = ?,
@@ -123,20 +204,24 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
         .bind(req.access_token_expires_at)
         .bind(&req.score_format)
         .bind(&req.username)
-        .bind(existing_id)
-        .execute(db)
+        .bind(id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("re-link UPDATE failed: {e}"))?;
-        return Ok(existing_id);
+        tx.commit()
+            .await
+            .map_err(|e| format!("re-link COMMIT: {e}"))?;
+        return Ok(id);
     }
 
     // Enforce one-account-at-a-time. The schema's UNIQUE(provider)
-    // would already reject a same-provider duplicate; this rejects a
-    // different-provider second link too.
+    // would already reject a same-provider duplicate; this rejects
+    // a different-provider second link too. Inside the transaction
+    // so the count and the subsequent INSERT see a consistent view.
     let any_linked: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM external_accounts WHERE provider != ?")
             .bind(&req.provider)
-            .fetch_one(db)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| format!("external_accounts count: {e}"))?;
     if any_linked > 0 {
@@ -145,11 +230,6 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
                 .into(),
         );
     }
-
-    let access_encrypted = crypto::encrypt(req.access_token.as_bytes())
-        .map_err(|e| format!("encrypt access token: {e}"))?;
-    let refresh_encrypted = crypto::encrypt(req.refresh_token.as_bytes())
-        .map_err(|e| format!("encrypt refresh token: {e}"))?;
 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO external_accounts
@@ -167,10 +247,11 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
     .bind(req.access_token_expires_at)
     .bind(&req.score_format)
     .bind(now)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| format!("external_accounts INSERT failed: {e}"))?;
 
+    tx.commit().await.map_err(|e| format!("link COMMIT: {e}"))?;
     Ok(id)
 }
 
@@ -259,21 +340,6 @@ pub async fn update_preferences(
     .await
     .map_err(|e| format!("update_preferences UPDATE failed: {e}"))?;
     Ok(())
-}
-
-async fn find_existing_id(
-    db: &SqlitePool,
-    provider: &str,
-    provider_user_id: &str,
-) -> Result<Option<i64>, String> {
-    sqlx::query_scalar(
-        "SELECT id FROM external_accounts WHERE provider = ? AND provider_user_id = ? LIMIT 1",
-    )
-    .bind(provider)
-    .bind(provider_user_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("external_accounts lookup: {e}"))
 }
 
 fn current_unix_ts() -> i64 {
