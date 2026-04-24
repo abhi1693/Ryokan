@@ -253,5 +253,16 @@ async fn run_auto_expand(
             &info_hash,
         )
         .await;
+    } else {
+        // Emit a debug tombstone for the zero-sibling run too — makes
+        // "did auto-expand even fire on this grab?" answerable from
+        // logs without re-deriving from the absence of an info line.
+        logger::debug(
+            &db,
+            LogCategory::Grab,
+            &format!("grab auto-expand detected no siblings in '{title}'"),
+            &info_hash,
+        )
+        .await;
     }
 }

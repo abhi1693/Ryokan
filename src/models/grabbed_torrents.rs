@@ -40,10 +40,14 @@ pub struct GrabbedTorrent {
 ///     columns. Callers treat `None` as "in-flight, leave it alone"
 ///     and skip any follow-up route/tag writes.
 ///  4. **Empty-hash pass-through** → `Ok(Some(new_id))`. Hash is empty
-///     (legacy grab paths). Partial index excludes empty-hash rows, so
-///     a fresh insert always succeeds. A DB error after the empty-hash
-///     insert (e.g. FK violation on `series_id`) surfaces as
-///     `Ok(None)` so the anomaly is visible rather than papered over.
+///     (legacy grab paths). Partial UNIQUE index excludes empty-hash
+///     rows, so a fresh insert can't trip that constraint. If the
+///     INSERT OR IGNORE still returns no row id (an unexpected
+///     NOT NULL / CHECK / UNIQUE violation that OR IGNORE swallowed),
+///     we surface `Ok(None)` so the anomaly is visible rather than
+///     papered over. FK violations aren't in that set —
+///     `PRAGMA foreign_keys = ON` bubbles them up as `Err` via the
+///     `?` before reaching this branch.
 ///
 /// `is_batch` is the caller's view (from the Nyaa listing or search
 /// hit) of whether the release is a batch/season pack. Persisted so

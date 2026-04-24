@@ -728,7 +728,61 @@ pub async fn grab_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::download_client::{
+        AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+    };
     use crate::test_support::{build_test_app_state, in_memory_pool};
+    use async_trait::async_trait;
+
+    /// Minimal DownloadClient stub that accepts every call. Used by
+    /// caller-level tests that need `grab_confirm` to clear
+    /// `require_download_client` + `set_file_wanted` + `resume`
+    /// without actually hitting a running qBittorrent.
+    struct NoopClient;
+
+    #[async_trait]
+    impl DownloadClient for NoopClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("noop".into())
+        }
+        async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+            Ok(AddOutcome::Added)
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _url: &str,
+            _hash: &str,
+            _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<SelectiveOutcome, String> {
+            Ok(SelectiveOutcome::FullDownload)
+        }
+        async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+            Ok(vec![])
+        }
+        async fn pause(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_file_wanted(
+            &self,
+            _hash: &str,
+            _files: &[usize],
+            _wanted: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            "QBittorrent"
+        }
+    }
 
     // Unit tests against the handler functions directly (not via a
     // live Axum router) so we can assert on concrete response types
@@ -1092,6 +1146,74 @@ mod tests {
             extract_release_is_batch("{\"is_batch\":\"yes\"}"),
             None,
             "string shouldn't coerce to bool"
+        );
+    }
+
+    #[tokio::test]
+    async fn grab_confirm_honors_release_metadata_is_batch_over_file_count() {
+        // Caller-level regression guard for the PR 90 bug fix. A future
+        // refactor could silently re-introduce `files.len() > 1` at the
+        // confirm call site without the `extract_release_is_batch` unit
+        // test failing (the helper would keep returning `Some(false)`,
+        // the caller would just ignore it). This test exercises the
+        // full path: 3 files posted (`.mkv + .ass + .srt`), explicit
+        // `is_batch: false` in release_metadata → asserts the written
+        // grabbed_torrents row has `is_batch = 0`, not 1.
+        let db = in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 303, "Single Episode Series").await;
+        let hash = VALID_HASH;
+        let release_metadata = serde_json::json!({
+            "title": "[Group] Single Ep - 05 [1080p]",
+            "size": "1.2 GB",
+            "seeders": 100,
+            "group": "Group",
+            "is_batch": false,
+        });
+        let file_list = serde_json::json!([
+            {"name": "[Group] Single Ep - 05 [1080p].mkv", "size": 1_000_000_000_i64},
+            {"name": "[Group] Single Ep - 05 [1080p].en.ass", "size": 20_000},
+            {"name": "[Group] Single Ep - 05 [1080p].en.srt", "size": 18_000},
+        ]);
+        pending_grabs::create(
+            &db,
+            "pid-subs",
+            hash,
+            "qbittorrent",
+            None,
+            Some(series_id),
+            &release_metadata.to_string(),
+            true,
+        )
+        .await
+        .unwrap();
+        pending_grabs::set_file_list(&db, "pid-subs", &file_list.to_string())
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db.clone(), Some(std::sync::Arc::new(NoopClient)));
+        let res = grab_confirm(
+            State(state),
+            Json(GrabConfirmForm {
+                preview_id: "pid-subs".into(),
+                wanted_indices: vec![0, 1, 2],
+                unblock: false,
+            }),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "confirm should succeed with NoopClient: {res:?}"
+        );
+
+        let is_batch: i64 =
+            sqlx::query_scalar("SELECT is_batch FROM grabbed_torrents WHERE hash = ?")
+                .bind(hash)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            is_batch, 0,
+            "release_metadata.is_batch=false MUST beat the files.len()>1 proxy"
         );
     }
 
