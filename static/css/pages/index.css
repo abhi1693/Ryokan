@@ -67,6 +67,16 @@
     border-color: rgba(203, 166, 247, 0.45);
 }
 
+/* Reserve the Clear button's layout slot when no filter is active
+   so the row doesn't shift sideways the moment the user types into
+   the search box. visibility:hidden keeps the box (and the flex
+   gap) in place; pointer-events:none + the template's tabindex=-1
+   keep it out of mouse and keyboard focus. */
+.library-filter-clear-hidden {
+    visibility: hidden;
+    pointer-events: none;
+}
+
 @media (max-width: 640px) {
     .library-grid {
         grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));

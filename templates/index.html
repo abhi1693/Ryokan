@@ -48,8 +48,16 @@
                     <option value="score"{% if sort_value.as_str() == "score" %} selected{% endif %}>My score (high → low)</option>
                 </select>
                 {% endif %}
+                {# Always rendered so its layout slot is reserved;
+                   visibility flips on/off so its presence doesn't
+                   shift neighbors when a filter becomes active. The
+                   element is also aria-hidden + tabindex=-1 in the
+                   inactive state so a screen-reader / keyboard user
+                   can't reach a "Clear" link that does nothing. #}
                 {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
                 <a class="btn btn-pill library-filter-clear" href="/" title="Clear filters">Clear</a>
+                {% else %}
+                <a class="btn btn-pill library-filter-clear library-filter-clear-hidden" href="/" tabindex="-1" aria-hidden="true">Clear</a>
                 {% endif %}
             </form>
             {# Reserved width pushes the right group's left edge back
