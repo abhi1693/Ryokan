@@ -232,9 +232,21 @@ pub async fn series_detail(
     State(state): State<AppState>,
     Path(request_id): Path<i64>,
 ) -> Html<String> {
-    let (db_series, provider_id, mut detail) = match resolve_series_context(&state.db, request_id)
-        .await
-    {
+    // Fetch config alongside the metadata resolve so both the error
+    // and success paths can reuse it. resolve_series_context typically
+    // dominates (network round trip to AniList on cold cache), so the
+    // cfg fetch overlaps with it for free.
+    let (resolve_res, cfg_res) = tokio::join!(
+        resolve_series_context(&state.db, request_id),
+        config::get_config(&state.db),
+    );
+    let cfg = cfg_res.ok().flatten();
+    let title_language_fallback = || {
+        cfg.as_ref()
+            .map(|c| c.title_language.clone())
+            .unwrap_or_else(|| "english".to_string())
+    };
+    let (db_series, provider_id, mut detail) = match resolve_res {
         Ok(v) => v,
         Err(e) => {
             logger::error(
@@ -271,7 +283,7 @@ pub async fn series_detail(
                 title,
                 message,
                 detail: tech_detail,
-                title_language: config::get_title_language(&state.db).await,
+                title_language: title_language_fallback(),
             };
             return Html(template.render().unwrap_or_default());
         }
@@ -373,12 +385,13 @@ pub async fn series_detail(
         None => Vec::new(),
     };
 
-    // Fan out the five independent read paths. Each one was previously
-    // awaited serially — on a cold cache that meant 4+ sequential DB
-    // round trips + the build_episodes fs-walk + the relation-group
-    // artwork lookups all stacked end to end. Running them concurrently
-    // collapses the total wait to ~max(...) instead of sum(...).
-    let cfg_fut = config::get_config(&state.db);
+    // Fan out the four remaining independent read paths. Each one was
+    // previously awaited serially — on a cold cache that meant 4+
+    // sequential DB round trips + the build_episodes fs-walk + the
+    // relation-group artwork lookups all stacked end to end. Running
+    // them concurrently collapses the total wait to ~max(...) instead
+    // of sum(...). cfg is fetched at the top of the handler alongside
+    // resolve_series_context so it's already in scope here.
     let relation_groups_fut = build_relation_groups(&state.db, db_id, &detail);
 
     let detail_for_episodes = detail.clone();
@@ -466,24 +479,19 @@ pub async fn series_detail(
             .unwrap_or_default()
     };
 
-    let (cfg, relation_groups, episodes_out, cover_url, banner_url, metadata_refreshed_at) = tokio::join!(
-        cfg_fut,
+    let (relation_groups, episodes_out, cover_url, banner_url, metadata_refreshed_at) = tokio::join!(
         relation_groups_fut,
         episodes_fut,
         cover_fut,
         banner_fut,
         refresh_fut,
     );
-    let cfg = cfg.ok().flatten();
     let ((episodes, on_disk_count, downloaded_count, size_display, monitored_count), media_root) =
         episodes_out;
     detail.cover_url = cover_url;
     detail.banner_url = banner_url;
 
-    let title_language = cfg
-        .as_ref()
-        .map(|c| c.title_language.clone())
-        .unwrap_or_else(|| "english".to_string());
+    let title_language = title_language_fallback();
 
     let ep_total = detail.effective_episode_count();
     // #15a — render AL and MAL links independently. AL link is hidden

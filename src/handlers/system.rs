@@ -210,7 +210,10 @@ pub async fn system_page(
         ("scoring", LogCategory::Scoring.label()),
     ];
 
-    let title_language = config::get_title_language(&state.db).await;
+    let title_language = cfg
+        .as_ref()
+        .map(|c| c.title_language.clone())
+        .unwrap_or_else(|| "english".to_string());
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
