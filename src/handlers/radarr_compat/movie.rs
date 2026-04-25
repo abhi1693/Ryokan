@@ -14,7 +14,8 @@ use crate::models::{config, monitoring, series};
 use crate::services::{anibridge, anilist, logger, monitoring as monitoring_service};
 
 use super::helpers::{
-    build_radarr_movie_from_search, build_radarr_movie_from_tracked, lookup_by_tmdb_id,
+    build_radarr_movie_from_search, build_radarr_movie_from_tracked, cached_detail_for,
+    lookup_by_tmdb_id,
 };
 use super::types::{AddMovieBody, RadarrCommandBody, RadarrMovie, UpdateMovieBody};
 
@@ -81,7 +82,8 @@ pub async fn list_movies(
     let mut results = Vec::new();
     for s in &tracked {
         let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
-        results.push(build_radarr_movie_from_tracked(s, tmdb_id, &cfg).await);
+        let detail = cached_detail_for(&state.db, s.id).await;
+        results.push(build_radarr_movie_from_tracked(s, detail.as_ref(), tmdb_id, &cfg).await);
     }
 
     Ok(Json(results))
@@ -104,8 +106,9 @@ pub async fn get_movie(
         .ok_or((StatusCode::NOT_FOUND, "Movie not found".to_string()))?;
 
     let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let detail = cached_detail_for(&state.db, s.id).await;
     Ok(Json(
-        build_radarr_movie_from_tracked(&s, tmdb_id, &cfg).await,
+        build_radarr_movie_from_tracked(&s, detail.as_ref(), tmdb_id, &cfg).await,
     ))
 }
 
@@ -246,8 +249,9 @@ pub async fn add_movie(
             "Movie not found after insert".to_string(),
         ))?;
 
+    let detail = cached_detail_for(&state.db, s.id).await;
     Ok(Json(
-        build_radarr_movie_from_tracked(&s, tmdb_id, &cfg).await,
+        build_radarr_movie_from_tracked(&s, detail.as_ref(), tmdb_id, &cfg).await,
     ))
 }
 
@@ -286,8 +290,9 @@ pub async fn update_movie(
         .unwrap_or_default();
 
     let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let detail = cached_detail_for(&state.db, s.id).await;
     Ok(Json(
-        build_radarr_movie_from_tracked(&s, tmdb_id, &cfg).await,
+        build_radarr_movie_from_tracked(&s, detail.as_ref(), tmdb_id, &cfg).await,
     ))
 }
 

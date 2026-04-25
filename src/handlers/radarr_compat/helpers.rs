@@ -3,12 +3,51 @@
 use axum::{Json, http::StatusCode};
 
 use crate::AppState;
-use crate::models::{config, monitoring, series};
+use crate::models::{config, metadata_cache, monitoring, series};
 use crate::services::{anibridge, anilist, media};
 
 use super::types::{RadarrImage, RadarrMovie, RadarrRatingValue, RadarrRatings};
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/// AL 0-100 / Jikan-x10 → Radarr's nested `RadarrRatings`. Radarr's
+/// shape carries an `imdb` and a `tmdb` slot, both with the same
+/// 0-10 scale Sonarr's flat shape uses; we populate both with the
+/// same value so Seerr renders a rating regardless of which slot it
+/// reads. `None` → zeroed; matches Sonarr's `ratings_from_score`.
+pub(super) fn ratings_from_score(score: Option<i32>) -> RadarrRatings {
+    let value = match score {
+        Some(s) if s > 0 => f64::from(s) / 10.0,
+        _ => 0.0,
+    };
+    RadarrRatings {
+        imdb: RadarrRatingValue {
+            votes: 0,
+            value,
+            rating_type: "user".to_string(),
+        },
+        tmdb: RadarrRatingValue {
+            votes: 0,
+            value,
+            rating_type: "user".to_string(),
+        },
+    }
+}
+
+/// Mirror of `sonarr_compat::cached_detail_for`. Pulls the cached
+/// `AnimeDetail` for a tracked series so callers that need the
+/// average_score (or other metadata) can recover it without
+/// duplicating the cache-miss handling at every call site.
+pub(super) async fn cached_detail_for(
+    db: &sqlx::SqlitePool,
+    series_id: i64,
+) -> Option<anilist::AnimeDetail> {
+    metadata_cache::get_by_series_id(db, series_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.detail)
+}
 
 pub(super) async fn lookup_by_tmdb_id(
     state: &AppState,
@@ -95,6 +134,7 @@ pub(super) async fn lookup_by_tmdb_id(
             episodes: detail.episodes,
             season_year: detail.season_year,
             source: if detail.id > 0 { "anilist" } else { "mal" }.to_string(),
+            average_score: detail.average_score,
         };
 
         results.push(
@@ -167,7 +207,7 @@ pub(super) async fn build_radarr_movie_from_search(
         } else {
             String::new()
         },
-        ratings: default_ratings(),
+        ratings: ratings_from_score(r.average_score),
         has_file,
         is_available: true,
         folder_name: folder_name.clone(),
@@ -181,6 +221,7 @@ pub(super) async fn build_radarr_movie_from_search(
 
 pub(super) async fn build_radarr_movie_from_tracked(
     s: &series::Series,
+    detail: Option<&anilist::AnimeDetail>,
     tmdb_id: i64,
     cfg: &config::Config,
 ) -> RadarrMovie {
@@ -225,7 +266,7 @@ pub(super) async fn build_radarr_movie_from_tracked(
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: "2024-01-01T00:00:00Z".to_string(),
-        ratings: default_ratings(),
+        ratings: ratings_from_score(detail.and_then(|d| d.average_score)),
         has_file,
         is_available: true,
         folder_name: s.folder_name.clone(),
@@ -242,21 +283,6 @@ pub(super) fn map_status(anilist_status: &str) -> String {
         "RELEASING" | "NOT_YET_RELEASED" => "announced".to_string(),
         "FINISHED" | "FINISHED_AIRING" | "CANCELLED" => "released".to_string(),
         _ => "released".to_string(),
-    }
-}
-
-pub(super) fn default_ratings() -> RadarrRatings {
-    RadarrRatings {
-        imdb: RadarrRatingValue {
-            votes: 0,
-            value: 0.0,
-            rating_type: "user".to_string(),
-        },
-        tmdb: RadarrRatingValue {
-            votes: 0,
-            value: 0.0,
-            rating_type: "user".to_string(),
-        },
     }
 }
 
@@ -288,7 +314,7 @@ pub(super) fn build_stub_movie(tmdb_id: i64, cfg: &config::Config) -> RadarrMovi
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: String::new(),
-        ratings: default_ratings(),
+        ratings: ratings_from_score(None),
         has_file: false,
         is_available: true,
         folder_name: String::new(),

@@ -195,6 +195,11 @@ struct SearchAnime {
     anime_type: Option<String>,
     status: Option<String>,
     episodes: Option<i32>,
+    /// MAL's 1-10 community score, e.g. `7.85`. `None` for entries
+    /// with no rating yet. Multiplied by 10 on conversion to
+    /// `AnimeEntry::average_score` (Option<i32> on the AL 0-100
+    /// scale) so both providers feed the same downstream sink.
+    score: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,6 +378,14 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
                 episodes: anime.episodes.filter(|&n| n > 0),
                 season_year: None, // Jikan search results don't include year
                 source: "mal".to_string(),
+                // MAL ships a 0-10 float; AnimeEntry stores 0-100 to
+                // match AL's `averageScore` shape. `(s * 10.0).round()`
+                // keeps the typical "7.85" → 79 mapping (AL would
+                // call this 79).
+                average_score: anime
+                    .score
+                    .filter(|s| *s > 0.0)
+                    .map(|s| (s * 10.0).round() as i32),
             }
         })
         .collect())

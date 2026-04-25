@@ -13,11 +13,11 @@ use super::types::RadarrRootFolder;
 // ── Handlers ───────────────────────────────────────────────────────────────
 
 /// GET /radarr/api/v3/system/status
-pub async fn system_status() -> Json<SystemStatus> {
-    // Radarr reports a different version string (5.x line) and the url_base
+pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatus> {
+    // Radarr reports a different version string (6.x line) and the url_base
     // is the `/radarr/` prefix this shim is mounted under; everything else
     // matches the shared default.
-    let mut s = SystemStatus::default_with_name("Ryokan");
+    let mut s = SystemStatus::default_with_name("Ryokan", state.start_time);
     s.version = "6.1.1.10360".to_string();
     s.url_base = "/radarr".to_string();
     Json(s)

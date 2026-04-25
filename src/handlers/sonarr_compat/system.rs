@@ -13,8 +13,8 @@ use super::types::{LanguageProfile, RootFolder};
 // ── Handlers ───────────────────────────────────────────────────────────────
 
 /// GET /api/v3/system/status
-pub async fn system_status() -> Json<SystemStatus> {
-    Json(SystemStatus::default_with_name("Ryokan"))
+pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatus> {
+    Json(SystemStatus::default_with_name("Ryokan", state.start_time))
 }
 
 /// GET /api/v3/qualityprofile

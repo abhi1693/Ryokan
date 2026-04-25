@@ -61,11 +61,13 @@ pub struct SystemStatus {
 }
 
 impl SystemStatus {
-    /// Fixed fake-Sonarr / fake-Radarr status payload. Only `app_name`
-    /// and `os_name` are material — Seerr uses `os_name` to decide
-    /// path separator when validating `root_folder_path`, and
-    /// `app_name` for the indicator pill in its UI.
-    pub fn default_with_name(app_name: &str) -> Self {
+    /// Fake-Sonarr / fake-Radarr status payload. Material fields:
+    /// `app_name` (Seerr's indicator-pill text), `os_name` (Seerr's
+    /// path-separator inference for `root_folder_path` validation),
+    /// `start_time` (the connected app's uptime as Seerr's UI
+    /// displays it — pass `state.start_time` so it reflects actual
+    /// process boot rather than a hardcoded long-stale timestamp).
+    pub fn default_with_name(app_name: &str, start_time: chrono::DateTime<chrono::Utc>) -> Self {
         Self {
             // Sonarr v4 is the current line; the Radarr override below
             // bumps to a v6 string. Seerr uses `app_name` for its UI
@@ -97,7 +99,7 @@ impl SystemStatus {
             url_base: String::new(),
             runtime_version: String::new(),
             runtime_name: String::new(),
-            start_time: "2024-01-01T00:00:00Z".to_string(),
+            start_time: start_time.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string(),
             package_update_mechanism: "builtIn".to_string(),
             app_name: app_name.to_string(),
         }

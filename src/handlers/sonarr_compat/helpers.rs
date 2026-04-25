@@ -6,7 +6,7 @@
 use axum::{Json, http::StatusCode};
 
 use crate::AppState;
-use crate::models::{config, monitoring, series};
+use crate::models::{config, metadata_cache, monitoring, series};
 use crate::services::{anibridge, anilist, media};
 
 use super::types::{
@@ -14,6 +14,44 @@ use super::types::{
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Map AL's 0-100 `averageScore` (also Jikan's 0-10 score multiplied
+/// by 10 inside `services::jikan`) onto Sonarr's `ratings.value`,
+/// which is a float on the 0-10 scale. `None` flattens to a zeroed
+/// `SonarrRatings` so the JSON payload keeps the same shape Seerr's
+/// `radarr-models` expects. `votes` stays at 0 — neither AL nor MAL
+/// gives us a vote count we can map cleanly onto Sonarr's notion of
+/// "vote count," and 0-with-a-non-zero-value is a shape Sonarr itself
+/// emits for unrated newer entries.
+pub(super) fn ratings_from_score(score: Option<i32>) -> SonarrRatings {
+    match score {
+        Some(s) if s > 0 => SonarrRatings {
+            votes: 0,
+            value: f64::from(s) / 10.0,
+        },
+        _ => SonarrRatings {
+            votes: 0,
+            value: 0.0,
+        },
+    }
+}
+
+/// Pull the cached `AnimeDetail` for `series_id`, or `None` on a cache
+/// miss / decode error. Used by `build_sonarr_series_from_tracked` to
+/// recover the average_score that the `series` row doesn't carry —
+/// metadata_cache is the canonical store. A miss falls through to a
+/// zeroed rating, which is the same shape Sonarr emits for entries
+/// whose metadata hasn't been refreshed yet.
+pub(super) async fn cached_detail_for(
+    db: &sqlx::SqlitePool,
+    series_id: i64,
+) -> Option<anilist::AnimeDetail> {
+    metadata_cache::get_by_series_id(db, series_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.detail)
+}
 
 /// Look up anime by external ID (TVDB or TMDB). Tries TVDB index first since
 /// Sonarr/Seerr sends real TVDB IDs, then falls back to TMDB index.
@@ -137,10 +175,7 @@ pub(super) async fn lookup_by_external_id(
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: String::new(),
-        ratings: SonarrRatings {
-            votes: 0,
-            value: 0.0,
-        },
+        ratings: ratings_from_score(show_detail.as_ref().and_then(|d| d.average_score)),
         quality_profile_id: 1,
         root_folder_path: cfg.media_root.clone(),
         statistics: SonarrStatistics {
@@ -259,10 +294,7 @@ pub(super) async fn build_sonarr_series_from_search(
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: String::new(),
-        ratings: SonarrRatings {
-            votes: 0,
-            value: 0.0,
-        },
+        ratings: ratings_from_score(r.average_score),
         quality_profile_id: 1,
         root_folder_path: cfg.media_root.clone(),
         statistics: SonarrStatistics {
@@ -282,6 +314,7 @@ pub(super) async fn build_sonarr_series_from_search(
 
 pub(super) async fn build_sonarr_series_from_tracked(
     s: &series::Series,
+    detail: Option<&anilist::AnimeDetail>,
     tmdb_id: i64,
     cfg: &config::Config,
 ) -> SonarrSeries {
@@ -352,10 +385,7 @@ pub(super) async fn build_sonarr_series_from_tracked(
         genres: vec!["Anime".to_string()],
         tags: vec![],
         added: String::new(),
-        ratings: SonarrRatings {
-            votes: 0,
-            value: 0.0,
-        },
+        ratings: ratings_from_score(detail.and_then(|d| d.average_score)),
         quality_profile_id: 1,
         root_folder_path: cfg.media_root.clone(),
         statistics: SonarrStatistics {

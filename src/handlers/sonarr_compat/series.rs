@@ -15,7 +15,8 @@ use crate::models::{config, monitoring, series};
 use crate::services::{anibridge, anilist, logger, monitoring as monitoring_service};
 
 use super::helpers::{
-    build_sonarr_series_from_search, build_sonarr_series_from_tracked, lookup_by_external_id,
+    build_sonarr_series_from_search, build_sonarr_series_from_tracked, cached_detail_for,
+    lookup_by_external_id,
 };
 use super::types::{AddSeriesBody, CommandBody, SonarrSeries, UpdateSeriesBody};
 
@@ -87,7 +88,8 @@ pub async fn list_series(
     let mut results = Vec::new();
     for s in &tracked {
         let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
-        results.push(build_sonarr_series_from_tracked(s, tmdb_id, &cfg).await);
+        let detail = cached_detail_for(&state.db, s.id).await;
+        results.push(build_sonarr_series_from_tracked(s, detail.as_ref(), tmdb_id, &cfg).await);
     }
 
     Ok(Json(results))
@@ -110,8 +112,9 @@ pub async fn get_series(
         .ok_or((StatusCode::NOT_FOUND, "Series not found".to_string()))?;
 
     let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let detail = cached_detail_for(&state.db, s.id).await;
     Ok(Json(
-        build_sonarr_series_from_tracked(&s, tmdb_id, &cfg).await,
+        build_sonarr_series_from_tracked(&s, detail.as_ref(), tmdb_id, &cfg).await,
     ))
 }
 
@@ -509,8 +512,9 @@ pub async fn add_series(
     // cours exist in Ryokan's DB but don't need to be reflected in the
     // Sonarr response shape.
     let primary = &processed[0];
+    let detail = cached_detail_for(&state.db, primary.id).await;
     Ok(Json(
-        build_sonarr_series_from_tracked(primary, tvdb_id, &cfg).await,
+        build_sonarr_series_from_tracked(primary, detail.as_ref(), tvdb_id, &cfg).await,
     ))
 }
 
@@ -550,8 +554,9 @@ pub async fn update_series(
         .unwrap_or_default();
 
     let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
+    let detail = cached_detail_for(&state.db, s.id).await;
     Ok(Json(
-        build_sonarr_series_from_tracked(&s, tmdb_id, &cfg).await,
+        build_sonarr_series_from_tracked(&s, detail.as_ref(), tmdb_id, &cfg).await,
     ))
 }
 

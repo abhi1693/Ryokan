@@ -137,6 +137,14 @@ pub struct AnimeEntry {
     pub episodes: Option<i32>,
     pub season_year: Option<i32>,
     pub source: String,
+    /// Average viewer score on the provider's native scale: AL is
+    /// 0-100, Jikan ingest multiplies by 10 to match. `None` for
+    /// entries with no community score yet (unaired / recently
+    /// added). Used by the Sonarr/Radarr shims to populate the
+    /// `ratings` field — Sonarr expects a 0-10 float, so the
+    /// downstream conversion divides by 10.
+    #[serde(default)]
+    pub average_score: Option<i32>,
 }
 
 /// One entry from a user's AniList watch list, projected to the
@@ -519,6 +527,8 @@ pub async fn search_anime_with_options(
                         format
                         status
                         episodes
+                        seasonYear
+                        averageScore
                     }
                 }
             }
@@ -676,6 +686,10 @@ pub async fn search_anime_with_options(
                 episodes: m["episodes"].as_i64().filter(|&n| n > 0).map(|e| e as i32),
                 season_year: m["seasonYear"].as_i64().map(|y| y as i32),
                 source: "anilist".to_string(),
+                average_score: m["averageScore"]
+                    .as_i64()
+                    .filter(|&n| n > 0)
+                    .map(|s| s as i32),
             })
         })
         .collect();
@@ -1574,6 +1588,7 @@ mod tests {
             episodes: Some(12),
             season_year: Some(2020),
             source: "anilist".into(),
+            average_score: Some(85),
         }];
         search_cache_put(key.clone(), entries.clone());
         let got = search_cache_get(&key).expect("cached value should be present");

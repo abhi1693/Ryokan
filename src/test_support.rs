@@ -77,6 +77,11 @@ pub fn build_test_app_state(
         users_exist: Arc::new(AtomicBool::new(true)),
         interactive_search_cache: crate::services::interactive_search_cache::new(),
         oauth_state: crate::services::oauth_state::new(),
+        // A fixed start_time so snapshot tests of `system_status` get
+        // a stable serialization. Real production paths use
+        // `chrono::Utc::now()` at process boot.
+        start_time: chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_067_200, 0)
+            .expect("epoch is valid"),
     }
 }
 
