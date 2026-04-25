@@ -115,6 +115,7 @@ struct DownloadsTemplate {
     queue_error: String,
     history: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
     blocklist: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
+    title_language: String,
 }
 
 #[derive(Deserialize)]
@@ -204,6 +205,7 @@ pub async fn downloads_page(
         queue_error,
         history,
         blocklist,
+        title_language: title_language.clone(),
     };
     Html(template.render().unwrap_or_default())
 }

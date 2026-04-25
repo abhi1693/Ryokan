@@ -155,6 +155,7 @@ struct ErrorTemplate {
     title: String,
     message: String,
     detail: String,
+    title_language: String,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
