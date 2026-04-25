@@ -309,6 +309,7 @@
                             <input type="checkbox" data-ext-pref="skip_already_watched" {% if acct.skip_already_watched %}checked{% endif %} onchange="saveExternalAccountPrefs()">
                             <span>Skip already-watched episodes</span>
                         </label>
+                        <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off; airing series + a caught-up user would otherwise skip everything.</span>
                     </div>
 
                     {# #62 PR B — sync cadence. Range: 15 minutes to
