@@ -1,0 +1,398 @@
+//! Interactive search handlers — the user-driven counterparts to the
+//! auto-search pipeline. Each endpoint takes a query, scores Nyaa
+//! results, and returns them as JSON (no automatic grab decision —
+//! the user picks which release to grab).
+//!
+//! `search_batch_releases` is here too, even though it returns batch-
+//! flavored results: it shares the per-series search shape with the
+//! single-episode interactive search and is gated on the same caller
+//! permissions, so it sits closer to the per-episode interactive
+//! handlers than to the auto-search pipeline.
+
+use axum::{
+    extract::{Path, Query, State},
+    response::Json,
+};
+
+use crate::AppState;
+use crate::models::log::LogCategory;
+use crate::models::{config, episode_tags};
+use crate::services::{auto_search, logger, progress};
+
+use super::super::reconcile::resolve_series_context;
+use super::auto_search::{AutoSearchQuery, batch_episode_numbers, display_title_for_progress};
+
+/// Search batch releases only for a series (no single-episode grabs).
+#[utoipa::path(
+    post,
+    path = "/api/series/{anilist_id}/search-batch",
+    tag = "Library",
+    summary = "Search for batch releases",
+    description = "Search for batch/complete-series torrent releases and grab the best match.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    responses(
+        (status = 200, description = "Batch search report", body = auto_search::AutoSearchReport),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
+pub async fn search_batch_releases(
+    State(state): State<AppState>,
+    Path(request_id): Path<i64>,
+    Query(q): Query<AutoSearchQuery>,
+) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
+        Some(id) => Some(state.progress.register(id).await),
+        None => None,
+    };
+    if let Some(h) = &progress_handle {
+        h.emit("start", "info", "Searching for batch release…", None, false)
+            .await;
+    }
+
+    let (tracked_row, _, detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let series_id_for_grab = tracked_row.as_ref().map(|s| s.id);
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_default();
+
+    let cfs = state.custom_formats.read().await.clone();
+
+    if let Some(h) = &progress_handle {
+        h.emit(
+            "search",
+            "info",
+            format!("Searching: {}", display_title_for_progress(&detail)),
+            None,
+            false,
+        )
+        .await;
+    }
+
+    // Pick the best *batch* — filtering to is_batch pre-selection instead
+    // of post-selection. The old code called find_best_for_target and
+    // post-filtered, which returned None whenever the top-scored result
+    // was a single-episode weekly release (i.e. almost every popular show
+    // with active weekly seeders).
+    let best = auto_search::find_best_batch_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &auto_search::SearchTarget::Single,
+        &cfs,
+    )
+    .await;
+
+    let qbit = {
+        let guard = state.download_client.read().await;
+        guard
+            .as_ref()
+            .ok_or({
+                if let Some(h) = &progress_handle {
+                    // Fire-and-forget: we're about to Err-return, so the
+                    // toast is the only surface that tells the user why.
+                    let h = h.clone();
+                    tokio::spawn(async move {
+                        h.emit(
+                            "error",
+                            "error",
+                            "Download client not configured",
+                            None,
+                            true,
+                        )
+                        .await;
+                    });
+                }
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "Download client not configured".to_string(),
+                )
+            })?
+            .clone()
+    };
+
+    match best {
+        None => {
+            if let Some(h) = &progress_handle {
+                h.emit("done", "warn", "No batch release found", None, true)
+                    .await;
+            }
+            Err((
+                axum::http::StatusCode::NOT_FOUND,
+                "No batch release found".to_string(),
+            ))
+        }
+        Some(result) => {
+            let url = if !result.magnet.is_empty() {
+                result.magnet.clone()
+            } else {
+                result.torrent.clone()
+            };
+            if url.is_empty() {
+                if let Some(h) = &progress_handle {
+                    h.emit(
+                        "error",
+                        "error",
+                        "No magnet/torrent URL for batch release",
+                        None,
+                        true,
+                    )
+                    .await;
+                }
+                return Err((
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "No magnet/torrent URL for batch release".to_string(),
+                ));
+            }
+            if let Some(h) = &progress_handle {
+                h.emit(
+                    "grab",
+                    "info",
+                    format!("Grabbing {}", result.title),
+                    None,
+                    false,
+                )
+                .await;
+            }
+            qbit.add_torrent(&url, &result.info_hash)
+                .await
+                .map_err(|e| {
+                    if let Some(h) = &progress_handle {
+                        let h = h.clone();
+                        let err = e.clone();
+                        tokio::spawn(async move {
+                            h.emit(
+                                "error",
+                                "error",
+                                "qBittorrent rejected the torrent",
+                                Some(err),
+                                true,
+                            )
+                            .await;
+                        });
+                    }
+                    (axum::http::StatusCode::BAD_GATEWAY, e)
+                })?;
+            let classification = crate::services::source::classify_release(
+                &state.db,
+                &result.title,
+                Some(&result.resolution),
+                Some(crate::services::source::NyaaContext {
+                    info_hash: &result.info_hash,
+                    view_url: &result.link,
+                    is_batch: result.is_batch,
+                }),
+                Some(crate::services::source::SeriesContext {
+                    status: &detail.status,
+                    season_year: detail.season_year,
+                    end_year: detail.end_year,
+                }),
+            )
+            .await;
+            let tier_label = classification.label();
+            logger::info(
+                &state.db,
+                LogCategory::Grab,
+                &format!("Grabbed batch: {}", result.title),
+                &format!(
+                    "group={}, score={}, tier={}",
+                    result.group, result.score, tier_label
+                ),
+            )
+            .await;
+            if let Some(sid) = series_id_for_grab {
+                // Parse episode list from the batch title so every covered
+                // episode gets a per-episode `episode_quality_tags` row at
+                // grab time, not just at post-processing time. Without
+                // this the UI shows UNKNOWN for every episode of a
+                // freshly-grabbed batch — and if the user has
+                // post-processing disabled the rows never get created at
+                // all. Mirrors the auto-search-path logic at
+                // `run_auto_search_targets_with_upgrades` (look for
+                // `parse_release_numbers` above).
+                //
+                // Fallback when the title carries no explicit range
+                // (e.g. "Jellyfish Can't Swim in the Night" with no
+                // "01-12" suffix): use the series' known episode count.
+                // Capped at 1000 so a garbage AniList record can't
+                // spawn a million rows.
+                let ep_nums = batch_episode_numbers(&result.title, &detail);
+                let _ = crate::models::grabbed_torrents::record_grab(
+                    &state.db,
+                    &result.info_hash,
+                    &result.title,
+                    sid,
+                    &ep_nums,
+                    result.is_batch,
+                )
+                .await;
+                for ep_num in &ep_nums {
+                    let _ = episode_tags::record_grab(
+                        &state.db,
+                        sid,
+                        *ep_num,
+                        &classification,
+                        &result.title,
+                        &result.group,
+                        result.size_bytes,
+                        result.is_batch,
+                    )
+                    .await;
+                }
+            }
+            if let Some(h) = &progress_handle {
+                h.emit(
+                    "done",
+                    "success",
+                    "Batch grabbed",
+                    Some(format!("{} ({})", result.title, tier_label)),
+                    true,
+                )
+                .await;
+            }
+            Ok(Json(auto_search::AutoSearchReport {
+                grabbed: vec![auto_search::AutoSearchHit {
+                    target_label: "Batch".to_string(),
+                    release_title: result.title,
+                    release_group: result.group,
+                    quality_tier: tier_label,
+                    url,
+                    score: result.score,
+                }],
+                skipped: vec![],
+                quality_profile: cfg.quality_profile,
+            }))
+        }
+    }
+}
+
+/// Interactive search: return all scored candidates for an episode without grabbing.
+#[utoipa::path(
+    get,
+    path = "/api/series/{anilist_id}/interactive-search/{episode_number}",
+    tag = "Library",
+    summary = "Interactive episode search",
+    description = "Search Nyaa for all available releases of a specific episode, returning scored results for manual selection.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+        ("episode_number" = i32, Path, description = "Episode number to search for"),
+    ),
+    responses(
+        (status = 200, description = "Search results", body = Vec<crate::services::nyaa::SearchResult>),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
+pub async fn interactive_search_episode(
+    State(state): State<AppState>,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+) -> Result<Json<Vec<crate::services::nyaa::SearchResult>>, (axum::http::StatusCode, String)> {
+    // 5-minute TTL cache so rapid reloads of the picker modal during
+    // UI iteration don't hammer Nyaa. Scope-limited to interactive
+    // search only; auto-search / RSS / manual grabs still go direct.
+    let cache_key = (request_id, Some(episode_number));
+    if let Some(cached) =
+        crate::services::interactive_search_cache::get(&state.interactive_search_cache, cache_key)
+    {
+        return Ok(Json((*cached).clone()));
+    }
+
+    let (_, _, detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_default();
+
+    let cfs = state.custom_formats.read().await.clone();
+
+    // Same single-entry collapse as auto_search_episode — the interactive
+    // picker otherwise returns zero results for movies.
+    let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
+    let mut results =
+        auto_search::find_all_for_target(&state.db, &detail, &cfg, &target, false, &cfs).await;
+
+    // Layer 3 (group-map) enrichment. Auto-search already runs the full
+    // source pipeline so its classification is complete, but the interactive
+    // picker shows results straight from nyaa::parse_results where only
+    // Layer 1 (anitomy filename tokens) has fired. Filling source via the
+    // group table here is what lets SubsPlease releases label as WEB-DL
+    // and VCB-Studio as BluRay when the filename alone is silent.
+    crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
+
+    crate::services::interactive_search_cache::insert(
+        &state.interactive_search_cache,
+        cache_key,
+        results.clone(),
+    );
+    Ok(Json(results))
+}
+
+/// Interactive batch search: return all scored batch candidates so the user
+/// can pick one. Uses the same query sweep as the auto batch search
+/// (`find_best_batch_for_target`) so the interactive and auto paths surface
+/// the same candidate pool — the only difference is that this returns every
+/// hit instead of picking the top.
+#[utoipa::path(
+    get,
+    path = "/api/series/{anilist_id}/interactive-search-batch",
+    tag = "Library",
+    summary = "Interactive batch search",
+    description = "Search Nyaa for batch/complete releases of a series, returning scored results for manual selection.",
+    params(
+        ("anilist_id" = i64, Path, description = "AniList ID or internal series ID"),
+    ),
+    responses(
+        (status = 200, description = "Batch search results", body = Vec<crate::services::nyaa::SearchResult>),
+        (status = 502, description = "Metadata fetch failed"),
+    ),
+)]
+pub async fn interactive_search_batches(
+    State(state): State<AppState>,
+    Path(request_id): Path<i64>,
+) -> Result<Json<Vec<crate::services::nyaa::SearchResult>>, (axum::http::StatusCode, String)> {
+    // 5-minute TTL cache — see interactive_search_episode for rationale.
+    // `None` episode slot distinguishes batch from per-episode.
+    let cache_key = (request_id, None);
+    if let Some(cached) =
+        crate::services::interactive_search_cache::get(&state.interactive_search_cache, cache_key)
+    {
+        return Ok(Json((*cached).clone()));
+    }
+
+    let (_, _, detail) = resolve_series_context(&state.db, request_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_default();
+
+    let cfs = state.custom_formats.read().await.clone();
+
+    let mut results = auto_search::collect_scored_batches_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &auto_search::SearchTarget::Single,
+        &cfs,
+    )
+    .await;
+
+    crate::services::nyaa::enrich_results_with_group_map(&state.db, &mut results).await;
+
+    crate::services::interactive_search_cache::insert(
+        &state.interactive_search_cache,
+        cache_key,
+        results.clone(),
+    );
+    Ok(Json(results))
+}

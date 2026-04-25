@@ -1,0 +1,806 @@
+use sqlx::SqlitePool;
+
+use super::super::reconcile::maybe_hydrate_cumulative_offset;
+
+use crate::models::{episode_tags, grabbed_torrents, series};
+use crate::services::anilist;
+use crate::services::auto_expand::{AutoExpandGrabContext, expand_from_files};
+
+fn empty_anime_detail(id: i64, title_english: &str) -> anilist::AnimeDetail {
+    anilist::AnimeDetail {
+        id,
+        id_mal: None,
+        title_romaji: title_english.to_string(),
+        title_english: title_english.to_string(),
+        title_native: String::new(),
+        cover_url: String::new(),
+        banner_url: String::new(),
+        format: "TV".to_string(),
+        status: "FINISHED".to_string(),
+        status_display: "Finished".to_string(),
+        episodes: Some(26),
+        duration: Some(24),
+        season: String::new(),
+        season_year: Some(2012),
+        end_year: Some(2013),
+        description: String::new(),
+        genres: Vec::new(),
+        average_score: None,
+        average_score_display: None,
+        score_is_ten_point: false,
+        score_class: String::new(),
+        next_airing_episode: None,
+        next_airing_at: None,
+        synonyms: Vec::new(),
+        streaming_episodes: Vec::new(),
+        relations: Vec::new(),
+    }
+}
+
+fn test_grab_ctx() -> AutoExpandGrabContext {
+    AutoExpandGrabContext {
+        classification: crate::services::source::ClassificationResult::unknown(),
+        release_group: String::new(),
+        size_bytes: 0,
+    }
+}
+
+fn related_entry(id: i64, title_english: &str, episodes: Option<i32>) -> anilist::RelatedEntry {
+    anilist::RelatedEntry {
+        id,
+        id_mal: None,
+        title_romaji: title_english.to_string(),
+        title_english: title_english.to_string(),
+        title_native: String::new(),
+        cover_url: String::new(),
+        format: "TV".to_string(),
+        status: "FINISHED".to_string(),
+        status_display: "Finished".to_string(),
+        episodes,
+        relation_type: "SIDE_STORY".to_string(),
+        season_year: Some(2014),
+        media_type: "ANIME".to_string(),
+    }
+}
+
+/// End-to-end exercise of the Phase 2 auto-expand route writer.
+/// Mirrors the real JoJo S1-S3 megapack case: the parent entry
+/// ("JoJo's Bizarre Adventure") owns the Phantom Blood / Battle
+/// Tendency files and a sibling relation ("Stardust Crusaders")
+/// owns the S3 files. After the pure inner fn runs, we expect two
+/// route rows to land in `grabbed_torrent_series` — one per series
+/// — with the unclaimed (parent) files routing to the franchise
+/// root.
+///
+/// The fn is split into outer (qBit metadata wait) + inner
+/// (`_with_files`) precisely so this test can feed synthetic
+/// filenames without spinning up qBittorrent.
+#[tokio::test]
+async fn auto_expand_routes_sibling_and_parent_files() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    crate::models::migrate(&db).await.expect("migrate");
+
+    // Seed the parent series row. The real grab path calls
+    // series::upsert first, so this matches production flow.
+    let (parent_id, _) = series::upsert(
+        &db,
+        series::SeriesCore {
+            anilist_id: 801,
+            mal_id: None,
+            title: "JoJo's Bizarre Adventure",
+            title_romaji: "JoJo no Kimyou na Bouken",
+            title_english: "JoJo's Bizarre Adventure",
+            title_native: "",
+            cover_url: "",
+            format: "TV",
+            status: "FINISHED",
+            episodes: Some(26),
+            season_year: Some(2012),
+            end_year: Some(2013),
+        },
+    )
+    .await
+    .expect("parent upsert");
+
+    // Record a grab row so there's a grab_id for the routes to
+    // attach to. `record_grab` returns Ok(Some(id)) on fresh insert.
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "dummyhash0000000000000000000000000000000",
+        "[Group] JoJo Megapack (BD 1080p)",
+        parent_id,
+        &[],
+        true,
+    )
+    .await
+    .expect("record_grab")
+    .expect("grab row inserted");
+
+    // Construct a parent AnimeDetail with one sibling relation.
+    // The sibling title must carry an extractable trailing
+    // subtitle ("Stardust Crusaders") for detect_sibling_entries
+    // to find a needle to match.
+    let mut parent_detail = empty_anime_detail(801, "JoJo's Bizarre Adventure");
+    parent_detail.relations.push(related_entry(
+        802,
+        "JoJo's Bizarre Adventure: Stardust Crusaders",
+        Some(24),
+    ));
+
+    // Two sibling files (match the Stardust Crusaders needle) and
+    // two parent files (bare franchise title, no sibling subtitle).
+    let filenames = vec![
+        "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 01 [BD 1080p].mkv".to_string(),
+        "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - 02 [BD 1080p].mkv".to_string(),
+        "[Group] JoJo no Kimyou na Bouken - 01 [BD 1080p].mkv".to_string(),
+        "[Group] JoJo no Kimyou na Bouken - 02 [BD 1080p].mkv".to_string(),
+    ];
+
+    let grab_ctx = test_grab_ctx();
+    let added = expand_from_files(
+        &db,
+        &filenames,
+        &parent_detail,
+        parent_id,
+        &[1, 2],
+        grab_id,
+        "[Group] JoJo Megapack (BD 1080p)",
+        &grab_ctx,
+    )
+    .await;
+
+    assert_eq!(added, 1, "one new sibling (Stardust Crusaders) expected");
+
+    let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+        .await
+        .expect("get_series_routes");
+    assert_eq!(routes.len(), 2, "sibling route + parent route expected");
+
+    // The sibling route: claims file indices 0 and 1, its series_id
+    // differs from the parent, and the matched subtitle is the one
+    // trailing_subtitle_of extracted from the relation title.
+    let sibling_route = routes
+        .iter()
+        .find(|r| r.series_id != parent_id)
+        .expect("sibling route present");
+    assert_eq!(sibling_route.file_indices, vec![0, 1]);
+    assert_eq!(sibling_route.matched_subtitle, "Stardust Crusaders");
+    // Arc-local numbering (files E01, E02) → min_ep=1 ≤
+    // parent_cap=26 → offset=0, and stored episode_numbers
+    // equal the raw parsed values.
+    assert_eq!(sibling_route.episode_offset, 0);
+    assert_eq!(sibling_route.episode_numbers, vec![1, 2]);
+
+    // The parent route: claims the unclaimed media files (2 and 3)
+    // and reuses the caller-supplied episode numbers verbatim.
+    let parent_route = routes
+        .iter()
+        .find(|r| r.series_id == parent_id)
+        .expect("parent route present");
+    assert_eq!(parent_route.file_indices, vec![2, 3]);
+    assert_eq!(parent_route.episode_numbers, vec![1, 2]);
+    // Parent routes always carry offset 0.
+    assert_eq!(parent_route.episode_offset, 0);
+}
+
+/// Smol Monogatari-style batch: absolute episode numbering runs
+/// across parent + sibling (E13 = last parent ep, E14 = first
+/// sibling ep). The fallback path detects Owarimonogatari Second
+/// Season via title-prefix matching AND the per-sibling offset
+/// pass sets offset=13 so the route row's episode_numbers store
+/// the effective (arc-local) 1..=7 instead of the raw 14..=20.
+#[tokio::test]
+async fn auto_expand_persists_episode_offset_for_absolute_numbered_batch() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    crate::models::migrate(&db).await.expect("migrate");
+
+    let (parent_id, _) = series::upsert(
+        &db,
+        series::SeriesCore {
+            anilist_id: 21320,
+            mal_id: None,
+            title: "Owarimonogatari",
+            title_romaji: "Owarimonogatari",
+            title_english: "Owarimonogatari",
+            title_native: "",
+            cover_url: "",
+            format: "TV",
+            status: "FINISHED",
+            episodes: Some(13),
+            season_year: Some(2015),
+            end_year: Some(2015),
+        },
+    )
+    .await
+    .expect("parent upsert");
+
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "owarismolhash00000000000000000000000000",
+        "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+        parent_id,
+        &[],
+        true,
+    )
+    .await
+    .expect("record_grab")
+    .expect("grab inserted");
+
+    // Parent AnimeDetail with a continuation relation. Use the
+    // real title "Owarimonogatari Second Season" — no delimiter,
+    // no 2-token trailing subtitle — so the subtitle path cannot
+    // match and the fallback path's title-prefix rule must fire.
+    let mut parent_detail = empty_anime_detail(21320, "Owarimonogatari");
+    parent_detail.episodes = Some(13);
+    parent_detail.relations.push(related_entry(
+        21860,
+        "Owarimonogatari Second Season",
+        Some(7),
+    ));
+
+    // 13 parent files (S07E01..E13) + 7 sibling files (S07E14..E20).
+    let mut filenames: Vec<String> = Vec::new();
+    for n in 1..=13 {
+        filenames.push(format!(
+            "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p).mkv",
+            n
+        ));
+    }
+    for n in 14..=20 {
+        filenames.push(format!(
+            "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p).mkv",
+            n
+        ));
+    }
+    let parent_episode_numbers: Vec<i32> = (1..=13).collect();
+
+    let grab_ctx = test_grab_ctx();
+    let added = expand_from_files(
+        &db,
+        &filenames,
+        &parent_detail,
+        parent_id,
+        &parent_episode_numbers,
+        grab_id,
+        "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+        &grab_ctx,
+    )
+    .await;
+
+    assert_eq!(added, 1, "one new sibling (Owari S2) expected");
+
+    let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+        .await
+        .expect("get_series_routes");
+    assert_eq!(routes.len(), 2, "sibling route + parent route expected");
+
+    let sibling_route = routes
+        .iter()
+        .find(|r| r.series_id != parent_id)
+        .expect("sibling route present");
+    // Files 13..=19 (0-based indices) correspond to S07E14..E20.
+    assert_eq!(sibling_route.file_indices, vec![13, 14, 15, 16, 17, 18, 19]);
+    // The matched subtitle records the detection method for
+    // operator inspection.
+    assert!(
+        sibling_route
+            .matched_subtitle
+            .starts_with("episode-range fallback")
+    );
+    // Absolute numbering → offset = parent_cap = 13.
+    assert_eq!(sibling_route.episode_offset, 13);
+    // Stored episode_numbers are effective (post-offset) values,
+    // so a later `find_imported_for_episode(sibling, 1)` upgrade
+    // query hits this route row correctly.
+    assert_eq!(sibling_route.episode_numbers, vec![1, 2, 3, 4, 5, 6, 7]);
+
+    let parent_route = routes
+        .iter()
+        .find(|r| r.series_id == parent_id)
+        .expect("parent route present");
+    assert_eq!(
+        parent_route.file_indices,
+        vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    );
+    assert_eq!(parent_route.episode_offset, 0);
+
+    // Regression guard: auto-expand must also write per-episode
+    // `episode_quality_tags` + `episode_grab_history` rows for the
+    // newly-upserted sibling. Without these the sibling's series
+    // page renders UNKNOWN with no progress bar until post-
+    // processing backfills them (which, if the user has PP
+    // disabled, never happens). Uses the effective (post-offset)
+    // local episode numbers the route already stores.
+    let sibling_id = sibling_route.series_id;
+    let sibling_tags = episode_tags::get_for_series(&db, sibling_id)
+        .await
+        .expect("sibling quality tags");
+    assert_eq!(
+        sibling_tags.len(),
+        7,
+        "sibling should have 7 quality-tag rows (one per local ep 1..=7)"
+    );
+    for local_ep in 1..=7 {
+        let tag = sibling_tags
+            .get(&local_ep)
+            .unwrap_or_else(|| panic!("sibling tag for local ep {} missing", local_ep));
+        assert_eq!(tag.state, "grabbed");
+        let history = episode_tags::get_grab_history(&db, sibling_id, local_ep)
+            .await
+            .expect("sibling grab history");
+        assert_eq!(
+            history.len(),
+            1,
+            "sibling local ep {} should have 1 grab-history row",
+            local_ep
+        );
+    }
+}
+
+/// When the file list has no sibling matches, the inner fn is a
+/// no-op: no sibling series get upserted and no route rows get
+/// written. This exercises the early-return after
+/// `detect_sibling_entries_in_pack` returns an empty vec — the
+/// production path relies on that branch to avoid polluting the
+/// library with ghost rows for regular single-series grabs.
+#[tokio::test]
+async fn auto_expand_noop_when_no_siblings_detected() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    crate::models::migrate(&db).await.expect("migrate");
+
+    let (parent_id, _) = series::upsert(
+        &db,
+        series::SeriesCore {
+            anilist_id: 901,
+            mal_id: None,
+            title: "Sono Bisque Doll wa Koi wo Suru",
+            title_romaji: "Sono Bisque Doll wa Koi wo Suru",
+            title_english: "My Dress-Up Darling",
+            title_native: "",
+            cover_url: "",
+            format: "TV",
+            status: "FINISHED",
+            episodes: Some(12),
+            season_year: Some(2022),
+            end_year: Some(2022),
+        },
+    )
+    .await
+    .expect("parent upsert");
+
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "dummyhash1111111111111111111111111111111",
+        "[Group] My Dress-Up Darling S01 (BD 1080p)",
+        parent_id,
+        &[],
+        true,
+    )
+    .await
+    .expect("record_grab")
+    .expect("grab row inserted");
+
+    // No relations on the parent detail → no sibling candidates
+    // even though the file list is full of media files.
+    let parent_detail = empty_anime_detail(901, "My Dress-Up Darling");
+    let filenames = vec![
+        "[Group] My Dress-Up Darling - 01 [BD 1080p].mkv".to_string(),
+        "[Group] My Dress-Up Darling - 02 [BD 1080p].mkv".to_string(),
+    ];
+
+    let grab_ctx = test_grab_ctx();
+    let added = expand_from_files(
+        &db,
+        &filenames,
+        &parent_detail,
+        parent_id,
+        &[1, 2],
+        grab_id,
+        "[Group] My Dress-Up Darling S01 (BD 1080p)",
+        &grab_ctx,
+    )
+    .await;
+
+    assert_eq!(added, 0);
+    let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+        .await
+        .expect("get_series_routes");
+    assert!(
+        routes.is_empty(),
+        "no sibling → no routes, post-processing falls back to grab.series_id"
+    );
+}
+
+/// #26 — Grab-time hydration gate must NOT fire when a series'
+/// only PREQUEL is a movie (format = "MOVIE"). JJK S1's only
+/// AL prequel is the JJK 0 movie; since absolute-numbered TV
+/// releases don't count movies, the existing cumulative = 0 is
+/// correct and we must not trigger an AL refresh on every
+/// auto-search.
+///
+/// Verifies the gate returns the series unchanged (cumulative
+/// still 0) WITHOUT attempting network I/O — if the gate were
+/// wrong, refresh_series_metadata would be called and the test
+/// would hit AL (and fail with a flaky network error).
+#[tokio::test]
+async fn cumulative_hydration_skips_movie_only_prequel() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    crate::models::migrate(&db).await.expect("migrate");
+
+    let (series_id, _) = series::upsert(
+        &db,
+        series::SeriesCore {
+            anilist_id: 113415,
+            mal_id: None,
+            title: "Jujutsu Kaisen",
+            title_romaji: "Jujutsu Kaisen",
+            title_english: "Jujutsu Kaisen",
+            title_native: "",
+            cover_url: "",
+            format: "TV",
+            status: "FINISHED",
+            episodes: Some(24),
+            season_year: Some(2020),
+            end_year: Some(2021),
+        },
+    )
+    .await
+    .expect("upsert");
+
+    let tracked = series::get_by_id(&db, series_id)
+        .await
+        .expect("get_by_id")
+        .expect("series exists");
+    assert_eq!(tracked.cumulative_prior_episodes, 0);
+
+    let mut detail = empty_anime_detail(113415, "Jujutsu Kaisen");
+    let mut jjk0 = related_entry(145064, "Jujutsu Kaisen 0", None);
+    jjk0.relation_type = "PREQUEL".to_string();
+    jjk0.format = "MOVIE".to_string();
+    detail.relations.push(jjk0);
+
+    let result = maybe_hydrate_cumulative_offset(&db, Some(tracked), &detail).await;
+    let after = result.expect("series still returned");
+    assert_eq!(
+        after.cumulative_prior_episodes, 0,
+        "movie-only prequel must not trigger hydration"
+    );
+}
+
+/// #26 — Gate must short-circuit when cumulative is already
+/// non-zero: a series that's been hydrated before (e.g. by the
+/// periodic metadata_refresh sweep) should not re-hydrate on
+/// every auto-search.
+#[tokio::test]
+async fn cumulative_hydration_skips_already_populated_series() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    crate::models::migrate(&db).await.expect("migrate");
+
+    let (series_id, _) = series::upsert(
+        &db,
+        series::SeriesCore {
+            anilist_id: 145064,
+            mal_id: None,
+            title: "Jujutsu Kaisen S2",
+            title_romaji: "Jujutsu Kaisen S2",
+            title_english: "Jujutsu Kaisen S2",
+            title_native: "",
+            cover_url: "",
+            format: "TV",
+            status: "FINISHED",
+            episodes: Some(23),
+            season_year: Some(2023),
+            end_year: Some(2023),
+        },
+    )
+    .await
+    .expect("upsert");
+    series::update_cumulative_prior_episodes(&db, series_id, 24)
+        .await
+        .expect("set cumulative");
+
+    let tracked = series::get_by_id(&db, series_id)
+        .await
+        .expect("get_by_id")
+        .expect("series exists");
+    assert_eq!(tracked.cumulative_prior_episodes, 24);
+
+    let mut detail = empty_anime_detail(145064, "Jujutsu Kaisen S2");
+    let mut prev = related_entry(113415, "Jujutsu Kaisen", Some(24));
+    prev.relation_type = "PREQUEL".to_string();
+    prev.format = "TV".to_string();
+    detail.relations.push(prev);
+
+    let result = maybe_hydrate_cumulative_offset(&db, Some(tracked), &detail).await;
+    let after = result.expect("series still returned");
+    assert_eq!(
+        after.cumulative_prior_episodes, 24,
+        "populated cumulative short-circuits the gate"
+    );
+}
+
+/// Issue #45: full-scale JoJo Part 3 case. 48-episode BD megapack
+/// with absolute continuous numbering (no per-cour arc markers in
+/// the filenames) and Egypt-hen as a sibling of Stardust Crusaders
+/// on AniList. Egypt-hen's trailing "subtitle" is a single token
+/// ("Egypt-hen") so the subtitle path can't match — the
+/// episode-range fallback picks it up via title-prefix matching.
+///
+/// Verifies that:
+///   1. detection fires once (Egypt-hen sibling).
+///   2. the sibling route carries files 24..=47 (0-based) = E25..E48.
+///   3. episode_offset = 24 (parent_cap) so those map to local 1..=24.
+///   4. the sibling gets 24 quality-tag + grab-history rows (not 0).
+///   5. the parent route carries files 0..=23 = E01..=E24, offset 0.
+#[tokio::test]
+async fn auto_expand_jojo_part3_48ep_pack_maps_all_episodes() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    crate::models::migrate(&db).await.expect("migrate");
+
+    // Parent: JoJo Stardust Crusaders (24 eps).
+    let (parent_id, _) = series::upsert(
+        &db,
+        series::SeriesCore {
+            anilist_id: 20899,
+            mal_id: None,
+            title: "JoJo's Bizarre Adventure: Stardust Crusaders",
+            title_romaji: "JoJo no Kimyou na Bouken: Stardust Crusaders",
+            title_english: "JoJo's Bizarre Adventure: Stardust Crusaders",
+            title_native: "",
+            cover_url: "",
+            format: "TV",
+            status: "FINISHED",
+            episodes: Some(24),
+            season_year: Some(2014),
+            end_year: Some(2014),
+        },
+    )
+    .await
+    .expect("parent upsert");
+
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "jojop3hash00000000000000000000000000000000",
+        "[Group] JoJo's Bizarre Adventure Part 3 - Stardust Crusaders (BD 1080p 48 ep)",
+        parent_id,
+        &[],
+        true,
+    )
+    .await
+    .expect("record_grab")
+    .expect("grab inserted");
+
+    // Parent AnimeDetail with Egypt-hen as a sibling relation. Use
+    // the real AL title form "... Stardust Crusaders - Egypt-hen";
+    // the trailing single-token subtitle can't be extracted, so
+    // detection falls through to the episode-range + title-prefix
+    // path.
+    let mut parent_detail =
+        empty_anime_detail(20899, "JoJo's Bizarre Adventure: Stardust Crusaders");
+    parent_detail.episodes = Some(24);
+    parent_detail.relations.push(related_entry(
+        22663,
+        "JoJo's Bizarre Adventure: Stardust Crusaders - Egypt-hen",
+        Some(24),
+    ));
+
+    // 48 absolute-numbered files (E01..E48).
+    let filenames: Vec<String> = (1..=48)
+        .map(|n| {
+            format!(
+                "[Group] JoJo no Kimyou na Bouken - Stardust Crusaders - {:02} [BD 1080p].mkv",
+                n
+            )
+        })
+        .collect();
+
+    let grab_ctx = test_grab_ctx();
+    let added = expand_from_files(
+        &db,
+        &filenames,
+        &parent_detail,
+        parent_id,
+        &(1..=48).collect::<Vec<_>>(),
+        grab_id,
+        "[Group] JoJo P3 BD 48ep",
+        &grab_ctx,
+    )
+    .await;
+
+    assert_eq!(added, 1, "one new sibling (Egypt-hen) expected");
+
+    let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+        .await
+        .expect("get_series_routes");
+    assert_eq!(routes.len(), 2, "sibling + parent route expected");
+
+    let sibling_route = routes
+        .iter()
+        .find(|r| r.series_id != parent_id)
+        .expect("sibling route present");
+    let expected_sibling_files: Vec<usize> = (24..=47).collect();
+    assert_eq!(
+        sibling_route.file_indices, expected_sibling_files,
+        "sibling owns files 24..=47 (E25..E48)"
+    );
+    assert_eq!(
+        sibling_route.episode_offset, 24,
+        "absolute numbering → offset = parent_cap = 24"
+    );
+    assert_eq!(
+        sibling_route.episode_numbers,
+        (1..=24).collect::<Vec<_>>(),
+        "sibling's stored ep_nums are effective (post-offset) 1..=24"
+    );
+
+    let parent_route = routes
+        .iter()
+        .find(|r| r.series_id == parent_id)
+        .expect("parent route present");
+    let expected_parent_files: Vec<usize> = (0..=23).collect();
+    assert_eq!(parent_route.file_indices, expected_parent_files);
+    assert_eq!(parent_route.episode_offset, 0);
+
+    // Sibling quality-tag + history rows exist for local 1..=24.
+    let sibling_id = sibling_route.series_id;
+    let sibling_tags = episode_tags::get_for_series(&db, sibling_id)
+        .await
+        .expect("sibling quality tags");
+    assert_eq!(
+        sibling_tags.len(),
+        24,
+        "sibling should have 24 quality-tag rows"
+    );
+    for local_ep in 1..=24 {
+        let tag = sibling_tags
+            .get(&local_ep)
+            .unwrap_or_else(|| panic!("sibling tag for local ep {} missing", local_ep));
+        assert_eq!(tag.state, "grabbed");
+    }
+}
+
+/// Issue #45: Owarimonogatari BD with an AL/BD episode-count
+/// disagreement. AL reports S1 = 12 eps (the aired ep 1 was a
+/// 48-min merged episode) but the [smol] BD splits that back into
+/// two ~24-min files, so the pack has 13 Owari S1 files + 7 Owari
+/// S2 files.
+///
+/// This is the case the user flagged as "frustrating" in issue #45.
+/// Verifies that:
+///   1. the sibling side is unaffected by the mismatch — Owari S2
+///      gets 7 files mapped to local 1..=7 via offset 13.
+///   2. the parent side gets all 13 files (including the "extra"
+///      ep 13 that AL doesn't know about), routed with offset 0.
+///
+/// The complementary UI fix lives in `pages::build_episodes` — see
+/// `build_episodes_surfaces_on_disk_files_beyond_anilist_episode_count`.
+#[tokio::test]
+async fn auto_expand_owari_bd_split_with_anilist_count_mismatch() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    crate::models::migrate(&db).await.expect("migrate");
+
+    // Parent: Owarimonogatari. Use AL's reported count (12), NOT
+    // the BD's file count (13). This is the whole point of the test.
+    let (parent_id, _) = series::upsert(
+        &db,
+        series::SeriesCore {
+            anilist_id: 21860,
+            mal_id: None,
+            title: "Owarimonogatari",
+            title_romaji: "Owarimonogatari",
+            title_english: "Owarimonogatari",
+            title_native: "",
+            cover_url: "",
+            format: "TV",
+            status: "FINISHED",
+            episodes: Some(12),
+            season_year: Some(2015),
+            end_year: Some(2015),
+        },
+    )
+    .await
+    .expect("parent upsert");
+
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "owarialmismatch000000000000000000000000000",
+        "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+        parent_id,
+        &[],
+        true,
+    )
+    .await
+    .expect("record_grab")
+    .expect("grab inserted");
+
+    let mut parent_detail = empty_anime_detail(21860, "Owarimonogatari");
+    parent_detail.episodes = Some(12); // AL's count, NOT the BD's.
+    parent_detail.relations.push(related_entry(
+        99423,
+        "Owarimonogatari Second Season",
+        Some(7),
+    ));
+
+    // 13 parent files (S07E01..E13) + 7 sibling files (S07E14..E20).
+    // The parent's file 12 (E13) exists despite AL saying S1 has
+    // only 12 episodes — this is the mismatch we're testing.
+    let mut filenames: Vec<String> = Vec::new();
+    for n in 1..=13 {
+        filenames.push(format!(
+            "[smol] Monogatari - S07E{:02} - Owarimonogatari (BD 1080p).mkv",
+            n
+        ));
+    }
+    for n in 14..=20 {
+        filenames.push(format!(
+            "[smol] Monogatari - S07E{:02} - Owarimonogatari Second Season (Ge) (BD 1080p).mkv",
+            n
+        ));
+    }
+
+    let grab_ctx = test_grab_ctx();
+    let added = expand_from_files(
+        &db,
+        &filenames,
+        &parent_detail,
+        parent_id,
+        &(1..=12).collect::<Vec<_>>(),
+        grab_id,
+        "[smol] Monogatari - S07 [BD 1080p HEVC Opus]",
+        &grab_ctx,
+    )
+    .await;
+
+    assert_eq!(added, 1, "one new sibling (Owari S2) expected");
+
+    let routes = grabbed_torrents::get_series_routes(&db, grab_id)
+        .await
+        .expect("get_series_routes");
+    assert_eq!(routes.len(), 2, "sibling + parent route expected");
+
+    // Sibling route: 7 files (S07E14..E20) mapped to local 1..=7.
+    // `min_ep = 14`, parent_cap = 12 → offset = min_ep - 1 = 13.
+    // Local = raw - offset: 14→1, 15→2, ..., 20→7.
+    let sibling_route = routes
+        .iter()
+        .find(|r| r.series_id != parent_id)
+        .expect("sibling route present");
+    assert_eq!(
+        sibling_route.file_indices,
+        vec![13, 14, 15, 16, 17, 18, 19],
+        "sibling owns E14..=E20 (0-based 13..=19)"
+    );
+    assert_eq!(
+        sibling_route.episode_offset, 13,
+        "min_ep(14) - 1 = 13, correctly larger than parent_cap(12)"
+    );
+    assert_eq!(sibling_route.episode_numbers, vec![1, 2, 3, 4, 5, 6, 7]);
+
+    // Parent route: all 13 files including the "extra" E13 that
+    // AL doesn't know about. Offset stays 0 — parent files use
+    // their own local numbering.
+    let parent_route = routes
+        .iter()
+        .find(|r| r.series_id == parent_id)
+        .expect("parent route present");
+    assert_eq!(
+        parent_route.file_indices,
+        (0..=12).collect::<Vec<_>>(),
+        "parent owns all 13 files (E01..=E13), including the AL-overflow E13"
+    );
+    assert_eq!(parent_route.episode_offset, 0);
+}
