@@ -23,29 +23,35 @@
     gap: 20px;
 }
 
-/* #62 PR E — genre filter input. Mirrors .folder-select's padding
-   and border treatment so it lines up with the list dropdown
-   beside it. The browser-native datalist autocomplete shows under
-   the input as the user types — no JS required. min-width keeps a
-   single-line placeholder visible without forcing the toolbar to
-   wrap on narrow viewports. */
-.library-genre-input {
-    padding: 5px 10px;
+/* Library search input. Sits in the middle column of the page
+   header (between the Library title and the right-side filter +
+   Add Series group). Wider min-width than the filter dropdowns
+   so it reads as a primary search affordance, not a small filter
+   field. */
+.library-search-form {
+    flex: 1 1 auto;
+    display: flex;
+    justify-content: center;
+    min-width: 0;
+}
+
+.library-search-input {
+    padding: 7px 12px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text);
-    font-size: 12px;
+    font-size: 13px;
     font-family: var(--font-body);
-    min-width: 180px;
-    max-width: 260px;
+    width: min(420px, 100%);
+    min-width: 220px;
 }
 
-.library-genre-input::placeholder {
+.library-search-input::placeholder {
     color: var(--text-dim);
 }
 
-.library-genre-input:focus {
+.library-search-input:focus {
     outline: none;
     border-color: var(--accent);
 }

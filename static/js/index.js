@@ -3,6 +3,17 @@
 // `getTitleByLang` below still has something to compare against.
 const initialTitleLanguage = window.initialTitleLanguage || '';
 
+// Debounced auto-submit for the library search input. Submits 250ms
+// after the user stops typing so each keystroke isn't a navigation,
+// but the page refreshes quickly enough to feel live.
+let librarySearchDebounceTimer = null;
+function debouncedLibrarySearchSubmit(input) {
+    if (librarySearchDebounceTimer) clearTimeout(librarySearchDebounceTimer);
+    librarySearchDebounceTimer = setTimeout(() => {
+        if (input.form) input.form.submit();
+    }, 250);
+}
+
 function openAddModal() {
     document.getElementById('add-modal').style.display = 'flex';
     document.getElementById('anilist-query').focus();

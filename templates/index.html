@@ -10,29 +10,34 @@
             <h2>Library</h2>
             <p class="page-desc">Your tracked anime series.</p>
         </div>
+        {# Middle column: the library search form. Its own GET form
+           so it can submit independently with debounced auto-submit
+           on the right side's filter/sort form. Hidden inputs mirror
+           the active list/sort values so a search submit doesn't
+           drop the user's other selections. #}
+        <form method="get" action="/" class="library-search-form">
+            <label for="library-search" class="visually-hidden">Search library</label>
+            <input type="search"
+                   id="library-search"
+                   name="search"
+                   placeholder="Search library…"
+                   class="library-search-input"
+                   value="{{ search_query }}"
+                   autocomplete="off"
+                   oninput="debouncedLibrarySearchSubmit(this)"
+                   onchange="this.form.submit()">
+            {% if !custom_list_filter.is_empty() %}<input type="hidden" name="list" value="{{ custom_list_filter }}">{% endif %}
+            {% if sort_value.as_str() != "recent" %}<input type="hidden" name="sort" value="{{ sort_value }}">{% endif %}
+        </form>
+
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            {# #62 PR D + E — library filters. Combined into one
-               GET form so the two controls compose (set both →
-               server filters by both predicates). The form
-               submits on dropdown change AND on the genre input's
-               native `change` (fires after blur or Enter), so
-               either control standalone or in combination produces
-               a single navigation. #}
+            {% if !custom_list_names.is_empty() || !score_format.is_empty() || !search_query.is_empty() || !custom_list_filter.is_empty() %}
+            {# Right group: list + sort filters. Each onchange auto-
+               submits. A hidden `search` input carries the current
+               search query through so changing list/sort doesn't
+               drop it. #}
             <form method="get" action="/" class="library-filter-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-                {# Library search. Case-insensitive substring match
-                   against the three title fields (english/romaji/
-                   native); composes with the list filter and sort.
-                   Submits on Enter (form default) and on blur after
-                   edit (`change` event) so the user doesn't have to
-                   hit Enter explicitly. #}
-                <label for="library-search" class="visually-hidden">Search library</label>
-                <input type="search"
-                       id="library-search"
-                       name="search"
-                       placeholder="Search library…"
-                       class="library-genre-input"
-                       value="{{ search_query }}"
-                       onchange="this.form.submit()">
+                {% if !search_query.is_empty() %}<input type="hidden" name="search" value="{{ search_query }}">{% endif %}
                 {% if !custom_list_names.is_empty() %}
                 <label for="library-list-filter" class="visually-hidden">Filter by custom list</label>
                 <select id="library-list-filter" name="list" class="folder-select" onchange="this.form.submit()">
@@ -45,8 +50,7 @@
                 {% if !score_format.is_empty() %}
                 {# #62 PR E — sort-by-user-score. Hidden when no
                    external account is linked because there'd be no
-                   user_score values to sort by. Submits the same
-                   form so the sort + active filters compose. #}
+                   user_score values to sort by. #}
                 <label for="library-sort" class="visually-hidden">Sort</label>
                 <select id="library-sort" name="sort" class="folder-select" onchange="this.form.submit()">
                     <option value="recent"{% if sort_value.as_str() == "recent" %} selected{% endif %}>Recently added</option>
@@ -57,13 +61,8 @@
                 <a class="btn btn-pill library-filter-clear" href="/" title="Clear filters">Clear</a>
                 {% endif %}
             </form>
-            {# Reserved width preserves the filter row's original
-               left edge after the Needs Review button was removed
-               — without it, the right-side flex box shrinks to
-               content and the filters slide right against Add
-               Series. Matches the deleted button's footprint
-               (padding + "Needs Review" label + the 8px gap). #}
-            <button class="btn btn-primary" style="margin-left: 140px;" onclick="openAddModal()">+ Add Series</button>
+            {% endif %}
+            <button class="btn btn-primary" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>
 </div>
