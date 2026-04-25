@@ -142,6 +142,18 @@
     background: rgba(203, 166, 247, 0.16);
     color: var(--accent);
     font-variant-numeric: tabular-nums;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* AL POINT_3 outline-face SVG sits inline with the "You:" prefix
+   and inherits the badge's accent color via `currentColor` on the
+   stroke. -1px translate centers the optical baseline against the
+   surrounding text — without it the circle bottom hangs slightly
+   below the text descender. */
+.user-score-smiley {
+    transform: translateY(-1px);
 }
 
 .tag-status-releasing,

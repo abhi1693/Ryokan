@@ -66,14 +66,19 @@ impl Series {
         MonitorMode::from_str(&self.monitor_mode)
     }
 
-    /// #62 PR C — render the "You: X" badge string for this series
-    /// using the given `score_format` (typically the linked
+    /// #62 PR C — render the "You: X" badge for this series using
+    /// the given `score_format` (typically the linked
     /// `external_accounts.score_format`). Returns `None` when no
     /// account is linked, the user hasn't rated this series, or the
-    /// score is the unrated sentinel. Library cards call this from
-    /// Askama directly so each row formats consistently with the
-    /// detail-page badge.
-    pub fn user_score_display(&self, score_format: &str) -> Option<String> {
+    /// score is the unrated sentinel. The returned
+    /// [`FormattedUserScore`] is either plain text (numbers, stars)
+    /// or a smiley enum the template renders as inline SVG. Library
+    /// cards call this from Askama directly so each row formats
+    /// consistently with the detail-page badge.
+    pub fn user_score_display(
+        &self,
+        score_format: &str,
+    ) -> Option<crate::services::user_score::FormattedUserScore> {
         crate::services::user_score::format_user_score(self.user_score, score_format)
     }
 }
@@ -531,7 +536,7 @@ pub async fn list_synced_from(
     account_id: i64,
 ) -> Result<Vec<SyncedSeriesRow>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, monitor_mode, monitor_mode_manual_override, user_score FROM series \
+        "SELECT id, anilist_id, monitor_mode, monitor_mode_manual_override FROM series \
          WHERE synced_from_external_account_id = ?",
     )
     .bind(account_id)

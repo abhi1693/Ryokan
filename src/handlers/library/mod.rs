@@ -88,13 +88,13 @@ struct SeriesTemplate {
     /// is following the external account (sync-tracked + override
     /// cleared); otherwise equals `monitor_mode`.
     monitor_mode_select_value: String,
-    /// #62 PR C — pre-rendered "You: X" badge text, formatted per
-    /// the linked account's `score_format`. `None` when no account
-    /// is linked, the series isn't on the user's list, or the user
-    /// hasn't rated this series. Empty in any other "no badge"
-    /// case so the template's `{% if let Some %}` reads as a clean
-    /// boolean.
-    user_score_display: Option<String>,
+    /// #62 PR C — pre-rendered "You: X" badge for the detail page,
+    /// formatted per the linked account's `score_format`. `None`
+    /// when no account is linked, the user hasn't rated this
+    /// series, or the score is the unrated sentinel. The variant
+    /// (Text vs. Smiley) drives whether the template renders a
+    /// string or an inline SVG outline face.
+    user_score_display: Option<crate::services::user_score::FormattedUserScore>,
     monitored_count: i32,
     all_monitored: bool,
     /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the

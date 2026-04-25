@@ -50,8 +50,8 @@
                 {# #62 PR C — user's personal score from their linked
                    AL/MAL account. Hidden when no account is linked or
                    the user hasn't rated this series. #}
-                {% if let Some(you_text) = s.user_score_display(score_format.as_str()) %}
-                <span class="tag tag-user-score" title="Your score on AL/MAL">You: {{ you_text }}</span>
+                {% if let Some(you_score) = s.user_score_display(score_format.as_str()) %}
+                <span class="tag tag-user-score" title="Your score on AL/MAL">You: {{ you_score.render_html()|safe }}</span>
                 {% endif %}
             </div>
         </div>
