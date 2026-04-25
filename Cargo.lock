@@ -2531,7 +2531,6 @@ dependencies = [
  "bcrypt",
  "chacha20poly1305",
  "chrono",
- "dotenvy",
  "fancy-regex",
  "futures-util",
  "hex",
