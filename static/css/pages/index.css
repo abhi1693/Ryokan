@@ -23,6 +23,51 @@
     gap: 20px;
 }
 
+/* #62 PR E — genre filter input. Mirrors .folder-select's padding
+   and border treatment so it lines up with the list dropdown
+   beside it. The browser-native datalist autocomplete shows under
+   the input as the user types — no JS required. min-width keeps a
+   single-line placeholder visible without forcing the toolbar to
+   wrap on narrow viewports. */
+.library-genre-input {
+    padding: 5px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 12px;
+    font-family: var(--font-body);
+    min-width: 180px;
+    max-width: 260px;
+}
+
+.library-genre-input::placeholder {
+    color: var(--text-dim);
+}
+
+.library-genre-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* "Clear" link styled as a quiet pill; only renders when at least
+   one filter is active. */
+.library-filter-clear {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border-subtle);
+    padding: 4px 12px;
+    font-size: 12px;
+    border-radius: 999px;
+    text-decoration: none;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.library-filter-clear:hover {
+    color: var(--accent);
+    border-color: rgba(203, 166, 247, 0.45);
+}
+
 @media (max-width: 640px) {
     .library-grid {
         grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));

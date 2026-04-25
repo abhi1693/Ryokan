@@ -37,6 +37,11 @@ pub struct LibraryIndexQuery {
     /// across navigations.
     #[serde(default)]
     pub list: Option<String>,
+    /// #62 PR E — `?genre=<name>` filter. Same shape as `list`;
+    /// the two filters compose (set both → series must satisfy
+    /// both predicates).
+    #[serde(default)]
+    pub genre: Option<String>,
 }
 
 pub async fn index(
@@ -98,6 +103,24 @@ pub async fn index(
         library.retain(|s| matching_ids.contains(&s.id));
     }
 
+    // #62 PR E — genre filter. Same shape as the list filter and
+    // composes with it (when both are set, retain rows that satisfy
+    // both). distinct_genres feeds the input's <datalist> so the
+    // user sees autocomplete suggestions while typing.
+    let genre_names = crate::models::series_genres::distinct_genres(&state.db)
+        .await
+        .unwrap_or_default();
+    let genre_filter = q.genre.unwrap_or_default();
+    if !genre_filter.is_empty() {
+        let matching_ids: std::collections::HashSet<i64> =
+            crate::models::series_genres::series_ids_in_genre(&state.db, &genre_filter)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+        library.retain(|s| matching_ids.contains(&s.id));
+    }
+
     let template = IndexTemplate {
         page: "library".to_string(),
         library,
@@ -107,6 +130,8 @@ pub async fn index(
         score_format,
         custom_list_names,
         custom_list_filter,
+        genre_names,
+        genre_filter,
     };
     Html(template.render().unwrap_or_default())
 }
