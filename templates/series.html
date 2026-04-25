@@ -66,7 +66,7 @@
         <div class="detail-custom-lists">
             <span class="detail-custom-lists-label">Lists:</span>
             {% for list_name in custom_list_memberships %}
-            <a href="/?list={{ list_name|urlencode }}" class="tag tag-custom-list">{{ list_name }}</a>
+            <a href="/?list={{ list_name|urlencode }}" class="tag-custom-list">{{ list_name }}</a>
             {% endfor %}
         </div>
         {% endif %}

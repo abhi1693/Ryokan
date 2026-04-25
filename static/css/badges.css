@@ -156,23 +156,35 @@
     transform: translateY(-1px);
 }
 
-/* #62 PR D — AL custom-list membership badge. Distinct visual
-   from the user-score badge: muted/neutral surface so a series in
-   five lists doesn't drown out the score row. Anchor element so
-   each badge clicks through to the library filtered to that list,
-   which is the most useful one-click pivot from the detail page. */
+/* #62 PR D — AL custom-list membership badge. Pill-shaped to match
+   the genre row's visual rhythm but with an accent-tinted surface
+   so it reads as "the user's own curation" rather than "metadata
+   from AL." `display: inline-block` is mandatory: the element is
+   an `<a>` (so each badge can click through to the filtered library)
+   and inline anchors don't render padding visually. The explicit
+   text-decoration override beats the browser-default underline.
+   Doesn't piggyback on the small `.tag` shape — that's mono-9px
+   eyebrow text used for status pills, not a row of clickable badges. */
 .tag-custom-list {
-    background: var(--surface-2, rgba(255, 255, 255, 0.04));
-    color: var(--text-dim);
-    border: 1px solid var(--border-subtle);
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: rgba(203, 166, 247, 0.12);
+    color: var(--accent);
+    border: 1px solid rgba(203, 166, 247, 0.30);
     text-decoration: none;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    line-height: 1.4;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
-.tag-custom-list:hover {
-    background: rgba(203, 166, 247, 0.10);
+.tag-custom-list:hover,
+.tag-custom-list:focus-visible {
+    background: rgba(203, 166, 247, 0.20);
+    border-color: rgba(203, 166, 247, 0.55);
     color: var(--accent);
-    border-color: rgba(203, 166, 247, 0.35);
+    text-decoration: none;
 }
 
 .detail-custom-lists {
@@ -180,13 +192,18 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 6px;
-    margin-top: 12px;
+    margin-top: 4px;
+    margin-bottom: 14px;
     font-size: 13px;
 }
 
 .detail-custom-lists-label {
     color: var(--text-dim);
-    margin-right: 2px;
+    margin-right: 4px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
 }
 
 .tag-status-releasing,
