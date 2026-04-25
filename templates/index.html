@@ -61,11 +61,11 @@
                 {% endif %}
             </form>
             {# Reserved width pushes the right group's left edge back
-               to where it sat before the Needs Review button was
-               removed. Trimmed from the original ~140px to compensate
-               for the now-always-rendered Clear link slot (≈60px
-               with its 6px flex gap). #}
-            <button class="btn btn-primary" style="margin-left: 80px;" onclick="openAddModal()">+ Add Series</button>
+               toward where it sat before the Needs Review button
+               was removed. Successively trimmed as the row grew —
+               first for the always-reserved Clear slot, then for
+               the height-matched (and so wider) dropdowns + search. #}
+            <button class="btn btn-primary" style="margin-left: 32px;" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>
 </div>

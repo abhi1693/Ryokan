@@ -24,21 +24,26 @@
 }
 
 /* Library search input. Sits between the custom-list dropdown and
-   the sort dropdown in the page-header filter row. Padding +
-   font-size + line-height match the `.btn` rule so the three
-   filter controls render at the same height as the Add Series
-   button next to them. */
+   the sort dropdown in the page-header filter row. Explicit
+   `height` + `box-sizing: border-box` pins all four controls
+   (input, two selects, Clear pill) to the same outer dimension as
+   the Add Series .btn next to them — without it, <input> and
+   <select> render ~1-2px apart at the same padding/font because
+   their intrinsic-height handling differs. */
 .library-search-input {
-    padding: 10px 14px;
+    box-sizing: border-box;
+    height: 42px;
+    padding: 0 12px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text);
-    font-size: 14px;
-    line-height: 1.6;
+    font-size: 13px;
     font-family: var(--font-body);
     width: 220px;
     min-width: 180px;
+    appearance: textfield;
+    -webkit-appearance: textfield;
 }
 
 .library-search-input::placeholder {
@@ -51,20 +56,23 @@
 }
 
 /* Scoped overrides on the page-header filter row so the dropdowns
-   and Clear pill match the `.btn` Add Series button's height. The
-   underlying .folder-select / .btn-pill rules stay untouched so
-   other pages (where the controls coexist with smaller affordances)
+   and Clear pill share the search input's exact height. Underlying
+   .folder-select / .btn-pill rules stay untouched so other pages
    keep their tighter sizing. */
 .library-filter-form .folder-select {
-    padding: 10px 14px;
-    font-size: 14px;
-    line-height: 1.6;
+    box-sizing: border-box;
+    height: 42px;
+    padding: 0 28px 0 12px;
+    font-size: 13px;
 }
 
 .library-filter-form .library-filter-clear {
-    padding: 10px 16px;
-    font-size: 14px;
-    line-height: 1.6;
+    box-sizing: border-box;
+    height: 42px;
+    padding: 0 14px;
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
 }
 
 /* "Clear" link styled as a quiet pill; only renders when at least
