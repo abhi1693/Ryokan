@@ -37,7 +37,7 @@ use sqlx::SqlitePool;
 use crate::AppState;
 use crate::models::external_accounts;
 use crate::models::log::LogCategory;
-use crate::services::{anilist, logger};
+use crate::services::{anilist, logger, mal};
 
 /// Run one sync iteration against the linked account. Called by the
 /// supervised loop in `main.rs::external_sync` once per configured
@@ -57,21 +57,7 @@ pub async fn tick_once(state: &AppState) -> Result<String, String> {
 
     match account.provider.as_str() {
         external_accounts::PROVIDER_ANILIST => sync_anilist_dryrun(state, &account).await,
-        external_accounts::PROVIDER_MAL => {
-            // MAL fetch + token refresh lands in the next commit. For
-            // now log the cadence is alive and return.
-            logger::debug(
-                &state.db,
-                LogCategory::ExternalSync,
-                &format!(
-                    "watch-list sync tick (MAL placeholder): username={}",
-                    account.username
-                ),
-                "",
-            )
-            .await;
-            Ok("MAL fetch lands in a follow-up commit".to_string())
-        }
+        external_accounts::PROVIDER_MAL => sync_mal_dryrun(state, account).await,
         other => {
             // Unknown provider string — schema CHECK constraint should
             // prevent this, but surface explicitly rather than panic.
@@ -119,6 +105,104 @@ async fn sync_anilist_dryrun(
         "AniList: fetched {} entries (merge lands in a follow-up commit)",
         total
     ))
+}
+
+/// Fetch the MAL watch list and log a count summary. Same dry-run
+/// shape as `sync_anilist_dryrun` — validates the live token, the
+/// network path, the parser, and the on-401 refresh-and-retry
+/// dance. Doesn't merge into `series` yet.
+///
+/// Token-refresh happens at this layer rather than inside
+/// `services::mal::fetch_animelist` because refresh requires writing
+/// the new tokens back to `external_accounts`, which the model
+/// layer owns. On 401: refresh, persist, retry the fetch once. A
+/// second 401 returns an error rather than looping forever — that
+/// shape signals "user must re-link" and the next tick won't fix
+/// it.
+async fn sync_mal_dryrun(
+    state: &AppState,
+    account: external_accounts::ExternalAccount,
+) -> Result<String, String> {
+    let mut access_token = account.access_token.clone();
+
+    let entries = match mal::fetch_animelist(&access_token).await {
+        Ok(entries) => entries,
+        Err(mal::MalFetchError::Unauthorized) => {
+            // Refresh the access token. If THIS fails (refresh token
+            // dead or revoked), surface a clear "re-link required"
+            // message; the eventual UI banner will read it.
+            if account.refresh_token.is_empty() {
+                return Err(
+                    "MAL access token expired and no refresh token stored — re-link required"
+                        .into(),
+                );
+            }
+            let new_tokens = mal::refresh_access_token(&account.refresh_token)
+                .await
+                .map_err(|e| format!("MAL refresh failed (re-link required): {e}"))?;
+
+            let expires_at = current_unix_ts() + new_tokens.expires_in;
+            external_accounts::update_tokens(
+                &state.db,
+                account.id,
+                &new_tokens.access_token,
+                &new_tokens.refresh_token,
+                Some(expires_at),
+            )
+            .await
+            .map_err(|e| format!("persist refreshed MAL tokens: {e}"))?;
+
+            logger::info(
+                &state.db,
+                LogCategory::ExternalSync,
+                "MAL access token refreshed",
+                &format!("account_id={} expires_at={}", account.id, expires_at),
+            )
+            .await;
+            access_token = new_tokens.access_token;
+
+            // Retry the fetch once with the new token. A second 401
+            // here is a hard "re-link required" — the refresh
+            // succeeded but the new token isn't accepted, which is
+            // the failure mode you'd see if MAL revoked the OAuth
+            // app or the user revoked their grant.
+            mal::fetch_animelist(&access_token)
+                .await
+                .map_err(|e| match e {
+                    mal::MalFetchError::Unauthorized => {
+                        "MAL rejected the token immediately after refresh — re-link required".into()
+                    }
+                    mal::MalFetchError::Other(msg) => format!("MAL fetch failed: {msg}"),
+                })?
+        }
+        Err(mal::MalFetchError::Other(msg)) => return Err(format!("MAL fetch failed: {msg}")),
+    };
+
+    let total = entries.len();
+    let with_score = entries.iter().filter(|e| e.score > 0.0).count();
+
+    logger::info(
+        &state.db,
+        LogCategory::ExternalSync,
+        &format!(
+            "MyAnimeList watch-list fetched: {} entries ({} scored)",
+            total, with_score
+        ),
+        &format!("username={}", account.username),
+    )
+    .await;
+
+    Ok(format!(
+        "MyAnimeList: fetched {} entries (merge lands in a follow-up commit)",
+        total
+    ))
+}
+
+fn current_unix_ts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Read the most recent successful tick from `scheduled_task_runs`.
