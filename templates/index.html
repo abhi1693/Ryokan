@@ -52,7 +52,13 @@
                 <a class="btn btn-pill library-filter-clear" href="/" title="Clear filters">Clear</a>
                 {% endif %}
             </form>
-            <button class="btn btn-primary" onclick="openAddModal()">+ Add Series</button>
+            {# Reserved width pushes the right group's left edge back
+               to where it sat before the Needs Review button was
+               removed. Without it, the right-side flex box shrinks
+               to content and the filters slide right against Add
+               Series. Matches the deleted button's footprint
+               (padding + "Needs Review" label + the 8px gap). #}
+            <button class="btn btn-primary" style="margin-left: 140px;" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>
 </div>
