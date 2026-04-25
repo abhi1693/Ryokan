@@ -612,11 +612,7 @@ pub(super) async fn build_episodes(
     //   3. force_kitsu_fallback config flag (DB)
     //   4. monitored-episode set (DB, only when the series is tracked)
     //   5. per-episode quality tags (DB, only when the series is tracked)
-    let media_root_owned = media_root.to_string();
-    let folder_name_owned = folder_name.to_string();
-    let disk_files_fut = tokio::task::spawn_blocking(move || {
-        media::scan_series_folder(&media_root_owned, &folder_name_owned)
-    });
+    let disk_files_fut = media::scan_series_folder(media_root, folder_name);
 
     let detail_id = detail.id;
     let cached_eps_fut = async move {
@@ -660,14 +656,13 @@ pub(super) async fn build_episodes(
         }
     };
 
-    let (disk_files_res, cached_eps, force_kitsu_fallback, monitored_lookup, quality_tags) = tokio::join!(
+    let (disk_files, cached_eps, force_kitsu_fallback, monitored_lookup, quality_tags) = tokio::join!(
         disk_files_fut,
         cached_eps_fut,
         force_kitsu_fallback_enabled(db),
         monitored_fut,
         quality_tags_fut,
     );
-    let disk_files = disk_files_res.unwrap_or_default();
     let cached_matches_force =
         !force_kitsu_fallback || cached_eps.values().any(|ep| ep.source == "kitsu");
     let use_cached_eps = !cached_eps.is_empty() && cached_matches_force;

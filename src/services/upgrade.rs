@@ -99,7 +99,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             continue;
         }
 
-        let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
+        let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name).await;
         if disk_files.is_empty() {
             continue;
         }

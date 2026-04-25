@@ -56,13 +56,9 @@ pub async fn movie_lookup(
             &r.title_romaji
         };
 
-        movies.push(build_radarr_movie_from_search(
-            &r,
-            title,
-            tmdb_id,
-            db_series.as_ref(),
-            &cfg,
-        ));
+        movies.push(
+            build_radarr_movie_from_search(&r, title, tmdb_id, db_series.as_ref(), &cfg).await,
+        );
     }
 
     Ok(Json(movies))
@@ -85,7 +81,7 @@ pub async fn list_movies(
     let mut results = Vec::new();
     for s in &tracked {
         let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
-        results.push(build_radarr_movie_from_tracked(s, tmdb_id, &cfg));
+        results.push(build_radarr_movie_from_tracked(s, tmdb_id, &cfg).await);
     }
 
     Ok(Json(results))
@@ -108,7 +104,9 @@ pub async fn get_movie(
         .ok_or((StatusCode::NOT_FOUND, "Movie not found".to_string()))?;
 
     let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
-    Ok(Json(build_radarr_movie_from_tracked(&s, tmdb_id, &cfg)))
+    Ok(Json(
+        build_radarr_movie_from_tracked(&s, tmdb_id, &cfg).await,
+    ))
 }
 
 /// POST /radarr/api/v3/movie — add a new movie (anime).
@@ -248,7 +246,9 @@ pub async fn add_movie(
             "Movie not found after insert".to_string(),
         ))?;
 
-    Ok(Json(build_radarr_movie_from_tracked(&s, tmdb_id, &cfg)))
+    Ok(Json(
+        build_radarr_movie_from_tracked(&s, tmdb_id, &cfg).await,
+    ))
 }
 
 /// PUT /radarr/api/v3/movie — update an existing movie.
@@ -286,7 +286,9 @@ pub async fn update_movie(
         .unwrap_or_default();
 
     let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
-    Ok(Json(build_radarr_movie_from_tracked(&s, tmdb_id, &cfg)))
+    Ok(Json(
+        build_radarr_movie_from_tracked(&s, tmdb_id, &cfg).await,
+    ))
 }
 
 /// POST /radarr/api/v3/command — execute a command. Seerr sends MoviesSearch.

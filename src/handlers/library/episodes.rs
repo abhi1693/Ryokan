@@ -65,7 +65,7 @@ pub async fn delete_episode_file(
         None => return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "No config"),
     };
 
-    let files = media::scan_series_folder(&cfg.media_root, &tracked.folder_name);
+    let files = media::scan_series_folder(&cfg.media_root, &tracked.folder_name).await;
     let target = files.iter().find(|f| f.episode_number == episode_number);
 
     match target {

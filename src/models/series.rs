@@ -167,6 +167,34 @@ pub async fn get_by_anilist_id(
     Ok(row.map(map_series_row))
 }
 
+/// Batch lookup keyed by AniList id. Returns a map of `anilist_id ->
+/// Series` for the rows that exist; ids with no row are absent. Used
+/// by the Sonarr/Radarr search-result fan-outs so a 10-result AL page
+/// turns into one DB round-trip instead of N. Empty input returns an
+/// empty map without hitting the DB.
+pub async fn get_by_anilist_ids(
+    db: &SqlitePool,
+    anilist_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Series>, sqlx::Error> {
+    if anilist_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = vec!["?"; anilist_ids.len()].join(",");
+    let sql = format!(
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE anilist_id IN ({placeholders})"
+    );
+    let mut q = sqlx::query(&sql);
+    for id in anilist_ids {
+        q = q.bind(id);
+    }
+    let rows = q.fetch_all(db).await?;
+    Ok(rows
+        .into_iter()
+        .map(map_series_row)
+        .map(|s| (s.anilist_id, s))
+        .collect())
+}
+
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE mal_id = ?",

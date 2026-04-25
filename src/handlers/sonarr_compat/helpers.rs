@@ -177,7 +177,7 @@ pub(super) async fn fetch_anime_detail(ids: &anibridge::AnimeIds) -> Option<anil
     None
 }
 
-pub(super) fn build_sonarr_series_from_search(
+pub(super) async fn build_sonarr_series_from_search(
     r: &anilist::AnimeEntry,
     title: &str,
     tmdb_id: i64,
@@ -193,7 +193,7 @@ pub(super) fn build_sonarr_series_from_search(
         .unwrap_or_else(|| media::sanitize_folder_name(title));
 
     let disk_files = if is_in_library {
-        media::scan_series_folder(&cfg.media_root, &folder_name)
+        media::scan_series_folder(&cfg.media_root, &folder_name).await
     } else {
         Vec::new()
     };
@@ -280,13 +280,13 @@ pub(super) fn build_sonarr_series_from_search(
     }
 }
 
-pub(super) fn build_sonarr_series_from_tracked(
+pub(super) async fn build_sonarr_series_from_tracked(
     s: &series::Series,
     tmdb_id: i64,
     cfg: &config::Config,
 ) -> SonarrSeries {
     let total_eps = s.episodes.unwrap_or(0).max(0);
-    let disk_files = media::scan_series_folder(&cfg.media_root, &s.folder_name);
+    let disk_files = media::scan_series_folder(&cfg.media_root, &s.folder_name).await;
     let on_disk = disk_files.len() as i32;
     let monitored = s.monitor_mode_enum() != monitoring::MonitorMode::None;
 

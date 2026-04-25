@@ -506,11 +506,14 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .filter(|ep| monitored_eps.contains(ep))
             .collect();
 
-        let disk_files = disk_cache
-            .entry(found.series.folder_name.clone())
-            .or_insert_with(|| {
-                media::scan_series_folder(&cfg.media_root, &found.series.folder_name)
-            });
+        let disk_files = if let Some(cached) = disk_cache.get(&found.series.folder_name) {
+            cached
+        } else {
+            let files = media::scan_series_folder(&cfg.media_root, &found.series.folder_name).await;
+            disk_cache
+                .entry(found.series.folder_name.clone())
+                .or_insert(files)
+        };
         let qtags = if let Some(cached) = quality_tags_cache.get(&found.series.id) {
             cached
         } else {

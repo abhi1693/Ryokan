@@ -62,7 +62,7 @@ pub async fn recompute_series_monitoring(
         .flatten()
         .unwrap_or_default();
 
-    let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
+    let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name).await;
     let existing_eps: HashSet<i32> = disk_files.iter().map(|f| f.episode_number).collect();
     let episode_info = load_episode_info(db, &row).await;
     let monitored_eps =

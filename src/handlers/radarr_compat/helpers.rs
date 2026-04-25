@@ -40,6 +40,13 @@ pub(super) async fn lookup_by_tmdb_id(
         tracing::debug!("Radarr fan-out: AL batch prefetch failed (per-id loop will retry): {e}");
     }
 
+    // Same shape as the AL prefetch: one batched DB read keyed on every
+    // AL id we'll look up below. Without this the per-id loop hits SQLite
+    // N times for what is structurally a single `IN (…)` query.
+    let db_by_id = series::get_by_anilist_ids(&state.db, &prefetch_ids)
+        .await
+        .unwrap_or_default();
+
     let mut results = Vec::new();
     for ids in &anime_ids {
         let detail = if let Some(al_id) = ids.anilist_id {
@@ -64,10 +71,7 @@ pub(super) async fn lookup_by_tmdb_id(
         };
 
         let db_series = if detail.id > 0 {
-            series::get_by_anilist_id(&state.db, detail.id)
-                .await
-                .ok()
-                .flatten()
+            db_by_id.get(&detail.id).cloned()
         } else {
             None
         };
@@ -93,19 +97,16 @@ pub(super) async fn lookup_by_tmdb_id(
             source: if detail.id > 0 { "anilist" } else { "mal" }.to_string(),
         };
 
-        results.push(build_radarr_movie_from_search(
-            &search_result,
-            title,
-            tmdb_id,
-            db_series.as_ref(),
-            cfg,
-        ));
+        results.push(
+            build_radarr_movie_from_search(&search_result, title, tmdb_id, db_series.as_ref(), cfg)
+                .await,
+        );
     }
 
     Ok(Json(results))
 }
 
-pub(super) fn build_radarr_movie_from_search(
+pub(super) async fn build_radarr_movie_from_search(
     r: &anilist::AnimeEntry,
     title: &str,
     tmdb_id: i64,
@@ -120,7 +121,9 @@ pub(super) fn build_radarr_movie_from_search(
         .unwrap_or_else(|| media::sanitize_folder_name(title));
 
     let has_file = if is_in_library {
-        !media::scan_series_folder(&cfg.media_root, &folder_name).is_empty()
+        !media::scan_series_folder(&cfg.media_root, &folder_name)
+            .await
+            .is_empty()
     } else {
         false
     };
@@ -176,12 +179,12 @@ pub(super) fn build_radarr_movie_from_search(
     }
 }
 
-pub(super) fn build_radarr_movie_from_tracked(
+pub(super) async fn build_radarr_movie_from_tracked(
     s: &series::Series,
     tmdb_id: i64,
     cfg: &config::Config,
 ) -> RadarrMovie {
-    let disk_files = media::scan_series_folder(&cfg.media_root, &s.folder_name);
+    let disk_files = media::scan_series_folder(&cfg.media_root, &s.folder_name).await;
     let has_file = !disk_files.is_empty();
     let monitored = s.monitor_mode_enum() != monitoring::MonitorMode::None;
 
