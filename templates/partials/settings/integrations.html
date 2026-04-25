@@ -337,12 +337,12 @@
                        use for their Test buttons. Sync now is the
                        primary; Unlink is secondary. The trailing
                        form-hint mirrors the Test-result span pattern
-                       — gives the user one more place to see sync
-                       cadence + last-sync at a glance. #}
+                       — gives the user one more place to see auto-sync
+                       interval + last-sync at a glance. #}
                     <div class="settings-inline-actions">
                         <button type="button" class="btn btn-primary" onclick="syncWatchListNow()">Sync now</button>
                         <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
-                        {# Cadence + last-sync hint. The last-sync
+                        {# Auto-syncs + last-sync hint. The last-sync
                            span's `data-relative-time` is the unix-
                            epoch the JS updater (settings.js) keys
                            off so the label re-renders ("4 minutes
@@ -352,7 +352,7 @@
                            those elements and the "Never" text from
                            server-render stays. #}
                         <span class="form-hint">
-                            Cadence every {{ config.external_sync_interval_minutes }} min · last sync
+                            Auto-syncs every {{ config.external_sync_interval_minutes }} min · last sync
                             {% match acct.last_sync_unix_ts %}
                                 {% when Some with (ts) %}
                                     <span data-relative-time="{{ ts }}">{{ acct.last_sync_label }}</span>

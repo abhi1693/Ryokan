@@ -678,14 +678,16 @@ fieldset legend {
     font-variant-numeric: tabular-nums;
 }
 
-/* Wrap-flex for the 5 import-list checkbox-rows. Default
-   checkbox-row is inline-display (set by base.css elsewhere); the
-   row gives them horizontal spacing + wraps cleanly on narrow.
-   2-3 per line on typical desktop, 1 per line on mobile. */
+/* Grid layout for the 5 import-list checkbox-rows. Wrap-flex
+   would let the column starts drift because the labels have
+   different widths ("Plan to Watch" is wider than "Paused"); grid
+   tracks pin every checkmark to a column edge so they line up
+   vertically across rows. auto-fill on a 140px floor gives 2-3
+   columns on typical desktop and 1 on mobile. */
 .ext-prefs-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 18px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px 16px;
     margin-bottom: 6px;
 }
 
@@ -694,9 +696,6 @@ fieldset legend {
     /* Match the form-input padding so row height feels consistent
        with the surrounding inputs without forcing the eye to retune. */
     padding: 4px 0;
-    /* Minimum width keeps the longest label ("Plan to Watch") on one
-       line and prevents a checkbox from orphaning when wrapped. */
-    min-width: 130px;
 }
 
 /* Read-only display field inside a form-group. Visually feels like
