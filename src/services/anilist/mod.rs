@@ -186,13 +186,29 @@ pub struct AniListMediaListEntry {
 /// Errors classify the same way other AL calls do (rate-limited /
 /// unavailable / not-found prefixes). The watch-list sync task
 /// surfaces the message verbatim under `LogCategory::ExternalSync`.
+/// Bundle returned by [`fetch_media_list_collection`] — the watch-
+/// list entries plus the user's currently-configured `scoreFormat`.
+/// The format is fetched in the same GraphQL call (rather than only
+/// at link time) so the sync engine refreshes
+/// `external_accounts.score_format` on every tick — a user changing
+/// their POINT_X preference on AL after linking takes effect on the
+/// next sync without forcing them to unlink + re-link.
+#[derive(Debug, Clone)]
+pub struct MediaListCollectionFetch {
+    pub entries: Vec<AniListMediaListEntry>,
+    pub score_format: String,
+}
+
 pub async fn fetch_media_list_collection(
     token: &str,
     user_id: i64,
-) -> Result<Vec<AniListMediaListEntry>, String> {
+) -> Result<MediaListCollectionFetch, String> {
     // Just the fields the sync engine reads. Each entry's `customLists`
     // is AL's per-entry membership map; the outer `lists[].isCustomList`
     // is the bucket flag we use to skip the custom-list duplicates.
+    // `User.mediaListOptions.scoreFormat` lets the sync refresh the
+    // local `score_format` column on every tick — that way switching
+    // POINT_X on AL post-link takes effect on the next sync.
     const QUERY: &str = r#"
         query ($userId: Int!) {
             MediaListCollection(userId: $userId, type: ANIME) {
@@ -207,6 +223,11 @@ pub async fn fetch_media_list_collection(
                         updatedAt
                         notes
                         customLists
+                    }
+                }
+                user {
+                    mediaListOptions {
+                        scoreFormat
                     }
                 }
             }
@@ -304,7 +325,20 @@ pub async fn fetch_media_list_collection(
         );
     }
 
-    Ok(out)
+    // Pull the user's current scoreFormat from the same response.
+    // Empty string fallback if AL omits the field — the sync caller
+    // treats empty as "leave the existing value alone" so we don't
+    // wipe a known-good score_format on a partial response.
+    let score_format = json
+        .pointer("/data/MediaListCollection/user/mediaListOptions/scoreFormat")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(MediaListCollectionFetch {
+        entries: out,
+        score_format,
+    })
 }
 
 /// Walk only the non-custom-list buckets to avoid double-counting

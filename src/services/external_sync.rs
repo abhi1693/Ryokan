@@ -984,8 +984,24 @@ async fn sync_anilist(
         )
     })?;
 
-    let raw = anilist::fetch_media_list_collection(&account.access_token, user_id).await?;
+    let fetch = anilist::fetch_media_list_collection(&account.access_token, user_id).await?;
+    let raw = fetch.entries;
     let raw_total = raw.len();
+
+    // Refresh the user's score_format on the linked-account row so
+    // the "You: X" badge picks up POINT_X changes the user made on
+    // AL after their original link. Empty-string responses no-op
+    // (defensive — AL's user.mediaListOptions field has been stable
+    // for years but a partial response shouldn't blank a known-good
+    // value).
+    if let Err(e) =
+        external_accounts::update_score_format(&state.db, account.id, &fetch.score_format).await
+    {
+        tracing::warn!(
+            "update_score_format failed for account_id={}: {e}",
+            account.id
+        );
+    }
 
     let prefs = ImportPreferences {
         import_watching: account.import_watching,

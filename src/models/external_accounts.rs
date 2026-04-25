@@ -319,6 +319,29 @@ pub struct ImportPreferences {
     pub skip_already_watched: bool,
 }
 
+/// Refresh the `score_format` column. Called from the AL sync path
+/// after each successful `fetch_media_list_collection` so a user
+/// changing their POINT_X preference on AL post-link takes effect on
+/// the next "You: X" badge render. No-op when `score_format` is
+/// empty (treats "AL omitted the field on this response" as "leave
+/// the known-good value alone").
+pub async fn update_score_format(
+    db: &SqlitePool,
+    id: i64,
+    score_format: &str,
+) -> Result<(), String> {
+    if score_format.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("UPDATE external_accounts SET score_format = ? WHERE id = ?")
+        .bind(score_format)
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("update_score_format failed: {e}"))?;
+    Ok(())
+}
+
 /// Stamp the watch-list sync cursor(s) after a successful tick.
 /// `list_last_synced_at` is always written. `list_full_resync_at` is
 /// also written when `was_full_sync = true` — the sync engine sets
