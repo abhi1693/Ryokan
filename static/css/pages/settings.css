@@ -678,16 +678,17 @@ fieldset legend {
     font-variant-numeric: tabular-nums;
 }
 
-/* Grid layout for the 5 import-list checkbox-rows. Wrap-flex
-   would let the column starts drift because the labels have
-   different widths ("Plan to Watch" is wider than "Paused"); grid
-   tracks pin every checkmark to a column edge so they line up
-   vertically across rows. auto-fill on a 140px floor gives 2-3
-   columns on typical desktop and 1 on mobile. */
+/* Wrap-flex for the 5 import-list checkbox-rows, sized to content
+   with a fixed column gap. A grid with `1fr` tracks would stretch
+   each cell to the same width and leave varying empty space after
+   the shorter labels ("Paused" leaves more trailing whitespace
+   than "Plan to Watch"), so the spacing between (label end) and
+   (next checkbox start) reads as uneven. Content-sized items with
+   a uniform gap keep that visible spacing constant. */
 .ext-prefs-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 8px 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 28px;
     margin-bottom: 6px;
 }
 
