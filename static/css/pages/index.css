@@ -53,6 +53,14 @@
     -webkit-appearance: textfield;
 }
 
+/* When the custom-list dropdown is absent (no AL account linked yet
+   or freshly unlinked), the search input absorbs that slot's
+   footprint so the row doesn't visibly contract. 220px (own width)
+   + 180px (list dropdown) + 6px (flex gap) = 406px. */
+.library-search-input.library-search-input-wide {
+    width: 406px;
+}
+
 .library-search-input::placeholder {
     color: var(--text-dim);
 }

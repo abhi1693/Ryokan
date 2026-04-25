@@ -42,7 +42,7 @@
                        id="library-search"
                        name="search"
                        placeholder="Search library…"
-                       class="library-search-input"
+                       class="library-search-input{% if custom_list_names.is_empty() %} library-search-input-wide{% endif %}"
                        value="{{ search_query }}"
                        autocomplete="off"
                        oninput="liveLibrarySearch(this)"
