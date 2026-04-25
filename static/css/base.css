@@ -161,6 +161,22 @@ body {
     padding: 32px 24px 80px;
 }
 
+/* Screen-reader-only utility — keeps a label in the a11y tree
+   while hiding it visually. Used by the library custom-list filter
+   where the dropdown is self-evident but assistive tech still
+   benefits from a label association. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 .page-header { margin-bottom: 28px; }
 
 .page-header h2 {

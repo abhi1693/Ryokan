@@ -22,6 +22,16 @@ struct IndexTemplate {
     /// which case `user_score_display` always returns `None` and
     /// the template renders no badge.
     score_format: String,
+    /// #62 PR D — distinct AL custom-list names across the whole
+    /// library. Powers the filter-dropdown next to the search box.
+    /// Empty when no memberships have synced yet, in which case the
+    /// template hides the dropdown entirely.
+    custom_list_names: Vec<String>,
+    /// Currently-active filter value from `?list=<name>`. Empty
+    /// means "no filter, show everything." The handler has already
+    /// applied the filter to `library`; this field drives the
+    /// dropdown's selected-option state on render.
+    custom_list_filter: String,
 }
 
 #[derive(Template)]
@@ -95,6 +105,12 @@ struct SeriesTemplate {
     /// (Text vs. Smiley) drives whether the template renders a
     /// string or an inline SVG outline face.
     user_score_display: Option<crate::services::user_score::FormattedUserScore>,
+    /// #62 PR D — AL custom-list names this series belongs to.
+    /// Sorted alphabetically by the model layer. Empty when no
+    /// memberships are recorded (no account linked, or sync hasn't
+    /// found this series in any custom list); the template hides
+    /// the badge row in that case.
+    custom_list_memberships: Vec<String>,
     monitored_count: i32,
     all_monitored: bool,
     /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the

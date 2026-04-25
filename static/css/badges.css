@@ -156,6 +156,39 @@
     transform: translateY(-1px);
 }
 
+/* #62 PR D — AL custom-list membership badge. Distinct visual
+   from the user-score badge: muted/neutral surface so a series in
+   five lists doesn't drown out the score row. Anchor element so
+   each badge clicks through to the library filtered to that list,
+   which is the most useful one-click pivot from the detail page. */
+.tag-custom-list {
+    background: var(--surface-2, rgba(255, 255, 255, 0.04));
+    color: var(--text-dim);
+    border: 1px solid var(--border-subtle);
+    text-decoration: none;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tag-custom-list:hover {
+    background: rgba(203, 166, 247, 0.10);
+    color: var(--accent);
+    border-color: rgba(203, 166, 247, 0.35);
+}
+
+.detail-custom-lists {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 12px;
+    font-size: 13px;
+}
+
+.detail-custom-lists-label {
+    color: var(--text-dim);
+    margin-right: 2px;
+}
+
 .tag-status-releasing,
 .tag-status-not_yet_released,
 .tag-status-currently_airing,

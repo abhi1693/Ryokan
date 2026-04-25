@@ -2531,8 +2531,7 @@ mod tests {
             updated_at: 0,
             custom_lists: vec!["Hidden Gems".into(), "Top 10".into()],
         }];
-        let _ =
-            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), Some(1)).await;
+        let _ = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), Some(1)).await;
 
         let memberships = series_custom_lists::list_for_series(&db, series_id)
             .await

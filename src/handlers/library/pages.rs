@@ -28,7 +28,21 @@ use super::reconcile::{
 };
 use super::{Episode, ErrorTemplate, IndexTemplate, RelationCard, RelationGroup, SeriesTemplate};
 
-pub async fn index(State(state): State<AppState>) -> Html<String> {
+#[derive(Default, serde::Deserialize)]
+pub struct LibraryIndexQuery {
+    /// #62 PR D — `?list=<name>` filter. When present + non-empty,
+    /// the index handler keeps only series whose
+    /// `series_custom_lists` rows match. Echoed back to the
+    /// template so the dropdown's selected-option state persists
+    /// across navigations.
+    #[serde(default)]
+    pub list: Option<String>,
+}
+
+pub async fn index(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LibraryIndexQuery>,
+) -> Html<String> {
     // Fetch the library list and config concurrently — they're independent
     // and each was previously serialized on the other. `get_all` is the
     // larger query of the two so this shaves the smaller query's RTT off
@@ -57,6 +71,30 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
         .map(|a| a.score_format)
         .unwrap_or_default();
 
+    // #62 PR D — populate the filter dropdown + apply the active
+    // filter. Distinct list names are alphabetized; empty result
+    // means no memberships synced yet (template hides the dropdown).
+    let custom_list_names = crate::models::series_custom_lists::distinct_list_names(&state.db)
+        .await
+        .unwrap_or_default();
+    let custom_list_filter = q.list.unwrap_or_default();
+    if !custom_list_filter.is_empty() {
+        // In-memory filter against the just-loaded library. Cheaper
+        // than a JOIN-based query when the library is already cached
+        // — the per-series ids set is small enough that the
+        // HashSet lookup on each row is sub-microsecond. Filter is
+        // dropped silently if the user passes a list name that
+        // doesn't exist (defensive against a stale tab + a sync
+        // that removed the last membership for that name).
+        let matching_ids: std::collections::HashSet<i64> =
+            crate::models::series_custom_lists::series_ids_in_list(&state.db, &custom_list_filter)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+        library.retain(|s| matching_ids.contains(&s.id));
+    }
+
     let template = IndexTemplate {
         page: "library".to_string(),
         library,
@@ -64,6 +102,8 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
             .map(|c| c.title_language)
             .unwrap_or_else(|| "english".to_string()),
         score_format,
+        custom_list_names,
+        custom_list_filter,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -203,6 +243,20 @@ pub async fn series_detail(
             crate::services::user_score::format_user_score(row.user_score, &acct.score_format)
         }
         _ => None,
+    };
+
+    // #62 PR D — read AL custom-list memberships for the badge row.
+    // Empty when this series isn't on any user-defined list; the
+    // template hides the row in that case. Sorted alphabetically by
+    // the model layer so the badge order is stable across renders.
+    let custom_list_memberships = match db_id {
+        Some(id) => crate::models::series_custom_lists::list_for_series(&state.db, id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| m.list_name)
+            .collect(),
+        None => Vec::new(),
     };
 
     // Fan out the five independent read paths. Each one was previously
@@ -383,6 +437,7 @@ pub async fn series_detail(
         sync_provider_label,
         monitor_mode_select_value,
         user_score_display,
+        custom_list_memberships,
         monitored_count,
         all_monitored,
         allow_upgrades,
