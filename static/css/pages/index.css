@@ -24,17 +24,18 @@
 }
 
 /* Library search input. Sits between the custom-list dropdown and
-   the sort dropdown in the page-header filter row. Padding + font
-   size match `.folder-select` so the three controls share a visual
-   baseline; width is generous enough to read as a primary search
-   affordance without dominating the toolbar. */
+   the sort dropdown in the page-header filter row. Padding +
+   font-size + line-height match the `.btn` rule so the three
+   filter controls render at the same height as the Add Series
+   button next to them. */
 .library-search-input {
-    padding: 5px 10px;
+    padding: 10px 14px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text);
-    font-size: 12px;
+    font-size: 14px;
+    line-height: 1.6;
     font-family: var(--font-body);
     width: 220px;
     min-width: 180px;
@@ -47,6 +48,23 @@
 .library-search-input:focus {
     outline: none;
     border-color: var(--accent);
+}
+
+/* Scoped overrides on the page-header filter row so the dropdowns
+   and Clear pill match the `.btn` Add Series button's height. The
+   underlying .folder-select / .btn-pill rules stay untouched so
+   other pages (where the controls coexist with smaller affordances)
+   keep their tighter sizing. */
+.library-filter-form .folder-select {
+    padding: 10px 14px;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.library-filter-form .library-filter-clear {
+    padding: 10px 16px;
+    font-size: 14px;
+    line-height: 1.6;
 }
 
 /* "Clear" link styled as a quiet pill; only renders when at least
