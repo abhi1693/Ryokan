@@ -244,11 +244,10 @@
                 External Accounts
                 {% match external_account %}
                     {% when Some with (acct) %}
-                        {% if acct.last_sync_auth_failed %}
-                        <span class="form-hint"><span class="log-badge log-badge-error">Re-link required</span></span>
-                        {% else %}
-                        <span class="form-hint"><span class="log-badge log-badge-info">{{ acct.provider_label }} · {{ acct.username }}</span></span>
-                        {% endif %}
+                        <span class="form-hint">
+                            <span class="log-badge log-badge-error" data-ext-auth-badge="error" {% if !acct.last_sync_auth_failed %}hidden{% endif %}>Re-link required</span>
+                            <span class="log-badge log-badge-info" data-ext-auth-badge="ok" {% if acct.last_sync_auth_failed %}hidden{% endif %}>{{ acct.provider_label }} · {{ acct.username }}</span>
+                        </span>
                     {% when None %}
                         <span class="form-hint"><span class="log-badge">Not linked</span></span>
                 {% endmatch %}
@@ -259,12 +258,10 @@
                        successful sync. Sized + spaced like Seerr's
                        intro paragraph so they sit naturally inside
                        the fieldset. #}
-                    {% if acct.last_sync_auth_failed %}
-                    <div class="ext-alert ext-alert-error" role="alert">
+                    <div class="ext-alert ext-alert-error" role="alert" data-ext-auth-banner {% if !acct.last_sync_auth_failed %}hidden{% endif %}>
                         <strong>Re-link required.</strong>
                         Your {{ acct.provider_label }} authentication has expired or was revoked. Sync stopped working until you unlink and link again.
                     </div>
-                    {% endif %}
                     {% if acct.last_sync_deferred_count > 0 && acct.provider == "mal" %}
                     <div class="ext-alert ext-alert-warn">
                         <strong>{{ acct.last_sync_deferred_count }} series couldn't be mapped MyAnimeList → AniList</strong>

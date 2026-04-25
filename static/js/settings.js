@@ -809,6 +809,21 @@ function syncWatchListNow() {
                     el.setAttribute('data-relative-time', String(nowSec));
                     el.textContent = 'Just now';
                 });
+                // A successful sync also clears `last_sync_auth_failed`
+                // server-side. The banner + legend badge are still
+                // server-rendered to whatever the page-load state was,
+                // so flip them in-place — without this, the user has
+                // to reload Settings to see "Re-link required" go
+                // away after a successful sync.
+                document
+                    .querySelectorAll('[data-ext-auth-banner]')
+                    .forEach((el) => el.setAttribute('hidden', ''));
+                document
+                    .querySelectorAll('[data-ext-auth-badge="error"]')
+                    .forEach((el) => el.setAttribute('hidden', ''));
+                document
+                    .querySelectorAll('[data-ext-auth-badge="ok"]')
+                    .forEach((el) => el.removeAttribute('hidden'));
             }
         },
     });
