@@ -127,13 +127,15 @@ pub async fn distinct_list_names(db: &SqlitePool) -> Result<Vec<String>, sqlx::E
 /// provider's memberships don't get cleared by another's unlink.
 ///
 /// Scoped to `provider` rather than `(provider, account_id)` because
-/// `external_accounts` enforces single-account-per-provider via the
-/// uniqueness check in `link()` — at any moment there is at most one
-/// AL account, at most one MAL account, etc. If a future schema ever
-/// allows multiple accounts per provider, this wipe would need to
-/// take an `account_id` parameter (and the caller in `unlink` would
-/// need to pass it through) so a sibling account's lists aren't
-/// collateral damage on an unlink.
+/// `external_accounts::link()` enforces an at-most-one-account-linked
+/// invariant via a `WHERE NOT EXISTS (... WHERE provider != ?)` guard
+/// on insert — practically that means at most one AL row OR one MAL
+/// row at any moment, never both and never two of either, so a
+/// `provider`-only delete clears exactly what the unlink targets.
+/// If a future schema ever allows multiple accounts per provider,
+/// this wipe would need to take an `account_id` parameter (and the
+/// caller in `unlink` would need to pass it through) so a sibling
+/// account's lists aren't collateral damage on an unlink.
 ///
 /// Takes a `&mut Transaction` rather than `&SqlitePool` because the
 /// only caller (`external_accounts::unlink`) needs the wipe to land
