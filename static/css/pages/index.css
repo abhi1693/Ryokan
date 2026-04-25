@@ -1,5 +1,18 @@
 /* pages/index.css — auto-split from style.css. */
 
+/* Library page header overrides. Scoped to .library-header-row so
+   other pages keep their existing flex-start (page-desc-under-h2)
+   shape. We want the "Anime Library" title vertically centered on
+   the same baseline as the filter controls and Add Series button to
+   its right, since the page-desc is gone and there's nothing for
+   the second-line alignment to anchor to. */
+.library-header-row {
+    align-items: center;
+}
+.library-header-row h2 {
+    margin-bottom: 0;
+}
+
 .btn-pill {
     background: transparent;
     color: var(--text-dim);
