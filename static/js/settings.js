@@ -785,6 +785,42 @@ function unlinkExternalAccountConfirmed() {
         .catch((e) => console.error('[ext-accounts] unlink failed:', e));
 }
 
+function syncWatchListNow() {
+    if (typeof window.ryokanNewProgressId !== 'function' || typeof window.ryokanProgressToast !== 'function') {
+        // Sticky-toast helpers come from base.js; if they're missing
+        // it's a load-order bug, not a user-facing failure mode.
+        console.error('[ext-accounts] progress toast helpers not loaded');
+        return;
+    }
+    const progressId = window.ryokanNewProgressId();
+    const toast = window.ryokanProgressToast({
+        progressId,
+        title: 'Watch-list sync starting…',
+        category: 'external_sync',
+    });
+    fetch('/settings/oauth/sync-now', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ progress_id: progressId }),
+    })
+        .then((r) => r.json().catch(() => ({})))
+        .then((data) => {
+            // The sync runs in the background; the toast finalizes off
+            // the progress feed. A bad-state response (e.g. account
+            // unlinked between page load and click) gets surfaced here.
+            if (data && data.ok === false) {
+                toast.finalize({
+                    kind: 'error',
+                    title: 'Sync could not start',
+                    body: data.error || 'Try reloading the Settings page.',
+                });
+            }
+        })
+        .catch((err) => {
+            toast.finalize({ kind: 'error', title: 'Sync request failed', body: String(err) });
+        });
+}
+
 let _extPrefsSaveTimer = null;
 function saveExternalAccountPrefs() {
     // Debounce so the user toggling three checkboxes in a row doesn't

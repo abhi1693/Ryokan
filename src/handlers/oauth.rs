@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::models::external_accounts::{self, LinkRequest, PROVIDER_ANILIST, PROVIDER_MAL};
 use crate::models::log::LogCategory;
-use crate::services::{logger, oauth_state};
+use crate::services::{external_sync, logger, oauth_state, progress};
 
 /// AniList public client ID. Registered 2026-04-22 against the
 /// author's AL account; the AL app page documents the redirect URI
@@ -405,6 +405,89 @@ pub async fn unlink(State(state): State<AppState>) -> impl IntoResponse {
             Json(serde_json::json!({"ok": false, "error": e})),
         ),
     }
+}
+
+// ── Manual "Sync now" trigger ────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+pub struct SyncNowForm {
+    /// Opaque client-generated id used to scope the ProgressRegistry
+    /// job. The frontend mints one (timestamp + random suffix) when
+    /// it clicks Sync now and polls `/api/progress/<id>` for live
+    /// status. Missing/empty/over-length values are treated as
+    /// "fire and forget" — the sync still runs but no progress
+    /// events are emitted.
+    #[serde(default)]
+    pub progress_id: Option<String>,
+}
+
+/// Trigger a one-off watch-list sync against the linked account.
+/// Returns 202 immediately after spawning the work; the actual sync
+/// runs as a background task and emits progress events into the
+/// registry. The frontend polls the progress endpoint to render the
+/// sticky-toast status.
+///
+/// Returns 400 when no account is linked. The supervised background
+/// task continues to run on its own cadence regardless — this is an
+/// out-of-band "do it right now" trigger, not a replacement for the
+/// scheduled tick.
+pub async fn sync_now(
+    State(state): State<AppState>,
+    Json(form): Json<SyncNowForm>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let account = external_accounts::get_current(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "No external account is linked.".into(),
+        ))?;
+
+    let progress_id = progress::sanitize_progress_id(form.progress_id.as_deref());
+    let handle = if let Some(id) = progress_id.clone() {
+        Some(state.progress.register(id).await)
+    } else {
+        None
+    };
+
+    if let Some(h) = &handle {
+        h.emit(
+            "start",
+            "info",
+            format!("Starting watch-list sync for {}", account.username),
+            None,
+            false,
+        )
+        .await;
+    }
+
+    // Spawn so the HTTP response returns immediately — the sync can
+    // take minutes for a large list and we don't want the browser
+    // sitting on an open POST while the user pokes around the rest of
+    // the UI. The progress poll endpoint is how the toast gets live
+    // status during the run.
+    let spawn_state = state.clone();
+    let spawn_handle = handle.clone();
+    tokio::spawn(async move {
+        let outcome = external_sync::tick_once(&spawn_state).await;
+        if let Some(h) = spawn_handle {
+            match outcome {
+                Ok(summary) => {
+                    h.emit("done", "success", "Sync complete", Some(summary), true)
+                        .await;
+                }
+                Err(err) => {
+                    h.emit("done", "error", "Sync failed", Some(err), true)
+                        .await;
+                }
+            }
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "progress_id": progress_id,
+    })))
 }
 
 // ── Provider call helpers ────────────────────────────────────────────

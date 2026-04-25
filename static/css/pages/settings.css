@@ -632,3 +632,21 @@ fieldset legend {
 
 .cf-score-zero { color: var(--text-dim); }
 
+/* External Accounts (#62 PR B): linked-account row layout. The header
+   pairs the username block on the left with the actions cluster on
+   the right; without flex they stack and the Sync now / Unlink pair
+   wraps awkwardly under long usernames. */
+.ext-accounts-linked-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.ext-accounts-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+

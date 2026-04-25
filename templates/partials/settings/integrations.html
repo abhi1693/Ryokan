@@ -243,7 +243,10 @@
                                 <div class="form-hint">Score format: {{ acct.score_format }}</div>
                                 {% endif %}
                             </div>
-                            <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
+                            <div class="ext-accounts-actions">
+                                <button type="button" class="btn btn-primary" onclick="syncWatchListNow()">Sync now</button>
+                                <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
+                            </div>
                         </div>
                         <div class="ext-accounts-prefs">
                             <div class="form-hint" style="margin-bottom:6px">Import lists:</div>

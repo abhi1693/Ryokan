@@ -654,6 +654,7 @@ async fn main() {
             post(handlers::oauth::update_preferences),
         )
         .route("/settings/oauth/unlink", post(handlers::oauth::unlink))
+        .route("/settings/oauth/sync-now", post(handlers::oauth::sync_now))
         .route(
             "/settings/groups",
             post(handlers::settings::settings_groups_upsert),
