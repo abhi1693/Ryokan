@@ -45,6 +45,22 @@ services:
       # RSS sync / metadata refresh schedules. Defaults to UTC.
       # - TZ=America/Los_Angeles
 
+      # --- Optional: reverse proxy + HTTPS ---
+      #
+      # Uncomment these two when Ryokan sits behind a reverse proxy that
+      # terminates TLS (Caddy, nginx, Traefik, Cloudflare Tunnel, etc.).
+      #
+      # 1. Trust the proxy's forwarded-client headers. Off by default
+      #    because direct exposure on 0.0.0.0:8978 would let any client
+      #    set X-Forwarded-For / X-Real-IP themselves and bypass the
+      #    per-IP login throttle. Only turn on when your proxy strips
+      #    and rewrites these headers on ingress.
+      # - RYOKAN_TRUSTED_PROXY=1
+      #
+      # 2. Mark the session cookie Secure so it never travels over
+      #    cleartext. Required for any HTTPS-fronted deployment.
+      # - RYOKAN_COOKIE_SECURE=1
+
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8978/login"]
       interval: 30s

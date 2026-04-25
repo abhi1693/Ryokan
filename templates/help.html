@@ -46,6 +46,13 @@
     </section>
 
     <section class="help-section">
+        <h3>Linking your AniList or MyAnimeList account</h3>
+        <p>Open <strong>Settings → Connections → External Accounts</strong> and pick a provider. You'll be sent to AniList or MAL to authorize Ryokan, then you paste the resulting code back into Settings. Once linked, Ryokan auto-imports your watch list every 30 minutes by default (configurable from 15 minutes to 7 days), picks up status changes, and shows your personal score on every library card in the format your account uses (POINT_100, POINT_10, POINT_5 stars, POINT_3 smileys, or POINT_10_DECIMAL).</p>
+        <p>OAuth tokens are encrypted at rest with an AEAD key. On Docker, the key file lives in your persistent <code>/data</code> volume; on bare metal it sits at <code>data/.ryokan-key</code>. Set <code>RYOKAN_ENCRYPTION_KEY</code> (a base64-encoded 32-byte value) if you'd rather supply the key from your secrets store.</p>
+        <p>Only one provider can be linked at a time. Unlinking wipes per-account state (your custom-list memberships and synced user scores) but preserves the imported series rows themselves, so you don't lose grab history or monitoring settings.</p>
+    </section>
+
+    <section class="help-section">
         <h3>Search Tips</h3>
         <p>Use the uploader field to filter by a specific release group's Nyaa account. The category filter lets you narrow to English-translated or raw releases. "Trusted only" shows releases from verified Nyaa uploaders.</p>
         <p>Try searching for batch releases by including "batch" in your query, e.g. "Jujutsu Kaisen batch 1080p".</p>
