@@ -17,9 +17,9 @@
                handler so the URL becomes `/?list=<name>` and the
                server-side handler returns the filtered set. #}
             {% if !custom_list_names.is_empty() %}
-            <form method="get" action="/" class="library-filter-form" id="library-filter-form">
+            <form method="get" action="/" class="library-filter-form">
                 <label for="library-list-filter" class="visually-hidden">Filter by custom list</label>
-                <select id="library-list-filter" name="list" class="folder-select" onchange="document.getElementById('library-filter-form').submit()">
+                <select id="library-list-filter" name="list" class="folder-select" onchange="this.form.submit()">
                     <option value="">All custom lists</option>
                     {% for name in custom_list_names %}
                     <option value="{{ name }}"{% if name.as_str() == custom_list_filter.as_str() %} selected{% endif %}>{{ name }}</option>

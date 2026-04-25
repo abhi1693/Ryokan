@@ -82,10 +82,13 @@ pub async fn index(
         // In-memory filter against the just-loaded library. Cheaper
         // than a JOIN-based query when the library is already cached
         // — the per-series ids set is small enough that the
-        // HashSet lookup on each row is sub-microsecond. Filter is
-        // dropped silently if the user passes a list name that
-        // doesn't exist (defensive against a stale tab + a sync
-        // that removed the last membership for that name).
+        // HashSet lookup on each row is sub-microsecond. A stale or
+        // unknown `?list=foo` (e.g. user bookmarked the URL, then
+        // synced away the last membership) yields an empty
+        // matching_ids set and therefore an empty library — chosen
+        // over silently dropping the filter so the dropdown's
+        // still-selected value lines up with what the user sees,
+        // making the staleness obvious instead of mysterious.
         let matching_ids: std::collections::HashSet<i64> =
             crate::models::series_custom_lists::series_ids_in_list(&state.db, &custom_list_filter)
                 .await

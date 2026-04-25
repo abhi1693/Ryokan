@@ -510,6 +510,15 @@ async fn stamp_user_score_if_set(
 /// custom-list memberships, so the call would just clear a never-
 /// populated set every tick).
 ///
+/// Called from BOTH the AL-detail and Jikan-fallback merge paths.
+/// The Jikan path is dead-by-data today — `entries_from_mal` always
+/// returns an empty `custom_lists` and the provider check short-
+/// circuits before any DB write — but keeping the call symmetric
+/// across both paths means a hypothetical future provider added to
+/// the Jikan-fallback path inherits the namespace-skip automatically
+/// instead of silently clobbering AL's rows. Two cheap branch-and-
+/// returns per Jikan merge is a fine tax for that invariant.
+///
 /// Replace-on-merge rather than incremental: the GraphQL response
 /// carries the full membership map per entry, so clear+insert is
 /// the right shape for "user moved this out of Hidden Gems" — an
