@@ -248,6 +248,18 @@
                                 <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
                             </div>
                         </div>
+                        {# #62 PR E — re-link-required banner. Set
+                           when the most recent sync hit an auth-
+                           rejection error (AL 401/403, MAL refresh
+                           dead). Cleared by the next successful
+                           sync, so it disappears on its own once
+                           the user re-links. #}
+                        {% if acct.last_sync_auth_failed %}
+                        <div class="ext-accounts-relink-banner">
+                            <strong>Re-link required.</strong>
+                            Your {{ acct.provider_label }} authentication has expired or was revoked. Sync stopped working until you unlink and link again.
+                        </div>
+                        {% endif %}
                         {# #62 PR E — MAL→AL mapping-failure
                            counter. Persisted by sync_mal at the end
                            of every successful tick (cleared to 0 by

@@ -156,6 +156,10 @@ pub(crate) struct ExternalAccountView {
     /// only when > 0 AND the linked provider is MAL (AL never
     /// produces deferred entries; the column always reads 0 there).
     pub last_sync_deferred_count: i64,
+    /// #62 PR E — sticky auth-rejection flag. Drives the
+    /// "Re-link required" red banner on the External Accounts card.
+    /// Cleared by the next successful sync.
+    pub last_sync_auth_failed: bool,
 }
 
 impl ExternalAccountView {
@@ -177,6 +181,7 @@ impl ExternalAccountView {
             import_completed: a.import_completed,
             skip_already_watched: a.skip_already_watched,
             last_sync_deferred_count: a.last_sync_deferred_count,
+            last_sync_auth_failed: a.last_sync_auth_failed,
         }
     }
 }

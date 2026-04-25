@@ -977,6 +977,20 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // #62 PR E — sticky flag set when a sync tick fails because
+    // the auth token was rejected (AL 401/403 or MAL refresh-token
+    // dead). Cleared on the next successful tick. Drives the
+    // "Re-link required" banner on the External Accounts card so
+    // a user whose AL token expired (1-year TTL) doesn't have to
+    // dig through System → Logs to figure out why their sync
+    // stopped working.
+    sqlx::query(
+        "ALTER TABLE external_accounts ADD COLUMN last_sync_auth_failed INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (

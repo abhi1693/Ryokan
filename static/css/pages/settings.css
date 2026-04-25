@@ -668,6 +668,27 @@ fieldset legend {
     width: 120px;
 }
 
+/* #62 PR E — re-link-required banner. Red-tinted because this is
+   a real error state: sync has stopped, no further entries will
+   import or update until the user unlinks + relinks. The banner
+   stays put until the next successful sync clears the flag, so a
+   user who clicks Sync now after re-linking gets immediate
+   feedback that the issue resolved. */
+.ext-accounts-relink-banner {
+    margin: 12px 0;
+    padding: 10px 12px;
+    background: rgba(211, 125, 125, 0.10);
+    color: var(--text);
+    border: 1px solid rgba(211, 125, 125, 0.35);
+    border-radius: var(--radius);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.ext-accounts-relink-banner strong {
+    color: var(--red);
+}
+
 /* #62 PR E — MAL mapping-failure info banner. Yellow-tinted to
    read as "informational warning" rather than an error (the
    library still works; the affected series just don't get AL-keyed

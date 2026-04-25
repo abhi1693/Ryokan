@@ -991,6 +991,23 @@ pub async fn tick_once_or_busy(state: &AppState) -> Result<String, String> {
     tick_once_inner(state, true).await
 }
 
+/// True when the sync error string indicates the user's auth token
+/// is dead and re-linking is the fix (vs. transient rate-limits,
+/// network errors, or upstream 5xx). Matches the stable prefixes
+/// the sync engine emits — adding new wordings means updating this
+/// list, which is the project's existing string-tag convention for
+/// the AL failure taxonomy.
+fn is_auth_rejection(err: &str) -> bool {
+    const AUTH_PREFIXES: &[&str] = &[
+        "AniList rejected the watch-list token",
+        "MAL access token expired and no refresh token stored",
+        "MAL refresh failed (re-link required)",
+        "MAL rejected the token immediately after refresh",
+        "re-link required",
+    ];
+    AUTH_PREFIXES.iter().any(|p| err.contains(p))
+}
+
 async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<String, String> {
     let account = external_accounts::get_current(&state.db)
         .await
@@ -1017,7 +1034,7 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
         account.list_last_synced_at
     };
 
-    let summary = match account.provider.as_str() {
+    let raw = match account.provider.as_str() {
         external_accounts::PROVIDER_ANILIST => {
             sync_anilist(state, &account, delta_cursor, is_full_sync).await
         }
@@ -1029,12 +1046,47 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
             // prevent this, but surface explicitly rather than panic.
             return Err(format!("unknown external_accounts.provider: {other}"));
         }
-    }?;
+    };
+
+    let summary = match raw {
+        Ok(s) => s,
+        Err(e) => {
+            // #62 PR E — auth-rejection detection. The sync engine
+            // returns stable error-prefix strings for token-dead
+            // failures; a match flips the sticky flag so the
+            // Settings UI can render the "Re-link required" banner.
+            // Other failure modes (rate-limit, network timeout)
+            // leave the flag alone — they're transient.
+            if is_auth_rejection(&e)
+                && let Err(write_err) =
+                    external_accounts::update_last_sync_auth_failed(&state.db, account.id, true)
+                        .await
+            {
+                tracing::warn!(
+                    "failed to set last_sync_auth_failed for account_id={}: {write_err}",
+                    account.id
+                );
+            }
+            return Err(e);
+        }
+    };
 
     // Only stamp on success — a failed tick must not advance the
     // cursor or the entries it skipped fetching would be lost forever.
     external_accounts::stamp_list_synced(&state.db, account.id, tick_started_at, is_full_sync)
         .await?;
+    // Clear any stale auth-failure flag — the sync just succeeded,
+    // whatever caused the prior failure resolved (e.g. user
+    // re-linked).
+    if account.last_sync_auth_failed
+        && let Err(e) =
+            external_accounts::update_last_sync_auth_failed(&state.db, account.id, false).await
+    {
+        tracing::warn!(
+            "failed to clear last_sync_auth_failed for account_id={}: {e}",
+            account.id
+        );
+    }
 
     Ok(if is_full_sync {
         format!("{summary} [full-resync]")
@@ -2781,6 +2833,46 @@ mod tests {
 
         let row = series::get_by_id(&db, pinned_id).await.unwrap().unwrap();
         assert_eq!(row.monitor_mode, MonitorMode::All.as_str());
+    }
+
+    #[test]
+    #[test]
+    fn is_auth_rejection_matches_known_dead_token_strings() {
+        // Each of these is a stable error-prefix the sync engine
+        // emits on a token-dead failure; the Settings UI's
+        // "Re-link required" banner keys off this exact match.
+        // Adding a new wording requires updating the auth-prefix
+        // list — pinning the existing ones here so a refactor that
+        // reshapes a message gets caught.
+        assert!(is_auth_rejection(
+            "AniList rejected the watch-list token (status 401); user may need to re-link"
+        ));
+        assert!(is_auth_rejection(
+            "MAL access token expired and no refresh token stored — re-link required"
+        ));
+        assert!(is_auth_rejection(
+            "MAL refresh failed (re-link required): some upstream detail"
+        ));
+        assert!(is_auth_rejection(
+            "MAL rejected the token immediately after refresh — re-link required"
+        ));
+    }
+
+    #[test]
+    fn is_auth_rejection_does_not_match_transient_errors() {
+        // Rate-limits, network timeouts, and 5xx-shaped errors are
+        // transient; the Settings banner shouldn't fire for them.
+        assert!(!is_auth_rejection(
+            "AniList rate-limited: too many requests"
+        ));
+        assert!(!is_auth_rejection(
+            "AniList unavailable (status 503): service unavailable"
+        ));
+        assert!(!is_auth_rejection("AniList HTTP error: connection reset"));
+        assert!(!is_auth_rejection(
+            "AniList batch request failed: connection timed out"
+        ));
+        assert!(!is_auth_rejection("MAL fetch failed: 500 Internal Server"));
     }
 
     #[test]
