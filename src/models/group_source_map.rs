@@ -539,7 +539,7 @@ pub async fn reconcile_seed_drift(db: &SqlitePool) -> Result<(), sqlx::Error> {
 /// idempotent `ALTER TABLE ADD COLUMN ... .ok()`. This exists solely
 /// so a repeat-on-every-boot migration can guard itself without each
 /// one inventing its own config flag.
-async fn ensure_schema_migrations_table(db: &SqlitePool) -> Result<(), sqlx::Error> {
+pub(crate) async fn ensure_schema_migrations_table(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
              id TEXT PRIMARY KEY,
@@ -551,7 +551,10 @@ async fn ensure_schema_migrations_table(db: &SqlitePool) -> Result<(), sqlx::Err
     Ok(())
 }
 
-async fn migration_already_applied(db: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
+pub(crate) async fn migration_already_applied(
+    db: &SqlitePool,
+    id: &str,
+) -> Result<bool, sqlx::Error> {
     let row = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations WHERE id = ?")
         .bind(id)
         .fetch_one(db)
@@ -559,7 +562,7 @@ async fn migration_already_applied(db: &SqlitePool, id: &str) -> Result<bool, sq
     Ok(row > 0)
 }
 
-async fn mark_migration_applied(
+pub(crate) async fn mark_migration_applied(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &str,
 ) -> Result<(), sqlx::Error> {

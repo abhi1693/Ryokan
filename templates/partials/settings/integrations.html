@@ -222,34 +222,65 @@
             </div>
         </fieldset>
 
-        {# Issue #62 PR A — External account linkage. Two states:
-           unlinked (Link buttons for AL + MAL) and linked (provider
-           card with username + per-list import checkboxes + Unlink
-           button). Only one account can be linked at a time per
-           decision #10 — the linked state hides both Link buttons. #}
-        <fieldset class="ext-accounts-fieldset">
-            <legend>External Accounts</legend>
-            <p class="form-hint" style="margin-top:-4px;margin-bottom:12px">
-                Link your AniList or MyAnimeList account to import your watch lists into Ryokan's library. Read-only — Ryokan never writes back to the provider. One account at a time.
-            </p>
+        {# Issue #62 PR A — External account linkage. Same fieldset
+           + form-group + settings-inline-actions vocabulary as every
+           other section in this tab (Download Client, qBit, Jellyfin,
+           Seerr) so the page reads as one rhythm. The structural
+           flow from the PR-E redesign is preserved — provider
+           identity → sync state → banners → prefs → skip-watched →
+           interval → actions — but rebuilt entirely from the
+           connections-tab primitives. No bespoke card surface. #}
+        <fieldset>
+            {# Legend health badge — same visual primitive
+               qBittorrent / Jellyfin / Deluge / Transmission /
+               rTorrent use. Server-rendered (we have the data; JS
+               on the other sections fills theirs because they
+               require a live network probe). The badge color
+               encodes connection state:
+                 • green (.log-badge-info)  → linked + auth healthy
+                 • red   (.log-badge-error) → linked + re-link required
+                 • neutral (.log-badge)     → not linked #}
+            <legend>
+                External Accounts
+                {% match external_account %}
+                    {% when Some with (acct) %}
+                        {% if acct.last_sync_auth_failed %}
+                        <span class="form-hint"><span class="log-badge log-badge-error">Re-link required</span></span>
+                        {% else %}
+                        <span class="form-hint"><span class="log-badge log-badge-info">{{ acct.provider_label }} · {{ acct.username }}</span></span>
+                        {% endif %}
+                    {% when None %}
+                        <span class="form-hint"><span class="log-badge">Not linked</span></span>
+                {% endmatch %}
+            </legend>
             {% match external_account %}
                 {% when Some with (acct) %}
-                    <div class="ext-accounts-linked" data-provider="{{ acct.provider }}">
-                        <div class="ext-accounts-linked-header">
-                            <div>
-                                <div class="ext-accounts-provider-name">{{ acct.provider_label }}</div>
-                                <div class="ext-accounts-username">Linked as <strong>{{ acct.username }}</strong></div>
-                                {% if !acct.score_format.is_empty() %}
-                                <div class="form-hint">Score format: {{ acct.score_format }}</div>
-                                {% endif %}
-                            </div>
-                            <div class="ext-accounts-actions">
-                                <button type="button" class="btn btn-primary" onclick="syncWatchListNow()">Sync now</button>
-                                <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
-                            </div>
-                        </div>
-                        <div class="ext-accounts-prefs">
-                            <div class="form-hint" style="margin-bottom:6px">Import lists:</div>
+                    {# Banners — sticky flags cleared on the next
+                       successful sync. Sized + spaced like Seerr's
+                       intro paragraph so they sit naturally inside
+                       the fieldset. #}
+                    {% if acct.last_sync_auth_failed %}
+                    <div class="ext-alert ext-alert-error" role="alert">
+                        <strong>Re-link required.</strong>
+                        Your {{ acct.provider_label }} authentication has expired or was revoked. Sync stopped working until you unlink and link again.
+                    </div>
+                    {% endif %}
+                    {% if acct.last_sync_deferred_count > 0 && acct.provider == "mal" %}
+                    <div class="ext-alert ext-alert-warn">
+                        <strong>{{ acct.last_sync_deferred_count }} series couldn't be mapped MyAnimeList → AniList</strong>
+                        on the last sync. They're still in your library but won't have AniList-keyed scoring (SeaDex, etc.) until the mappings catch up.
+                    </div>
+                    {% endif %}
+
+                    {# Import-list checkboxes. Wrap-flex so 2-3 fit
+                       per row on a wide viewport, falling back to
+                       one-per-row on narrow without a separate media
+                       query — same physical pattern as the existing
+                       checkbox-row primitive, just laid out
+                       horizontally inside one form-group. #}
+                    <div class="form-group">
+                        <label>Import lists</label>
+                        <div class="ext-prefs-row">
                             <label class="checkbox-row">
                                 <input type="checkbox" data-ext-pref="import_watching" {% if acct.import_watching %}checked{% endif %} onchange="saveExternalAccountPrefs()">
                                 <span>Watching</span>
@@ -270,37 +301,73 @@
                                 <input type="checkbox" data-ext-pref="import_completed" {% if acct.import_completed %}checked{% endif %} onchange="saveExternalAccountPrefs()">
                                 <span>Completed</span>
                             </label>
-                            <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-subtle)">
-                                <label class="checkbox-row">
-                                    <input type="checkbox" data-ext-pref="skip_already_watched" {% if acct.skip_already_watched %}checked{% endif %} onchange="saveExternalAccountPrefs()">
-                                    <span>Skip already-watched episodes</span>
-                                </label>
-                                <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off — airing-series + caught-up user would skip everything otherwise.</span>
-                            </div>
                         </div>
-                        {# #62 PR B — sync cadence. Range: 15 minutes to
-                           7 days (10080 minutes). Saved as part of the
-                           outer Save Settings button (resolver coerces
-                           out-of-range values back to the 30-minute
-                           default). #}
-                        <div class="ext-accounts-interval form-group">
-                            <label for="external_sync_interval_minutes">Sync interval (minutes)</label>
-                            <input type="number"
-                                   id="external_sync_interval_minutes"
-                                   name="external_sync_interval_minutes"
-                                   min="15"
-                                   max="10080"
-                                   step="1"
-                                   value="{{ config.external_sync_interval_minutes }}">
-                            <span class="form-hint">How often the supervised task pulls your watch list. Range: 15 minutes to 7 days. Default 30 minutes — most lists change infrequently and the delta cursor keeps each tick cheap.</span>
-                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="checkbox-row">
+                            <input type="checkbox" data-ext-pref="skip_already_watched" {% if acct.skip_already_watched %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                            <span>Skip already-watched episodes</span>
+                        </label>
+                        <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off; airing series + a caught-up user would otherwise skip everything.</span>
+                    </div>
+
+                    {# #62 PR B — sync cadence. Range: 15 minutes to
+                       7 days (10080 minutes). Saved as part of the
+                       outer Save Settings button (resolver coerces
+                       out-of-range values back to the 30-minute
+                       default). #}
+                    <div class="form-group">
+                        <label for="external_sync_interval_minutes">Sync interval (minutes)</label>
+                        <input type="number"
+                               id="external_sync_interval_minutes"
+                               name="external_sync_interval_minutes"
+                               min="15"
+                               max="10080"
+                               step="1"
+                               value="{{ config.external_sync_interval_minutes }}">
+                    </div>
+
+                    {# Same .settings-inline-actions row qBit/Jellyfin
+                       use for their Test buttons. Sync now is the
+                       primary; Unlink is secondary. The trailing
+                       form-hint mirrors the Test-result span pattern
+                       — gives the user one more place to see auto-sync
+                       interval + last-sync at a glance. #}
+                    <div class="settings-inline-actions">
+                        <button type="button" class="btn btn-primary" onclick="syncWatchListNow()">Sync now</button>
+                        <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
+                        {# Auto-syncs + last-sync hint. The last-sync
+                           span's `data-relative-time` is the unix-
+                           epoch the JS updater (settings.js) keys
+                           off so the label re-renders ("4 minutes
+                           ago" → "5 minutes ago") without a page
+                           reload. When `last_sync_unix_ts` is None
+                           the attribute is omitted; the JS skips
+                           those elements and the "Never" text from
+                           server-render stays. #}
+                        <span class="form-hint">
+                            Auto-syncs every {{ config.external_sync_interval_minutes }} min · last sync
+                            {% match acct.last_sync_unix_ts %}
+                                {% when Some with (ts) %}
+                                    <span data-relative-time="{{ ts }}">{{ acct.last_sync_label }}</span>
+                                {% when None %}
+                                    {{ acct.last_sync_label }}
+                            {% endmatch %}
+                        </span>
                     </div>
                 {% when None %}
-                    <div class="ext-accounts-link-row">
-                        <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('anilist')">Link AniList</button>
-                        <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('mal')">Link MyAnimeList</button>
+                    {# Unlinked: a single form-group whose action row
+                       carries both Link buttons, mirroring how the
+                       Sonarr/Radarr fieldsets present their enable
+                       checkbox at the top. #}
+                    <div class="form-group">
+                        <label>Provider</label>
+                        <div class="settings-inline-actions">
+                            <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('anilist')">Link AniList</button>
+                            <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('mal')">Link MyAnimeList</button>
+                        </div>
                     </div>
-                    <span class="form-hint">Attribution: AniList and MyAnimeList data used with permission under each platform's API terms. Read-only scope.</span>
             {% endmatch %}
         </fieldset>
 

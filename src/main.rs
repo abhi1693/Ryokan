@@ -351,6 +351,15 @@ async fn main() {
         .await
         .expect("Failed to run migrations");
 
+    // #62 PR E — one-shot genre backfill from existing
+    // series_metadata_cache rows so the library filter dropdown
+    // lights up immediately on first boot after upgrade. Idempotent
+    // via the `schema_migrations` ledger; subsequent boots are a
+    // single COUNT(*) probe and return.
+    if let Err(e) = models::series_genres::backfill_from_metadata_cache_once(&db).await {
+        tracing::warn!("series_genres backfill failed (filter dropdown may be empty): {e}");
+    }
+
     // Password-recovery boot path (#22). When RYOKAN_RESET_AUTH=1 or
     // --reset-auth is passed AND a `data/.reset-auth` sentinel file exists,
     // wipe users + sessions before the router mounts. `has_users()` then

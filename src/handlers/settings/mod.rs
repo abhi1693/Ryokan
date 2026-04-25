@@ -144,6 +144,11 @@ pub(crate) struct ExternalAccountView {
     pub provider: String,
     pub provider_label: &'static str,
     pub username: String,
+    /// Raw `score_format` enum string (e.g. `POINT_10_DECIMAL`).
+    /// Kept distinct from `score_format_label` (the humanized form
+    /// the template renders) so a future debug surface can inspect
+    /// the canonical AL value without re-parsing the label.
+    #[allow(dead_code)]
     pub score_format: String,
     pub import_watching: bool,
     pub import_planning: bool,
@@ -151,6 +156,28 @@ pub(crate) struct ExternalAccountView {
     pub import_dropped: bool,
     pub import_completed: bool,
     pub skip_already_watched: bool,
+    /// #62 PR E — count of MAL→AL mapping failures from the most
+    /// recent sync. Surfaces as a "N couldn't be mapped" info banner
+    /// only when > 0 AND the linked provider is MAL (AL never
+    /// produces deferred entries; the column always reads 0 there).
+    pub last_sync_deferred_count: i64,
+    /// #62 PR E — sticky auth-rejection flag. Drives the
+    /// "Re-link required" red banner on the External Accounts card.
+    /// Cleared by the next successful sync.
+    pub last_sync_auth_failed: bool,
+    /// #62 PR E (redesign) — relative-time label for the most
+    /// recent successful sync. "Never" when `list_last_synced_at`
+    /// is NULL; otherwise the largest reasonable unit ("4 minutes
+    /// ago", "2 hours ago", "3 days ago"). Computed server-side
+    /// once per render so the template doesn't carry the time math.
+    pub last_sync_label: String,
+    /// Raw unix timestamp the live-updater JS keys off via
+    /// `data-relative-time`. `None` when no sync has succeeded yet
+    /// (the JS skips the element in that case so "Never" stays
+    /// rendered as-is). Splitting this out from the label lets the
+    /// initial render stay correct when JS is disabled while the
+    /// JS path keeps the label fresh between page loads.
+    pub last_sync_unix_ts: Option<i64>,
 }
 
 impl ExternalAccountView {
@@ -160,6 +187,7 @@ impl ExternalAccountView {
             crate::models::external_accounts::PROVIDER_MAL => "MyAnimeList",
             _ => "External",
         };
+        let last_sync_label = humanize_relative_time(a.list_last_synced_at);
         Self {
             provider: a.provider,
             provider_label,
@@ -171,7 +199,40 @@ impl ExternalAccountView {
             import_dropped: a.import_dropped,
             import_completed: a.import_completed,
             skip_already_watched: a.skip_already_watched,
+            last_sync_deferred_count: a.last_sync_deferred_count,
+            last_sync_auth_failed: a.last_sync_auth_failed,
+            last_sync_label,
+            last_sync_unix_ts: a.list_last_synced_at,
         }
+    }
+}
+
+/// "4 minutes ago" / "2 hours ago" / "3 days ago" / "Never" from a
+/// Unix-epoch timestamp. The largest-reasonable-unit policy is the
+/// same one Sonarr/*arr use on their dashboards: pick the unit that
+/// gives a single-digit-or-low-double-digit number and drop fine
+/// granularity (the sync runs every N minutes; second-precision is
+/// noise).
+fn humanize_relative_time(unix_ts: Option<i64>) -> String {
+    let Some(ts) = unix_ts else {
+        return "Never".to_string();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let delta = (now - ts).max(0);
+    if delta < 60 {
+        "Just now".to_string()
+    } else if delta < 60 * 60 {
+        let m = delta / 60;
+        format!("{m} minute{} ago", if m == 1 { "" } else { "s" })
+    } else if delta < 60 * 60 * 24 {
+        let h = delta / 3600;
+        format!("{h} hour{} ago", if h == 1 { "" } else { "s" })
+    } else {
+        let d = delta / 86400;
+        format!("{d} day{} ago", if d == 1 { "" } else { "s" })
     }
 }
 

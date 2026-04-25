@@ -32,6 +32,14 @@ struct IndexTemplate {
     /// applied the filter to `library`; this field drives the
     /// dropdown's selected-option state on render.
     custom_list_filter: String,
+    /// Currently-active library search query from `?search=<text>`.
+    /// Echoed back so the input's `value` persists across
+    /// navigations.
+    search_query: String,
+    /// #62 PR E — `recent` (default) or `score`. The handler has
+    /// already applied the sort to `library`; this field drives the
+    /// dropdown's selected-option state.
+    sort_value: String,
 }
 
 #[derive(Template)]

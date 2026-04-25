@@ -118,6 +118,38 @@ pub async fn distinct_list_names(db: &SqlitePool) -> Result<Vec<String>, sqlx::E
     Ok(rows)
 }
 
+/// Drop every membership row for the given provider. Used on
+/// account unlink so the library filter dropdown stops showing list
+/// names that came from an account the user no longer has linked
+/// (and so a re-link to a different AL account starts from a clean
+/// slate). Today's only producer is "anilist"; the schema's
+/// `provider` column scopes the wipe so a hypothetical future
+/// provider's memberships don't get cleared by another's unlink.
+///
+/// Scoped to `provider` rather than `(provider, account_id)` because
+/// `external_accounts` enforces single-account-per-provider via the
+/// uniqueness check in `link()` — at any moment there is at most one
+/// AL account, at most one MAL account, etc. If a future schema ever
+/// allows multiple accounts per provider, this wipe would need to
+/// take an `account_id` parameter (and the caller in `unlink` would
+/// need to pass it through) so a sibling account's lists aren't
+/// collateral damage on an unlink.
+///
+/// Takes a `&mut Transaction` rather than `&SqlitePool` because the
+/// only caller (`external_accounts::unlink`) needs the wipe to land
+/// atomically with the `user_score` reset and the account-row
+/// `DELETE`. Add a `_pool` variant if a non-tx caller appears.
+pub async fn clear_for_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    provider: &str,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM series_custom_lists WHERE provider = ?")
+        .bind(provider)
+        .execute(&mut **tx)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 /// Series ids that belong to `list_name`. Used by the library
 /// filter — handler reads this set, then filters the in-memory
 /// `Vec<Series>` against it. Cheaper than re-querying `series` with

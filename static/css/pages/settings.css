@@ -632,39 +632,81 @@ fieldset legend {
 
 .cf-score-zero { color: var(--text-dim); }
 
-/* External Accounts (#62 PR B): linked-account row layout. The header
-   pairs the username block on the left with the actions cluster on
-   the right; without flex they stack and the Sync now / Unlink pair
-   wraps awkwardly under long usernames. */
-.ext-accounts-linked-header {
+/* ─── External Accounts — #62 PR E ────────────────────────────────
+   The fieldset itself is the standard connections-tab fieldset (no
+   bespoke surface). Just two small primitives below to support
+   the linked-state content:
+     • .ext-alert — inline alert blocks for the auth-fail / mapping-
+       fail banners. Sized to fit between fieldset's intro paragraph
+       and form-groups; same vertical rhythm as a form-hint paragraph.
+     • .ext-prefs-row — wrap-flex container for the import-list
+       checkbox-rows so they fit 2-3 per line on a wide viewport
+       instead of stacking five-deep.
+   Identity (provider/username) is shown via the standard
+   .log-badge primitive in the legend, matching the qBittorrent /
+   Jellyfin / Deluge / etc. health-badge pattern. */
+
+.ext-alert {
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    line-height: 1.5;
+    margin-bottom: 12px;
+    color: var(--text);
+}
+
+.ext-alert strong {
+    font-weight: 600;
+}
+
+.ext-alert-error {
+    background: rgba(211, 125, 125, 0.10);
+    border: 1px solid rgba(211, 125, 125, 0.32);
+}
+
+.ext-alert-error strong {
+    color: var(--red);
+}
+
+.ext-alert-warn {
+    background: rgba(211, 176, 125, 0.10);
+    border: 1px solid rgba(211, 176, 125, 0.30);
+}
+
+.ext-alert-warn strong {
+    color: var(--orange);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Wrap-flex for the 5 import-list checkbox-rows, sized to content
+   with a fixed column gap. A grid with `1fr` tracks would stretch
+   each cell to the same width and leave varying empty space after
+   the shorter labels ("Paused" leaves more trailing whitespace
+   than "Plan to Watch"), so the spacing between (label end) and
+   (next checkbox start) reads as uneven. Content-sized items with
+   a uniform gap keep that visible spacing constant. */
+.ext-prefs-row {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
     flex-wrap: wrap;
+    gap: 8px 28px;
+    margin-bottom: 6px;
 }
 
-.ext-accounts-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
+.ext-prefs-row .checkbox-row {
+    margin: 0;
+    /* Match the form-input padding so row height feels consistent
+       with the surrounding inputs without forcing the eye to retune. */
+    padding: 4px 0;
 }
 
-/* The container is `.ext-accounts-interval.form-group` — `.form-group`
-   gives the input the canonical bordered/padded treatment (forms.css
-   :36-47) so it matches every other settings input, while
-   `.ext-accounts-interval` adds the divider above and clamps the
-   numeric input to a narrow width. The label uses .form-group's
-   uppercase-eyebrow style so it lines up with the rest of the page. */
-.ext-accounts-interval {
-    margin-top: 14px;
-    padding-top: 14px;
-    border-top: 1px solid var(--border-subtle);
-}
-
-.ext-accounts-interval input[type="number"] {
-    /* Override .form-group input's default 100% width — a 4-digit
-       minute count never needs the full row. */
-    width: 120px;
+/* Read-only display field inside a form-group. Visually feels like
+   an input row (same padding / box) but styled as static text so
+   the user doesn't expect to edit it. */
+.form-display {
+    display: inline-block;
+    padding: 8px 0;
+    color: var(--text);
+    font-size: 14px;
+    font-family: var(--font-body);
 }
 

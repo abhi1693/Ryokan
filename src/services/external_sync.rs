@@ -48,7 +48,7 @@ use crate::AppState;
 use crate::models::external_accounts::{self, ImportPreferences};
 use crate::models::log::LogCategory;
 use crate::models::monitoring::MonitorMode;
-use crate::models::{metadata_cache, series, series_custom_lists};
+use crate::models::{metadata_cache, series, series_custom_lists, series_genres};
 use crate::services::{
     anibridge, anilist, artwork, jikan, logger, mal, monitoring as monitoring_service,
 };
@@ -751,6 +751,13 @@ async fn merge_one_jikan_entry(
         );
     }
 
+    // #62 PR E — populate genre side table from Jikan-supplied genres.
+    if let Err(e) = series_genres::replace_for_series(db, series_id, &detail.genres).await {
+        tracing::warn!(
+            "series_genres::replace_for_series failed for series_id={series_id} during Jikan sync: {e}"
+        );
+    }
+
     stamp_synced_from_if_set(db, series_id, account_id).await;
     stamp_user_score_if_set(db, series_id, entry.score, account_id).await;
     stamp_custom_lists_if_set(
@@ -850,6 +857,13 @@ async fn merge_one_anilist_entry(
         metadata_cache::upsert(db, series_id, entry.anilist_id, detail.id_mal, detail).await
     {
         tracing::warn!("metadata_cache::upsert failed for series_id={series_id} during sync: {e}");
+    }
+
+    // #62 PR E — populate genre side table from AL-supplied genres.
+    if let Err(e) = series_genres::replace_for_series(db, series_id, &detail.genres).await {
+        tracing::warn!(
+            "series_genres::replace_for_series failed for series_id={series_id} during AL sync: {e}"
+        );
     }
 
     stamp_synced_from_if_set(db, series_id, account_id).await;
@@ -977,6 +991,23 @@ pub async fn tick_once_or_busy(state: &AppState) -> Result<String, String> {
     tick_once_inner(state, true).await
 }
 
+/// True when the sync error string indicates the user's auth token
+/// is dead and re-linking is the fix (vs. transient rate-limits,
+/// network errors, or upstream 5xx). Matches the stable prefixes
+/// the sync engine emits — adding new wordings means updating this
+/// list, which is the project's existing string-tag convention for
+/// the AL failure taxonomy.
+fn is_auth_rejection(err: &str) -> bool {
+    const AUTH_PREFIXES: &[&str] = &[
+        "AniList rejected the watch-list token",
+        "MAL access token expired and no refresh token stored",
+        "MAL refresh failed (re-link required)",
+        "MAL rejected the token immediately after refresh",
+        "re-link required",
+    ];
+    AUTH_PREFIXES.iter().any(|p| err.contains(p))
+}
+
 async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<String, String> {
     let account = external_accounts::get_current(&state.db)
         .await
@@ -1003,7 +1034,7 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
         account.list_last_synced_at
     };
 
-    let summary = match account.provider.as_str() {
+    let raw = match account.provider.as_str() {
         external_accounts::PROVIDER_ANILIST => {
             sync_anilist(state, &account, delta_cursor, is_full_sync).await
         }
@@ -1015,12 +1046,47 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
             // prevent this, but surface explicitly rather than panic.
             return Err(format!("unknown external_accounts.provider: {other}"));
         }
-    }?;
+    };
+
+    let summary = match raw {
+        Ok(s) => s,
+        Err(e) => {
+            // #62 PR E — auth-rejection detection. The sync engine
+            // returns stable error-prefix strings for token-dead
+            // failures; a match flips the sticky flag so the
+            // Settings UI can render the "Re-link required" banner.
+            // Other failure modes (rate-limit, network timeout)
+            // leave the flag alone — they're transient.
+            if is_auth_rejection(&e)
+                && let Err(write_err) =
+                    external_accounts::update_last_sync_auth_failed(&state.db, account.id, true)
+                        .await
+            {
+                tracing::warn!(
+                    "failed to set last_sync_auth_failed for account_id={}: {write_err}",
+                    account.id
+                );
+            }
+            return Err(e);
+        }
+    };
 
     // Only stamp on success — a failed tick must not advance the
     // cursor or the entries it skipped fetching would be lost forever.
     external_accounts::stamp_list_synced(&state.db, account.id, tick_started_at, is_full_sync)
         .await?;
+    // Clear any stale auth-failure flag — the sync just succeeded,
+    // whatever caused the prior failure resolved (e.g. user
+    // re-linked).
+    if account.last_sync_auth_failed
+        && let Err(e) =
+            external_accounts::update_last_sync_auth_failed(&state.db, account.id, false).await
+    {
+        tracing::warn!(
+            "failed to clear last_sync_auth_failed for account_id={}: {e}",
+            account.id
+        );
+    }
 
     Ok(if is_full_sync {
         format!("{summary} [full-resync]")
@@ -1141,6 +1207,18 @@ async fn sync_anilist(
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
+    // #62 PR E — clear any stale MAL deferred count from a prior
+    // provider on this same account row. AL syncs never produce
+    // deferred entries (no anibridge step), so always writing 0
+    // keeps the Settings UI accurate after a provider switch.
+    if let Err(e) =
+        external_accounts::update_last_sync_deferred_count(&state.db, account.id, 0).await
+    {
+        tracing::warn!(
+            "update_last_sync_deferred_count failed for account_id={}: {e}",
+            account.id
+        );
+    }
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
@@ -1353,6 +1431,21 @@ async fn sync_mal(
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
+    // #62 PR E — persist the MAL→AL mapping-failure count so the
+    // Settings UI can render a "N series couldn't be mapped" banner
+    // without scraping the supervised-loop summary string.
+    if let Err(e) = external_accounts::update_last_sync_deferred_count(
+        &state.db,
+        account.id,
+        outcome.deferred_jikan as i64,
+    )
+    .await
+    {
+        tracing::warn!(
+            "update_last_sync_deferred_count failed for account_id={}: {e}",
+            account.id
+        );
+    }
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
@@ -2740,6 +2833,45 @@ mod tests {
 
         let row = series::get_by_id(&db, pinned_id).await.unwrap().unwrap();
         assert_eq!(row.monitor_mode, MonitorMode::All.as_str());
+    }
+
+    #[test]
+    fn is_auth_rejection_matches_known_dead_token_strings() {
+        // Each of these is a stable error-prefix the sync engine
+        // emits on a token-dead failure; the Settings UI's
+        // "Re-link required" banner keys off this exact match.
+        // Adding a new wording requires updating the auth-prefix
+        // list — pinning the existing ones here so a refactor that
+        // reshapes a message gets caught.
+        assert!(is_auth_rejection(
+            "AniList rejected the watch-list token (status 401); user may need to re-link"
+        ));
+        assert!(is_auth_rejection(
+            "MAL access token expired and no refresh token stored — re-link required"
+        ));
+        assert!(is_auth_rejection(
+            "MAL refresh failed (re-link required): some upstream detail"
+        ));
+        assert!(is_auth_rejection(
+            "MAL rejected the token immediately after refresh — re-link required"
+        ));
+    }
+
+    #[test]
+    fn is_auth_rejection_does_not_match_transient_errors() {
+        // Rate-limits, network timeouts, and 5xx-shaped errors are
+        // transient; the Settings banner shouldn't fire for them.
+        assert!(!is_auth_rejection(
+            "AniList rate-limited: too many requests"
+        ));
+        assert!(!is_auth_rejection(
+            "AniList unavailable (status 503): service unavailable"
+        ));
+        assert!(!is_auth_rejection("AniList HTTP error: connection reset"));
+        assert!(!is_auth_rejection(
+            "AniList batch request failed: connection timed out"
+        ));
+        assert!(!is_auth_rejection("MAL fetch failed: 500 Internal Server"));
     }
 
     #[test]

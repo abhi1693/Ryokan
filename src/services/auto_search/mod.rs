@@ -2118,6 +2118,7 @@ mod tests {
             cumulative_prior_episodes: 0,
             monitor_mode_manual_override: false,
             user_score: None,
+            added_at: String::new(),
         }
     }
 

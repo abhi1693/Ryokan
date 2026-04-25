@@ -301,14 +301,8 @@ pub async fn fetch_media_list_collection(
         return Err(format!("AniList unavailable: {err_msg}"));
     }
 
-    let lists = json
-        .pointer("/data/MediaListCollection/lists")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            "AniList MediaListCollection missing data.MediaListCollection.lists".to_string()
-        })?;
-
-    let out = parse_media_list_collection_lists(lists);
+    let lists = extract_media_list_buckets(&json)?;
+    let out = parse_media_list_collection_lists(&lists);
 
     // Sanity log: zero entries kept across all non-custom-list buckets
     // when the response actually had buckets means either the user has
@@ -318,7 +312,7 @@ pub async fn fetch_media_list_collection(
     // it shows up in the operator's logs even when the sync looks
     // "successful" with zero results. Doesn't fail the call — an
     // empty list IS a valid state for new accounts.
-    if out.is_empty() && all_buckets_are_custom_lists(lists) {
+    if out.is_empty() && all_buckets_are_custom_lists(&lists) {
         tracing::warn!(
             "AniList MediaListCollection returned {} buckets, all isCustomList=true; sync will see zero entries until the schema is investigated",
             lists.len()
@@ -339,6 +333,34 @@ pub async fn fetch_media_list_collection(
         entries: out,
         score_format,
     })
+}
+
+/// Pull the `lists` array out of an AL `MediaListCollection` response.
+///
+/// AL serves three legitimate response shapes here, and only the
+/// third is a real error:
+///   1. `{ data: { MediaListCollection: { lists: [...], user: {...} } } }`
+///      — normal populated response.
+///   2. `{ data: { MediaListCollection: null } }` — accounts with zero
+///      anime entries (brand-new users, or someone who cleared their
+///      list). AL omits the wrapping object entirely rather than
+///      returning an empty `lists` array.
+///   3. `data` missing entirely — malformed / partial response, the
+///      only case worth surfacing as an error.
+///
+/// Without the (2) branch, brand-new accounts (and anyone whose
+/// imported categories happen to all be empty) hit "missing
+/// data.MediaListCollection.lists" and the manual Sync now button
+/// fails instead of succeeding gracefully with 0 entries.
+fn extract_media_list_buckets(json: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+    if json.pointer("/data").is_none() {
+        return Err("AniList MediaListCollection missing data".to_string());
+    }
+    Ok(json
+        .pointer("/data/MediaListCollection/lists")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// Walk only the non-custom-list buckets to avoid double-counting
@@ -1654,6 +1676,67 @@ mod tests {
         ]);
         let arr = lists.as_array().unwrap();
         assert!(all_buckets_are_custom_lists(arr));
+    }
+
+    #[test]
+    fn extract_media_list_buckets_succeeds_for_populated_response() {
+        // The normal shape: lists array present and non-empty.
+        let json = serde_json::json!({
+            "data": {
+                "MediaListCollection": {
+                    "lists": [
+                        {"isCustomList": false, "entries": []}
+                    ],
+                    "user": {"mediaListOptions": {"scoreFormat": "POINT_10"}}
+                }
+            }
+        });
+        let lists = extract_media_list_buckets(&json).unwrap();
+        assert_eq!(lists.len(), 1);
+    }
+
+    #[test]
+    fn extract_media_list_buckets_returns_empty_when_collection_is_null() {
+        // The empty-account shape: AL replies with MediaListCollection
+        // = null for accounts with zero anime entries. Should succeed
+        // with an empty lists array, not error.
+        let json = serde_json::json!({
+            "data": {
+                "MediaListCollection": null
+            }
+        });
+        let lists = extract_media_list_buckets(&json).unwrap();
+        assert!(
+            lists.is_empty(),
+            "null MediaListCollection should yield empty lists"
+        );
+    }
+
+    #[test]
+    fn extract_media_list_buckets_returns_empty_when_lists_field_is_missing() {
+        // Defense-in-depth: a response with the wrapper present but
+        // `lists` missing should also degrade to empty rather than
+        // erroring. The sync's downstream code handles empty inputs
+        // safely already, so being lenient here is the right move.
+        let json = serde_json::json!({
+            "data": {
+                "MediaListCollection": {
+                    "user": {"mediaListOptions": {"scoreFormat": "POINT_10"}}
+                }
+            }
+        });
+        let lists = extract_media_list_buckets(&json).unwrap();
+        assert!(lists.is_empty());
+    }
+
+    #[test]
+    fn extract_media_list_buckets_errors_when_data_field_missing() {
+        // The malformed-response shape: `data` itself missing means
+        // something is genuinely wrong upstream (rare — GraphQL errors
+        // are caught earlier via the `errors[]` branch). Surface it.
+        let json = serde_json::json!({});
+        let err = extract_media_list_buckets(&json).unwrap_err();
+        assert!(err.contains("missing data"), "got: {err}");
     }
 
     #[test]

@@ -1,5 +1,18 @@
 /* pages/index.css — auto-split from style.css. */
 
+/* Library page header overrides. Scoped to .library-header-row so
+   other pages keep their existing flex-start (page-desc-under-h2)
+   shape. We want the "Anime Library" title vertically centered on
+   the same baseline as the filter controls and Add Series button to
+   its right, since the page-desc is gone and there's nothing for
+   the second-line alignment to anchor to. */
+.library-header-row {
+    align-items: center;
+}
+.library-header-row h2 {
+    margin-bottom: 0;
+}
+
 .btn-pill {
     background: transparent;
     color: var(--text-dim);
@@ -21,6 +34,102 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 20px;
+}
+
+/* Library search input. Sits between the custom-list dropdown and
+   the sort dropdown in the page-header filter row. Explicit
+   `height` + `box-sizing: border-box` pins all four controls
+   (input, two selects, Clear pill) to the same outer dimension as
+   the Add Series .btn next to them — without it, <input> and
+   <select> render ~1-2px apart at the same padding/font because
+   their intrinsic-height handling differs. The inline SVG
+   magnifier sits 12px from the left edge using --text-dim
+   (#7a7a96) baked into the stroke; left-padding (38px) clears
+   space for it so typed text doesn't run under the icon. */
+.library-search-input {
+    box-sizing: border-box;
+    height: 42px;
+    padding: 0 12px 0 38px;
+    background-color: var(--bg);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a7a96' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: 12px center;
+    background-size: 16px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 13px;
+    font-family: var(--font-body);
+    width: 220px;
+    min-width: 180px;
+    appearance: textfield;
+    -webkit-appearance: textfield;
+}
+
+/* When the custom-list dropdown is absent (no AL account linked yet
+   or freshly unlinked), the search input absorbs that slot's
+   footprint so the row doesn't visibly contract. 220px (own width)
+   + 180px (list dropdown) + 6px (flex gap) = 406px. */
+.library-search-input.library-search-input-wide {
+    width: 406px;
+}
+
+.library-search-input::placeholder {
+    color: var(--text-dim);
+}
+
+.library-search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* Scoped overrides on the page-header filter row so the dropdowns
+   and Clear pill share the search input's exact height. Underlying
+   .folder-select / .btn-pill rules stay untouched so other pages
+   keep their tighter sizing. */
+.library-filter-form .folder-select {
+    box-sizing: border-box;
+    height: 42px;
+    width: 180px;
+    padding: 0 28px 0 12px;
+    font-size: 13px;
+}
+
+.library-filter-form .library-filter-clear {
+    box-sizing: border-box;
+    height: 42px;
+    padding: 0 14px;
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+}
+
+/* "Clear" link styled as a quiet pill; only renders when at least
+   one filter is active. */
+.library-filter-clear {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border-subtle);
+    padding: 4px 12px;
+    font-size: 12px;
+    border-radius: 999px;
+    text-decoration: none;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.library-filter-clear:hover {
+    color: var(--accent);
+    border-color: rgba(203, 166, 247, 0.45);
+}
+
+/* Reserve the Clear button's layout slot when no filter is active
+   so the row doesn't shift sideways the moment the user types into
+   the search box. visibility:hidden keeps the box (and the flex
+   gap) in place; pointer-events:none + the template's tabindex=-1
+   keep it out of mouse and keyboard focus. */
+.library-filter-clear-hidden {
+    visibility: hidden;
+    pointer-events: none;
 }
 
 @media (max-width: 640px) {
@@ -92,8 +201,19 @@
     font-size: 13px;
 }
 
+/* Pin every card to the same total height. Cover height is already
+   fixed via `aspect-ratio: 2/3`, but `.series-info` would otherwise
+   grow to fit a 2-line title + 2-row wrapped tags vs. a 1-line
+   title + 1-row tags, leaving rows unequal. With grid-auto-rows
+   defaulting to `auto`, each row's height tracks the tallest card
+   in it — so as filters reshuffle which cards land in which row,
+   row heights would visibly jump. Fixed height + overflow:hidden
+   gives every card the same outer dimension regardless of content,
+   and the grid stays still through filter changes. */
 .series-info {
+    height: 100px;
     padding: 10px 12px 12px;
+    overflow: hidden;
 }
 
 .series-title {

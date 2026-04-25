@@ -56,6 +56,19 @@ pub struct ExternalAccount {
     pub import_dropped: bool,
     pub import_completed: bool,
     pub skip_already_watched: bool,
+    /// #62 PR E — count of entries from the most recent sync that
+    /// couldn't be mapped MAL→AL via anibridge. Always 0 for AL
+    /// accounts. Surfaces on the Settings → External Accounts card
+    /// as a banner so the user can see which subset of their MAL
+    /// list is sitting on the negated-id sentinel path.
+    pub last_sync_deferred_count: i64,
+    /// #62 PR E — sticky flag set when the most recent sync tick
+    /// failed with an auth-rejection error (AL 401/403, MAL
+    /// refresh-token dead). Cleared on the next successful tick.
+    /// Drives the Settings UI's "Re-link required" banner — the
+    /// only signal a user has that their otherwise-quiet sync has
+    /// stopped working because of an expired token.
+    pub last_sync_auth_failed: bool,
 }
 
 /// Input for [`link`] — the OAuth handler populates one of these
@@ -95,6 +108,8 @@ impl std::fmt::Debug for ExternalAccount {
             .field("import_dropped", &self.import_dropped)
             .field("import_completed", &self.import_completed)
             .field("skip_already_watched", &self.skip_already_watched)
+            .field("last_sync_deferred_count", &self.last_sync_deferred_count)
+            .field("last_sync_auth_failed", &self.last_sync_auth_failed)
             .finish()
     }
 }
@@ -133,7 +148,8 @@ pub async fn get_current(db: &SqlitePool) -> Result<Option<ExternalAccount>, Str
                 access_token_expires_at, score_format,
                 list_last_synced_at, list_full_resync_at, linked_at,
                 import_watching, import_planning, import_paused,
-                import_dropped, import_completed, skip_already_watched
+                import_dropped, import_completed, skip_already_watched,
+                last_sync_deferred_count, last_sync_auth_failed
            FROM external_accounts
           ORDER BY linked_at DESC
           LIMIT 1",
@@ -255,6 +271,24 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
 /// the new account). Per the plan doc: "user scores [are] lost" on
 /// re-link-different-account.
 pub async fn unlink(db: &SqlitePool, id: i64) -> Result<(), String> {
+    // All four steps inside one tx: a crash between them would otherwise
+    // leave the account row dangling against half-cleaned per-account
+    // state (user_score NULL'd but custom_lists still referencing the
+    // unlinked provider, etc.).
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| format!("external_accounts unlink begin: {e}"))?;
+
+    // Capture the provider before the row goes away so we can scope
+    // the custom-list wipe below.
+    let provider: Option<String> =
+        sqlx::query_scalar("SELECT provider FROM external_accounts WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("external_accounts read for provider: {e}"))?;
+
     // Order matters: clear user_score on rows synced from THIS
     // account BEFORE the account row goes away (the FK is set to
     // SET NULL on cascade, so after the DELETE we'd lose the join
@@ -263,15 +297,31 @@ pub async fn unlink(db: &SqlitePool, id: i64) -> Result<(), String> {
     // ratings.
     sqlx::query("UPDATE series SET user_score = NULL WHERE synced_from_external_account_id = ?")
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("user_score wipe failed: {e}"))?;
 
+    // Drop the custom-list memberships that came from this provider.
+    // Without this, the library page's "All custom lists" dropdown
+    // keeps showing the unlinked account's list names, and a
+    // re-link to a different account inherits stale memberships
+    // until each affected series gets re-synced. Today's only
+    // producer is AL, so unlinking AL effectively clears the table.
+    if let Some(provider) = provider.as_deref() {
+        crate::models::series_custom_lists::clear_for_provider(&mut tx, provider)
+            .await
+            .map_err(|e| format!("series_custom_lists wipe failed: {e}"))?;
+    }
+
     sqlx::query("DELETE FROM external_accounts WHERE id = ?")
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("external_accounts DELETE failed: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("external_accounts unlink commit: {e}"))?;
     Ok(())
 }
 
@@ -317,6 +367,41 @@ pub struct ImportPreferences {
     pub import_dropped: bool,
     pub import_completed: bool,
     pub skip_already_watched: bool,
+}
+
+/// #62 PR E — record the count of MAL→AL mapping failures from
+/// the most recent sync. AL syncs always pass `0`. Read by the
+/// Settings → External Accounts page handler to render the
+/// "N series couldn't be mapped to AniList" banner.
+pub async fn update_last_sync_deferred_count(
+    db: &SqlitePool,
+    id: i64,
+    count: i64,
+) -> Result<(), String> {
+    sqlx::query("UPDATE external_accounts SET last_sync_deferred_count = ? WHERE id = ?")
+        .bind(count)
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("update_last_sync_deferred_count: {e}"))?;
+    Ok(())
+}
+
+/// #62 PR E — flip the auth-failure flag. Set to `true` from the
+/// sync engine's auth-rejection branches (AL 401/403, MAL refresh
+/// dead); cleared back to `false` on the next successful tick.
+pub async fn update_last_sync_auth_failed(
+    db: &SqlitePool,
+    id: i64,
+    flag: bool,
+) -> Result<(), String> {
+    sqlx::query("UPDATE external_accounts SET last_sync_auth_failed = ? WHERE id = ?")
+        .bind(if flag { 1_i64 } else { 0_i64 })
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("update_last_sync_auth_failed: {e}"))?;
+    Ok(())
 }
 
 /// Refresh the `score_format` column. Called from the AL sync path
@@ -439,6 +524,8 @@ struct ExternalAccountRaw {
     import_dropped: bool,
     import_completed: bool,
     skip_already_watched: bool,
+    last_sync_deferred_count: i64,
+    last_sync_auth_failed: bool,
 }
 
 impl ExternalAccountRaw {
@@ -478,6 +565,8 @@ impl ExternalAccountRaw {
             import_dropped: self.import_dropped,
             import_completed: self.import_completed,
             skip_already_watched: self.skip_already_watched,
+            last_sync_deferred_count: self.last_sync_deferred_count,
+            last_sync_auth_failed: self.last_sync_auth_failed,
         })
     }
 }

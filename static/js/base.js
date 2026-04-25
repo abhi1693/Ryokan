@@ -433,6 +433,10 @@ window.ryokanProgressToast = function (opts) {
                     // if it does.
                     toast.finalize({});
                 }
+                if (typeof opts.onTerminal === 'function') {
+                    try { opts.onTerminal(last || {}); }
+                    catch (e) { console.warn('[ryokanProgressToast] onTerminal threw:', e); }
+                }
                 return;
             }
             schedule(500);

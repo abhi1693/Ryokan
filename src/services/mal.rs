@@ -49,8 +49,13 @@ const MAL_REQUEST_DELAY: Duration = Duration::from_secs(1);
 const MAL_PAGE_SIZE: u32 = 1000;
 
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    // User-Agent set at the builder layer so every request the
+    // client issues carries it without per-call repetition. Matches
+    // `services::rss::feed::RSS_HTTP_CLIENT`'s shape; the static
+    // `Ryokan/0.1` UA is the project-wide default per CLAUDE.md.
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .user_agent("Ryokan/0.1")
         .build()
         .expect("MAL reqwest client build")
 });

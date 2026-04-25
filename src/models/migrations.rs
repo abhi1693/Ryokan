@@ -936,6 +936,61 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // #62 PR E — genre side table for the library filter dropdown.
+    // Genres come from AL/Jikan AnimeDetail.genres (already cached
+    // in series_metadata_cache); we extract them into their own
+    // table on every metadata refresh + sync merge so the filter +
+    // autocomplete reads can hit a small indexed scan instead of
+    // unmarshalling JSON for every series. Provider-agnostic — both
+    // AL and Jikan (MAL) emit the same genre vocabulary, so unlike
+    // custom_lists this table doesn't carry a `provider` column.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS series_genres (
+            series_id INTEGER NOT NULL,
+            genre TEXT NOT NULL,
+            PRIMARY KEY (series_id, genre),
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_series_genres_genre \
+         ON series_genres (genre)",
+    )
+    .execute(db)
+    .await?;
+
+    // #62 PR E — count of MAL→AL mapping failures from the most
+    // recent sync run. Surfaces on the Settings → External Accounts
+    // card as a "N series couldn't be mapped to AniList" banner so
+    // the user knows which subset of their MAL list is on the
+    // negated-id sentinel path (no SeaDex keying, etc.). Set on
+    // every successful MAL sync; AL syncs leave the column at 0.
+    sqlx::query(
+        "ALTER TABLE external_accounts ADD COLUMN last_sync_deferred_count INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // #62 PR E — sticky flag set when a sync tick fails because
+    // the auth token was rejected (AL 401/403 or MAL refresh-token
+    // dead). Cleared on the next successful tick. Drives the
+    // "Re-link required" banner on the External Accounts card so
+    // a user whose AL token expired (1-year TTL) doesn't have to
+    // dig through System → Logs to figure out why their sync
+    // stopped working.
+    sqlx::query(
+        "ALTER TABLE external_accounts ADD COLUMN last_sync_auth_failed INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (

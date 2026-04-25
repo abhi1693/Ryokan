@@ -5,19 +5,20 @@
 
 {% block content %}
 <div class="page-header">
-    <div class="page-header-row">
+    <div class="page-header-row library-header-row">
         <div>
-            <h2>Library</h2>
-            <p class="page-desc">Your tracked anime series.</p>
+            <h2>Anime Library</h2>
         </div>
-        <div style="display:flex;gap:8px;align-items:center">
-            {# #62 PR D — AL custom-list filter dropdown. Hidden
-               when no memberships have synced yet. Selecting an
-               option submits the surrounding form via the change
-               handler so the URL becomes `/?list=<name>` and the
-               server-side handler returns the filtered set. #}
-            {% if !custom_list_names.is_empty() %}
-            <form method="get" action="/" class="library-filter-form">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            {# All filter controls in one form so they share state
+               without hidden-input mirrors. Visual order is list →
+               search → sort → clear, putting the search box between
+               the two dropdowns. Each control auto-submits on its
+               own native event; the search input uses a 250ms
+               debounce on `input` so each keystroke isn't a fresh
+               navigation. #}
+            <form method="get" action="/" class="library-filter-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                {% if !custom_list_names.is_empty() %}
                 <label for="library-list-filter" class="visually-hidden">Filter by custom list</label>
                 <select id="library-list-filter" name="list" class="folder-select" onchange="this.form.submit()">
                     <option value="">All custom lists</option>
@@ -25,22 +26,99 @@
                     <option value="{{ name }}"{% if name.as_str() == custom_list_filter.as_str() %} selected{% endif %}>{{ name }}</option>
                     {% endfor %}
                 </select>
+                {% endif %}
+                <label for="library-search" class="visually-hidden">Search library</label>
+                {# Search runs entirely client-side: `liveLibrarySearch`
+                   filters the already-rendered .series-card grid in
+                   place and stamps `?search=foo` into the URL via
+                   replaceState, so a reload still loads the right
+                   subset (the server handler stays as the no-JS
+                   fallback). Enter is prevented on the input so the
+                   form doesn't navigate; the dropdowns still
+                   submit-on-change because list and sort genuinely
+                   need server work. #}
+                <input type="search"
+                       id="library-search"
+                       name="search"
+                       placeholder="Search library…"
+                       class="library-search-input{% if custom_list_names.is_empty() %} library-search-input-wide{% endif %}"
+                       value="{{ search_query }}"
+                       autocomplete="off"
+                       oninput="liveLibrarySearch(this)"
+                       onkeydown="if(event.key==='Enter'){event.preventDefault();}">
+                {# Sort dropdown always renders so the universal
+                   options (Recently added, oldest first, A→Z, Z→A)
+                   stay available regardless of linkage. The two
+                   score-based options only appear when an external
+                   account is linked (`score_format` non-empty);
+                   without one there's nothing to sort against. #}
+                <label for="library-sort" class="visually-hidden">Sort</label>
+                <select id="library-sort" name="sort" class="folder-select" onchange="this.form.submit()">
+                    <option value="recent"{% if sort_value.as_str() == "recent" %} selected{% endif %}>Recently added</option>
+                    <option value="oldest"{% if sort_value.as_str() == "oldest" %} selected{% endif %}>Oldest first</option>
+                    <option value="title_asc"{% if sort_value.as_str() == "title_asc" %} selected{% endif %}>Title (A → Z)</option>
+                    <option value="title_desc"{% if sort_value.as_str() == "title_desc" %} selected{% endif %}>Title (Z → A)</option>
+                    {% if !score_format.is_empty() %}
+                    <option value="score"{% if sort_value.as_str() == "score" %} selected{% endif %}>My score (high → low)</option>
+                    <option value="score_asc"{% if sort_value.as_str() == "score_asc" %} selected{% endif %}>My score (low → high)</option>
+                    {% endif %}
+                </select>
+                {# Always rendered so its layout slot is reserved;
+                   visibility flips on/off so its presence doesn't
+                   shift neighbors when a filter becomes active. The
+                   element is also aria-hidden + tabindex=-1 in the
+                   inactive state so a screen-reader / keyboard user
+                   can't reach a "Clear" link that does nothing.
+
+                   The href carries the current sort through because
+                   sort is presentation, not a filter — clearing
+                   filters shouldn't snap the user back to the
+                   default "Recently added" order. The default
+                   ("recent") is omitted to keep the cleared URL
+                   tidy. #}
+                {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
+                <a class="btn btn-pill library-filter-clear" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}" title="Clear filters">Clear</a>
+                {% else %}
+                <a class="btn btn-pill library-filter-clear library-filter-clear-hidden" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}" tabindex="-1" aria-hidden="true">Clear</a>
+                {% endif %}
             </form>
-            {% endif %}
-            <a class="btn" href="/system?tab=review">Needs Review</a>
-            <button class="btn btn-primary" onclick="openAddModal()">+ Add Series</button>
+            {# Reserved width pushes the right group's left edge back
+               toward where it sat before the Needs Review button
+               was removed. Successively trimmed as the row grew —
+               first for the always-reserved Clear slot, then for
+               the height-matched (and so wider) dropdowns + search. #}
+            <button class="btn btn-primary" style="margin-left: 32px;" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>
 </div>
 
 {% if library.is_empty() %}
 <div class="empty-state">
+    {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
+    {# Distinguish "filter excluded everything" from "library is
+       genuinely empty." Keeps the user from thinking the library
+       was wiped. #}
+    <p>No series match your current filter.</p>
+    <p class="form-hint">
+        {% if !search_query.is_empty() && !custom_list_filter.is_empty() %}
+        Filtered by list <strong>{{ custom_list_filter }}</strong> and search <strong>"{{ search_query }}"</strong>.
+        {% else if !search_query.is_empty() %}
+        No matches for <strong>"{{ search_query }}"</strong>.
+        {% else %}
+        Filtered by list <strong>{{ custom_list_filter }}</strong>.
+        {% endif %}
+    </p>
+    <div class="empty-state-actions">
+        <a class="btn btn-secondary" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}">Clear filters</a>
+    </div>
+    {% else %}
     <p>Your library is empty.</p>
     <p class="form-hint">Add your first series to get Ryokan watching for new episodes. You can also browse releases directly on Nyaa via the Search tab.</p>
     <div class="empty-state-actions">
         <button class="btn btn-primary" onclick="openAddModal()">Search AniList to add anime</button>
         <a class="btn btn-secondary" href="/search">Browse Nyaa</a>
     </div>
+    {% endif %}
 </div>
 {% else %}
 <div class="library-grid" id="library-grid">

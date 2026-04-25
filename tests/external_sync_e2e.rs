@@ -224,6 +224,28 @@ async fn watch_list_sync_imports_series_with_resolved_monitor_mode() {
         .render_html();
     assert_eq!(html, "8.5");
 
+    // Auth-flag clear-on-success invariant: a successful tick after a
+    // prior token-rejection must wipe `last_sync_auth_failed` so the
+    // Settings UI's "Re-link required" banner stops firing. Pre-flip
+    // the flag (simulating the prior failed tick that set it), run
+    // another sync, and assert it clears. Without this regression
+    // guard a stuck-true flag would silently keep showing the banner
+    // forever; the detection-side tests pin only the failure path.
+    external_accounts::update_last_sync_auth_failed(&db, acct.id, true)
+        .await
+        .expect("pre-flip last_sync_auth_failed for the regression guard");
+    external_sync::tick_once(&state)
+        .await
+        .expect("second tick should succeed against the wiremock fixture");
+    let acct_after = external_accounts::get_current(&db)
+        .await
+        .expect("get_current after second tick")
+        .expect("linked account should still exist after second tick");
+    assert!(
+        !acct_after.last_sync_auth_failed,
+        "successful tick must clear last_sync_auth_failed"
+    );
+
     // Cleanup: clear the override so other tests in the same process
     // (sequential within a `cargo test` invocation but separate test
     // crates run in parallel) don't pick up our wiremock host.
