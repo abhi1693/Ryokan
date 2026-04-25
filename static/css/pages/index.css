@@ -62,6 +62,7 @@
 .library-filter-form .folder-select {
     box-sizing: border-box;
     height: 42px;
+    width: 180px;
     padding: 0 28px 0 12px;
     font-size: 13px;
 }
