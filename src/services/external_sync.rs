@@ -48,7 +48,7 @@ use crate::AppState;
 use crate::models::external_accounts::{self, ImportPreferences};
 use crate::models::log::LogCategory;
 use crate::models::monitoring::MonitorMode;
-use crate::models::{metadata_cache, series, series_custom_lists};
+use crate::models::{metadata_cache, series, series_custom_lists, series_genres};
 use crate::services::{
     anibridge, anilist, artwork, jikan, logger, mal, monitoring as monitoring_service,
 };
@@ -751,6 +751,13 @@ async fn merge_one_jikan_entry(
         );
     }
 
+    // #62 PR E — populate genre side table from Jikan-supplied genres.
+    if let Err(e) = series_genres::replace_for_series(db, series_id, &detail.genres).await {
+        tracing::warn!(
+            "series_genres::replace_for_series failed for series_id={series_id} during Jikan sync: {e}"
+        );
+    }
+
     stamp_synced_from_if_set(db, series_id, account_id).await;
     stamp_user_score_if_set(db, series_id, entry.score, account_id).await;
     stamp_custom_lists_if_set(
@@ -850,6 +857,13 @@ async fn merge_one_anilist_entry(
         metadata_cache::upsert(db, series_id, entry.anilist_id, detail.id_mal, detail).await
     {
         tracing::warn!("metadata_cache::upsert failed for series_id={series_id} during sync: {e}");
+    }
+
+    // #62 PR E — populate genre side table from AL-supplied genres.
+    if let Err(e) = series_genres::replace_for_series(db, series_id, &detail.genres).await {
+        tracing::warn!(
+            "series_genres::replace_for_series failed for series_id={series_id} during AL sync: {e}"
+        );
     }
 
     stamp_synced_from_if_set(db, series_id, account_id).await;

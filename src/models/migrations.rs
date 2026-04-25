@@ -936,6 +936,34 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // #62 PR E — genre side table for the library filter dropdown.
+    // Genres come from AL/Jikan AnimeDetail.genres (already cached
+    // in series_metadata_cache); we extract them into their own
+    // table on every metadata refresh + sync merge so the filter +
+    // autocomplete reads can hit a small indexed scan instead of
+    // unmarshalling JSON for every series. Provider-agnostic — both
+    // AL and Jikan (MAL) emit the same genre vocabulary, so unlike
+    // custom_lists this table doesn't carry a `provider` column.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS series_genres (
+            series_id INTEGER NOT NULL,
+            genre TEXT NOT NULL,
+            PRIMARY KEY (series_id, genre),
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_series_genres_genre \
+         ON series_genres (genre)",
+    )
+    .execute(db)
+    .await?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (

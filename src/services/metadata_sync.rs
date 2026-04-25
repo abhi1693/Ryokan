@@ -520,6 +520,20 @@ async fn refresh_series_metadata_inner(
             .await
             .map_err(|e| e.to_string())?;
 
+        // #62 PR E — extract genres into the per-row side table for
+        // the library filter. Best-effort: a write failure here logs
+        // but doesn't fail the whole metadata refresh — the cache
+        // upsert above is the canonical source and the side table
+        // can be rebuilt from it on the next tick.
+        if let Err(e) =
+            crate::models::series_genres::replace_for_series(db, tracked.id, &detail.genres).await
+        {
+            tracing::warn!(
+                "series_genres::replace_for_series failed for series_id={}: {e}",
+                tracked.id
+            );
+        }
+
         artwork::cache_series_detail_artwork(db, tracked.id, &detail).await;
         for related in detail
             .relations
