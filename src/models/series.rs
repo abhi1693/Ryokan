@@ -52,6 +52,13 @@ pub struct Series {
     /// pinned across syncs. Cleared when the user picks "Sync from
     /// AL/MAL" from the dropdown.
     pub monitor_mode_manual_override: bool,
+    /// #62 PR C — user's personal score on their linked AL/MAL
+    /// account. `None` for manually-added series (no linked account
+    /// fed a score in) and for sync-imported series the user hasn't
+    /// rated. The render helper in `services::user_score` formats
+    /// this per the account's `score_format` and never shows
+    /// `You: 0` for 0.0 (AL's "unrated" sentinel).
+    pub user_score: Option<f64>,
 }
 
 impl Series {
@@ -94,13 +101,14 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
             .try_get::<i64, _>("monitor_mode_manual_override")
             .map(|v| v != 0)
             .unwrap_or(false),
+        user_score: row.try_get::<Option<f64>, _>("user_score").unwrap_or(None),
     }
 }
 
 /// Get all tracked series, ordered by most recently added.
 pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -110,7 +118,7 @@ pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series WHERE id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
@@ -124,7 +132,7 @@ pub async fn get_by_anilist_id(
     anilist_id: i64,
 ) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series WHERE anilist_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series WHERE anilist_id = ?",
     )
     .bind(anilist_id)
     .fetch_optional(db)
@@ -135,7 +143,7 @@ pub async fn get_by_anilist_id(
 
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series WHERE mal_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series WHERE mal_id = ?",
     )
     .bind(mal_id)
     .fetch_optional(db)
@@ -395,7 +403,7 @@ pub async fn refresh_core_metadata(
 
 pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -428,6 +436,25 @@ pub async fn update_monitor_mode_manual_override(
 ) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE series SET monitor_mode_manual_override = ? WHERE id = ?")
         .bind(if flag { 1_i64 } else { 0_i64 })
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// #62 PR C — write the user's personal score from the linked
+/// AL/MAL account. AL's POINT_10_DECIMAL format stores fractional
+/// values, so the column is REAL. Stored as `0.0` for unrated
+/// (matching AL's "0 means no score" convention); the render helper
+/// in `services::user_score` treats 0.0 the same as NULL and never
+/// shows `You: 0`.
+pub async fn update_user_score(
+    db: &SqlitePool,
+    id: i64,
+    score: Option<f64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE series SET user_score = ? WHERE id = ?")
+        .bind(score)
         .bind(id)
         .execute(db)
         .await?;
@@ -493,7 +520,7 @@ pub async fn list_synced_from(
     account_id: i64,
 ) -> Result<Vec<SyncedSeriesRow>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, monitor_mode, monitor_mode_manual_override FROM series \
+        "SELECT id, anilist_id, monitor_mode, monitor_mode_manual_override, user_score FROM series \
          WHERE synced_from_external_account_id = ?",
     )
     .bind(account_id)

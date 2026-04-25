@@ -49,3 +49,5 @@ pub mod source_ffprobe;
 pub mod source_filename;
 pub mod source_groups;
 pub mod source_temporal;
+
+pub mod user_score;

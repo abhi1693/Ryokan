@@ -2117,6 +2117,7 @@ mod tests {
             restrict_to_uploader: user.to_string(),
             cumulative_prior_episodes: 0,
             monitor_mode_manual_override: false,
+            user_score: None,
         }
     }
 

@@ -1997,6 +1997,7 @@ mod evaluate_candidate_tests {
             restrict_to_uploader: String::new(),
             cumulative_prior_episodes: 0,
             monitor_mode_manual_override: false,
+            user_score: None,
         }
     }
 
