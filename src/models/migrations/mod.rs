@@ -39,32 +39,49 @@ async fn column_exists(db: &SqlitePool, table: &str, column: &str) -> bool {
 ///
 /// | legacy | new | action                                             |
 /// |--------|-----|----------------------------------------------------|
-/// |   ✓    | ✓   | copy legacy→new (only when new is empty), drop legacy |
+/// |   ✓    | ✓   | copy legacy→new (only when new still the default), drop legacy |
 /// |   ✓    | ✗   | rename legacy→new                                  |
 /// |   ✗    | ✓   | no-op                                              |
-/// |   ✗    | ✗   | add new (empty default)                            |
+/// |   ✗    | ✗   | add new (caller-supplied declaration)              |
 ///
 /// The "both columns exist" row is the one PR #37's first migration
 /// attempt produced: it ran ADD-then-RENAME, so ADD succeeded, RENAME
 /// hit "duplicate column" → `.ok()` → data stranded in the legacy
 /// column alongside an empty new column.
 ///
-/// `legacy` / `new` are hardcoded column-name string literals from
-/// the callers in `migrate()`, so inline interpolation into the SQL
-/// is safe (no user input reaches PRAGMA or ALTER TABLE here).
-async fn reconcile_column_rename(db: &SqlitePool, table: &str, legacy: &str, new: &str) {
+/// `legacy` / `new` / `add_decl` / `default_predicate` are all
+/// hardcoded literals from the callers in `migrate()`, so inline
+/// interpolation into the SQL is safe (no user input reaches PRAGMA
+/// or ALTER TABLE here).
+///
+/// `add_decl` is the column declaration used when neither column
+/// exists (fresh install) — e.g. `"TEXT NOT NULL DEFAULT ''"` for
+/// string renames, `"INTEGER NOT NULL DEFAULT 0"` for boolean flag
+/// renames. `default_predicate` is the WHERE-clause fragment that
+/// identifies "new column still has its default value" so the
+/// recovery copy doesn't clobber a value the user / a later
+/// migration pass legitimately wrote — `"= ''"` for strings,
+/// `"= 0"` for integer flags.
+async fn reconcile_column_rename_typed(
+    db: &SqlitePool,
+    table: &str,
+    legacy: &str,
+    new: &str,
+    add_decl: &str,
+    default_predicate: &str,
+) {
     let legacy_exists = column_exists(db, table, legacy).await;
     let new_exists = column_exists(db, table, new).await;
 
     match (legacy_exists, new_exists) {
         (true, true) => {
             // Recovery path for the PR #37 half-migrated state.
-            // Copy legacy→new where new is still the default
-            // (empty string). Guard with `new = ''` so a later pass
-            // that legitimately set new via UPDATE isn't overwritten
+            // Copy legacy→new where new is still the default. Guard
+            // on the type-appropriate predicate so a later pass that
+            // legitimately set `new` via UPDATE isn't overwritten
             // from the stale legacy value.
             let copy = format!(
-                "UPDATE {table} SET {new} = {legacy} WHERE {new} = '' AND {legacy} IS NOT NULL"
+                "UPDATE {table} SET {new} = {legacy} WHERE {new} {default_predicate} AND {legacy} IS NOT NULL"
             );
             let _ = sqlx::query(&copy).execute(db).await;
 
@@ -84,11 +101,18 @@ async fn reconcile_column_rename(db: &SqlitePool, table: &str, legacy: &str, new
             // Already migrated, nothing to do.
         }
         (false, false) => {
-            // Fresh install — ADD with empty default.
-            let add = format!("ALTER TABLE {table} ADD COLUMN {new} TEXT NOT NULL DEFAULT ''");
+            // Fresh install — ADD with caller-supplied declaration.
+            let add = format!("ALTER TABLE {table} ADD COLUMN {new} {add_decl}");
             let _ = sqlx::query(&add).execute(db).await;
         }
     }
+}
+
+/// String-column rename — backwards-compatible wrapper for the
+/// pre-existing call sites that all carried the `TEXT NOT NULL DEFAULT
+/// ''` shape.
+async fn reconcile_column_rename(db: &SqlitePool, table: &str, legacy: &str, new: &str) {
+    reconcile_column_rename_typed(db, table, legacy, new, "TEXT NOT NULL DEFAULT ''", "= ''").await
 }
 
 /// Run all database migrations.
@@ -533,31 +557,25 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Three-DB-states rename for `force_tmdb_fallback` → `force_kitsu_fallback`:
-    //
-    //   1. Fresh install — neither column exists. The ADD succeeds and creates
-    //      `force_tmdb_fallback`; the subsequent RENAME moves it to the new name.
-    //      End state: `force_kitsu_fallback` exists.
-    //   2. Legacy install — only `force_tmdb_fallback` exists. The ADD is a no-op
-    //      (`.ok()` swallows "duplicate column name"); the RENAME moves it to the
-    //      new name. End state: `force_kitsu_fallback` exists.
-    //   3. Post-migration install — only `force_kitsu_fallback` exists. The ADD
-    //      *creates* `force_tmdb_fallback` as a vestigial column because SQLite has
-    //      no IF NOT EXISTS check on column name alone; the RENAME then fails
-    //      because the target name is already taken (swallowed by `.ok()`). End
-    //      state: `force_kitsu_fallback` still exists, but so does a stray
-    //      `force_tmdb_fallback` column. This is harmless — nothing reads it — but
-    //      it's a cosmetic wart. If you're cleaning up, an `IF NOT EXISTS` guarded
-    //      by a `PRAGMA table_info` check would fix it.
-    sqlx::query("ALTER TABLE config ADD COLUMN force_tmdb_fallback INTEGER NOT NULL DEFAULT 0")
-        .execute(db)
-        .await
-        .ok();
-
-    sqlx::query("ALTER TABLE config RENAME COLUMN force_tmdb_fallback TO force_kitsu_fallback")
-        .execute(db)
-        .await
-        .ok();
+    // Rename `force_tmdb_fallback` → `force_kitsu_fallback` via the
+    // four-state reconciler. The pre-fix path was the same ADD-then-
+    // RENAME-with-.ok() pattern that the file_name + restrict_to_*
+    // renames moved away from: on a post-migrated install the ADD
+    // re-created the legacy column as a vestigial INTEGER alongside
+    // the new one (RENAME silently failed against the existing
+    // target), leaving a stray column nothing read. The typed
+    // reconciler dispatches on the (legacy, new) presence matrix so
+    // each starting state moves to the correct end state without
+    // creating ghost columns.
+    reconcile_column_rename_typed(
+        db,
+        "config",
+        "force_tmdb_fallback",
+        "force_kitsu_fallback",
+        "INTEGER NOT NULL DEFAULT 0",
+        "= 0",
+    )
+    .await;
 
     sqlx::query("ALTER TABLE config ADD COLUMN plex_mappings_enabled INTEGER NOT NULL DEFAULT 0")
         .execute(db)
