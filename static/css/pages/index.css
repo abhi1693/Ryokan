@@ -29,12 +29,19 @@
    (input, two selects, Clear pill) to the same outer dimension as
    the Add Series .btn next to them — without it, <input> and
    <select> render ~1-2px apart at the same padding/font because
-   their intrinsic-height handling differs. */
+   their intrinsic-height handling differs. The inline SVG
+   magnifier sits 12px from the left edge using --text-dim
+   (#7a7a96) baked into the stroke; left-padding (38px) clears
+   space for it so typed text doesn't run under the icon. */
 .library-search-input {
     box-sizing: border-box;
     height: 42px;
-    padding: 0 12px;
-    background: var(--bg);
+    padding: 0 12px 0 38px;
+    background-color: var(--bg);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a7a96' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: 12px center;
+    background-size: 16px 16px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text);
