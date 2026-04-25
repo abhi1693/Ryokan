@@ -797,6 +797,20 @@ function syncWatchListNow() {
         progressId,
         title: 'Watch-list sync starting…',
         category: 'external_sync',
+        onTerminal: (ev) => {
+            // On a successful manual sync, snap the last-sync hint to
+            // "Just now" right away so the user gets immediate
+            // feedback. The 30s `[data-relative-time]` updater takes
+            // care of subsequent ticks. A failed/warned sync leaves
+            // the previous timestamp untouched.
+            if (ev && ev.kind === 'success') {
+                const nowSec = Math.floor(Date.now() / 1000);
+                document.querySelectorAll('[data-relative-time]').forEach((el) => {
+                    el.setAttribute('data-relative-time', String(nowSec));
+                    el.textContent = 'Just now';
+                });
+            }
+        },
     });
     fetch('/settings/oauth/sync-now', {
         method: 'POST',
