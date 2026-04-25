@@ -21,16 +21,16 @@
 //!
 //! ## Status (this commit)
 //!
-//! End-to-end fetch + merge + delta cursor for AniList watch lists,
-//! and AniList-resolvable MyAnimeList watch lists (via
-//! `anibridge::lookup_anilist_by_mal`). MAL entries that anibridge
-//! can't resolve are counted as `deferred_jikan` and skipped — the
-//! Jikan-fallback path that writes them under the negated-MAL-id
-//! sentinel (`-mal_id`) lands in a follow-up commit. Still pending:
-//!   1. Jikan-fallback merge for `deferred_jikan` entries.
-//!   2. Bulk-mode coalescing for sync-originated adds (defer Jellyfin
+//! End-to-end fetch + merge + delta cursor for both AniList and
+//! MyAnimeList watch lists. AL entries land under their real AL id;
+//! MAL entries that anibridge can resolve land under the resolved AL
+//! id; MAL entries that anibridge misses fall back to the
+//! Jikan-fetched-detail path and land under the `-mal_id` sentinel
+//! that the existing reconcile-fallbacks flow knows how to promote
+//! later. Still pending:
+//!   1. Bulk-mode coalescing for sync-originated adds (defer Jellyfin
 //!      refresh + RSS sync until the first-sync drain completes).
-//!   3. Manual "Sync now" button + ProgressRegistry hook for the
+//!   2. Manual "Sync now" button + ProgressRegistry hook for the
 //!      sticky-toast first-sync UI.
 
 use std::collections::HashMap;
@@ -42,7 +42,7 @@ use crate::models::external_accounts::{self, ImportPreferences};
 use crate::models::log::LogCategory;
 use crate::models::monitoring::MonitorMode;
 use crate::models::series;
-use crate::services::{anibridge, anilist, logger, mal, monitoring as monitoring_service};
+use crate::services::{anibridge, anilist, jikan, logger, mal, monitoring as monitoring_service};
 
 // ── Provider-agnostic sync entry abstraction ──────────────────────
 
@@ -372,6 +372,130 @@ enum MergeAction {
     Created,
     MonitorUpdated,
     Unchanged,
+}
+
+impl MergeOutcome {
+    /// Combine two outcomes from sequential merge passes (typically
+    /// the AL-detail pass followed by the Jikan-fallback pass for the
+    /// same `entries` slice). Counts add; `failed` lists concatenate.
+    /// `deferred_jikan` is taken from `self` and reduced by the
+    /// number of entries the second pass actually handled — so a
+    /// successful Jikan pass on every deferred entry zeroes out the
+    /// counter, matching what the operator sees in the library.
+    pub fn merge_pass(mut self, other: MergeOutcome) -> MergeOutcome {
+        let handled_by_other = other.created
+            + other.monitor_mode_updated
+            + other.unchanged
+            + other.failed.len() as i32;
+        self.created += other.created;
+        self.monitor_mode_updated += other.monitor_mode_updated;
+        self.unchanged += other.unchanged;
+        self.deferred_jikan = (self.deferred_jikan - handled_by_other).max(0);
+        self.failed.extend(other.failed);
+        self
+    }
+}
+
+/// Walk negated-id [`SyncEntry`]s (the ones `merge_into_library`
+/// counted as `deferred_jikan`) and merge each via Jikan-fetched
+/// metadata. Used by the MAL sync path so entries whose anibridge
+/// MAL→AL lookup missed still land in the library — they sit under
+/// the `series.anilist_id = -mal_id` sentinel that the existing
+/// reconcile-fallbacks flow already understands.
+///
+/// Walks one entry at a time rather than fanning out: Jikan is rate-
+/// limited at 3 req/s, and `get_anime_detail_cached` carries its own
+/// negative-cache + rate-limit state. A failure for any single entry
+/// records into `failed` and does not abort the loop, so one
+/// upstream-deleted MAL id doesn't block the others from importing.
+pub async fn merge_jikan_fallback_entries(
+    db: &SqlitePool,
+    entries: &[SyncEntry],
+    skip_already_watched: bool,
+) -> MergeOutcome {
+    let mut outcome = MergeOutcome::default();
+    for entry in entries.iter().filter(|e| e.anilist_id < 0) {
+        // Recover the original MAL id by negating the sentinel back.
+        // `provider_media_id` carries the same value but going through
+        // the sentinel keeps the AL-merge path and Jikan-merge path
+        // consistent: each derives the upstream id from `anilist_id`.
+        let mal_id = -entry.anilist_id;
+        let target_mode = monitor_mode_for(entry.status, skip_already_watched);
+        match merge_one_jikan_entry(db, entry, mal_id, target_mode).await {
+            Ok(MergeAction::Created) => outcome.created += 1,
+            Ok(MergeAction::MonitorUpdated) => outcome.monitor_mode_updated += 1,
+            Ok(MergeAction::Unchanged) => outcome.unchanged += 1,
+            Err(msg) => outcome.failed.push((entry.anilist_id, msg)),
+        }
+    }
+    outcome
+}
+
+async fn merge_one_jikan_entry(
+    db: &SqlitePool,
+    entry: &SyncEntry,
+    mal_id: i64,
+    target_mode: MonitorMode,
+) -> Result<MergeAction, String> {
+    // Two lookup paths because the row may already exist under either
+    // identity. anilist_id (negated sentinel) is canonical for sync-
+    // sourced rows; mal_id covers the case where a previous
+    // reconcile-fallbacks run promoted the row to a real AL id (and
+    // the negated sentinel no longer matches).
+    let existing = match series::get_by_anilist_id(db, entry.anilist_id).await {
+        Ok(Some(row)) => Some(row),
+        Ok(None) => series::get_by_mal_id(db, mal_id)
+            .await
+            .map_err(|e| format!("series mal lookup failed: {e}"))?,
+        Err(e) => return Err(format!("series anilist lookup failed: {e}")),
+    };
+
+    if let Some(row) = existing {
+        if row.monitor_mode == target_mode.as_str() {
+            return Ok(MergeAction::Unchanged);
+        }
+        monitoring_service::apply_monitor_mode(db, row.id, target_mode).await?;
+        return Ok(MergeAction::MonitorUpdated);
+    }
+
+    // Fetch metadata from Jikan (cached). The cached helper handles
+    // the 15-minute TTL + rate-limit pacing internally; we just call
+    // it and trust its output.
+    let detail = jikan::get_anime_detail_cached(mal_id)
+        .await
+        .map_err(|e| format!("Jikan detail fetch failed for mal_id {mal_id}: {e}"))?;
+
+    let primary_title = if !detail.title_english.trim().is_empty() {
+        &detail.title_english
+    } else {
+        &detail.title_romaji
+    };
+    let (series_id, _created) = series::upsert(
+        db,
+        series::SeriesCore {
+            // Preserve the negated sentinel so the existing > 0 filters
+            // throughout the AL call sites continue to skip this row,
+            // matching how Jikan-fallback entries already behave when
+            // added through the interactive search flow.
+            anilist_id: entry.anilist_id,
+            mal_id: detail.id_mal.or(Some(mal_id)),
+            title: primary_title,
+            title_romaji: &detail.title_romaji,
+            title_english: &detail.title_english,
+            title_native: &detail.title_native,
+            cover_url: &detail.cover_url,
+            format: &detail.format,
+            status: &detail.status,
+            episodes: detail.episodes,
+            season_year: detail.season_year,
+            end_year: detail.end_year,
+        },
+    )
+    .await
+    .map_err(|e| format!("series upsert failed: {e}"))?;
+
+    monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
+    Ok(MergeAction::Created)
 }
 
 async fn merge_one_anilist_entry(
@@ -753,7 +877,7 @@ async fn sync_mal(
             .map_err(|e| format!("AniList detail batch fetch failed: {e}"))?
     };
 
-    let outcome = merge_into_library(
+    let al_outcome = merge_into_library(
         &state.db,
         &resolved,
         &detail_map,
@@ -761,11 +885,20 @@ async fn sync_mal(
     )
     .await;
 
+    // Second pass: walk the negated-id (anibridge-miss) entries and
+    // merge each via Jikan metadata. The combined outcome's
+    // deferred_jikan counter falls toward zero as Jikan acts on
+    // entries; anything still deferred at the end means Jikan also
+    // failed (rate-limited, deleted upstream, etc.).
+    let jikan_outcome =
+        merge_jikan_fallback_entries(&state.db, &resolved, prefs.skip_already_watched).await;
+    let outcome = al_outcome.merge_pass(jikan_outcome);
+
     logger::info(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "MyAnimeList watch-list synced: {kept} kept ({dropped} skipped, {stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} deferred (no anibridge mapping), {} failed",
+            "MyAnimeList watch-list synced: {kept} kept ({dropped} skipped, {stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} deferred, {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
@@ -1271,6 +1404,105 @@ mod tests {
         assert_eq!(outcome.failed.len(), 1);
         assert_eq!(outcome.failed[0].0, 99999);
         assert!(outcome.failed[0].1.contains("no AniList detail"));
+    }
+
+    #[tokio::test]
+    async fn merge_jikan_fallback_creates_series_with_negated_sentinel() {
+        let db = crate::test_support::in_memory_pool().await;
+        // Seed Jikan's detail cache so the merge call hits the cache
+        // rather than the live Jikan API. mal_id 555 ↔ negated AL id
+        // -555 (the sync-time sentinel).
+        let detail = make_detail(-555, "Jikan-only Show", "TV", "RELEASING");
+        let mut detail = detail;
+        detail.id_mal = Some(555);
+        jikan::seed_detail_cache_for_tests(555, detail).await;
+
+        let entries = vec![entry(
+            external_accounts::PROVIDER_MAL,
+            -555,
+            NormalizedStatus::Watching,
+        )];
+        let outcome = merge_jikan_fallback_entries(&db, &entries, false).await;
+        assert_eq!(outcome.created, 1);
+        assert!(outcome.failed.is_empty());
+
+        // The new row carries the negated sentinel — preserves the
+        // existing `> 0` filters on every AL call site so this entry
+        // routes back through Jikan on refresh.
+        let row = series::get_by_anilist_id(&db, -555)
+            .await
+            .unwrap()
+            .expect("series row should exist under negated sentinel");
+        assert_eq!(row.anilist_id, -555);
+        assert_eq!(row.mal_id, Some(555));
+        assert_eq!(row.monitor_mode, MonitorMode::All.as_str());
+
+        jikan::clear_detail_cache_entry_for_tests(555).await;
+    }
+
+    #[tokio::test]
+    async fn merge_jikan_fallback_skips_positive_ids() {
+        // The Jikan pass must only touch negated-id entries. A
+        // positive AL id sneaking in would be a logic bug — the AL
+        // pass already handled it.
+        let db = crate::test_support::in_memory_pool().await;
+        let entries = vec![entry(
+            external_accounts::PROVIDER_ANILIST,
+            12345,
+            NormalizedStatus::Watching,
+        )];
+        let outcome = merge_jikan_fallback_entries(&db, &entries, false).await;
+        assert_eq!(outcome.created, 0);
+        assert_eq!(outcome.monitor_mode_updated, 0);
+        assert_eq!(outcome.unchanged, 0);
+        assert!(outcome.failed.is_empty());
+    }
+
+    #[test]
+    fn merge_pass_combines_outcomes_and_drains_deferred_counter() {
+        // AL pass deferred 3 entries; Jikan pass merged 2 + failed 1
+        // (3 entries handled). Combined deferred drops to 0.
+        let al = MergeOutcome {
+            created: 5,
+            monitor_mode_updated: 2,
+            unchanged: 10,
+            deferred_jikan: 3,
+            failed: Vec::new(),
+        };
+        let jikan = MergeOutcome {
+            created: 2,
+            monitor_mode_updated: 0,
+            unchanged: 0,
+            deferred_jikan: 0,
+            failed: vec![(-9999, "Jikan rate-limited".into())],
+        };
+        let combined = al.merge_pass(jikan);
+        assert_eq!(combined.created, 7);
+        assert_eq!(combined.monitor_mode_updated, 2);
+        assert_eq!(combined.unchanged, 10);
+        assert_eq!(combined.deferred_jikan, 0);
+        assert_eq!(combined.failed.len(), 1);
+    }
+
+    #[test]
+    fn merge_pass_keeps_remaining_deferred_when_jikan_partial() {
+        // AL deferred 5; Jikan only handled 2. 3 still deferred.
+        let al = MergeOutcome {
+            created: 0,
+            monitor_mode_updated: 0,
+            unchanged: 0,
+            deferred_jikan: 5,
+            failed: Vec::new(),
+        };
+        let jikan = MergeOutcome {
+            created: 2,
+            monitor_mode_updated: 0,
+            unchanged: 0,
+            deferred_jikan: 0,
+            failed: Vec::new(),
+        };
+        let combined = al.merge_pass(jikan);
+        assert_eq!(combined.deferred_jikan, 3);
     }
 
     #[tokio::test]
