@@ -405,6 +405,60 @@ pub async fn update_monitor_mode(
     Ok(())
 }
 
+/// #62 PR B — stamp the external account that most-recently synced
+/// this series. Called on every successful merge action (Created,
+/// MonitorUpdated, Unchanged) so the marker stays current even if
+/// the user manually adds a series that later appears on their AL
+/// list. The marker is what enables removal detection on full-resync:
+/// a sync-marked series whose AL id is NOT in the current fetch gets
+/// downgraded to monitor_mode=None.
+pub async fn stamp_synced_from(
+    db: &SqlitePool,
+    id: i64,
+    account_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE series SET synced_from_external_account_id = ? WHERE id = ?")
+        .bind(account_id)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Lightweight projection used by the watch-list-sync removal pass.
+/// Returns one row per `series` that was last synced from
+/// `account_id`; the consumer compares each row's `anilist_id`
+/// against the IDs in the current fetch to find missing entries.
+#[derive(Debug, Clone)]
+pub struct SyncedSeriesRow {
+    pub id: i64,
+    pub anilist_id: i64,
+    pub monitor_mode: String,
+}
+
+pub async fn list_synced_from(
+    db: &SqlitePool,
+    account_id: i64,
+) -> Result<Vec<SyncedSeriesRow>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, anilist_id, monitor_mode FROM series \
+         WHERE synced_from_external_account_id = ?",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| SyncedSeriesRow {
+            id: r.get("id"),
+            anilist_id: r.get("anilist_id"),
+            monitor_mode: r
+                .try_get("monitor_mode")
+                .unwrap_or_else(|_| "future".to_string()),
+        })
+        .collect())
+}
+
 /// Toggle the per-series upgrade opt-in. When false the upgrade scanner
 /// in `services::upgrade` skips this series entirely.
 pub async fn update_allow_upgrades(

@@ -858,6 +858,21 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // #62 PR B — track which external_account most-recently synced
+    // each series. NULL for manually-added series + pre-PR-B rows.
+    // Used by sync's removal-detection pass: on full-resync, series
+    // marked with a sync source whose AL id is NOT in the current
+    // fetch get monitor_mode downgraded to None (the user removed
+    // them from their AL/MAL list). ON DELETE SET NULL so unlinking
+    // an account doesn't cascade-drop the imported series rows.
+    sqlx::query(
+        "ALTER TABLE series ADD COLUMN synced_from_external_account_id INTEGER \
+         REFERENCES external_accounts(id) ON DELETE SET NULL",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (

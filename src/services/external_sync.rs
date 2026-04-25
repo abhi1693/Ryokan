@@ -21,19 +21,23 @@
 //!
 //! ## Status (this commit)
 //!
-//! End-to-end fetch + merge + delta cursor + bulk-mode coalescing
-//! for both AniList and MyAnimeList watch lists. AL entries land under
-//! their real AL id; MAL entries that anibridge can resolve land under
-//! the resolved AL id; MAL entries that anibridge misses fall back to
-//! the Jikan-fetched-detail path and land under the `-mal_id` sentinel
-//! that the existing reconcile-fallbacks flow knows how to promote
-//! later. Newly-imported series get their AnimeDetail cached + their
-//! artwork fetched + (if configured) a single Jellyfin refresh, all
-//! in one coalesced post-merge background task per tick. Still
-//! pending:
-//!   1. Manual "Sync now" button + ProgressRegistry hook for the
-//!      sticky-toast first-sync UI.
-//!   2. Settings UI for the per-account interval slider.
+//! End-to-end import + merge + delta cursor + bulk-mode coalescing
+//! for both AniList and MyAnimeList watch lists, with bidirectional
+//! status tracking: monitor_mode follows the user's AL/MAL status
+//! transitions (Watching ↔ Dropped, etc.) regardless of import
+//! preferences for existing series, and full-resync runs detect
+//! series that have been removed from the user's list and downgrade
+//! their monitor_mode to None. Manually-added series are never touched
+//! by removal detection (synced_from_external_account_id IS NULL).
+//!
+//! AL entries land under their real AL id; MAL entries that anibridge
+//! can resolve land under the resolved AL id; MAL entries that
+//! anibridge misses fall back to the Jikan-fetched-detail path and
+//! land under the `-mal_id` sentinel that the existing
+//! reconcile-fallbacks flow knows how to promote later. Newly-imported
+//! series get their AnimeDetail cached + their artwork fetched + (if
+//! configured) a single Jellyfin refresh, all in one coalesced
+//! post-merge background task per tick.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -382,6 +386,7 @@ pub async fn merge_into_library(
     entries: &[SyncEntry],
     detail_map: &HashMap<i64, anilist::AnimeDetail>,
     prefs: &ImportPreferences,
+    account_id: Option<i64>,
 ) -> MergeOutcome {
     let mut outcome = MergeOutcome::default();
 
@@ -391,7 +396,7 @@ pub async fn merge_into_library(
             continue;
         }
         let target_mode = monitor_mode_for(entry.status, prefs.skip_already_watched);
-        match merge_one_anilist_entry(db, entry, target_mode, detail_map, prefs).await {
+        match merge_one_anilist_entry(db, entry, target_mode, detail_map, prefs, account_id).await {
             Ok(MergeAction::Created(spec)) => {
                 outcome.created += 1;
                 outcome.new_artwork.push(spec);
@@ -445,6 +450,71 @@ impl MergeOutcome {
     }
 }
 
+/// Stamp `series.synced_from_external_account_id` if the caller
+/// passed an `account_id` (live sync) and skip silently when `None`
+/// (unit tests and theoretical batch-merge paths that don't have a
+/// real account). Best-effort write — a failure is logged but does
+/// not fail the merge, since the marker is only used by the removal-
+/// detection pass and missing it just means the series stays out of
+/// removal candidates (safer than the alternative).
+async fn stamp_synced_from_if_set(db: &SqlitePool, series_id: i64, account_id: Option<i64>) {
+    if let Some(aid) = account_id
+        && let Err(e) = series::stamp_synced_from(db, series_id, aid).await
+    {
+        tracing::warn!("series::stamp_synced_from failed for series_id={series_id}: {e}");
+    }
+}
+
+/// Report from a removal-detection pass. `removed` is the list of
+/// `series.id` whose monitor_mode got downgraded to `None` because
+/// they were no longer in the user's AL/MAL list. Surfaces in the
+/// supervised-loop summary so an unexpected removal is visible
+/// (e.g. user accidentally cleared their list — the count tells
+/// them how much got downgraded).
+#[derive(Debug, Default, Clone)]
+pub struct RemovalReport {
+    pub removed: Vec<i64>,
+}
+
+/// Find sync-marked series that aren't in the current fetch and
+/// downgrade their `monitor_mode` to `None`. Run AFTER the merge
+/// passes (so the merge's own monitor_mode writes don't fight us)
+/// and ONLY on full-resync runs (delta runs by definition only see
+/// changed entries, so a series that didn't change wouldn't appear
+/// in `fetch_ids` and would be wrongly flagged as removed).
+///
+/// `fetch_ids` is the set of `anilist_id` values from the current
+/// sync's entries — positive AL ids for AL syncs, mix of positive
+/// (anibridge-resolved) and negated (Jikan-fallback sentinel) for
+/// MAL syncs. The same value the merge wrote to `series.anilist_id`,
+/// so the comparison is straightforward.
+///
+/// Series whose `monitor_mode` is already `None` are left alone —
+/// no point burning a write to set the same value, and the user
+/// might have manually downgraded for their own reasons.
+pub async fn detect_removals(
+    db: &SqlitePool,
+    account_id: i64,
+    fetch_ids: &std::collections::HashSet<i64>,
+) -> Result<RemovalReport, String> {
+    let synced = series::list_synced_from(db, account_id)
+        .await
+        .map_err(|e| format!("list_synced_from: {e}"))?;
+    let mut report = RemovalReport::default();
+    let already_none = MonitorMode::None.as_str();
+    for s in synced {
+        if fetch_ids.contains(&s.anilist_id) {
+            continue;
+        }
+        if s.monitor_mode == already_none {
+            continue;
+        }
+        monitoring_service::apply_monitor_mode(db, s.id, MonitorMode::None).await?;
+        report.removed.push(s.id);
+    }
+    Ok(report)
+}
+
 /// Walk negated-id [`SyncEntry`]s (the ones `merge_into_library`
 /// counted as `deferred_jikan`) and merge each via Jikan-fetched
 /// metadata. Used by the MAL sync path so entries whose anibridge
@@ -461,6 +531,7 @@ pub async fn merge_jikan_fallback_entries(
     db: &SqlitePool,
     entries: &[SyncEntry],
     prefs: &ImportPreferences,
+    account_id: Option<i64>,
 ) -> MergeOutcome {
     let mut outcome = MergeOutcome::default();
     for entry in entries.iter().filter(|e| e.anilist_id < 0) {
@@ -470,7 +541,7 @@ pub async fn merge_jikan_fallback_entries(
         // consistent: each derives the upstream id from `anilist_id`.
         let mal_id = -entry.anilist_id;
         let target_mode = monitor_mode_for(entry.status, prefs.skip_already_watched);
-        match merge_one_jikan_entry(db, entry, mal_id, target_mode, prefs).await {
+        match merge_one_jikan_entry(db, entry, mal_id, target_mode, prefs, account_id).await {
             Ok(MergeAction::Created(spec)) => {
                 outcome.created += 1;
                 outcome.new_artwork.push(spec);
@@ -490,6 +561,7 @@ async fn merge_one_jikan_entry(
     mal_id: i64,
     target_mode: MonitorMode,
     prefs: &ImportPreferences,
+    account_id: Option<i64>,
 ) -> Result<MergeAction, String> {
     // Two lookup paths because the row may already exist under either
     // identity. anilist_id (negated sentinel) is canonical for sync-
@@ -509,6 +581,7 @@ async fn merge_one_jikan_entry(
         // of import_status preference. A status transition on AL
         // (Watching → Dropped) must downgrade local monitor_mode
         // even when the new status's import flag is off.
+        stamp_synced_from_if_set(db, row.id, account_id).await;
         if row.monitor_mode == target_mode.as_str() {
             return Ok(MergeAction::Unchanged);
         }
@@ -574,6 +647,7 @@ async fn merge_one_jikan_entry(
         );
     }
 
+    stamp_synced_from_if_set(db, series_id, account_id).await;
     monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
     Ok(MergeAction::Created(NewArtworkSpec {
         series_id,
@@ -588,6 +662,7 @@ async fn merge_one_anilist_entry(
     target_mode: MonitorMode,
     detail_map: &HashMap<i64, anilist::AnimeDetail>,
     prefs: &ImportPreferences,
+    account_id: Option<i64>,
 ) -> Result<MergeAction, String> {
     let existing = series::get_by_anilist_id(db, entry.anilist_id)
         .await
@@ -599,6 +674,7 @@ async fn merge_one_anilist_entry(
         // (Watching → Dropped) must downgrade local monitor_mode
         // even when `import_dropped = false`, otherwise the series
         // silently keeps grabbing for a show the user dropped.
+        stamp_synced_from_if_set(db, row.id, account_id).await;
         if row.monitor_mode == target_mode.as_str() {
             return Ok(MergeAction::Unchanged);
         }
@@ -654,6 +730,7 @@ async fn merge_one_anilist_entry(
         tracing::warn!("metadata_cache::upsert failed for series_id={series_id} during sync: {e}");
     }
 
+    stamp_synced_from_if_set(db, series_id, account_id).await;
     monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
     Ok(MergeAction::Created(NewArtworkSpec {
         series_id,
@@ -787,8 +864,12 @@ async fn tick_once_inner(state: &AppState) -> Result<String, String> {
     };
 
     let summary = match account.provider.as_str() {
-        external_accounts::PROVIDER_ANILIST => sync_anilist(state, &account, delta_cursor).await,
-        external_accounts::PROVIDER_MAL => sync_mal(state, account.clone(), delta_cursor).await,
+        external_accounts::PROVIDER_ANILIST => {
+            sync_anilist(state, &account, delta_cursor, is_full_sync).await
+        }
+        external_accounts::PROVIDER_MAL => {
+            sync_mal(state, account.clone(), delta_cursor, is_full_sync).await
+        }
         other => {
             // Unknown provider string — schema CHECK constraint should
             // prevent this, but surface explicitly rather than panic.
@@ -819,6 +900,7 @@ async fn sync_anilist(
     state: &AppState,
     account: &external_accounts::ExternalAccount,
     delta_cursor: Option<i64>,
+    is_full_sync: bool,
 ) -> Result<String, String> {
     let user_id: i64 = account.provider_user_id.parse().map_err(|e| {
         format!(
@@ -867,17 +949,35 @@ async fn sync_anilist(
             .map_err(|e| format!("AniList detail batch fetch failed: {e}"))?
     };
 
-    let outcome = merge_into_library(&state.db, &entries, &detail_map, &prefs).await;
+    let outcome =
+        merge_into_library(&state.db, &entries, &detail_map, &prefs, Some(account.id)).await;
+
+    // Removal detection (full-resync only). Delta runs by definition
+    // only fetch CHANGED entries, so a series whose updated_at is
+    // older than the cursor wouldn't be in `entries` even though
+    // it's still on the user's AL list. Running removal on a delta
+    // would wrongly downgrade every still-on-list series whose entry
+    // didn't change since the last tick. Full-resync includes every
+    // entry on the list, so the missing-from-fetch check is sound.
+    let removal_report = if is_full_sync {
+        let fetch_ids: std::collections::HashSet<i64> =
+            entries.iter().map(|e| e.anilist_id).collect();
+        detect_removals(&state.db, account.id, &fetch_ids).await?
+    } else {
+        RemovalReport::default()
+    };
+    let removed_count = removal_report.removed.len();
 
     logger::info(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "AniList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} failed",
+            "AniList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} removed-from-list, {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
             outcome.skipped_by_preference,
+            removed_count,
             outcome.failed.len(),
         ),
         &format!("username={} fetched_total={raw_total}", account.username),
@@ -887,11 +987,12 @@ async fn sync_anilist(
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
-        "AniList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, failed {}",
+        "AniList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, removed-from-list {}, failed {}",
         outcome.created,
         outcome.monitor_mode_updated,
         outcome.unchanged,
         outcome.skipped_by_preference,
+        removed_count,
         outcome.failed.len(),
     ))
 }
@@ -959,6 +1060,7 @@ async fn sync_mal(
     state: &AppState,
     account: external_accounts::ExternalAccount,
     delta_cursor: Option<i64>,
+    is_full_sync: bool,
 ) -> Result<String, String> {
     let mut access_token = account.access_token.clone();
 
@@ -1050,26 +1152,42 @@ async fn sync_mal(
             .map_err(|e| format!("AniList detail batch fetch failed: {e}"))?
     };
 
-    let al_outcome = merge_into_library(&state.db, &resolved, &detail_map, &prefs).await;
+    let al_outcome =
+        merge_into_library(&state.db, &resolved, &detail_map, &prefs, Some(account.id)).await;
 
     // Second pass: walk the negated-id (anibridge-miss) entries and
     // merge each via Jikan metadata. The combined outcome's
     // deferred_jikan counter falls toward zero as Jikan acts on
     // entries; anything still deferred at the end means Jikan also
     // failed (rate-limited, deleted upstream, etc.).
-    let jikan_outcome = merge_jikan_fallback_entries(&state.db, &resolved, &prefs).await;
+    let jikan_outcome =
+        merge_jikan_fallback_entries(&state.db, &resolved, &prefs, Some(account.id)).await;
     let outcome = al_outcome.merge_pass(jikan_outcome);
+
+    // Removal detection (full-resync only) — same rationale as the
+    // AL path. fetch_ids covers BOTH positive (anibridge-resolved)
+    // and negated (Jikan-fallback sentinel) ids since both shapes
+    // land in series.anilist_id.
+    let removal_report = if is_full_sync {
+        let fetch_ids: std::collections::HashSet<i64> =
+            resolved.iter().map(|e| e.anilist_id).collect();
+        detect_removals(&state.db, account.id, &fetch_ids).await?
+    } else {
+        RemovalReport::default()
+    };
+    let removed_count = removal_report.removed.len();
 
     logger::info(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "MyAnimeList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} deferred, {} failed",
+            "MyAnimeList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} deferred, {} removed-from-list, {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
             outcome.skipped_by_preference,
             outcome.deferred_jikan,
+            removed_count,
             outcome.failed.len(),
         ),
         &format!("username={} fetched_total={raw_total}", account.username),
@@ -1079,12 +1197,13 @@ async fn sync_mal(
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
-        "MyAnimeList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, deferred {}, failed {}",
+        "MyAnimeList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, deferred {}, removed-from-list {}, failed {}",
         outcome.created,
         outcome.monitor_mode_updated,
         outcome.unchanged,
         outcome.skipped_by_preference,
         outcome.deferred_jikan,
+        removed_count,
         outcome.failed.len(),
     ))
 }
@@ -1602,7 +1721,7 @@ mod tests {
         let mut detail_map = HashMap::new();
         detail_map.insert(12345, detail);
 
-        let outcome = merge_into_library(&db, &entries, &detail_map, &prefs_default()).await;
+        let outcome = merge_into_library(&db, &entries, &detail_map, &prefs_default(), None).await;
         assert_eq!(outcome.created, 1);
         assert_eq!(outcome.monitor_mode_updated, 0);
         assert_eq!(outcome.unchanged, 0);
@@ -1663,7 +1782,8 @@ mod tests {
             12345,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default()).await;
+        let outcome =
+            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), None).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.monitor_mode_updated, 1);
         assert_eq!(outcome.unchanged, 0);
@@ -1688,7 +1808,8 @@ mod tests {
             12345,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default()).await;
+        let outcome =
+            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), None).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.monitor_mode_updated, 0);
         assert_eq!(outcome.unchanged, 1);
@@ -1705,7 +1826,8 @@ mod tests {
             -7777,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default()).await;
+        let outcome =
+            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), None).await;
         assert_eq!(outcome.deferred_jikan, 1);
         assert_eq!(outcome.created, 0);
         assert!(outcome.failed.is_empty());
@@ -1721,7 +1843,8 @@ mod tests {
             99999,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default()).await;
+        let outcome =
+            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), None).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.failed.len(), 1);
         assert_eq!(outcome.failed[0].0, 99999);
@@ -1744,7 +1867,7 @@ mod tests {
             -555,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_jikan_fallback_entries(&db, &entries, &prefs_default()).await;
+        let outcome = merge_jikan_fallback_entries(&db, &entries, &prefs_default(), None).await;
         assert_eq!(outcome.created, 1);
         assert!(outcome.failed.is_empty());
 
@@ -1773,7 +1896,7 @@ mod tests {
             12345,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_jikan_fallback_entries(&db, &entries, &prefs_default()).await;
+        let outcome = merge_jikan_fallback_entries(&db, &entries, &prefs_default(), None).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.monitor_mode_updated, 0);
         assert_eq!(outcome.unchanged, 0);
@@ -1877,6 +2000,7 @@ mod tests {
             &entries,
             &detail_map,
             &prefs_with_skip_already_watched(),
+            None,
         )
         .await;
         assert_eq!(outcome.created, 2);
@@ -2031,7 +2155,7 @@ mod tests {
         let prefs = prefs_default(); // import_dropped = false
         assert!(!prefs.import_dropped, "test premise: import_dropped off");
 
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs).await;
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs, None).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.monitor_mode_updated, 1);
         assert_eq!(outcome.skipped_by_preference, 0);
@@ -2042,6 +2166,160 @@ mod tests {
             MonitorMode::None.as_str(),
             "Dropped status must downgrade existing series to None even with import_dropped=false"
         );
+    }
+
+    /// Helper: insert a placeholder `external_accounts` row directly,
+    /// bypassing the encrypt-then-INSERT path of `link()`. The
+    /// removal-detection tests need a real id to satisfy the FK
+    /// constraint on `synced_from_external_account_id` but don't care
+    /// about the token contents — the tests never decrypt them.
+    /// `provider` must be `"anilist"` or `"mal"` (schema CHECK +
+    /// UNIQUE(provider)); two-account tests pass one of each.
+    async fn seed_account_id(db: &sqlx::SqlitePool, id: i64, provider: &str) {
+        sqlx::query(
+            "INSERT INTO external_accounts \
+             (id, provider, provider_user_id, username, \
+              access_token_encrypted, refresh_token_encrypted, linked_at) \
+             VALUES (?, ?, ?, ?, X'00', X'00', 0)",
+        )
+        .bind(id)
+        .bind(provider)
+        .bind(format!("user-{id}"))
+        .bind(format!("user-{id}"))
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    /// Helper: stamp `synced_from_external_account_id` on a series row
+    /// so the removal-detection tests can pin which series came from
+    /// which account.
+    async fn force_synced_from(db: &sqlx::SqlitePool, series_id: i64, account_id: i64) {
+        sqlx::query("UPDATE series SET synced_from_external_account_id = ? WHERE id = ?")
+            .bind(account_id)
+            .bind(series_id)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    async fn force_monitor_mode(db: &sqlx::SqlitePool, series_id: i64, mode: MonitorMode) {
+        sqlx::query("UPDATE series SET monitor_mode = ? WHERE id = ?")
+            .bind(mode.as_str())
+            .bind(series_id)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn detect_removals_downgrades_missing_synced_series() {
+        // The key user-facing behavior: a series that was on AL,
+        // synced into Ryokan with monitor_mode=all, gets removed from
+        // AL → next full-sync downgrades monitor_mode to None so it
+        // stops grabbing.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        let kept_id = crate::test_support::seed_series(&db, 100, "Kept").await;
+        let removed_id = crate::test_support::seed_series(&db, 200, "Removed").await;
+        force_synced_from(&db, kept_id, 1).await;
+        force_synced_from(&db, removed_id, 1).await;
+        force_monitor_mode(&db, kept_id, MonitorMode::All).await;
+        force_monitor_mode(&db, removed_id, MonitorMode::All).await;
+
+        // Current fetch only includes the kept one (anilist_id=100);
+        // 200 is missing → removal detection downgrades it.
+        let mut fetch_ids = std::collections::HashSet::new();
+        fetch_ids.insert(100);
+        let report = detect_removals(&db, 1, &fetch_ids).await.unwrap();
+        assert_eq!(report.removed.len(), 1);
+        assert_eq!(report.removed[0], removed_id);
+
+        let kept = series::get_by_id(&db, kept_id).await.unwrap().unwrap();
+        let removed = series::get_by_id(&db, removed_id).await.unwrap().unwrap();
+        assert_eq!(
+            kept.monitor_mode,
+            MonitorMode::All.as_str(),
+            "in-fetch series stays at its existing mode"
+        );
+        assert_eq!(
+            removed.monitor_mode,
+            MonitorMode::None.as_str(),
+            "removed-from-fetch series downgrades to None"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_removals_leaves_manually_added_series_alone() {
+        // synced_from_external_account_id IS NULL means the user added
+        // this manually. Removal detection MUST NOT touch it even if
+        // it's not in the fetch — the user's library is theirs.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        let manual_id = crate::test_support::seed_series(&db, 300, "Manual").await;
+        let synced_id = crate::test_support::seed_series(&db, 400, "Synced").await;
+        force_synced_from(&db, synced_id, 1).await;
+        force_monitor_mode(&db, manual_id, MonitorMode::All).await;
+        force_monitor_mode(&db, synced_id, MonitorMode::All).await;
+
+        // Empty fetch — neither series is on the user's list.
+        let fetch_ids = std::collections::HashSet::new();
+        let report = detect_removals(&db, 1, &fetch_ids).await.unwrap();
+
+        // Only the synced series gets downgraded.
+        assert_eq!(report.removed.len(), 1);
+        assert_eq!(report.removed[0], synced_id);
+
+        let manual = series::get_by_id(&db, manual_id).await.unwrap().unwrap();
+        assert_eq!(
+            manual.monitor_mode,
+            MonitorMode::All.as_str(),
+            "manually-added series MUST NOT be touched by removal detection"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_removals_skips_already_none_series() {
+        // A series that's already at monitor_mode=none doesn't need a
+        // redundant write. Counter only includes series that actually
+        // changed.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        let already_none = crate::test_support::seed_series(&db, 500, "Already None").await;
+        force_synced_from(&db, already_none, 1).await;
+        force_monitor_mode(&db, already_none, MonitorMode::None).await;
+
+        let fetch_ids = std::collections::HashSet::new();
+        let report = detect_removals(&db, 1, &fetch_ids).await.unwrap();
+        assert_eq!(
+            report.removed.len(),
+            0,
+            "already-None series stays out of the report"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_removals_scopes_to_account_id() {
+        // Two accounts, each synced one series. Removal detection
+        // for account=1 must NOT touch account=2's series.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        seed_account_id(&db, 2, "mal").await;
+        let acct1_series = crate::test_support::seed_series(&db, 600, "Acct1 series").await;
+        let acct2_series = crate::test_support::seed_series(&db, 700, "Acct2 series").await;
+        force_synced_from(&db, acct1_series, 1).await;
+        force_synced_from(&db, acct2_series, 2).await;
+        force_monitor_mode(&db, acct1_series, MonitorMode::All).await;
+        force_monitor_mode(&db, acct2_series, MonitorMode::All).await;
+
+        // Empty fetch for account 1.
+        let fetch_ids = std::collections::HashSet::new();
+        let report = detect_removals(&db, 1, &fetch_ids).await.unwrap();
+        assert_eq!(report.removed, vec![acct1_series]);
+
+        // Account 2's series is unaffected.
+        let acct2 = series::get_by_id(&db, acct2_series).await.unwrap().unwrap();
+        assert_eq!(acct2.monitor_mode, MonitorMode::All.as_str());
     }
 
     #[tokio::test]
@@ -2065,7 +2343,7 @@ mod tests {
         );
 
         let prefs = prefs_default();
-        let outcome = merge_into_library(&db, &entries, &detail_map, &prefs).await;
+        let outcome = merge_into_library(&db, &entries, &detail_map, &prefs, None).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.skipped_by_preference, 1);
         assert!(
