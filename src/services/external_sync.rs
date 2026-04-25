@@ -2836,7 +2836,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn is_auth_rejection_matches_known_dead_token_strings() {
         // Each of these is a stable error-prefix the sync engine
         // emits on a token-dead failure; the Settings UI's
