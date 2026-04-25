@@ -1,0 +1,326 @@
+/* Shared style for the OAuth broker pages.
+ *
+ * Matches Ryokan's main UI: dark theme by default with light-mode
+ * override via prefers-color-scheme, Murecho display font for the
+ * brand mark + headings, the same color tokens used by the rest of
+ * the app. The broker pages were a minimal stopgap before this; now
+ * they look like part of Ryokan instead of a generic OAuth callback.
+ *
+ * Self-contained: this file plus the woff2 binaries under fonts/
+ * are everything the broker needs. No external CDN, no JS framework.
+ */
+
+@font-face {
+    font-family: 'Murecho';
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+    src: url('fonts/murecho-latin-500.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: 'Murecho';
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+    src: url('fonts/murecho-japanese-500.woff2') format('woff2');
+    unicode-range: U+3000-30FF, U+3131-318E, U+31F0-31FF, U+3200-32FF, U+3400-4DBF, U+4E00-9FAF, U+A960-A97F, U+AC00-D7AF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+    font-family: 'Murecho';
+    font-style: normal;
+    font-weight: 600;
+    font-display: swap;
+    src: url('fonts/murecho-latin-600.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: 'Murecho';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('fonts/murecho-latin-700.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+    /* Token names + hex values lifted verbatim from main Ryokan
+       base.css so the brokers match in any future palette tweak. */
+    --bg: #0f0f13;
+    --bg-card: #16161d;
+    --bg-elevated: #1e1e28;
+    --border: #2a2a3a;
+    --border-accent: #3a3a4f;
+    --text: #d4d4e0;
+    --text-bright: #e8e8f0;
+    --text-dim: #7a7a96;
+    --accent: #cba6f7;
+    --accent-hover: #d9bfff;
+    --green: #7dd393;
+    --red: #d37d7d;
+    --mauve-bg: rgba(203, 166, 247, 0.12);
+    --red-bg: rgba(211, 125, 125, 0.12);
+
+    --font-body: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    --font-display: 'Murecho', system-ui, sans-serif;
+    --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'JetBrains Mono', monospace;
+
+    --radius: 6px;
+    --radius-lg: 10px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+.broker-shell {
+    width: 100%;
+    max-width: 560px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 36px 40px 32px;
+}
+
+/* Two-span brand mark: 旅館 at Murecho 500 + Ryokan at Murecho 600,
+   tracked (0.08em kanji, 0.05em Latin). Matches the topbar and
+   the auth pages on the main app. */
+.broker-brand {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: var(--font-display);
+    font-size: 22px;
+    color: var(--text-bright);
+    line-height: 1;
+    margin-bottom: 6px;
+}
+.broker-brand .kanji {
+    font-weight: 500;
+    letter-spacing: 0.08em;
+}
+.broker-brand .latin {
+    font-weight: 600;
+    letter-spacing: 0.05em;
+}
+
+.broker-eyebrow {
+    color: var(--text-dim);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-family: var(--font-display);
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.broker-heading {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 22px;
+    color: var(--text-bright);
+    letter-spacing: -0.005em;
+    margin-bottom: 22px;
+    line-height: 1.25;
+}
+
+.broker-prose {
+    color: var(--text);
+    font-size: 14.5px;
+    line-height: 1.65;
+}
+.broker-prose p { margin-bottom: 12px; }
+.broker-prose strong { color: var(--text-bright); font-weight: 600; }
+
+.broker-prose code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--text);
+}
+
+/* Section labels above each value block (Access token, State, etc.). */
+.broker-label {
+    display: block;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin: 18px 0 6px;
+}
+
+/* Values rendered in a code block; full-width, monospace, scrollable. */
+.broker-value {
+    display: block;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text-bright);
+    word-break: break-all;
+    margin-bottom: 8px;
+    line-height: 1.5;
+}
+
+/* Buttons matching Ryokan's btn-primary / btn-secondary aesthetic. */
+.broker-btn {
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.broker-btn:hover {
+    border-color: var(--border-accent);
+    color: var(--text-bright);
+}
+.broker-btn:active {
+    background: var(--bg);
+}
+.broker-btn.is-primary {
+    background: var(--mauve-bg);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.broker-btn.is-primary:hover {
+    background: rgba(203, 166, 247, 0.18);
+    color: var(--accent-hover);
+}
+
+/* The "Sent to Ryokan" success card sits on a tinted accent surface
+   so it reads as the happy-path state without competing with the
+   chrome around it. */
+.broker-success-banner {
+    background: var(--mauve-bg);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 18px;
+    color: var(--text-bright);
+    font-size: 14px;
+}
+.broker-success-banner strong {
+    color: var(--accent);
+    font-weight: 600;
+}
+.broker-autoclose {
+    color: var(--text-dim);
+    font-size: 12.5px;
+    margin-top: 6px;
+}
+
+.broker-error {
+    background: var(--red-bg);
+    border: 1px solid var(--red);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 18px;
+    color: var(--text-bright);
+    font-size: 14px;
+}
+.broker-error strong { color: var(--red); }
+.broker-error .error-detail {
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text-dim);
+    word-break: break-word;
+}
+
+.broker-fallback-toggle {
+    margin-top: 14px;
+    color: var(--text-dim);
+    font-size: 12.5px;
+}
+.broker-fallback-toggle summary {
+    cursor: pointer;
+    user-select: none;
+    padding: 4px 0;
+    color: var(--text-dim);
+}
+.broker-fallback-toggle summary:hover {
+    color: var(--text);
+}
+.broker-fallback-toggle[open] summary {
+    margin-bottom: 8px;
+}
+.broker-fallback-toggle .fallback-prose {
+    color: var(--text);
+    font-size: 13.5px;
+    margin-bottom: 6px;
+}
+
+footer {
+    margin-top: 28px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.6;
+}
+footer a {
+    color: var(--text-dim);
+    text-decoration: underline;
+    text-decoration-color: var(--border);
+    text-underline-offset: 2px;
+}
+footer a:hover {
+    color: var(--accent);
+    text-decoration-color: var(--accent);
+}
+
+@media (max-width: 560px) {
+    body { padding: 16px; }
+    .broker-shell { padding: 26px 22px 22px; }
+    .broker-brand { font-size: 19px; }
+    .broker-heading { font-size: 19px; }
+}
+
+/* Light mode opt-in for users with that system preference. The
+   color tokens flip; everything else inherits from the cascade. */
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg: #fafaf9;
+        --bg-card: #ffffff;
+        --bg-elevated: #f3f3f1;
+        --border: #e2e2dc;
+        --border-accent: #c9c9c2;
+        --text: #2a2a32;
+        --text-bright: #14141c;
+        --text-dim: #6a6a78;
+        --accent: #6a3eb8;
+        --accent-hover: #4f2c8b;
+        --mauve-bg: rgba(106, 62, 184, 0.08);
+        --red: #b54a4a;
+        --red-bg: rgba(181, 74, 74, 0.08);
+    }
+}

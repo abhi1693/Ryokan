@@ -3,106 +3,70 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ryokan — MyAnimeList Authorization</title>
+  <title>Ryokan, MyAnimeList</title>
   <meta name="robots" content="noindex">
-  <style>
-    :root { color-scheme: light dark; }
-    body {
-      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-      max-width: 640px;
-      margin: 40px auto;
-      padding: 0 24px;
-      line-height: 1.5;
-    }
-    h1 { font-size: 1.5rem; margin: 0 0 16px; }
-    h2 { font-size: 1rem; margin: 24px 0 6px; opacity: 0.85; }
-    p { margin: 12px 0; }
-    code.value {
-      background: rgba(127, 127, 127, 0.15);
-      padding: 12px;
-      display: block;
-      margin: 8px 0;
-      word-break: break-all;
-      border-radius: 4px;
-      font-size: 0.9rem;
-      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    }
-    button {
-      padding: 8px 16px;
-      font-size: 1rem;
-      cursor: pointer;
-      border-radius: 4px;
-      border: 1px solid currentColor;
-      background: transparent;
-      color: inherit;
-      font-family: inherit;
-      margin-right: 8px;
-    }
-    button:hover { background: rgba(127, 127, 127, 0.15); }
-    .error {
-      padding: 12px 16px;
-      background: rgba(204, 0, 0, 0.1);
-      border: 1px solid rgba(204, 0, 0, 0.4);
-      border-radius: 4px;
-      margin: 16px 0;
-    }
-    .error strong { color: #c00; }
-    footer {
-      margin-top: 48px;
-      padding-top: 16px;
-      border-top: 1px solid rgba(127, 127, 127, 0.2);
-      font-size: 0.85rem;
-      opacity: 0.75;
-    }
-    a { color: inherit; }
-  </style>
+  <link rel="stylesheet" href="../style.css">
 </head>
 <body>
-  <h1>Ryokan — MyAnimeList Authorization</h1>
+  <main class="broker-shell">
+    <a class="broker-brand" href="https://github.com/johnthreekay/Ryokan">
+      <span class="kanji">旅館</span><span class="latin">Ryokan</span>
+    </a>
+    <div class="broker-eyebrow">MyAnimeList authorization</div>
 
-  <div id="autofilled" hidden>
-    <p><strong>Sent to Ryokan.</strong> The code and state were posted back to your Ryokan tab automatically — switch to that tab to confirm the link landed. This window will close in a few seconds.</p>
-    <p class="form-hint" id="autoclose-hint" style="opacity:0.7"></p>
-    <details style="margin-top:16px">
-      <summary>Manual copy-paste fallback</summary>
-      <p>If the auto-postback didn't work (your Ryokan tab was closed, or a popup blocker interfered), the values are below — copy them manually into <strong>Settings → Integrations → External Accounts</strong>.</p>
-      <h2>Authorization code</h2>
-      <code id="code-fallback" class="value"></code>
-      <button id="copy-code-fallback" type="button">Copy code</button>
-      <h2>State</h2>
-      <code id="state-fallback" class="value"></code>
-      <button id="copy-state-fallback" type="button">Copy state</button>
-    </details>
-  </div>
+    <div id="autofilled" hidden>
+      <div class="broker-success-banner">
+        <strong>Sent to Ryokan.</strong>
+        <div>The code and state were posted back to your Ryokan tab automatically. Switch to that tab to confirm the link landed.</div>
+        <div class="broker-autoclose" id="autoclose-hint"></div>
+      </div>
+      <details class="broker-fallback-toggle">
+        <summary>Manual copy-paste fallback</summary>
+        <div class="fallback-prose">
+          Use these values if the auto-postback did not reach Ryokan (your Ryokan tab was closed, or a popup blocker interfered). Paste them into Settings, Integrations, External Accounts.
+        </div>
+        <span class="broker-label">Authorization code</span>
+        <code class="broker-value" id="code-fallback"></code>
+        <button class="broker-btn" type="button" id="copy-code-fallback">Copy code</button>
+        <span class="broker-label">State</span>
+        <code class="broker-value" id="state-fallback"></code>
+        <button class="broker-btn" type="button" id="copy-state-fallback">Copy state</button>
+      </details>
+    </div>
 
-  <div id="success" hidden>
-    <p>MyAnimeList has issued an authorization code for Ryokan. Copy <strong>both</strong> the code and the state value below, then paste them into your Ryokan instance under <strong>Settings → Integrations → External Accounts</strong>.</p>
+    <section id="success" class="broker-prose" hidden>
+      <h1 class="broker-heading">Code issued</h1>
+      <p>MyAnimeList has issued an authorization code for Ryokan. Copy <strong>both</strong> the code and the state value, then paste them into Ryokan under <strong>Settings, Integrations, External Accounts</strong>.</p>
 
-    <h2>Authorization code</h2>
-    <code id="code" class="value"></code>
-    <button id="copy-code" type="button">Copy code</button>
+      <span class="broker-label">Authorization code</span>
+      <code class="broker-value" id="code"></code>
+      <button class="broker-btn is-primary" type="button" id="copy-code">Copy code</button>
 
-    <h2>State</h2>
-    <code id="state" class="value"></code>
-    <button id="copy-state" type="button">Copy state</button>
+      <span class="broker-label">State</span>
+      <code class="broker-value" id="state"></code>
+      <button class="broker-btn" type="button" id="copy-state">Copy state</button>
 
-    <p>The code is single-use and expires in a few minutes. The state value is a one-time CSRF nonce that proves this approval is the same one your Ryokan started; without it Ryokan will reject the link. If Ryokan rejects either, come back and link again.</p>
-  </div>
+      <p>The code is single-use and expires in a few minutes. The state value is a one-time CSRF nonce that proves this approval matches the link your Ryokan started; without it Ryokan rejects the submission. If Ryokan rejects either, come back and link again.</p>
+    </section>
 
-  <div id="error-block" class="error" hidden>
-    <p><strong>Authorization failed.</strong></p>
-    <p id="error-msg"></p>
-    <p>Go back to Ryokan's Settings → Integrations → External Accounts and try again.</p>
-  </div>
+    <section id="error-block" hidden>
+      <div class="broker-error">
+        <strong>Authorization failed.</strong>
+        <div class="error-detail" id="error-msg"></div>
+      </div>
+      <p class="broker-prose">Go back to Ryokan, open <strong>Settings, Integrations, External Accounts</strong>, and try the link flow again.</p>
+    </section>
 
-  <div id="no-code" hidden>
-    <p>This page expects an authorization code in the URL. You probably landed here without going through MyAnimeList first.</p>
-    <p>Open Ryokan, go to <strong>Settings → Integrations → External Accounts</strong>, and click <em>Link MyAnimeList</em>.</p>
-  </div>
+    <section id="no-code" class="broker-prose" hidden>
+      <h1 class="broker-heading">Nothing to display</h1>
+      <p>This page expects an authorization code in the URL. You probably opened it directly without going through MyAnimeList first.</p>
+      <p>Open Ryokan, go to <strong>Settings, Integrations, External Accounts</strong>, and click <em>Link MyAnimeList</em>.</p>
+    </section>
 
-  <footer>
-    This page is part of <a href="https://github.com/johnthreekay/Ryokan">Ryokan</a>, a self-hosted anime PVR. It receives the OAuth authorization code + state nonce from MyAnimeList and displays them so you can paste them back into your local Ryokan instance. No data is sent anywhere else — the code and state stay in your browser. <a href="https://github.com/johnthreekay/Ryokan/blob/gh-pages/auth/mal/index.html">View this page's source.</a>
-  </footer>
+    <footer>
+      Part of <a href="https://github.com/johnthreekay/Ryokan">Ryokan</a>, a self-hosted anime PVR. This page receives the OAuth authorization code + state nonce from MyAnimeList and either posts them back to your Ryokan tab automatically or displays them for manual copy. Both stay in your browser. <a href="https://github.com/johnthreekay/Ryokan/blob/gh-pages/auth/mal/index.html">View source.</a>
+    </footer>
+  </main>
 
   <script>
     (function () {
@@ -119,25 +83,23 @@
           var text = document.getElementById(valueId).textContent;
           try {
             await navigator.clipboard.writeText(text);
-            btn.textContent = 'Copied!';
+            btn.textContent = 'Copied';
             setTimeout(function () { btn.textContent = label; }, 2000);
           } catch (e) {
-            alert('Copy failed — select the value and copy it manually.');
+            alert('Copy failed. Select the value and copy it manually.');
           }
         });
       }
 
-      // Same auto-postback path as the AniList broker page — see
+      // Same auto-postback path as the AniList broker page; see
       // auth/anilist/index.html for the full rationale. If
-      // `window.opener` is set (this tab was opened from a Ryokan
-      // tab via window.open), post the code + state back so the
-      // user doesn't have to copy-paste. Receiver-side handler in
+      // window.opener is set (this tab was opened from a Ryokan tab
+      // via window.open), post the code + state back so the user
+      // does not have to copy-paste. The receiver in
       // static/js/settings.js validates origin against this broker
       // before auto-submitting.
       function tryAutofill(code, state) {
-        if (!window.opener || window.opener.closed) {
-          return false;
-        }
+        if (!window.opener || window.opener.closed) return false;
         try {
           window.opener.postMessage(
             {
@@ -168,26 +130,27 @@
           document.getElementById('state-fallback').textContent = state || '';
           bindCopy('copy-code-fallback', 'code-fallback', 'Copy code');
           bindCopy('copy-state-fallback', 'state-fallback', 'Copy state');
+
           var closeIn = 5;
           var hint = document.getElementById('autoclose-hint');
           var tick = setInterval(function () {
             closeIn -= 1;
-            if (hint) hint.textContent = 'Closing in ' + closeIn + 's…';
+            if (hint) hint.textContent = 'Closing in ' + closeIn + 's.';
             if (closeIn <= 0) {
               clearInterval(tick);
               try { window.close(); } catch (e) { /* ignore */ }
             }
           }, 1000);
-          if (hint) hint.textContent = 'Closing in ' + closeIn + 's…';
+          if (hint) hint.textContent = 'Closing in ' + closeIn + 's.';
           return;
         }
 
         document.getElementById('success').hidden = false;
         document.getElementById('code').textContent = code;
-        // State should always be present — Ryokan's /start always
-        // sets it. Display empty if missing so the user notices
-        // something is wrong on the Ryokan side rather than silently
-        // submitting and failing CSRF validation.
+        // State should always be present; Ryokan's /start always sets
+        // it. Display empty if missing so the user notices a
+        // Ryokan-side bug rather than silently submitting and failing
+        // the constant-time comparison there.
         document.getElementById('state').textContent = state || '';
 
         bindCopy('copy-code', 'code', 'Copy code');
