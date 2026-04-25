@@ -1840,4 +1840,167 @@ mod tests {
         assert_eq!(validate_resolution("360p", "1080"), "1080");
         assert_eq!(validate_resolution("540p", "1080"), "1080");
     }
+
+    // ── normalize_settings_tab ───────────────────────────────────────
+
+    #[test]
+    fn normalize_settings_tab_known_tabs_pass_through() {
+        for tab in ["quality", "custom_formats", "groups", "general"] {
+            assert_eq!(normalize_settings_tab(Some(tab.into())), tab);
+        }
+    }
+
+    #[test]
+    fn normalize_settings_tab_unknown_or_missing_defaults_to_integrations() {
+        // Integrations is the default landing — first-run users
+        // most often need to wire a download client + Jellyfin
+        // before doing anything else, so that's the natural first
+        // tab.
+        assert_eq!(normalize_settings_tab(None), "integrations");
+        assert_eq!(
+            normalize_settings_tab(Some("garbage".into())),
+            "integrations"
+        );
+        assert_eq!(normalize_settings_tab(Some("".into())), "integrations");
+    }
+
+    // ── min_score_display ────────────────────────────────────────────
+
+    #[test]
+    fn min_score_display_renders_blank_for_no_floor_sentinel() {
+        // i32::MIN is the "no minimum score floor" sentinel — must
+        // render as an empty string so the input shows blank, not
+        // "-2147483648".
+        assert_eq!(min_score_display(i32::MIN), "");
+    }
+
+    #[test]
+    fn min_score_display_renders_normal_values_as_string() {
+        assert_eq!(min_score_display(0), "0");
+        assert_eq!(min_score_display(50), "50");
+        assert_eq!(min_score_display(-5), "-5");
+        // Just-above-the-sentinel renders normally — only the exact
+        // i32::MIN value is special.
+        assert_eq!(min_score_display(i32::MIN + 1), (i32::MIN + 1).to_string());
+    }
+
+    // ── humanize_relative_time ───────────────────────────────────────
+
+    #[test]
+    fn humanize_relative_time_none_renders_never() {
+        // No row in scheduled_task_runs yet → "Never", which is
+        // what the Settings dashboard shows for unrun tasks.
+        assert_eq!(humanize_relative_time(None), "Never");
+    }
+
+    fn now_ts() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn humanize_relative_time_under_one_minute_says_just_now() {
+        assert_eq!(humanize_relative_time(Some(now_ts())), "Just now");
+        assert_eq!(humanize_relative_time(Some(now_ts() - 30)), "Just now");
+    }
+
+    #[test]
+    fn humanize_relative_time_under_one_hour_uses_minutes() {
+        // The pluralization arm: 1 minute is singular, 2+ is plural.
+        assert_eq!(humanize_relative_time(Some(now_ts() - 60)), "1 minute ago");
+        assert_eq!(
+            humanize_relative_time(Some(now_ts() - 120)),
+            "2 minutes ago"
+        );
+        assert_eq!(
+            humanize_relative_time(Some(now_ts() - 30 * 60)),
+            "30 minutes ago"
+        );
+    }
+
+    #[test]
+    fn humanize_relative_time_under_one_day_uses_hours() {
+        assert_eq!(humanize_relative_time(Some(now_ts() - 3600)), "1 hour ago");
+        assert_eq!(humanize_relative_time(Some(now_ts() - 7200)), "2 hours ago");
+        // 23h59m is still in hours.
+        assert_eq!(
+            humanize_relative_time(Some(now_ts() - (23 * 3600 + 59 * 60))),
+            "23 hours ago"
+        );
+    }
+
+    #[test]
+    fn humanize_relative_time_one_day_or_more_uses_days() {
+        assert_eq!(humanize_relative_time(Some(now_ts() - 86400)), "1 day ago");
+        assert_eq!(
+            humanize_relative_time(Some(now_ts() - 86400 * 7)),
+            "7 days ago"
+        );
+    }
+
+    #[test]
+    fn humanize_relative_time_future_timestamp_renders_just_now() {
+        // Defensive: a clock skew or pre-clock-init timestamp could
+        // produce ts > now. The `.max(0)` keeps the delta non-negative
+        // so we render "Just now" rather than "-N days ago".
+        assert_eq!(humanize_relative_time(Some(now_ts() + 10000)), "Just now");
+    }
+
+    // ── extract_spec_labels ──────────────────────────────────────────
+
+    #[test]
+    fn extract_spec_labels_parses_spec_array_into_views() {
+        let json = r#"{
+            "name": "BD",
+            "specifications": [
+                {"name": "BluRay", "implementation": "ReleaseTitleSpecification", "negate": false, "required": true},
+                {"name": "WEB", "implementation": "ReleaseTitleSpecification", "negate": true, "required": false}
+            ]
+        }"#;
+        let labels = extract_spec_labels(json);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].name, "BluRay");
+        assert_eq!(labels[0].implementation, "ReleaseTitleSpecification");
+        assert!(!labels[0].negate);
+        assert!(labels[0].required);
+        assert_eq!(labels[1].name, "WEB");
+        assert!(labels[1].negate);
+        assert!(!labels[1].required);
+    }
+
+    #[test]
+    fn extract_spec_labels_returns_empty_on_invalid_json() {
+        // Defensive: a parse failure mustn't bubble up — the caller
+        // already surfaces the raw parse error via `parse_error`,
+        // and the spec-pill row just renders empty.
+        assert!(extract_spec_labels("{not json").is_empty());
+        assert!(extract_spec_labels("").is_empty());
+    }
+
+    #[test]
+    fn extract_spec_labels_returns_empty_when_specifications_missing() {
+        // CF JSON without a "specifications" array (e.g. malformed
+        // import or partial CF in flight) yields zero labels rather
+        // than a panic.
+        assert!(extract_spec_labels(r#"{"name": "BD"}"#).is_empty());
+        // Wrong type for "specifications" → also empty.
+        assert!(extract_spec_labels(r#"{"specifications": "oops"}"#).is_empty());
+    }
+
+    #[test]
+    fn extract_spec_labels_uses_defaults_for_missing_fields() {
+        // Each spec entry that omits a field falls back to the
+        // typed default — empty strings for `name`/`implementation`,
+        // false for both bools. This is what unblocks rendering
+        // half-imported CFs in the edit drawer.
+        let json = r#"{"specifications": [{}]}"#;
+        let labels = extract_spec_labels(json);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].name, "");
+        assert_eq!(labels[0].implementation, "");
+        assert!(!labels[0].negate);
+        assert!(!labels[0].required);
+    }
 }
