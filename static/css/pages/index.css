@@ -11,6 +11,12 @@
 }
 .library-header-row h2 {
     margin-bottom: 0;
+    text-transform: uppercase;
+    /* All-caps wants a touch more breathing room than the base
+       Murecho letter-spacing (-0.005em was tuned for mixed-case);
+       0.06em opens the title up just enough to read as a deliberate
+       display treatment instead of a tight rendered string. */
+    letter-spacing: 0.06em;
 }
 
 .btn-pill {
