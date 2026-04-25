@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::models::external_accounts::{self, LinkRequest, PROVIDER_ANILIST, PROVIDER_MAL};
 use crate::models::log::LogCategory;
-use crate::services::{external_sync, logger, oauth_state, progress};
+use crate::services::{anilist, external_sync, logger, oauth_state, progress};
 
 /// AniList public client ID. Registered 2026-04-22 against the
 /// author's AL account; the AL app page documents the redirect URI
@@ -532,12 +532,19 @@ async fn fetch_anilist_viewer(token: &str) -> Result<AniListViewer, String> {
         .map_err(|e| format!("AniList HTTP error: {e}"))?;
 
     let status = resp.status();
+    let headers = resp.headers().clone();
     let body = resp
         .text()
         .await
         .map_err(|e| format!("AniList response read failed: {e}"))?;
+    // Participate in the same rate-limit cooldown the in-module AL
+    // callers use. Without this, a 429 / 5xx during link doesn't flip
+    // the process-wide cooldown, so a metadata sync or library-page
+    // render firing right after the link attempt charges in unaware
+    // and earns its own 429.
+    anilist::note_external_anilist_response(status, &headers);
     if !status.is_success() {
-        return Err(format!("AniList returned {status}: {body}"));
+        return Err(format!("AniList returned {status}: {}", excerpt(&body)));
     }
 
     // The GraphQL shape is `{"data": {"Viewer": { id, name, mediaListOptions: { scoreFormat } }}}`.
@@ -606,11 +613,18 @@ async fn exchange_mal_code(code: &str, verifier: &str) -> Result<MalTokenRespons
         .await
         .map_err(|e| format!("MAL token response read failed: {e}"))?;
     if !status.is_success() {
-        return Err(format!("MAL token endpoint returned {status}: {body}"));
+        return Err(format!(
+            "MAL token endpoint returned {status}: {}",
+            excerpt(&body)
+        ));
     }
 
-    serde_json::from_str::<MalTokenResponse>(&body)
-        .map_err(|e| format!("MAL token response parse failed: {e} (body: {body})"))
+    serde_json::from_str::<MalTokenResponse>(&body).map_err(|e| {
+        format!(
+            "MAL token response parse failed: {e} (body: {})",
+            excerpt(&body)
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -640,11 +654,11 @@ async fn fetch_mal_me(token: &str) -> Result<MalUserInfo, String> {
         .await
         .map_err(|e| format!("MAL @me response read failed: {e}"))?;
     if !status.is_success() {
-        return Err(format!("MAL @me returned {status}: {body}"));
+        return Err(format!("MAL @me returned {status}: {}", excerpt(&body)));
     }
 
     serde_json::from_str::<MalUserInfo>(&body)
-        .map_err(|e| format!("MAL @me parse failed: {e} (body: {body})"))
+        .map_err(|e| format!("MAL @me parse failed: {e} (body: {})", excerpt(&body)))
 }
 
 // ── Small helpers ────────────────────────────────────────────────────
@@ -708,6 +722,25 @@ fn current_unix_ts() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Truncate a provider response body for an error string. Both AL and
+/// MAL can return large bodies on edge failure modes (Cloudflare HTML
+/// when AL is melting, MAL's own error pages); without this cap, a
+/// `Sync now` toast or the link-flow error renders multi-KB inline.
+/// **Char-aware** rather than byte-aware: a multi-byte UTF-8 sequence
+/// crossing the 240-byte boundary would panic a byte-slice. Mirrors
+/// the same-named helpers in `services::mal` and
+/// `services::anilist::rate_limit`.
+fn excerpt(s: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let mut iter = s.chars();
+    let prefix: String = iter.by_ref().take(MAX_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
 }
 
 #[cfg(test)]

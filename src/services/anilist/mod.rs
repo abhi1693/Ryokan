@@ -15,7 +15,9 @@ use rate_limit::{
     excerpt, extract_graphql_error, record_rate_limit_headers, set_anilist_cooldown,
     set_cooldown_until_now_plus, throttle_before_anilist_request,
 };
-pub use rate_limit::{anilist_cooldown_active, is_rate_limit_error};
+pub use rate_limit::{
+    anilist_cooldown_active, is_rate_limit_error, note_external_anilist_response,
+};
 
 const ANILIST_API_DEFAULT: &str = "https://graphql.anilist.co";
 
