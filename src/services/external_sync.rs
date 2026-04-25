@@ -48,7 +48,7 @@ use crate::AppState;
 use crate::models::external_accounts::{self, ImportPreferences};
 use crate::models::log::LogCategory;
 use crate::models::monitoring::MonitorMode;
-use crate::models::{metadata_cache, series};
+use crate::models::{metadata_cache, series, series_custom_lists};
 use crate::services::{
     anibridge, anilist, artwork, jikan, logger, mal, monitoring as monitoring_service,
 };
@@ -504,6 +504,51 @@ async fn stamp_user_score_if_set(
     }
 }
 
+/// #62 PR D — replace the series's AL custom-list memberships from
+/// `entry.custom_lists`. Skips when `account_id` is `None` (unit-
+/// test pathway) and when `provider` isn't AniList (MAL never emits
+/// custom-list memberships, so the call would just clear a never-
+/// populated set every tick).
+///
+/// Called from BOTH the AL-detail and Jikan-fallback merge paths.
+/// The Jikan path is dead-by-data today — `entries_from_mal` always
+/// returns an empty `custom_lists` and the provider check short-
+/// circuits before any DB write — but keeping the call symmetric
+/// across both paths means a hypothetical future provider added to
+/// the Jikan-fallback path inherits the namespace-skip automatically
+/// instead of silently clobbering AL's rows. Two cheap branch-and-
+/// returns per Jikan merge is a fine tax for that invariant.
+///
+/// Replace-on-merge rather than incremental: the GraphQL response
+/// carries the full membership map per entry, so clear+insert is
+/// the right shape for "user moved this out of Hidden Gems" — an
+/// upsert path would leak stale rows.
+///
+/// Best-effort: a failure logs but doesn't fail the merge. A
+/// missing membership row just means the badge / filter doesn't
+/// reflect the latest state until the next tick.
+async fn stamp_custom_lists_if_set(
+    db: &SqlitePool,
+    series_id: i64,
+    provider: &str,
+    custom_lists: &[String],
+    account_id: Option<i64>,
+) {
+    if account_id.is_none() {
+        return;
+    }
+    if provider != external_accounts::PROVIDER_ANILIST {
+        return;
+    }
+    if let Err(e) =
+        series_custom_lists::replace_for_series(db, series_id, provider, custom_lists).await
+    {
+        tracing::warn!(
+            "series_custom_lists::replace_for_series failed for series_id={series_id}: {e}"
+        );
+    }
+}
+
 /// Report from a removal-detection pass. `removed` is the list of
 /// `series.id` whose monitor_mode got downgraded to `None` because
 /// they were no longer in the user's AL/MAL list. Surfaces in the
@@ -632,6 +677,8 @@ async fn merge_one_jikan_entry(
         // even when the new status's import flag is off.
         stamp_synced_from_if_set(db, row.id, account_id).await;
         stamp_user_score_if_set(db, row.id, entry.score, account_id).await;
+        stamp_custom_lists_if_set(db, row.id, &entry.provider, &entry.custom_lists, account_id)
+            .await;
         // Manual override takes precedence: the user has explicitly
         // pinned this series's monitor_mode through the UI. Sync
         // honors that pin until the user clears it via "Sync from
@@ -706,6 +753,14 @@ async fn merge_one_jikan_entry(
 
     stamp_synced_from_if_set(db, series_id, account_id).await;
     stamp_user_score_if_set(db, series_id, entry.score, account_id).await;
+    stamp_custom_lists_if_set(
+        db,
+        series_id,
+        &entry.provider,
+        &entry.custom_lists,
+        account_id,
+    )
+    .await;
     monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
     Ok(MergeAction::Created(NewArtworkSpec {
         series_id,
@@ -734,6 +789,8 @@ async fn merge_one_anilist_entry(
         // silently keeps grabbing for a show the user dropped.
         stamp_synced_from_if_set(db, row.id, account_id).await;
         stamp_user_score_if_set(db, row.id, entry.score, account_id).await;
+        stamp_custom_lists_if_set(db, row.id, &entry.provider, &entry.custom_lists, account_id)
+            .await;
         // Manual override takes precedence: the user pinned this
         // series's monitor_mode through the UI. Sync honors the pin
         // until the user clears it via "Sync from AL/MAL".
@@ -797,6 +854,14 @@ async fn merge_one_anilist_entry(
 
     stamp_synced_from_if_set(db, series_id, account_id).await;
     stamp_user_score_if_set(db, series_id, entry.score, account_id).await;
+    stamp_custom_lists_if_set(
+        db,
+        series_id,
+        &entry.provider,
+        &entry.custom_lists,
+        account_id,
+    )
+    .await;
     monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
     Ok(MergeAction::Created(NewArtworkSpec {
         series_id,
@@ -2454,6 +2519,128 @@ mod tests {
             Some(8.5),
             "merge must write entry.score to user_score"
         );
+    }
+
+    #[tokio::test]
+    async fn merge_writes_custom_list_memberships_for_anilist() {
+        // AL custom-list membership is replaced on every successful
+        // merge action so the detail-page badge row + library filter
+        // stay in lockstep with the user's current AL state.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        let series_id = crate::test_support::seed_series(&db, 12345, "Listed").await;
+
+        let entries = vec![SyncEntry {
+            provider: external_accounts::PROVIDER_ANILIST.to_string(),
+            provider_media_id: 12345,
+            anilist_id: 12345,
+            status: NormalizedStatus::Watching,
+            progress: 0,
+            score: 0.0,
+            updated_at: 0,
+            custom_lists: vec!["Hidden Gems".into(), "Top 10".into()],
+        }];
+        let _ = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), Some(1)).await;
+
+        let memberships = series_custom_lists::list_for_series(&db, series_id)
+            .await
+            .unwrap();
+        assert_eq!(memberships.len(), 2);
+        assert!(memberships.iter().any(|m| m.list_name == "Hidden Gems"));
+        assert!(memberships.iter().any(|m| m.list_name == "Top 10"));
+        for m in &memberships {
+            assert_eq!(m.provider, external_accounts::PROVIDER_ANILIST);
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_replaces_stale_custom_list_membership() {
+        // The user moved a series out of "Hidden Gems" on AL. The
+        // next sync's replace-on-merge MUST drop the old membership;
+        // an upsert-only path would leak stale rows forever.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        let series_id = crate::test_support::seed_series(&db, 12345, "Moved").await;
+
+        // First sync: in Hidden Gems.
+        let entries_v1 = vec![SyncEntry {
+            provider: external_accounts::PROVIDER_ANILIST.to_string(),
+            provider_media_id: 12345,
+            anilist_id: 12345,
+            status: NormalizedStatus::Watching,
+            progress: 0,
+            score: 0.0,
+            updated_at: 0,
+            custom_lists: vec!["Hidden Gems".into()],
+        }];
+        let _ =
+            merge_into_library(&db, &entries_v1, &HashMap::new(), &prefs_default(), Some(1)).await;
+
+        // Second sync: moved to Top 10, no longer in Hidden Gems.
+        let entries_v2 = vec![SyncEntry {
+            custom_lists: vec!["Top 10".into()],
+            ..entries_v1[0].clone()
+        }];
+        let _ =
+            merge_into_library(&db, &entries_v2, &HashMap::new(), &prefs_default(), Some(1)).await;
+
+        let memberships = series_custom_lists::list_for_series(&db, series_id)
+            .await
+            .unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].list_name, "Top 10");
+    }
+
+    #[tokio::test]
+    async fn merge_jikan_path_does_not_write_custom_lists() {
+        // MAL has no custom-list concept; entries_from_mal always
+        // returns empty custom_lists. The Jikan-fallback merge path
+        // MUST also skip the membership write so it can't ever
+        // accidentally clobber AL-side memberships.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "mal").await;
+        // Pre-seed a hypothetical AL-side membership for this series
+        // (e.g. user previously had AL linked, then switched to MAL).
+        let series_id = crate::test_support::seed_series(&db, -777, "Jikan series").await;
+        sqlx::query(
+            "INSERT INTO series_custom_lists (series_id, provider, list_name) VALUES (?, ?, ?)",
+        )
+        .bind(series_id)
+        .bind("anilist")
+        .bind("Old AL List")
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // Seed a Jikan detail so the merge path actually fires.
+        crate::services::jikan::seed_detail_cache_for_tests(
+            777,
+            make_detail(-777, "Jikan series", "TV", "FINISHED"),
+        )
+        .await;
+
+        let entries = vec![SyncEntry {
+            provider: external_accounts::PROVIDER_MAL.to_string(),
+            provider_media_id: 777,
+            anilist_id: -777,
+            status: NormalizedStatus::Watching,
+            progress: 0,
+            score: 0.0,
+            updated_at: 0,
+            custom_lists: Vec::new(),
+        }];
+        let _ = merge_jikan_fallback_entries(&db, &entries, &prefs_default(), Some(1)).await;
+
+        // The pre-seeded AL membership stays put — Jikan path's
+        // skip-when-not-anilist guard prevents it from being wiped.
+        let memberships = series_custom_lists::list_for_series(&db, series_id)
+            .await
+            .unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].list_name, "Old AL List");
+        assert_eq!(memberships[0].provider, "anilist");
+
+        crate::services::jikan::clear_detail_cache_entry_for_tests(777).await;
     }
 
     #[tokio::test]

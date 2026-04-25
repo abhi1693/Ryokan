@@ -57,6 +57,20 @@
             {% endfor %}
         </div>
 
+        {# #62 PR D — AL custom-list membership badges. Hidden when
+           the series isn't on any of the user's custom lists (or
+           no account is linked). Each badge links back to the
+           library filtered to that list so the user can quickly
+           pivot from "what's in this list" to "the list itself." #}
+        {% if !custom_list_memberships.is_empty() %}
+        <div class="detail-custom-lists">
+            <span class="detail-custom-lists-label">Lists:</span>
+            {% for list_name in custom_list_memberships %}
+            <a href="/?list={{ list_name|urlencode }}" class="tag-custom-list">{{ list_name }}</a>
+            {% endfor %}
+        </div>
+        {% endif %}
+
         <div class="detail-actions">
             <button class="btn btn-primary" id="btn-auto-search" onclick="autoSearchSeries(this)">
                 <span class="btn-label">Search Missing Episodes</span>
