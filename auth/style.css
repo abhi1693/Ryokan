@@ -1,10 +1,10 @@
 /* Shared style for the OAuth broker pages.
  *
- * Matches Ryokan's main UI: dark theme by default with light-mode
- * override via prefers-color-scheme, Murecho display font for the
- * brand mark + headings, the same color tokens used by the rest of
- * the app. The broker pages were a minimal stopgap before this; now
- * they look like part of Ryokan instead of a generic OAuth callback.
+ * Matches Ryokan's main UI: dark theme (the main app is dark-only,
+ * the broker pages match), Murecho display font for the brand mark
+ * + headings, the same color tokens used by the rest of the app.
+ * The broker pages were a minimal stopgap before this; now they
+ * look like part of Ryokan instead of a generic OAuth callback.
  *
  * Self-contained: this file plus the woff2 binaries under fonts/
  * are everything the broker needs. No external CDN, no JS framework.
@@ -87,16 +87,23 @@ body {
 
 .broker-shell {
     width: 100%;
-    max-width: 560px;
+    /* 720px lets the long auth-code blocks and the prose paragraphs
+       breathe without forcing the eye across an editorial-too-wide
+       column. Original 560px ran the OAuth values into 18+ wrapped
+       lines; 720px brings that down to ~10 and lets the right-hand
+       margin of the prose match where the buttons sit. */
+    max-width: 720px;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 36px 40px 32px;
+    padding: 36px 44px 32px;
 }
 
 /* Two-span brand mark: 旅館 at Murecho 500 + Ryokan at Murecho 600,
    tracked (0.08em kanji, 0.05em Latin). Matches the topbar and
-   the auth pages on the main app. */
+   the auth pages on the main app. The element is an <a> linking
+   to the GitHub repo; suppress the default underline so the brand
+   reads as a brand, not a link. Hover gets a faint accent shift. */
 .broker-brand {
     display: inline-flex;
     align-items: baseline;
@@ -106,7 +113,10 @@ body {
     color: var(--text-bright);
     line-height: 1;
     margin-bottom: 6px;
+    text-decoration: none;
+    transition: color 0.15s;
 }
+.broker-brand:hover { color: var(--accent); }
 .broker-brand .kanji {
     font-weight: 500;
     letter-spacing: 0.08em;
@@ -298,29 +308,14 @@ footer a:hover {
     text-decoration-color: var(--accent);
 }
 
-@media (max-width: 560px) {
+@media (max-width: 720px) {
     body { padding: 16px; }
     .broker-shell { padding: 26px 22px 22px; }
     .broker-brand { font-size: 19px; }
     .broker-heading { font-size: 19px; }
 }
 
-/* Light mode opt-in for users with that system preference. The
-   color tokens flip; everything else inherits from the cascade. */
-@media (prefers-color-scheme: light) {
-    :root {
-        --bg: #fafaf9;
-        --bg-card: #ffffff;
-        --bg-elevated: #f3f3f1;
-        --border: #e2e2dc;
-        --border-accent: #c9c9c2;
-        --text: #2a2a32;
-        --text-bright: #14141c;
-        --text-dim: #6a6a78;
-        --accent: #6a3eb8;
-        --accent-hover: #4f2c8b;
-        --mauve-bg: rgba(106, 62, 184, 0.08);
-        --red: #b54a4a;
-        --red-bg: rgba(181, 74, 74, 0.08);
-    }
-}
+/* No light-mode override. Ryokan's main app (login.html, setup.html,
+   forgot_password.html, every page under base.css) is dark-only by
+   design; the broker pages match. The default tokens above hold
+   regardless of `prefers-color-scheme`. */
