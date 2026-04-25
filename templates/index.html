@@ -18,8 +18,21 @@
                native `change` (fires after blur or Enter), so
                either control standalone or in combination produces
                a single navigation. #}
-            {% if !custom_list_names.is_empty() || !genre_names.is_empty() || !score_format.is_empty() %}
             <form method="get" action="/" class="library-filter-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                {# Library search. Case-insensitive substring match
+                   against the three title fields (english/romaji/
+                   native); composes with the list filter and sort.
+                   Submits on Enter (form default) and on blur after
+                   edit (`change` event) so the user doesn't have to
+                   hit Enter explicitly. #}
+                <label for="library-search" class="visually-hidden">Search library</label>
+                <input type="search"
+                       id="library-search"
+                       name="search"
+                       placeholder="Search library…"
+                       class="library-genre-input"
+                       value="{{ search_query }}"
+                       onchange="this.form.submit()">
                 {% if !custom_list_names.is_empty() %}
                 <label for="library-list-filter" class="visually-hidden">Filter by custom list</label>
                 <select id="library-list-filter" name="list" class="folder-select" onchange="this.form.submit()">
@@ -28,28 +41,6 @@
                     <option value="{{ name }}"{% if name.as_str() == custom_list_filter.as_str() %} selected{% endif %}>{{ name }}</option>
                     {% endfor %}
                 </select>
-                {% endif %}
-                {% if !genre_names.is_empty() %}
-                {# #62 PR E — genre filter with HTML5 datalist
-                   autocomplete. The user types a genre name,
-                   browser shows matches from the bound datalist;
-                   on commit (blur/Enter) the form submits and the
-                   handler applies the filter. No JS required for
-                   the autocomplete; the small "✕" inside is the
-                   reset (visible only when filter is active). #}
-                <label for="library-genre-filter" class="visually-hidden">Filter by genre</label>
-                <input type="search"
-                       id="library-genre-filter"
-                       name="genre"
-                       list="library-genre-options"
-                       placeholder="Filter by genre…"
-                       class="library-genre-input"
-                       value="{{ genre_filter }}">
-                <datalist id="library-genre-options">
-                    {% for name in genre_names %}
-                    <option value="{{ name }}"></option>
-                    {% endfor %}
-                </datalist>
                 {% endif %}
                 {% if !score_format.is_empty() %}
                 {# #62 PR E — sort-by-user-score. Hidden when no
@@ -62,11 +53,10 @@
                     <option value="score"{% if sort_value.as_str() == "score" %} selected{% endif %}>My score (high → low)</option>
                 </select>
                 {% endif %}
-                {% if !genre_filter.is_empty() || !custom_list_filter.is_empty() %}
+                {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
                 <a class="btn btn-pill library-filter-clear" href="/" title="Clear filters">Clear</a>
                 {% endif %}
             </form>
-            {% endif %}
             {# Reserved width preserves the filter row's original
                left edge after the Needs Review button was removed
                — without it, the right-side flex box shrinks to
@@ -80,16 +70,16 @@
 
 {% if library.is_empty() %}
 <div class="empty-state">
-    {% if !genre_filter.is_empty() || !custom_list_filter.is_empty() %}
-    {# #62 PR E — distinguish "filter excluded everything" from
-       "library is genuinely empty." Keeps the user from thinking
-       the library was wiped. #}
+    {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
+    {# Distinguish "filter excluded everything" from "library is
+       genuinely empty." Keeps the user from thinking the library
+       was wiped. #}
     <p>No series match your current filter.</p>
     <p class="form-hint">
-        {% if !genre_filter.is_empty() && !custom_list_filter.is_empty() %}
-        Filtered by list <strong>{{ custom_list_filter }}</strong> and genre <strong>{{ genre_filter }}</strong>.
-        {% else if !genre_filter.is_empty() %}
-        Filtered by genre <strong>{{ genre_filter }}</strong>.
+        {% if !search_query.is_empty() && !custom_list_filter.is_empty() %}
+        Filtered by list <strong>{{ custom_list_filter }}</strong> and search <strong>"{{ search_query }}"</strong>.
+        {% else if !search_query.is_empty() %}
+        No matches for <strong>"{{ search_query }}"</strong>.
         {% else %}
         Filtered by list <strong>{{ custom_list_filter }}</strong>.
         {% endif %}

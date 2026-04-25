@@ -37,11 +37,12 @@ pub struct LibraryIndexQuery {
     /// across navigations.
     #[serde(default)]
     pub list: Option<String>,
-    /// #62 PR E — `?genre=<name>` filter. Same shape as `list`;
-    /// the two filters compose (set both → series must satisfy
-    /// both predicates).
+    /// `?search=<text>` library search. Case-insensitive substring
+    /// match against `title_english` / `title_romaji` /
+    /// `title_native`; composes with `list` (set both → series must
+    /// satisfy both predicates).
     #[serde(default)]
-    pub genre: Option<String>,
+    pub search: Option<String>,
     /// #62 PR E — `?sort=<key>` ordering. Currently supports
     /// `recent` (default; SQL `ORDER BY added_at DESC`) and `score`
     /// (user-score descending — only meaningful when an account is
@@ -111,22 +112,17 @@ pub async fn index(
         library.retain(|s| matching_ids.contains(&s.id));
     }
 
-    // #62 PR E — genre filter. Same shape as the list filter and
-    // composes with it (when both are set, retain rows that satisfy
-    // both). distinct_genres feeds the input's <datalist> so the
-    // user sees autocomplete suggestions while typing.
-    let genre_names = crate::models::series_genres::distinct_genres(&state.db)
-        .await
-        .unwrap_or_default();
-    let genre_filter = q.genre.unwrap_or_default();
-    if !genre_filter.is_empty() {
-        let matching_ids: std::collections::HashSet<i64> =
-            crate::models::series_genres::series_ids_in_genre(&state.db, &genre_filter)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-        library.retain(|s| matching_ids.contains(&s.id));
+    // Library search. Case-insensitive substring match against the
+    // three title fields. Composes with the list filter (set both →
+    // series must satisfy both predicates).
+    let search_query = q.search.unwrap_or_default();
+    if !search_query.trim().is_empty() {
+        let needle = search_query.trim().to_lowercase();
+        library.retain(|s| {
+            s.title_english.to_lowercase().contains(&needle)
+                || s.title_romaji.to_lowercase().contains(&needle)
+                || s.title_native.to_lowercase().contains(&needle)
+        });
     }
 
     // #62 PR E — sort-by-user-score. SQL already returned series
@@ -166,8 +162,7 @@ pub async fn index(
         score_format,
         custom_list_names,
         custom_list_filter,
-        genre_names,
-        genre_filter,
+        search_query,
         sort_value,
     };
     Html(template.render().unwrap_or_default())

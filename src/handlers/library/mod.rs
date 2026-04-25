@@ -32,14 +32,10 @@ struct IndexTemplate {
     /// applied the filter to `library`; this field drives the
     /// dropdown's selected-option state on render.
     custom_list_filter: String,
-    /// #62 PR E — distinct genre names across the library, sorted
-    /// alphabetically. Powers the genre filter input's `<datalist>`
-    /// autocomplete. Empty when no metadata has been cached yet
-    /// (template hides the input).
-    genre_names: Vec<String>,
-    /// Currently-active genre filter value from `?genre=<name>`.
-    /// Same shape as `custom_list_filter`.
-    genre_filter: String,
+    /// Currently-active library search query from `?search=<text>`.
+    /// Echoed back so the input's `value` persists across
+    /// navigations.
+    search_query: String,
     /// #62 PR E — `recent` (default) or `score`. The handler has
     /// already applied the sort to `library`; this field drives the
     /// dropdown's selected-option state.
