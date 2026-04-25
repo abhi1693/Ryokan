@@ -242,12 +242,31 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
 }
 
 /// Remove the linked account. Per decision #8, preserves any
-/// imported series rows — this call only drops the `external_accounts`
-/// row. Callers that want to clear `series.user_score` / custom-list
-/// side tables invoke those model functions separately; keeping the
-/// concerns split so the unlink path can be composed from the UI
-/// side without this module growing a grab-bag of cleanup args.
+/// imported series rows but wipes the per-account state: `user_score`
+/// (which renders as "You: X" against the just-unlinked provider's
+/// `score_format`) and the FK-on-`series` `synced_from_external_
+/// account_id` (the ON DELETE SET NULL on the FK does this automatically
+/// once the account row is gone). Custom-list memberships will get
+/// the same treatment in PR D.
+///
+/// Without the user_score wipe, an unlink → re-link-different-provider
+/// flow would render every prior AL POINT_100 score as a MAL POINT_10
+/// integer (a literal `You: 85` for a series the user never rated on
+/// the new account). Per the plan doc: "user scores [are] lost" on
+/// re-link-different-account.
 pub async fn unlink(db: &SqlitePool, id: i64) -> Result<(), String> {
+    // Order matters: clear user_score on rows synced from THIS
+    // account BEFORE the account row goes away (the FK is set to
+    // SET NULL on cascade, so after the DELETE we'd lose the join
+    // key). Bounded to synced-from-this-account rows so a concurrent
+    // unlink-from-other-provider doesn't wipe an unrelated account's
+    // ratings.
+    sqlx::query("UPDATE series SET user_score = NULL WHERE synced_from_external_account_id = ?")
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("user_score wipe failed: {e}"))?;
+
     sqlx::query("DELETE FROM external_accounts WHERE id = ?")
         .bind(id)
         .execute(db)
@@ -298,6 +317,29 @@ pub struct ImportPreferences {
     pub import_dropped: bool,
     pub import_completed: bool,
     pub skip_already_watched: bool,
+}
+
+/// Refresh the `score_format` column. Called from the AL sync path
+/// after each successful `fetch_media_list_collection` so a user
+/// changing their POINT_X preference on AL post-link takes effect on
+/// the next "You: X" badge render. No-op when `score_format` is
+/// empty (treats "AL omitted the field on this response" as "leave
+/// the known-good value alone").
+pub async fn update_score_format(
+    db: &SqlitePool,
+    id: i64,
+    score_format: &str,
+) -> Result<(), String> {
+    if score_format.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("UPDATE external_accounts SET score_format = ? WHERE id = ?")
+        .bind(score_format)
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("update_score_format failed: {e}"))?;
+    Ok(())
 }
 
 /// Stamp the watch-list sync cursor(s) after a successful tick.

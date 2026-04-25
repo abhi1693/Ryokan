@@ -890,6 +890,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // #62 PR C — user's personal score on the linked AL/MAL account
+    // for this series. NULL means "no linked account" or "unrated"
+    // (the watch-list sync writes 0.0 for unrated entries; the read
+    // path treats 0.0 the same as NULL when rendering — never shows
+    // "You: 0"). REAL because AL's POINT_10_DECIMAL format stores
+    // fractional values; integer formats store as e.g. 8.0 and the
+    // render helper formats them back as integers.
+    sqlx::query("ALTER TABLE series ADD COLUMN user_score REAL")
+        .execute(db)
+        .await
+        .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (

@@ -44,7 +44,12 @@ fn media_list_collection_response() -> serde_json::Value {
                             }
                         ]
                     }
-                ]
+                ],
+                "user": {
+                    "mediaListOptions": {
+                        "scoreFormat": "POINT_10_DECIMAL"
+                    }
+                }
             }
         }
     })
@@ -197,6 +202,27 @@ async fn watch_list_sync_imports_series_with_resolved_monitor_mode() {
         acct.list_full_resync_at.unwrap_or(0) > 0,
         "first sync is a full sync; list_full_resync_at must also advance"
     );
+    // The fixture's MediaListCollection response carries
+    // user.mediaListOptions.scoreFormat = "POINT_10_DECIMAL"; the
+    // sync MUST persist that on every tick so the user's
+    // post-link POINT_X change takes effect on the next render.
+    // The link seed above started at "POINT_10" — assert the
+    // refresh actually happened.
+    assert_eq!(
+        acct.score_format, "POINT_10_DECIMAL",
+        "sync must refresh score_format from the AL response"
+    );
+
+    // Series row carries user_score = 8.5 from the fixture entry's
+    // `score: 8.5`. Renders via the user's POINT_10_DECIMAL format.
+    assert_eq!(row.user_score, Some(8.5));
+    let formatted =
+        ryokan::services::user_score::format_user_score(row.user_score, &acct.score_format);
+    let html = formatted
+        .as_ref()
+        .expect("badge should render")
+        .render_html();
+    assert_eq!(html, "8.5");
 
     // Cleanup: clear the override so other tests in the same process
     // (sequential within a `cargo test` invocation but separate test

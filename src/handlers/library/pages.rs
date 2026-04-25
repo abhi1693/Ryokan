@@ -46,12 +46,24 @@ pub async fn index(State(state): State<AppState>) -> Html<String> {
     )
     .await;
 
+    // #62 PR C — pull the linked account's score_format so library
+    // cards can render "You: X" badges per row. Empty string when
+    // no account is linked, in which case Series::user_score_display
+    // returns None and no badge renders.
+    let score_format = crate::models::external_accounts::get_current(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|a| a.score_format)
+        .unwrap_or_default();
+
     let template = IndexTemplate {
         page: "library".to_string(),
         library,
         title_language: cfg
             .map(|c| c.title_language)
             .unwrap_or_else(|| "english".to_string()),
+        score_format,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -180,6 +192,18 @@ pub async fn series_detail(
         } else {
             monitor_mode.clone()
         };
+
+    // #62 PR C — render the "You: X" badge string per the linked
+    // account's score_format. Hidden when no account is linked, the
+    // series has no user_score, or the score is the unrated
+    // sentinel. Computed here so the template just renders the
+    // already-formatted string.
+    let user_score_display = match (db_series.as_ref(), linked_account.as_ref()) {
+        (Some(row), Some(acct)) => {
+            crate::services::user_score::format_user_score(row.user_score, &acct.score_format)
+        }
+        _ => None,
+    };
 
     // Fan out the five independent read paths. Each one was previously
     // awaited serially — on a cold cache that meant 4+ sequential DB
@@ -358,6 +382,7 @@ pub async fn series_detail(
         can_sync_from_external_account,
         sync_provider_label,
         monitor_mode_select_value,
+        user_score_display,
         monitored_count,
         all_monitored,
         allow_upgrades,
