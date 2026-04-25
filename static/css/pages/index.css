@@ -9,16 +9,19 @@
 .library-header-row {
     align-items: center;
 }
+/* Match the `.form-group label` treatment used throughout the
+   settings page (Provider / Import lists / Sync interval). Reads as
+   a section eyebrow rather than a primary headline — drops the
+   Murecho display font and the 24px size in favor of 13px Segoe at
+   the same dim-grey + uppercase + 0.5px letter-spacing the form
+   labels use. */
 .library-header-row h2 {
     margin-bottom: 0;
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 600;
     text-transform: uppercase;
-    /* All-caps wants a touch more breathing room than the base
-       Murecho letter-spacing (-0.005em was tuned for mixed-case);
-       0.06em opens the title up just enough to read as a deliberate
-       display treatment instead of a tight rendered string.
-       Dimmer text color reads as a quiet section label rather than
-       a bright primary headline. */
-    letter-spacing: 0.06em;
+    letter-spacing: 0.5px;
     color: var(--text-dim);
 }
 
