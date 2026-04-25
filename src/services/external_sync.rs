@@ -36,6 +36,7 @@
 //!   2. Settings UI for the per-account interval slider.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use sqlx::SqlitePool;
 
@@ -127,10 +128,16 @@ pub struct SyncEntry {
     pub anilist_id: i64,
     /// Normalized list status across providers.
     pub status: NormalizedStatus,
-    /// Episodes the user has marked watched.
+    /// Episodes the user has marked watched. **Reserved**: the
+    /// current merge step doesn't write this to the `series` row
+    /// (PR B is a "what's on the list" import, not a "watched-state
+    /// mirror"). Carried through the abstraction so a follow-up PR
+    /// can light up the user-progress sync without re-plumbing the
+    /// fetcher.
     pub progress: i64,
-    /// Score on the provider's scale; `0.0` means unrated. Render
-    /// path NEVER displays "You: 0".
+    /// Score on the provider's scale; `0.0` means unrated. **Reserved**:
+    /// same status as `progress` — fetched and normalized, not yet
+    /// written. Render path NEVER displays "You: 0".
     pub score: f64,
     /// Unix epoch (seconds) of the entry's most-recent update on
     /// the provider. The merge engine filters by this against
@@ -652,31 +659,77 @@ pub fn should_full_resync(
     }
 }
 
-/// Drop entries whose `updated_at` is at or before the cursor — the
-/// caller has already merged everything up to and including that
+/// Drop entries whose `updated_at` is strictly before the cursor —
+/// the caller has already merged everything up to and including that
 /// timestamp. With `cursor = None`, all entries pass through (used on
 /// full-sync passes and on the first sync ever).
 ///
-/// `<=` rather than `<` is deliberate: the cursor IS the last-synced
-/// timestamp, so an entry with `updated_at == cursor` was either part
-/// of the previous merge or was changed within the same second and
-/// the next tick will catch it. Either way, dropping it on the
-/// boundary avoids re-merging entries that didn't actually change.
+/// `>=` rather than `>` is deliberate: the cursor is captured BEFORE
+/// the network fetch, so an entry the user just edited at exactly
+/// `cursor` may or may not have been visible to the previous tick's
+/// fetch (provider read-after-write timing, clock skew between us
+/// and the provider). Re-merging an unchanged entry is idempotent
+/// (existing-series → unchanged), but losing a changed entry is a
+/// silent data bug — we'd never re-fetch it unless a later edit
+/// bumped its timestamp. Inclusive boundary is the safe direction.
 pub fn drop_entries_before_cursor(entries: Vec<SyncEntry>, cursor: Option<i64>) -> Vec<SyncEntry> {
     let Some(c) = cursor else {
         return entries;
     };
-    entries.into_iter().filter(|e| e.updated_at > c).collect()
+    entries.into_iter().filter(|e| e.updated_at >= c).collect()
 }
 
-/// Run one sync iteration against the linked account. Called by the
-/// supervised loop in `main.rs::external_sync` once per configured
-/// interval.
+/// Process-wide lock guarding the watch-list sync. Two callers can
+/// race: the supervised cadence loop in `main.rs` and the manual
+/// "Sync now" handler. Without serialization they'd produce two
+/// concurrent fetches, two merge passes against the same `series`
+/// rows (idempotent on data but counters double-count), and two
+/// `spawn_post_merge_bulk_pass` artwork loops.
+///
+/// Mirrors `services::rss::RSS_SYNC_LOCK` but with a split policy:
+/// the supervised path **awaits** the lock (a pending manual sync
+/// shouldn't push the next supervised tick into the exponential-
+/// backoff path), while the manual path **try-locks** and surfaces
+/// a "sync already in progress" error so the user gets immediate
+/// feedback instead of a silent hang.
+static EXTERNAL_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// True when a row exists in `external_accounts`. Used by the
+/// supervised loop to short-circuit before stamping
+/// `scheduled_task_runs` — a 30-minute cadence with no linked
+/// account would otherwise churn the table with "no external
+/// account linked" rows forever.
+pub async fn has_linked_account(db: &SqlitePool) -> bool {
+    matches!(external_accounts::get_current(db).await, Ok(Some(_)))
+}
+
+/// Run one sync iteration against the linked account. Used by the
+/// supervised loop in `main.rs::external_sync`. Awaits
+/// [`EXTERNAL_SYNC_LOCK`] — a manual "Sync now" in flight blocks
+/// this call until the manual sync completes, instead of letting
+/// the supervised tick fail and trigger exponential backoff.
 ///
 /// Returns a one-line summary used by `scheduled_task_runs.detail`.
 /// Errors bubble up so the supervised loop's `mark_finished("error",
 /// …)` path captures the failure.
 pub async fn tick_once(state: &AppState) -> Result<String, String> {
+    let _guard = EXTERNAL_SYNC_LOCK.lock().await;
+    tick_once_inner(state).await
+}
+
+/// Manual-trigger variant. Returns a "sync already running" error
+/// rather than waiting if the supervised loop or another manual
+/// trigger is already mid-tick. The user-facing toast surfaces this
+/// error directly so a double-click doesn't silently queue.
+pub async fn tick_once_or_busy(state: &AppState) -> Result<String, String> {
+    let _guard = EXTERNAL_SYNC_LOCK
+        .try_lock()
+        .map_err(|_| "Watch-list sync is already running.".to_string())?;
+    tick_once_inner(state).await
+}
+
+async fn tick_once_inner(state: &AppState) -> Result<String, String> {
     let account = external_accounts::get_current(&state.db)
         .await
         .map_err(|e| format!("read external_accounts: {e}"))?;
@@ -1426,10 +1479,40 @@ mod tests {
         assert_eq!(kept.len(), 3);
     }
 
+    #[tokio::test]
+    async fn tick_once_or_busy_returns_busy_when_lock_held() {
+        // Hold the sync lock from a separate task and assert that
+        // tick_once_or_busy fails fast with the user-facing message.
+        // Regression for the PR #94 finding: supervised + manual
+        // races used to spawn two concurrent fetches.
+        // multi_thread runtime so the holder can sit on the lock
+        // while the test thread races against it.
+        let lock_held = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let lh = lock_held.clone();
+        let r = release.clone();
+        let holder = tokio::spawn(async move {
+            let _guard = EXTERNAL_SYNC_LOCK.lock().await;
+            lh.notify_one();
+            r.notified().await;
+        });
+        lock_held.notified().await;
+
+        let db = crate::test_support::in_memory_pool().await;
+        let state = crate::test_support::build_test_app_state(db, None);
+        let result = tick_once_or_busy(&state).await;
+        assert!(matches!(&result, Err(msg) if msg.contains("already running")));
+
+        release.notify_one();
+        let _ = holder.await;
+    }
+
     #[test]
-    fn drop_entries_before_cursor_keeps_strictly_newer_entries() {
-        // cursor = 100: entries with updated_at > 100 survive; entries
-        // with updated_at <= 100 (the boundary case included) drop.
+    fn drop_entries_before_cursor_keeps_boundary_and_newer_entries() {
+        // cursor = 100: entries with updated_at >= 100 survive; only
+        // strictly-older entries drop. Inclusive boundary is the safe
+        // direction — see the doc comment on drop_entries_before_cursor
+        // for the read-after-write / clock-skew rationale.
         let mk = |ts| SyncEntry {
             provider: external_accounts::PROVIDER_ANILIST.to_string(),
             provider_media_id: ts,
@@ -1440,11 +1523,12 @@ mod tests {
             updated_at: ts,
             custom_lists: Vec::new(),
         };
-        let entries = vec![mk(50), mk(100), mk(101), mk(200)];
+        let entries = vec![mk(50), mk(99), mk(100), mk(101), mk(200)];
         let kept = drop_entries_before_cursor(entries, Some(100));
-        assert_eq!(kept.len(), 2);
-        assert_eq!(kept[0].updated_at, 101);
-        assert_eq!(kept[1].updated_at, 200);
+        assert_eq!(kept.len(), 3, "boundary entry (100) must be kept");
+        assert_eq!(kept[0].updated_at, 100);
+        assert_eq!(kept[1].updated_at, 101);
+        assert_eq!(kept[2].updated_at, 200);
     }
 
     #[tokio::test]

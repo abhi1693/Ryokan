@@ -336,6 +336,31 @@ pub async fn fetch_media_list_collection(
         }
     }
 
+    // Sanity log: zero entries kept across all non-custom-list buckets
+    // when the response actually had buckets means either the user has
+    // an empty list (legitimate) OR a future AL schema change made
+    // every bucket `isCustomList: true` (which would silently produce
+    // empty syncs forever). Surface the latter via a tracing warn so
+    // it shows up in the operator's logs even when the sync looks
+    // "successful" with zero results. Doesn't fail the call — an
+    // empty list IS a valid state for new accounts.
+    if out.is_empty() && !lists.is_empty() {
+        let custom_count = lists
+            .iter()
+            .filter(|l| {
+                l.get("isCustomList")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
+            .count();
+        if custom_count == lists.len() {
+            tracing::warn!(
+                "AniList MediaListCollection returned {} buckets, all isCustomList=true; sync will see zero entries until the schema is investigated",
+                lists.len()
+            );
+        }
+    }
+
     Ok(out)
 }
 

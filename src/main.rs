@@ -1685,13 +1685,32 @@ async fn main() {
                         .await;
 
                         // Exponential backoff on consecutive errors:
-                        // skip 2^errors extra intervals (capped at 32).
+                        // skip 2^errors extra intervals (errors capped
+                        // at 5 → max 32x multiplier). Outer ceiling
+                        // caps the wait at max(every, 24h) so a 7-day
+                        // cadence with five errors doesn't push the
+                        // next retry seven months out — `.max(every)`
+                        // prevents the ceiling from retrying SOONER
+                        // than the configured cadence.
+                        const SUPERVISED_BACKOFF_CEILING_MIN: i64 = 24 * 60;
                         let backoff = if consecutive_errors > 0 {
-                            every * (1i64 << consecutive_errors.min(5))
+                            (every.saturating_mul(1i64 << consecutive_errors.min(5)))
+                                .min(SUPERVISED_BACKOFF_CEILING_MIN.max(every))
                         } else {
                             every
                         };
                         if minutes_since_last < backoff {
+                            continue;
+                        }
+
+                        // No linked account → don't churn
+                        // scheduled_task_runs with one "no account"
+                        // row per cadence interval. Reset the counter
+                        // so once an account IS linked, the next tick
+                        // fires promptly instead of waiting out a
+                        // residual `every`-minutes window.
+                        if !services::external_sync::has_linked_account(&state.db).await {
+                            minutes_since_last = 0;
                             continue;
                         }
 

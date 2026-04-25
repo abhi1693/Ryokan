@@ -330,6 +330,13 @@ pub(crate) const EXTERNAL_SYNC_INTERVAL_CEILING_MIN: i32 = 10080; // 7 days
 /// to the 30-minute default rather than the nearest bound — a value
 /// outside `15..=10080` is more likely a hand-crafted POST or a
 /// stale form than a deliberate edge.
+///
+/// Missing-form-value behavior: the integrations template always
+/// emits the field, so the missing case shouldn't arise from the UI.
+/// When it does (a future bug or a scripted POST that omits it), we
+/// preserve the existing persisted value rather than resetting to the
+/// default — losing a configured 7-day cadence to a UI bug would be a
+/// user-visible regression.
 pub(crate) fn resolve_external_sync_interval_minutes(
     form_value: Option<i32>,
     tab: Option<&str>,
@@ -343,7 +350,15 @@ pub(crate) fn resolve_external_sync_interval_minutes(
             {
                 v
             }
-            _ => EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN,
+            // Out-of-range form value: still resets to default — the
+            // out-of-range submission is a hand-crafted/malicious POST
+            // signal, not a "user accidentally cleared the field"
+            // case. Preserving an out-of-range existing value would
+            // also be wrong (it can't be persisted via normal flow).
+            Some(_) => EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN,
+            // Field absent from the POST: keep the persisted value.
+            // First-time save (existing = None) falls back to default.
+            None => existing.unwrap_or(EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN),
         }
     } else {
         existing.unwrap_or(EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN)
@@ -1598,14 +1613,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_external_sync_interval_missing_form_value_falls_back_to_default() {
-        // Field absent → coerce to default rather than reading from
-        // existing. Reflects "form didn't include the field" being
-        // distinct from "form sent a deliberate value." On the
-        // Integrations tab we trust the form to be authoritative.
+    fn resolve_external_sync_interval_missing_form_value_preserves_existing() {
+        // Field absent from a POST that should have included it
+        // (template bug, scripted POST that omits it). Preserve the
+        // user's persisted value rather than resetting to default —
+        // losing a configured 7-day cadence to a UI bug would be a
+        // user-visible regression. Out-of-range form values still
+        // reset (separate test) since those signal hand-crafted
+        // POSTs we don't trust.
         assert_eq!(
             resolve_external_sync_interval_minutes(None, Some("integrations"), Some(60)),
-            EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
+            60
         );
     }
 
@@ -1616,6 +1634,17 @@ mod tests {
         // reason the resolver should still produce a valid value.
         assert_eq!(
             resolve_external_sync_interval_minutes(None, Some("quality"), None),
+            EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
+        );
+    }
+
+    #[test]
+    fn resolve_external_sync_interval_missing_form_and_existing_uses_default() {
+        // First-time save on a fresh install with the field missing.
+        // No existing value to preserve, so default is the only sane
+        // landing.
+        assert_eq!(
+            resolve_external_sync_interval_minutes(None, Some("integrations"), None),
             EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
         );
     }

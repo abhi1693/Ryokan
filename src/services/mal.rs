@@ -212,13 +212,33 @@ pub async fn fetch_animelist(token: &str) -> Result<Vec<MalAnimeListEntry>, MalF
             });
         }
 
+        // Validate the next-page URL points at MAL's own API host
+        // before following it. The bearer token rides the request
+        // verbatim; without this check, a server-side bug or
+        // upstream shape-change that emitted a foreign URL in
+        // `paging.next` would leak the access token to a third-party
+        // host. MAL's animelist endpoint always lives on
+        // `api.myanimelist.net`, so a non-matching host is either a
+        // bug or an attack and we abort the walk rather than follow.
         next_url = body
             .pointer("/paging/next")
             .and_then(|v| v.as_str())
+            .filter(|s| paging_url_is_trusted(s))
             .map(|s| s.to_string());
     }
 
     Ok(out)
+}
+
+/// True when `url` is an absolute URL pointing at MAL's API host.
+/// `paging.next` is trusted by the loop above only when this returns
+/// true. Pulled out for unit-testability — covers the bearer-token-
+/// leak scenario surfaced by the PR #94 review.
+fn paging_url_is_trusted(url: &str) -> bool {
+    match reqwest::Url::parse(url) {
+        Ok(u) => u.scheme() == "https" && u.host_str() == Some("api.myanimelist.net"),
+        Err(_) => false,
+    }
 }
 
 /// POST to `/v1/oauth2/token` with `grant_type=refresh_token`.
@@ -268,13 +288,20 @@ pub async fn refresh_access_token(refresh_token: &str) -> Result<TokenResponse, 
 }
 
 /// Truncate a body excerpt for log messages. MAL's error responses
-/// can carry HTML in some failure modes; capping at 240 chars
-/// keeps the `logs` table from accumulating multi-KB blobs.
+/// can carry HTML in some failure modes; capping at 240 chars keeps
+/// the `logs` table from accumulating multi-KB blobs. **Char-aware**
+/// rather than byte-aware: a Cloudflare error page interspersed with
+/// localized strings can land a multi-byte UTF-8 sequence across the
+/// 240-byte boundary, and a byte slice through the middle of one
+/// would panic. Mirrors `services::anilist::rate_limit::excerpt`.
 fn excerpt(s: &str) -> String {
-    if s.len() <= 240 {
-        s.to_string()
+    const MAX_CHARS: usize = 240;
+    let mut iter = s.chars();
+    let prefix: String = iter.by_ref().take(MAX_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{}…", prefix)
     } else {
-        format!("{}…", &s[..240])
+        prefix
     }
 }
 
@@ -408,5 +435,66 @@ mod tests {
     fn excerpt_passes_short_strings_through() {
         assert_eq!(excerpt("ok"), "ok");
         assert_eq!(excerpt(""), "");
+    }
+
+    #[test]
+    fn excerpt_does_not_panic_on_multibyte_boundary() {
+        // Regression for the byte-slice variant: 240 ASCII chars
+        // followed by a 3-byte UTF-8 character means the byte boundary
+        // (240) lands inside the multi-byte sequence. A byte slice
+        // would panic with "byte index 240 is not a char boundary";
+        // the char-aware version takes 240 chars and keeps going.
+        let mut s = "x".repeat(240);
+        s.push('日');
+        s.push('本');
+        let got = excerpt(&s);
+        assert!(got.ends_with('…'), "long input must be ellipsized");
+        // First 240 chars are ASCII 'x'; the cap fires before the
+        // multi-byte chars are ever sliced through.
+        assert!(got.starts_with(&"x".repeat(240)));
+    }
+
+    #[test]
+    fn paging_url_is_trusted_accepts_canonical_mal_api_host() {
+        assert!(paging_url_is_trusted(
+            "https://api.myanimelist.net/v2/users/@me/animelist?offset=300"
+        ));
+    }
+
+    #[test]
+    fn paging_url_is_trusted_rejects_foreign_hosts() {
+        // A bearer-token-leak scenario: a bug or upstream shape change
+        // emits paging.next pointing at a different host. The walker
+        // must NOT follow it.
+        assert!(!paging_url_is_trusted("https://attacker.example/page"));
+        assert!(!paging_url_is_trusted("https://myanimelist.net/page"));
+        // Subdomain-of-myanimelist that isn't api.myanimelist.net.
+        assert!(!paging_url_is_trusted("https://forum.myanimelist.net/x"));
+    }
+
+    #[test]
+    fn paging_url_is_trusted_rejects_non_https_scheme() {
+        // Plaintext HTTP would leak the token to a network observer
+        // even on the right host.
+        assert!(!paging_url_is_trusted(
+            "http://api.myanimelist.net/v2/users/@me/animelist"
+        ));
+    }
+
+    #[test]
+    fn paging_url_is_trusted_rejects_unparseable() {
+        assert!(!paging_url_is_trusted("not a url"));
+        assert!(!paging_url_is_trusted(""));
+    }
+
+    #[test]
+    fn excerpt_under_cap_with_multibyte_passes_through_unchanged() {
+        // 100 multi-byte chars (300 bytes) is over the byte cap of the
+        // old impl but under the 240-char cap of the new one. Should
+        // pass through clean with no ellipsis.
+        let s: String = std::iter::repeat_n('日', 100).collect();
+        let got = excerpt(&s);
+        assert_eq!(got, s);
+        assert!(!got.ends_with('…'));
     }
 }

@@ -469,7 +469,12 @@ pub async fn sync_now(
     let spawn_state = state.clone();
     let spawn_handle = handle.clone();
     tokio::spawn(async move {
-        let outcome = external_sync::tick_once(&spawn_state).await;
+        // try-lock variant so a click while a supervised tick is in
+        // flight produces an immediate "already running" toast
+        // instead of a silent multi-minute wait that the user can't
+        // tell apart from a hung backend. Supervised ticks use the
+        // await-lock variant (external_sync::tick_once).
+        let outcome = external_sync::tick_once_or_busy(&spawn_state).await;
         if let Some(h) = spawn_handle {
             match outcome {
                 Ok(summary) => {
