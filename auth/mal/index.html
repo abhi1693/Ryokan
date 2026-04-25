@@ -60,6 +60,21 @@
 <body>
   <h1>Ryokan — MyAnimeList Authorization</h1>
 
+  <div id="autofilled" hidden>
+    <p><strong>Sent to Ryokan.</strong> The code and state were posted back to your Ryokan tab automatically — switch to that tab to confirm the link landed. This window will close in a few seconds.</p>
+    <p class="form-hint" id="autoclose-hint" style="opacity:0.7"></p>
+    <details style="margin-top:16px">
+      <summary>Manual copy-paste fallback</summary>
+      <p>If the auto-postback didn't work (your Ryokan tab was closed, or a popup blocker interfered), the values are below — copy them manually into <strong>Settings → Integrations → External Accounts</strong>.</p>
+      <h2>Authorization code</h2>
+      <code id="code-fallback" class="value"></code>
+      <button id="copy-code-fallback" type="button">Copy code</button>
+      <h2>State</h2>
+      <code id="state-fallback" class="value"></code>
+      <button id="copy-state-fallback" type="button">Copy state</button>
+    </details>
+  </div>
+
   <div id="success" hidden>
     <p>MyAnimeList has issued an authorization code for Ryokan. Copy <strong>both</strong> the code and the state value below, then paste them into your Ryokan instance under <strong>Settings → Integrations → External Accounts</strong>.</p>
 
@@ -112,12 +127,61 @@
         });
       }
 
+      // Same auto-postback path as the AniList broker page — see
+      // auth/anilist/index.html for the full rationale. If
+      // `window.opener` is set (this tab was opened from a Ryokan
+      // tab via window.open), post the code + state back so the
+      // user doesn't have to copy-paste. Receiver-side handler in
+      // static/js/settings.js validates origin against this broker
+      // before auto-submitting.
+      function tryAutofill(code, state) {
+        if (!window.opener || window.opener.closed) {
+          return false;
+        }
+        try {
+          window.opener.postMessage(
+            {
+              type: 'ryokan-oauth-mal',
+              code: code,
+              state: state || '',
+            },
+            '*'
+          );
+          return true;
+        } catch (e) {
+          console.warn('postMessage to opener failed:', e);
+          return false;
+        }
+      }
+
       if (error) {
         document.getElementById('error-block').hidden = false;
         document.getElementById('error-msg').textContent = errorDesc
           ? error + ': ' + errorDesc
           : error;
       } else if (code) {
+        var autofilled = tryAutofill(code, state);
+
+        if (autofilled) {
+          document.getElementById('autofilled').hidden = false;
+          document.getElementById('code-fallback').textContent = code;
+          document.getElementById('state-fallback').textContent = state || '';
+          bindCopy('copy-code-fallback', 'code-fallback', 'Copy code');
+          bindCopy('copy-state-fallback', 'state-fallback', 'Copy state');
+          var closeIn = 5;
+          var hint = document.getElementById('autoclose-hint');
+          var tick = setInterval(function () {
+            closeIn -= 1;
+            if (hint) hint.textContent = 'Closing in ' + closeIn + 's…';
+            if (closeIn <= 0) {
+              clearInterval(tick);
+              try { window.close(); } catch (e) { /* ignore */ }
+            }
+          }, 1000);
+          if (hint) hint.textContent = 'Closing in ' + closeIn + 's…';
+          return;
+        }
+
         document.getElementById('success').hidden = false;
         document.getElementById('code').textContent = code;
         // State should always be present — Ryokan's /start always
