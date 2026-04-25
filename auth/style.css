@@ -133,7 +133,10 @@ body {
     text-transform: uppercase;
     font-family: var(--font-display);
     font-weight: 600;
-    margin-bottom: 4px;
+    /* Generous gap to the heading below so the eyebrow reads as a
+       section label with breathing room, not as a kerned subhead
+       crammed against its title. */
+    margin-bottom: 22px;
 }
 
 .broker-heading {
@@ -191,7 +194,15 @@ body {
     line-height: 1.5;
 }
 
-/* Buttons matching Ryokan's btn-primary / btn-secondary aesthetic. */
+/* Buttons matching Ryokan's btn-primary / btn-secondary aesthetic.
+ * Single style for every Copy button on the broker pages: neutral
+ * by default, accent border + tinted-accent background + accent
+ * text on hover. The earlier two-tier `.is-primary` distinction was
+ * dropped because it made the "Copy code" button read as
+ * persistently-highlighted next to a "Copy state" that needed to
+ * be hovered to come alive. Both copy actions are equally
+ * important (state without code is unusable, code without state
+ * fails CSRF), so they share one treatment now. */
 .broker-btn {
     appearance: none;
     -webkit-appearance: none;
@@ -210,20 +221,20 @@ body {
     transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 .broker-btn:hover {
-    border-color: var(--border-accent);
-    color: var(--text-bright);
-}
-.broker-btn:active {
-    background: var(--bg);
-}
-.broker-btn.is-primary {
     background: var(--mauve-bg);
     border-color: var(--accent);
     color: var(--accent);
 }
-.broker-btn.is-primary:hover {
+.broker-btn:active {
     background: rgba(203, 166, 247, 0.18);
     color: var(--accent-hover);
+}
+/* When a Copy button is followed by prose (the "Copy state" button
+   above the explanatory paragraph), give the text room to breathe
+   instead of butting up against the button bottom. */
+.broker-btn + p,
+.broker-btn + section {
+    margin-top: 22px;
 }
 
 /* The "Sent to Ryokan" success card sits on a tinted accent surface
