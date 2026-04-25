@@ -21,19 +21,16 @@
 //!
 //! ## Status (this commit)
 //!
-//! End-to-end fetch + merge for AniList watch lists, and AniList-
-//! resolvable MyAnimeList watch lists (via `anibridge::lookup_anilist_by_mal`).
-//! MAL entries that anibridge can't resolve are counted as
-//! `deferred_jikan` and skipped — the Jikan-fallback path that writes
-//! them under the negated-MAL-id sentinel (`-mal_id`) lands in a
-//! follow-up commit. Still pending:
+//! End-to-end fetch + merge + delta cursor for AniList watch lists,
+//! and AniList-resolvable MyAnimeList watch lists (via
+//! `anibridge::lookup_anilist_by_mal`). MAL entries that anibridge
+//! can't resolve are counted as `deferred_jikan` and skipped — the
+//! Jikan-fallback path that writes them under the negated-MAL-id
+//! sentinel (`-mal_id`) lands in a follow-up commit. Still pending:
 //!   1. Jikan-fallback merge for `deferred_jikan` entries.
 //!   2. Bulk-mode coalescing for sync-originated adds (defer Jellyfin
 //!      refresh + RSS sync until the first-sync drain completes).
-//!   3. Delta cursor (`list_last_synced_at`) so a tick only refetches
-//!      entries with `updatedAt > cursor`, plus a weekly full-resync
-//!      backstop.
-//!   4. Manual "Sync now" button + ProgressRegistry hook for the
+//!   3. Manual "Sync now" button + ProgressRegistry hook for the
 //!      sticky-toast first-sync UI.
 
 use std::collections::HashMap;
@@ -431,6 +428,52 @@ async fn merge_one_anilist_entry(
     Ok(MergeAction::Created)
 }
 
+/// Seven days of seconds; the weekly full-resync backstop interval.
+/// Made an associated constant rather than a magic number so the value
+/// shows up in tests and so a future "raise this to 30 days" change is
+/// trivial.
+pub const FULL_RESYNC_INTERVAL_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Decide whether the current tick should be a full resync (vs. a
+/// delta from `list_last_synced_at`). True when:
+///   - There's no `list_full_resync_at` yet (first sync after link).
+///   - `list_full_resync_at` is older than the weekly backstop window.
+///   - There's no `list_last_synced_at` either (cursor unset; nothing
+///     to delta against — equivalent to a first sync).
+///
+/// Pure function so the cursor decision stays unit-testable without
+/// mocking the clock.
+pub fn should_full_resync(
+    list_last_synced_at: Option<i64>,
+    list_full_resync_at: Option<i64>,
+    now_unix_ts: i64,
+) -> bool {
+    if list_last_synced_at.is_none() {
+        return true;
+    }
+    match list_full_resync_at {
+        None => true,
+        Some(t) => now_unix_ts.saturating_sub(t) >= FULL_RESYNC_INTERVAL_SECS,
+    }
+}
+
+/// Drop entries whose `updated_at` is at or before the cursor — the
+/// caller has already merged everything up to and including that
+/// timestamp. With `cursor = None`, all entries pass through (used on
+/// full-sync passes and on the first sync ever).
+///
+/// `<=` rather than `<` is deliberate: the cursor IS the last-synced
+/// timestamp, so an entry with `updated_at == cursor` was either part
+/// of the previous merge or was changed within the same second and
+/// the next tick will catch it. Either way, dropping it on the
+/// boundary avoids re-merging entries that didn't actually change.
+pub fn drop_entries_before_cursor(entries: Vec<SyncEntry>, cursor: Option<i64>) -> Vec<SyncEntry> {
+    let Some(c) = cursor else {
+        return entries;
+    };
+    entries.into_iter().filter(|e| e.updated_at > c).collect()
+}
+
 /// Run one sync iteration against the linked account. Called by the
 /// supervised loop in `main.rs::external_sync` once per configured
 /// interval.
@@ -447,15 +490,42 @@ pub async fn tick_once(state: &AppState) -> Result<String, String> {
         return Ok("no external account linked".to_string());
     };
 
-    match account.provider.as_str() {
-        external_accounts::PROVIDER_ANILIST => sync_anilist(state, &account).await,
-        external_accounts::PROVIDER_MAL => sync_mal(state, account).await,
+    // Capture the tick's wall-clock at entry, before any network
+    // fetch. The cursor we stamp on success is "the moment we started
+    // looking" — using the post-fetch time would risk dropping
+    // entries the user updated while we were syncing.
+    let tick_started_at = current_unix_ts();
+    let is_full_sync = should_full_resync(
+        account.list_last_synced_at,
+        account.list_full_resync_at,
+        tick_started_at,
+    );
+    let delta_cursor = if is_full_sync {
+        None
+    } else {
+        account.list_last_synced_at
+    };
+
+    let summary = match account.provider.as_str() {
+        external_accounts::PROVIDER_ANILIST => sync_anilist(state, &account, delta_cursor).await,
+        external_accounts::PROVIDER_MAL => sync_mal(state, account.clone(), delta_cursor).await,
         other => {
             // Unknown provider string — schema CHECK constraint should
             // prevent this, but surface explicitly rather than panic.
-            Err(format!("unknown external_accounts.provider: {other}"))
+            return Err(format!("unknown external_accounts.provider: {other}"));
         }
-    }
+    }?;
+
+    // Only stamp on success — a failed tick must not advance the
+    // cursor or the entries it skipped fetching would be lost forever.
+    external_accounts::stamp_list_synced(&state.db, account.id, tick_started_at, is_full_sync)
+        .await?;
+
+    Ok(if is_full_sync {
+        format!("{summary} [full-resync]")
+    } else {
+        format!("{summary} [delta]")
+    })
 }
 
 /// Fetch the AL watch list and merge entries into the library. AL
@@ -468,6 +538,7 @@ pub async fn tick_once(state: &AppState) -> Result<String, String> {
 async fn sync_anilist(
     state: &AppState,
     account: &external_accounts::ExternalAccount,
+    delta_cursor: Option<i64>,
 ) -> Result<String, String> {
     let user_id: i64 = account.provider_user_id.parse().map_err(|e| {
         format!(
@@ -488,8 +559,15 @@ async fn sync_anilist(
         skip_already_watched: account.skip_already_watched,
     };
     let entries = entries_from_anilist(raw, &prefs);
+    let after_prefs = entries.len();
+    let dropped = raw_total - after_prefs;
+
+    // Delta filter: drop entries that haven't changed since the last
+    // successful tick. On a full-resync run delta_cursor = None, so
+    // every entry passes through.
+    let entries = drop_entries_before_cursor(entries, delta_cursor);
     let kept = entries.len();
-    let dropped = raw_total - kept;
+    let stale_dropped = after_prefs - kept;
 
     // Pre-fetch AnimeDetail for the AL ids that aren't already in the
     // local series table. Existing rows skip the fetch — the merge
@@ -510,16 +588,13 @@ async fn sync_anilist(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "AniList watch-list synced: {kept} kept ({dropped} skipped), {} created, {} monitor-mode updated, {} unchanged, {} failed",
+            "AniList watch-list synced: {kept} kept ({dropped} skipped, {stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
             outcome.failed.len(),
         ),
-        &format!(
-            "username={} fetched_total={raw_total}",
-            account.username
-        ),
+        &format!("username={} fetched_total={raw_total}", account.username),
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
@@ -586,6 +661,7 @@ async fn log_failed_entries(db: &SqlitePool, outcome: &MergeOutcome) {
 async fn sync_mal(
     state: &AppState,
     account: external_accounts::ExternalAccount,
+    delta_cursor: Option<i64>,
 ) -> Result<String, String> {
     let mut access_token = account.access_token.clone();
 
@@ -652,8 +728,15 @@ async fn sync_mal(
         skip_already_watched: account.skip_already_watched,
     };
     let normalized = entries_from_mal(entries, &prefs);
+    let after_prefs = normalized.len();
+    let dropped = raw_total - after_prefs;
+
+    // Delta filter happens BEFORE anibridge resolution / detail fetch
+    // so a delta tick doesn't incur a single network call when the
+    // user's list hasn't changed since last tick.
+    let normalized = drop_entries_before_cursor(normalized, delta_cursor);
     let kept = normalized.len();
-    let dropped = raw_total - kept;
+    let stale_dropped = after_prefs - kept;
 
     // Resolve MAL → AL via anibridge. Misses fall back to the
     // negated-MAL-id sentinel, which the merge step skips for now
@@ -682,17 +765,14 @@ async fn sync_mal(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "MyAnimeList watch-list synced: {kept} kept ({dropped} skipped), {} created, {} monitor-mode updated, {} unchanged, {} deferred (no anibridge mapping), {} failed",
+            "MyAnimeList watch-list synced: {kept} kept ({dropped} skipped, {stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} deferred (no anibridge mapping), {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
             outcome.deferred_jikan,
             outcome.failed.len(),
         ),
-        &format!(
-            "username={} fetched_total={raw_total}",
-            account.username
-        ),
+        &format!("username={} fetched_total={raw_total}", account.username),
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
@@ -1005,6 +1085,82 @@ mod tests {
             updated_at: 0,
             custom_lists: Vec::new(),
         }
+    }
+
+    // ── Delta cursor / full-resync helpers ────────────────────────
+
+    #[test]
+    fn should_full_resync_when_no_cursor_at_all() {
+        // Fresh link: list_last_synced_at and list_full_resync_at are
+        // both None → first sync MUST be full to populate everything.
+        assert!(should_full_resync(None, None, 1_700_000_000));
+    }
+
+    #[test]
+    fn should_full_resync_when_only_full_resync_missing() {
+        // Defensive: list_last_synced_at populated but
+        // list_full_resync_at NULL means the cursor schema landed
+        // mid-deployment; treat as "no full sync ever, run one now."
+        assert!(should_full_resync(Some(1_700_000_000), None, 1_700_000_001));
+    }
+
+    #[test]
+    fn should_full_resync_after_seven_day_window() {
+        let now = 2_000_000_000;
+        let just_under = now - FULL_RESYNC_INTERVAL_SECS + 1;
+        let exactly = now - FULL_RESYNC_INTERVAL_SECS;
+        let beyond = now - FULL_RESYNC_INTERVAL_SECS - 1;
+        assert!(
+            !should_full_resync(Some(just_under), Some(just_under), now),
+            "below threshold → delta"
+        );
+        assert!(
+            should_full_resync(Some(exactly), Some(exactly), now),
+            "exactly at threshold → full (>= boundary)"
+        );
+        assert!(
+            should_full_resync(Some(beyond), Some(beyond), now),
+            "past threshold → full"
+        );
+    }
+
+    #[test]
+    fn drop_entries_before_cursor_passes_all_when_cursor_missing() {
+        // First sync ever: cursor None means every entry merges.
+        let mk = |ts| SyncEntry {
+            provider: external_accounts::PROVIDER_ANILIST.to_string(),
+            provider_media_id: ts,
+            anilist_id: ts,
+            status: NormalizedStatus::Watching,
+            progress: 0,
+            score: 0.0,
+            updated_at: ts,
+            custom_lists: Vec::new(),
+        };
+        let entries = vec![mk(1), mk(2), mk(3)];
+        let kept = drop_entries_before_cursor(entries, None);
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn drop_entries_before_cursor_keeps_strictly_newer_entries() {
+        // cursor = 100: entries with updated_at > 100 survive; entries
+        // with updated_at <= 100 (the boundary case included) drop.
+        let mk = |ts| SyncEntry {
+            provider: external_accounts::PROVIDER_ANILIST.to_string(),
+            provider_media_id: ts,
+            anilist_id: ts,
+            status: NormalizedStatus::Watching,
+            progress: 0,
+            score: 0.0,
+            updated_at: ts,
+            custom_lists: Vec::new(),
+        };
+        let entries = vec![mk(50), mk(100), mk(101), mk(200)];
+        let kept = drop_entries_before_cursor(entries, Some(100));
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].updated_at, 101);
+        assert_eq!(kept[1].updated_at, 200);
     }
 
     #[tokio::test]
