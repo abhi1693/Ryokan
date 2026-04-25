@@ -8,6 +8,8 @@ use tokio::sync::RwLock;
 use crate::services::jikan;
 
 mod rate_limit;
+#[cfg(any(test, feature = "test-support"))]
+pub use rate_limit::reset_state_for_tests;
 use rate_limit::{
     ANILIST_COOLDOWN_DEFAULT, AniListFailureKind, classify_anilist_failure, cooldown_from_headers,
     excerpt, extract_graphql_error, record_rate_limit_headers, set_anilist_cooldown,
@@ -15,7 +17,19 @@ use rate_limit::{
 };
 pub use rate_limit::{anilist_cooldown_active, is_rate_limit_error};
 
-const ANILIST_API: &str = "https://graphql.anilist.co";
+const ANILIST_API_DEFAULT: &str = "https://graphql.anilist.co";
+
+/// AL GraphQL endpoint, with a `RYOKAN_ANILIST_API_BASE` override
+/// the same shape as `JIKAN_API_BASE`. Re-read on every call rather
+/// than cached so tests can flip it per-fixture without process
+/// restart; the env-var lookup is sub-microsecond and dwarfed by the
+/// network round-trip that follows it.
+fn anilist_api_base() -> String {
+    std::env::var("RYOKAN_ANILIST_API_BASE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ANILIST_API_DEFAULT.to_string())
+}
 
 /// TTL for the search result cache. Short enough to stay fresh, long enough to
 /// absorb bursts of repeat queries (which is what actually hammers AniList/Jikan
@@ -207,7 +221,7 @@ pub async fn fetch_media_list_collection(
     throttle_before_anilist_request().await;
 
     let resp = HTTP_CLIENT
-        .post(ANILIST_API)
+        .post(anilist_api_base())
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
         .header("User-Agent", "Ryokan/0.1")
         .json(&body)
@@ -273,10 +287,35 @@ pub async fn fetch_media_list_collection(
             "AniList MediaListCollection missing data.MediaListCollection.lists".to_string()
         })?;
 
-    // Walk only the non-custom-list buckets to avoid double-counting
-    // entries that appear under both their primary status and one or
-    // more custom-list buckets. Per-entry `customLists` Json gives us
-    // membership directly, so we don't need the bucket walk for that.
+    let out = parse_media_list_collection_lists(lists);
+
+    // Sanity log: zero entries kept across all non-custom-list buckets
+    // when the response actually had buckets means either the user has
+    // an empty list (legitimate) OR a future AL schema change made
+    // every bucket `isCustomList: true` (which would silently produce
+    // empty syncs forever). Surface the latter via a tracing warn so
+    // it shows up in the operator's logs even when the sync looks
+    // "successful" with zero results. Doesn't fail the call — an
+    // empty list IS a valid state for new accounts.
+    if out.is_empty() && all_buckets_are_custom_lists(lists) {
+        tracing::warn!(
+            "AniList MediaListCollection returned {} buckets, all isCustomList=true; sync will see zero entries until the schema is investigated",
+            lists.len()
+        );
+    }
+
+    Ok(out)
+}
+
+/// Walk only the non-custom-list buckets to avoid double-counting
+/// entries that appear under both their primary status and one or
+/// more custom-list buckets. Per-entry `customLists` Json gives us
+/// membership directly, so we don't need the bucket walk for that.
+///
+/// Pure helper extracted from `fetch_media_list_collection` so the
+/// parse logic + the all-isCustomList sanity branch are unit-testable
+/// without standing up an HTTP mock against `graphql.anilist.co`.
+fn parse_media_list_collection_lists(lists: &[serde_json::Value]) -> Vec<AniListMediaListEntry> {
     let mut out: Vec<AniListMediaListEntry> = Vec::new();
     for list in lists {
         if list
@@ -335,33 +374,22 @@ pub async fn fetch_media_list_collection(
             });
         }
     }
+    out
+}
 
-    // Sanity log: zero entries kept across all non-custom-list buckets
-    // when the response actually had buckets means either the user has
-    // an empty list (legitimate) OR a future AL schema change made
-    // every bucket `isCustomList: true` (which would silently produce
-    // empty syncs forever). Surface the latter via a tracing warn so
-    // it shows up in the operator's logs even when the sync looks
-    // "successful" with zero results. Doesn't fail the call — an
-    // empty list IS a valid state for new accounts.
-    if out.is_empty() && !lists.is_empty() {
-        let custom_count = lists
-            .iter()
-            .filter(|l| {
-                l.get("isCustomList")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            })
-            .count();
-        if custom_count == lists.len() {
-            tracing::warn!(
-                "AniList MediaListCollection returned {} buckets, all isCustomList=true; sync will see zero entries until the schema is investigated",
-                lists.len()
-            );
-        }
+/// True when every entry in `lists` is flagged `isCustomList: true`.
+/// Empty `lists` returns false — that's the "no buckets at all" case
+/// (a brand-new AL account with no list activity), not the "schema
+/// drift" signal the sanity warning fires for.
+fn all_buckets_are_custom_lists(lists: &[serde_json::Value]) -> bool {
+    if lists.is_empty() {
+        return false;
     }
-
-    Ok(out)
+    lists.iter().all(|l| {
+        l.get("isCustomList")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    })
 }
 
 /// Search AniList for anime by title, falling back to MAL/Jikan if AniList 403s.
@@ -447,7 +475,7 @@ pub async fn search_anime_with_options(
 
     let client = &*HTTP_CLIENT;
     let resp = match client
-        .post(ANILIST_API)
+        .post(anilist_api_base())
         .header("User-Agent", "Ryokan/0.1")
         .json(&gql)
         .send()
@@ -943,7 +971,7 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Option<AnimeDetai
 
     let client = &*HTTP_CLIENT;
     let resp = client
-        .post(ANILIST_API)
+        .post(anilist_api_base())
         .header("User-Agent", "Ryokan/0.1")
         .json(&gql)
         .send()
@@ -1280,7 +1308,7 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
         throttle_before_anilist_request().await;
 
         let resp = client
-            .post(ANILIST_API)
+            .post(anilist_api_base())
             .header("User-Agent", "Ryokan/0.1")
             .json(&gql)
             .send()
@@ -1485,5 +1513,123 @@ mod tests {
         // A different normalized key should miss.
         let other = normalize_search_key(false, "completely different");
         assert!(search_cache_get(&other).is_none());
+    }
+
+    // ── parse_media_list_collection_lists / all_buckets_are_custom_lists ─
+
+    #[test]
+    fn parse_media_list_collection_drops_custom_buckets_keeps_status_buckets() {
+        // Per-entry customLists membership is read from the entry, so
+        // status buckets pass through; isCustomList: true buckets are
+        // skipped entirely to avoid double-counting an entry that
+        // appears in both its status bucket and a custom one.
+        let lists = serde_json::json!([
+            {
+                "isCustomList": false,
+                "entries": [
+                    {
+                        "mediaId": 100,
+                        "status": "CURRENT",
+                        "progress": 4,
+                        "score": 8.5,
+                        "updatedAt": 1_700_000_000_i64,
+                        "notes": "",
+                        "customLists": {"My picks": true, "On hold": false},
+                    },
+                    {
+                        "mediaId": 200,
+                        "status": "PLANNING",
+                        "progress": 0,
+                        "score": 0,
+                        "updatedAt": 1_700_000_001_i64,
+                        "notes": "",
+                        "customLists": {},
+                    }
+                ]
+            },
+            {
+                "isCustomList": true,
+                "entries": [
+                    {"mediaId": 100, "status": "CURRENT", "progress": 4}
+                ]
+            }
+        ]);
+        let arr = lists.as_array().unwrap();
+        let out = parse_media_list_collection_lists(arr);
+        assert_eq!(out.len(), 2, "custom-list bucket must not double-count");
+        assert_eq!(out[0].media_id, 100);
+        assert_eq!(out[0].status, "CURRENT");
+        assert_eq!(out[0].progress, 4);
+        assert!((out[0].score - 8.5).abs() < f64::EPSILON);
+        assert_eq!(out[0].custom_lists, vec!["My picks".to_string()]);
+        assert_eq!(out[1].media_id, 200);
+        assert_eq!(out[1].status, "PLANNING");
+        assert!(out[1].custom_lists.is_empty());
+    }
+
+    #[test]
+    fn parse_media_list_collection_handles_missing_optional_fields() {
+        // A real AL response omits `notes` for some entries and the
+        // `customLists` object can be missing entirely. Defaults must
+        // not panic or skip the entry.
+        let lists = serde_json::json!([{
+            "isCustomList": false,
+            "entries": [{"mediaId": 7}]
+        }]);
+        let out = parse_media_list_collection_lists(lists.as_array().unwrap());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].media_id, 7);
+        assert_eq!(out[0].progress, 0);
+        assert!(out[0].notes.is_empty());
+        assert!(out[0].custom_lists.is_empty());
+    }
+
+    #[test]
+    fn parse_media_list_collection_drops_entries_without_media_id() {
+        // A defensive write-side bug at AL would emit an entry with no
+        // mediaId. Our merge step keys on it; better to drop than to
+        // produce a 0-id row that later collides with everything.
+        let lists = serde_json::json!([{
+            "isCustomList": false,
+            "entries": [
+                {"status": "CURRENT"},
+                {"mediaId": 99, "status": "CURRENT"}
+            ]
+        }]);
+        let out = parse_media_list_collection_lists(lists.as_array().unwrap());
+        assert_eq!(out.len(), 1, "entry without mediaId must be dropped");
+        assert_eq!(out[0].media_id, 99);
+    }
+
+    #[test]
+    fn all_buckets_are_custom_lists_returns_false_on_empty() {
+        // Empty `lists` is the "no buckets at all" case, NOT the
+        // schema-drift signal. Returning true here would fire the
+        // sanity warn for legitimate brand-new accounts.
+        assert!(!all_buckets_are_custom_lists(&[]));
+    }
+
+    #[test]
+    fn all_buckets_are_custom_lists_true_when_every_bucket_is_custom() {
+        // The signal the sanity warn fires for: AL ships a schema
+        // change where every bucket is `isCustomList: true` and our
+        // walker would silently produce empty syncs forever.
+        let lists = serde_json::json!([
+            {"isCustomList": true, "entries": []},
+            {"isCustomList": true, "entries": []}
+        ]);
+        let arr = lists.as_array().unwrap();
+        assert!(all_buckets_are_custom_lists(arr));
+    }
+
+    #[test]
+    fn all_buckets_are_custom_lists_false_when_any_bucket_is_status() {
+        // Mixed shape (today's reality) → no warn.
+        let lists = serde_json::json!([
+            {"isCustomList": false, "entries": []},
+            {"isCustomList": true, "entries": []}
+        ]);
+        let arr = lists.as_array().unwrap();
+        assert!(!all_buckets_are_custom_lists(arr));
     }
 }

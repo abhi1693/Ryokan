@@ -1575,6 +1575,18 @@ mod tests {
             outcome.new_artwork[0].banner_url,
             "https://example/banner.jpg"
         );
+
+        // metadata_cache row is written inline so the UI sees full
+        // metadata immediately on next page load instead of waiting
+        // on the next 12h metadata_refresh sweep. Without this the
+        // newly-imported series page renders bare title + status only.
+        let cached = crate::models::metadata_cache::get_by_series_id(&db, row.id)
+            .await
+            .unwrap()
+            .expect("metadata_cache row should exist after merge");
+        assert_eq!(cached.detail.id, 12345);
+        assert_eq!(cached.detail.title_english, "Example");
+        assert!(cached.is_fresh, "freshly-cached row must be is_fresh");
     }
 
     #[tokio::test]

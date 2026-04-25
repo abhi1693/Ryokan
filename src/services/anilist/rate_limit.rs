@@ -378,6 +378,21 @@ pub(super) fn set_cooldown_until_now_plus(dur: Duration) {
     }
 }
 
+/// Test-only: clear the global cooldown + rate-limit-headroom state.
+/// Both are process-wide LazyLocks, so a stray cooldown left over
+/// from one test (e.g. a wiremock that returned 429) would block the
+/// next test's request. Tests that exercise the AL HTTP path should
+/// call this at entry and exit.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_state_for_tests() {
+    if let Ok(mut g) = ANILIST_COOLDOWN_UNTIL.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = RATE_LIMIT_STATE.lock() {
+        *g = None;
+    }
+}
+
 /// Extract the first GraphQL-level error message from an AniList response
 /// body. Shared with `mod.rs` callers that need to surface the GraphQL
 /// message alongside the HTTP status.

@@ -882,4 +882,50 @@ mod tests {
             "second attempt must surface 'no pending authorization', got: {msg_2}"
         );
     }
+
+    #[tokio::test]
+    async fn sync_now_returns_json_body_when_no_account_linked() {
+        // Regression for the PR #94 r2 finding: this path used to
+        // return `(StatusCode, String)` which Axum serves as plain
+        // text. The frontend toast parses the body as JSON to decide
+        // whether to finalize as error; an unparseable body left the
+        // toast spinning indefinitely. The handler now emits JSON so
+        // both transport-layer and application-layer errors finalize
+        // the toast cleanly.
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        // No `external_accounts` row → handler hits the `.ok_or(...)`
+        // branch and returns the JSON-bodied 400.
+        let result = sync_now(
+            State(app_state),
+            Json(SyncNowForm {
+                progress_id: Some("p_test_1".into()),
+            }),
+        )
+        .await;
+        let (status, body) = match result {
+            Err(e) => e,
+            Ok(_) => panic!("sync_now must reject when no account is linked"),
+        };
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        let body_value = body.0.clone();
+        assert_eq!(
+            body_value.get("ok").and_then(|v| v.as_bool()),
+            Some(false),
+            "JSON body MUST carry ok:false so the toast finalizes; \
+             previous plain-text body left the spinner stuck"
+        );
+        let err_text = body_value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(
+            err_text.contains("no external account"),
+            "error string should call out the no-link state, got: {err_text}"
+        );
+    }
 }
