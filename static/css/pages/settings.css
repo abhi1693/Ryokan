@@ -632,477 +632,82 @@ fieldset legend {
 
 .cf-score-zero { color: var(--text-dim); }
 
-/* ─── External Accounts card — #62 PR E redesign ─────────────────
-   The previous "list of stacked widgets" treatment didn't give
-   users a fast read of (a) which provider is linked, (b) whether
-   sync is alive, (c) what the user's preferences are. The card
-   below collapses those into one dashboard-style surface:
-     • accent stripe down the left edge identifies the provider
-       at a glance
-     • status strip surfaces "Last sync · 4 minutes ago · every
-       30 min" inline with the primary [Sync now] action
-     • banners (auth-fail / mapping-fail) live between status and
-       prefs so they read as sync-related signals
-     • prefs in a 2-column grid (less stacking, easier scan)
-     • Unlink demoted to a quiet text link in the footer corner —
-       destructive action shouldn't compete with the everyday
-       Sync now button visually
+/* ─── External Accounts — #62 PR E ────────────────────────────────
+   The fieldset itself is the standard connections-tab fieldset (no
+   bespoke surface). Just three small primitives below to support
+   the linked-state content:
+     • .ext-alert — inline alert blocks for the auth-fail / mapping-
+       fail banners. Sized to fit between fieldset's intro paragraph
+       and form-groups; same vertical rhythm as a form-hint paragraph.
+     • .ext-prefs-row — wrap-flex container for the import-list
+       checkbox-rows so they fit 2-3 per line on a wide viewport
+       instead of stacking five-deep.
+     • .form-display — read-only value text rendered inside a
+       form-group for "label / static value" rows (Provider,
+       Username, Score format). Mirrors the input padding so the
+       column lines up with the inputs in adjacent form-groups. */
 
-   Reuses Ryokan's accent/dim/border tokens; adds no new ones. */
-
-.ext-accounts-intro {
-    margin-top: -4px;
-    margin-bottom: 16px;
-}
-
-.ext-card {
-    position: relative;
-    background: var(--bg-elevated, var(--bg));
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    overflow: hidden;
-    /* Soft elevation; matches the depth of existing fieldsets without
-       drawing attention away from the legend above. */
-    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25), 0 8px 24px -16px rgba(0, 0, 0, 0.45);
-}
-
-/* Provider stripe on the left edge — 3px solid accent so the card
-   visually identifies as "linked AL/MAL" before the user reads any
-   text. Decorative; aria-hidden on the markup. */
-.ext-card-stripe {
-    position: absolute;
-    inset: 0 auto 0 0;
-    width: 3px;
-    background: linear-gradient(
-        180deg,
-        rgba(203, 166, 247, 0.65) 0%,
-        rgba(203, 166, 247, 0.18) 100%
-    );
-}
-
-.ext-card[data-provider="mal"] .ext-card-stripe {
-    /* MAL gets a slightly different hue to make a provider switch
-       visible on a glance — same family, different temperature. */
-    background: linear-gradient(
-        180deg,
-        rgba(125, 176, 211, 0.65) 0%,
-        rgba(125, 176, 211, 0.18) 100%
-    );
-}
-
-.ext-card-body {
-    padding: 18px 22px 16px 22px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-/* ── 1. Identity row ─────────────────────────────────────────── */
-
-.ext-card-identity {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-}
-
-.ext-card-dot {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 0 4px rgba(203, 166, 247, 0.16);
-    flex-shrink: 0;
-}
-
-.ext-card[data-provider="mal"] .ext-card-dot {
-    background: rgb(125, 176, 211);
-    box-shadow: 0 0 0 4px rgba(125, 176, 211, 0.18);
-}
-
-.ext-card-identity-text {
-    display: flex;
-    flex-direction: column;
-    line-height: 1.2;
-    min-width: 0;
-}
-
-.ext-card-provider {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--text-dim);
-}
-
-.ext-card-username {
-    font-size: 17px;
-    font-weight: 600;
-    color: var(--text-bright);
-    margin-top: 2px;
-}
-
-.ext-card-meta-tag {
-    margin-left: auto;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border-subtle);
-    font-size: 11px;
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
-
-/* ── 2. Status strip ─────────────────────────────────────────── */
-
-.ext-card-status {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    padding: 10px 14px;
-    background: rgba(255, 255, 255, 0.025);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius);
-}
-
-.ext-card-status-meta {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    flex-wrap: wrap;
-    font-size: 13px;
-}
-
-.ext-card-status-label {
-    color: var(--text-dim);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    font-weight: 600;
-}
-
-.ext-card-status-value {
-    color: var(--text);
-    font-variant-numeric: tabular-nums;
-}
-
-.ext-card-status-sep {
-    color: var(--border);
-    margin: 0 4px;
-}
-
-.ext-card-sync-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-}
-
-/* The refresh glyph subtly rotates on hover. The spin-during-sync
-   class is reserved for the JS path that flips it while a manual
-   sync is in flight — wired up in static/js/settings.js if/when
-   the toast lifecycle exposes it. */
-.ext-card-sync-icon {
-    display: inline-block;
-    font-size: 14px;
-    line-height: 1;
-    transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.ext-card-sync-btn:hover .ext-card-sync-icon {
-    transform: rotate(180deg);
-}
-
-/* ── 3. Banners ──────────────────────────────────────────────── */
-
-.ext-card-banner {
-    padding: 12px 14px;
+.ext-alert {
+    padding: 10px 12px;
     border-radius: var(--radius);
     font-size: 13px;
     line-height: 1.5;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.ext-card-banner p {
-    margin: 0;
+    margin-bottom: 12px;
     color: var(--text);
 }
 
-.ext-card-banner-eyebrow {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
+.ext-alert strong {
+    font-weight: 600;
 }
 
-.ext-card-banner-error {
+.ext-alert-error {
     background: rgba(211, 125, 125, 0.10);
     border: 1px solid rgba(211, 125, 125, 0.32);
 }
 
-.ext-card-banner-error .ext-card-banner-eyebrow {
+.ext-alert-error strong {
     color: var(--red);
 }
 
-.ext-card-banner-warn {
+.ext-alert-warn {
     background: rgba(211, 176, 125, 0.10);
     border: 1px solid rgba(211, 176, 125, 0.30);
 }
 
-.ext-card-banner-warn .ext-card-banner-eyebrow {
-    color: var(--orange);
-}
-
-.ext-card-banner-warn strong {
+.ext-alert-warn strong {
     color: var(--orange);
     font-variant-numeric: tabular-nums;
 }
 
-/* ── 4. Sections (prefs, interval) — eyebrow + content ───────── */
-
-.ext-card-section {
+/* Wrap-flex for the 5 import-list checkbox-rows. Default
+   checkbox-row is inline-display (set by base.css elsewhere); the
+   row gives them horizontal spacing + wraps cleanly on narrow.
+   2-3 per line on typical desktop, 1 per line on mobile. */
+.ext-prefs-row {
     display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding-top: 14px;
-    border-top: 1px solid var(--border-subtle);
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    margin-bottom: 6px;
 }
 
-.ext-card-eyebrow {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.9px;
-    color: var(--text-dim);
-}
-
-.ext-card-eyebrow label {
-    font: inherit;
-    color: inherit;
-    text-transform: inherit;
-    letter-spacing: inherit;
+.ext-prefs-row .checkbox-row {
     margin: 0;
+    /* Match the form-input padding so row height feels consistent
+       with the surrounding inputs without forcing the eye to retune. */
+    padding: 4px 0;
+    /* Minimum width keeps the longest label ("Plan to Watch") on one
+       line and prevents a checkbox from orphaning when wrapped. */
+    min-width: 130px;
 }
 
-.ext-card-prefs-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(140px, 1fr));
-    gap: 8px 24px;
-}
-
-@media (max-width: 480px) {
-    .ext-card-prefs-grid {
-        grid-template-columns: 1fr;
-    }
-}
-
-.ext-card-pref {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    cursor: pointer;
-    font-size: 13px;
-    color: var(--text);
-    user-select: none;
-    transition: color 0.12s;
-}
-
-.ext-card-pref:hover {
-    color: var(--text-bright);
-}
-
-.ext-card-pref input[type="checkbox"] {
-    width: 14px;
-    height: 14px;
-    accent-color: var(--accent);
-    cursor: pointer;
-    flex-shrink: 0;
-}
-
-/* The skip-already-watched row uses a richer pref shape: title +
-   hint stacked, with the checkbox aligned to the start so the long
-   explanatory copy doesn't push it off-axis. */
-.ext-card-pref-toggle {
-    align-items: flex-start;
-    gap: 10px;
-}
-
-.ext-card-pref-toggle input[type="checkbox"] {
-    margin-top: 2px;
-}
-
-.ext-card-pref-label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-}
-
-.ext-card-pref-title {
-    font-weight: 500;
-    color: var(--text);
-}
-
-.ext-card-pref-hint {
-    font-size: 12px;
-    color: var(--text-dim);
-    line-height: 1.5;
-}
-
-.ext-card-pref-hint code {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    padding: 1px 5px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--border-subtle);
-    border-radius: 3px;
-    color: var(--text);
-}
-
-/* ── 6. Sync interval ─────────────────────────────────────────── */
-
-.ext-card-interval {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 8px;
-}
-
-.ext-card-interval input[type="number"] {
-    width: 90px;
-    padding: 8px 10px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+/* Read-only display field inside a form-group. Visually feels like
+   an input row (same padding / box) but styled as static text so
+   the user doesn't expect to edit it. */
+.form-display {
+    display: inline-block;
+    padding: 8px 0;
     color: var(--text);
     font-size: 14px;
     font-family: var(--font-body);
-    font-variant-numeric: tabular-nums;
-    appearance: textfield;
-    -moz-appearance: textfield;
-}
-
-.ext-card-interval input[type="number"]:focus {
-    outline: none;
-    border-color: var(--accent);
-}
-
-.ext-card-interval input[type="number"]::-webkit-outer-spin-button,
-.ext-card-interval input[type="number"]::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-.ext-card-interval-unit {
-    font-size: 13px;
-    color: var(--text-dim);
-}
-
-.ext-card-interval-hint {
-    font-size: 11px;
-    color: var(--text-dim);
-}
-
-/* ── 7. Footer (Unlink demoted to quiet link) ────────────────── */
-
-.ext-card-footer {
-    display: flex;
-    justify-content: flex-end;
-    padding-top: 10px;
-    margin-top: -4px;
-    border-top: 1px dashed var(--border-subtle);
-}
-
-.ext-card-unlink {
-    background: none;
-    border: none;
-    padding: 4px 0;
-    color: var(--text-dim);
-    font-size: 12px;
-    font-family: inherit;
-    cursor: pointer;
-    text-decoration: underline;
-    text-underline-offset: 3px;
-    text-decoration-color: var(--border);
-    transition: color 0.12s, text-decoration-color 0.12s;
-}
-
-.ext-card-unlink:hover,
-.ext-card-unlink:focus-visible {
-    color: var(--red);
-    text-decoration-color: var(--red);
-    outline: none;
-}
-
-/* ─── Unlinked state — provider tiles ─────────────────────────── */
-
-.ext-link-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 12px;
-    margin-bottom: 12px;
-}
-
-.ext-link-tile {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 16px;
-    background: var(--bg-elevated, var(--bg));
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    transition: border-color 0.15s, transform 0.15s;
-}
-
-.ext-link-tile:hover {
-    border-color: rgba(203, 166, 247, 0.4);
-    transform: translateY(-1px);
-}
-
-.ext-link-tile-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.ext-link-tile-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-}
-
-.ext-link-tile-dot-al {
-    background: var(--accent);
-}
-
-.ext-link-tile-dot-mal {
-    background: rgb(125, 176, 211);
-}
-
-.ext-link-tile-name {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-bright);
-}
-
-.ext-link-tile-blurb {
-    margin: 0;
-    font-size: 12px;
-    color: var(--text-dim);
-    line-height: 1.5;
-    flex-grow: 1;
-}
-
-.ext-link-tile-cta {
-    align-self: flex-start;
-}
-
-.ext-link-attribution {
-    font-size: 11px;
-    color: var(--text-dim);
 }
 
