@@ -38,7 +38,7 @@ use crate::AppState;
 use crate::models::external_accounts::{self, ImportPreferences};
 use crate::models::log::LogCategory;
 use crate::models::monitoring::MonitorMode;
-use crate::services::{anilist, logger, mal};
+use crate::services::{anibridge, anilist, logger, mal};
 
 // ── Provider-agnostic sync entry abstraction ──────────────────────
 
@@ -248,6 +248,43 @@ pub fn entries_from_mal(
         .collect()
 }
 
+/// Fill in `anilist_id` for MAL-sourced entries via anibridge lookup.
+/// Entries that already carry a non-zero `anilist_id` (i.e. AL-sourced)
+/// pass through unchanged.
+///
+/// On a successful MAL→AL lookup, sets `anilist_id` to the matching
+/// AniList ID — this is the value the merge step writes to
+/// `series.anilist_id`, which means SeaDex / AL-keyed scoring then
+/// works for the entry the same way it would for a manually-added AL
+/// series.
+///
+/// On a miss, falls back to the negated-MAL-id sentinel
+/// (`anilist_id = -provider_media_id`) so the entry still lands in the
+/// library and the existing reconcile-fallbacks flow can promote it
+/// to a real AL ID later if anibridge gains a mapping.
+///
+/// **Caller is responsible for ensuring the anibridge cache is loaded
+/// first** (typically via `anibridge::ensure_loaded().await`). This
+/// function only reads — it never triggers a download. Splitting the
+/// load and the lookup keeps tests deterministic: they can seed the
+/// cache directly without racing the real network fetch.
+pub async fn resolve_mal_anilist_ids(mut entries: Vec<SyncEntry>) -> Vec<SyncEntry> {
+    for entry in &mut entries {
+        if entry.anilist_id != 0 {
+            // AL-sourced: provider_media_id IS the AL id. Already set.
+            continue;
+        }
+        match anibridge::lookup_anilist_by_mal(entry.provider_media_id).await {
+            Some(al_id) => entry.anilist_id = al_id,
+            // Negated-MAL-id sentinel — matches the existing
+            // services::jikan fallback convention so reconcile and
+            // every AL-id-filtered query keeps its `> 0` guard.
+            None => entry.anilist_id = -entry.provider_media_id,
+        }
+    }
+    entries
+}
+
 /// Run one sync iteration against the linked account. Called by the
 /// supervised loop in `main.rs::external_sync` once per configured
 /// interval.
@@ -440,6 +477,14 @@ pub async fn minutes_since_last_run(db: &SqlitePool) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The anibridge CACHE is process-global, so the three async
+    /// resolver tests below have to serialize their seed→lookup→clear
+    /// sequences or they race each other. A static Mutex held for the
+    /// duration of each test is the simplest reliable guard; using
+    /// `tokio::sync::Mutex` (not std) so awaits inside the critical
+    /// section don't deadlock on a parking-lot lock.
+    static ANIBRIDGE_CACHE_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn prefs_default() -> ImportPreferences {
         // Watching + Planning on, the rest off — the plan-doc-decided
@@ -661,6 +706,99 @@ mod tests {
             assert_eq!(e.anilist_id, 0, "MAL anilist_id is 0 pre-resolution");
             assert_eq!(e.provider, external_accounts::PROVIDER_MAL);
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_mal_anilist_ids_uses_anibridge_hit() {
+        // Cache-hit path: MAL 1234 → AL 9999 lives in the seeded
+        // anibridge cache, so the resolver writes the real AL id back
+        // onto the SyncEntry.
+        let _guard = ANIBRIDGE_CACHE_GUARD.lock().await;
+        anibridge::seed_mal_to_anilist_for_tests(&[(1234, 9999)]).await;
+
+        let entries = vec![SyncEntry {
+            provider: external_accounts::PROVIDER_MAL.to_string(),
+            provider_media_id: 1234,
+            anilist_id: 0,
+            status: NormalizedStatus::Watching,
+            progress: 0,
+            score: 0.0,
+            updated_at: 0,
+            custom_lists: Vec::new(),
+        }];
+        let resolved = resolve_mal_anilist_ids(entries).await;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].anilist_id, 9999,
+            "anibridge hit should set anilist_id to the real AL id"
+        );
+
+        anibridge::clear_cache_for_tests().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_mal_anilist_ids_falls_back_to_negated_sentinel_on_miss() {
+        // Empty cache → every lookup misses, every MAL entry gets
+        // anilist_id = -provider_media_id. This is the reconcile-
+        // path-friendly state from the existing Jikan fallback flow.
+        let _guard = ANIBRIDGE_CACHE_GUARD.lock().await;
+        anibridge::seed_mal_to_anilist_for_tests(&[]).await;
+
+        let entries = vec![
+            SyncEntry {
+                provider: external_accounts::PROVIDER_MAL.to_string(),
+                provider_media_id: 7777,
+                anilist_id: 0,
+                status: NormalizedStatus::Watching,
+                progress: 0,
+                score: 0.0,
+                updated_at: 0,
+                custom_lists: Vec::new(),
+            },
+            SyncEntry {
+                provider: external_accounts::PROVIDER_MAL.to_string(),
+                provider_media_id: 8888,
+                anilist_id: 0,
+                status: NormalizedStatus::Planning,
+                progress: 0,
+                score: 0.0,
+                updated_at: 0,
+                custom_lists: Vec::new(),
+            },
+        ];
+        let resolved = resolve_mal_anilist_ids(entries).await;
+        assert_eq!(resolved[0].anilist_id, -7777);
+        assert_eq!(resolved[1].anilist_id, -8888);
+
+        anibridge::clear_cache_for_tests().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_mal_anilist_ids_passes_through_anilist_entries_unchanged() {
+        // AL entries (anilist_id != 0) MUST NOT be touched even if a
+        // MAL ID with the same numeric value happens to live in the
+        // cache. Otherwise an AL entry whose AL id collides with some
+        // MAL id would be silently rewritten.
+        let _guard = ANIBRIDGE_CACHE_GUARD.lock().await;
+        anibridge::seed_mal_to_anilist_for_tests(&[(1234, 9999)]).await;
+
+        let entries = vec![SyncEntry {
+            provider: external_accounts::PROVIDER_ANILIST.to_string(),
+            provider_media_id: 1234,
+            anilist_id: 1234,
+            status: NormalizedStatus::Watching,
+            progress: 0,
+            score: 0.0,
+            updated_at: 0,
+            custom_lists: Vec::new(),
+        }];
+        let resolved = resolve_mal_anilist_ids(entries).await;
+        assert_eq!(
+            resolved[0].anilist_id, 1234,
+            "AL pass-through must not be rewritten"
+        );
+
+        anibridge::clear_cache_for_tests().await;
     }
 
     #[test]

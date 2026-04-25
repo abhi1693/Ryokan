@@ -372,6 +372,39 @@ pub async fn lookup_anilist_by_mal(mal_id: i64) -> Option<i64> {
         .copied()
 }
 
+/// Test-only: seed the in-memory cache with a controlled set of MAL→AL
+/// pairs. Called by external_sync's resolve_mal_anilist_ids tests so
+/// they exercise the cache-hit path without depending on the real
+/// 8.5 MB mappings blob (which may or may not be present on a given
+/// dev machine). All non-MAL→AL maps are left empty — the unit under
+/// test only reads `mal_to_anilist`.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn seed_mal_to_anilist_for_tests(pairs: &[(i64, i64)]) {
+    let mut mal_to_anilist = HashMap::new();
+    for &(mal, al) in pairs {
+        mal_to_anilist.insert(mal, al);
+    }
+    let data = MappingCache {
+        tmdb_to_anime: HashMap::new(),
+        tvdb_to_anime: HashMap::new(),
+        anilist_to_tmdb: HashMap::new(),
+        mal_to_tmdb: HashMap::new(),
+        mal_to_anilist,
+    };
+    let mut w = CACHE.write().await;
+    *w = Some(CacheState { data });
+}
+
+/// Test-only: drop the in-memory cache so a subsequent
+/// `lookup_anilist_by_mal` call exercises the cache-miss path. Pairs
+/// with `seed_mal_to_anilist_for_tests` so a test can simulate both
+/// branches without process-restart isolation.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn clear_cache_for_tests() {
+    let mut w = CACHE.write().await;
+    *w = None;
+}
+
 /// Resolve a TMDB ID from either an AniList ID or a MAL ID. Tries
 /// AniList first, falls back to MAL when given. Returns 0 when neither
 /// path produces a hit — callers (the Sonarr/Radarr compat handlers)
