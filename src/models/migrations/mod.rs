@@ -1580,42 +1580,32 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // doesn't re-run on every boot. Nyaa magnets are overwhelmingly
     // hex so the affected row count should be near zero in practice,
     // but the backfill unifies the partial UNIQUE index on (hash)
-    // once and forever.
-    sqlx::query("ALTER TABLE config ADD COLUMN base32_backfill_done INTEGER NOT NULL DEFAULT 0")
-        .execute(db)
-        .await
-        .ok();
-
-    let backfill_done: i64 =
-        sqlx::query_scalar("SELECT COALESCE((SELECT base32_backfill_done FROM config LIMIT 1), 0)")
-            .fetch_one(db)
+    // once and forever. The `base32_backfill_done` config column the
+    // first version of this migration added is intentionally left in
+    // place on existing DBs (DROP COLUMN is risky and the column is
+    // harmless): the SELECT below already self-gates by length, so
+    // the bespoke flag was redundant from the start. Per CLAUDE.md
+    // ("Do NOT invent a per-migration config flag — that's what
+    // `schema_migrations` is for"), one-shot data rewrites that need
+    // a guard go through `schema_migrations`; this one doesn't need
+    // any guard at all because base32 hashes are 32 chars and hex
+    // hashes are 40, so once a row is converted it never matches the
+    // SELECT again. Re-running on a fully-migrated DB is a no-op.
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, hash FROM grabbed_torrents WHERE LENGTH(hash) = 32")
+            .fetch_all(db)
             .await
-            .unwrap_or(0);
+            .unwrap_or_default();
 
-    if backfill_done == 0 {
-        let rows: Vec<(i64, String)> =
-            sqlx::query_as("SELECT id, hash FROM grabbed_torrents WHERE LENGTH(hash) = 32")
-                .fetch_all(db)
-                .await
-                .unwrap_or_default();
-
-        for (id, b32_hash) in rows {
-            if let Some(bytes) = crate::services::nyaa::base32_decode_infohash(&b32_hash) {
-                let hex_hash = hex::encode(bytes);
-                let _ = sqlx::query("UPDATE grabbed_torrents SET hash = ? WHERE id = ?")
-                    .bind(&hex_hash)
-                    .bind(id)
-                    .execute(db)
-                    .await;
-            }
+    for (id, b32_hash) in rows {
+        if let Some(bytes) = crate::services::nyaa::base32_decode_infohash(&b32_hash) {
+            let hex_hash = hex::encode(bytes);
+            let _ = sqlx::query("UPDATE grabbed_torrents SET hash = ? WHERE id = ?")
+                .bind(&hex_hash)
+                .bind(id)
+                .execute(db)
+                .await;
         }
-
-        // Mark done whether or not any rows were found — fresh installs
-        // with no legacy base32 rows also get the flag set so we don't
-        // rescan on every boot.
-        let _ = sqlx::query("UPDATE config SET base32_backfill_done = 1")
-            .execute(db)
-            .await;
     }
 
     sqlx::query("ALTER TABLE episode_quality_tags ADD COLUMN web_kind TEXT NOT NULL DEFAULT ''")

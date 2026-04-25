@@ -537,3 +537,145 @@ async fn migrate_creates_schema_migrations_table() {
         "schema_migrations table should exist after seed pass"
     );
 }
+
+/// Stronger companion to `migrate_is_idempotent_on_second_invocation`
+/// — that test only proves the second call doesn't *error*. This one
+/// proves it doesn't silently *mutate* user-set values that the
+/// initial migration backfilled.
+///
+/// The Jellyfin URL backfill is the load-bearing case: it derives
+/// `jellyfin_url` from the legacy `jellyfin_host`/`jellyfin_port`/
+/// `jellyfin_use_ssl` columns when `jellyfin_url` is empty. Without
+/// the `WHERE jellyfin_url = ''` gate, a second migration call after
+/// the user customized the derived URL would clobber it back to the
+/// host-derived form. The gate is the actual idempotency guarantee
+/// for every other UPDATE-style backfill in `migrate()`; this test
+/// pins it for the most user-impactful one.
+#[tokio::test]
+async fn migrate_does_not_overwrite_user_values_on_second_invocation() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    migrate(&db).await.expect("first migrate");
+
+    // migrate() doesn't seed the config row (`save_config` does that
+    // on first settings-page write). Seed a minimal row directly so
+    // the test exercises the user-customized-URL → second-migrate
+    // path. Only the four jellyfin_* columns the backfill cares
+    // about need real values.
+    sqlx::query(
+        "INSERT INTO config (id, jellyfin_url, jellyfin_host, jellyfin_port, jellyfin_use_ssl) \
+         VALUES (1, 'https://my.real.jellyfin.example/jf', 'derived.example', '8096', 0)",
+    )
+    .execute(&db)
+    .await
+    .expect("seed config row with user-customized jellyfin_url");
+
+    migrate(&db).await.expect("second migrate must succeed");
+
+    let url: String = sqlx::query_scalar("SELECT jellyfin_url FROM config WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .expect("read jellyfin_url back");
+    assert_eq!(
+        url, "https://my.real.jellyfin.example/jf",
+        "second migrate must not overwrite the user's custom jellyfin_url"
+    );
+}
+
+/// Pin behavior of the typed-rename helper for the
+/// `force_tmdb_fallback` → `force_kitsu_fallback` recovery path.
+/// PR #37's regression shape (ADD-then-RENAME with `.ok()`) used to
+/// leave a stray INTEGER column alongside the new one on a post-
+/// migrated install, with the user's enable/disable bit stranded in
+/// either column depending on which migrate() build ran first.
+/// `reconcile_column_rename_typed` collapses every starting state to
+/// "new column exists, value preserved, legacy column dropped".
+#[tokio::test]
+async fn reconcile_typed_rename_recovers_half_migrated_integer_column() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+
+    // Simulate the half-migrated state: BOTH columns present, user's
+    // bit in the legacy one, new one still at the default 0.
+    sqlx::query(
+        r#"CREATE TABLE config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            force_tmdb_fallback   INTEGER NOT NULL DEFAULT 0,
+            force_kitsu_fallback  INTEGER NOT NULL DEFAULT 0
+        )"#,
+    )
+    .execute(&db)
+    .await
+    .expect("create legacy config");
+    sqlx::query(
+        "INSERT INTO config (id, force_tmdb_fallback, force_kitsu_fallback) VALUES (1, 1, 0)",
+    )
+    .execute(&db)
+    .await
+    .expect("seed legacy bit");
+
+    reconcile_column_rename_typed(
+        &db,
+        "config",
+        "force_tmdb_fallback",
+        "force_kitsu_fallback",
+        "INTEGER NOT NULL DEFAULT 0",
+        "= 0",
+    )
+    .await;
+
+    let kitsu: i64 = sqlx::query_scalar("SELECT force_kitsu_fallback FROM config WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .expect("read new column");
+    assert_eq!(
+        kitsu, 1,
+        "user's enable bit must move from legacy → new column"
+    );
+    assert!(
+        !column_exists(&db, "config", "force_tmdb_fallback").await,
+        "legacy column must be dropped, not duplicated"
+    );
+}
+
+/// The fresh-install path: neither column exists yet, the typed
+/// helper must add the new one with the caller-supplied INTEGER
+/// declaration (not the TEXT default the string-flavored helper
+/// uses).
+#[tokio::test]
+async fn reconcile_typed_rename_adds_integer_column_on_fresh_install() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    sqlx::query("CREATE TABLE config (id INTEGER PRIMARY KEY CHECK (id = 1))")
+        .execute(&db)
+        .await
+        .expect("create empty config");
+    sqlx::query("INSERT INTO config (id) VALUES (1)")
+        .execute(&db)
+        .await
+        .expect("seed config row");
+
+    reconcile_column_rename_typed(
+        &db,
+        "config",
+        "force_tmdb_fallback",
+        "force_kitsu_fallback",
+        "INTEGER NOT NULL DEFAULT 0",
+        "= 0",
+    )
+    .await;
+
+    assert!(column_exists(&db, "config", "force_kitsu_fallback").await);
+    let kitsu: i64 = sqlx::query_scalar("SELECT force_kitsu_fallback FROM config WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .expect("read new column");
+    assert_eq!(kitsu, 0, "fresh-install default must be the integer 0");
+    assert!(
+        !column_exists(&db, "config", "force_tmdb_fallback").await,
+        "fresh-install path must not create the legacy column",
+    );
+}
