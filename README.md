@@ -9,9 +9,9 @@ This project's being actively developed. Expect some occasional bugs. See [Relea
 ## Screenshots
 
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/ab8d0588-a896-477e-b264-79d2a44fc118" />
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/1601ca73-1c47-4831-bd3d-4fcf3d2a6ad1" />
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/754565f7-662f-4a85-a1e2-257a251c2361" />
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/0a54684f-8bb9-4083-a7d7-8760e35fcfef" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/72db83dd-0252-43c9-a5e6-7fb43a15e271" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/018ecb01-b434-4b3b-93d6-1cad3678bcc5" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/db443139-e72b-4cca-b220-feeb7b348ee6" />
 
 ## What it does
 
