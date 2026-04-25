@@ -180,8 +180,19 @@
     font-size: 13px;
 }
 
+/* Pin every card to the same total height. Cover height is already
+   fixed via `aspect-ratio: 2/3`, but `.series-info` would otherwise
+   grow to fit a 2-line title + 2-row wrapped tags vs. a 1-line
+   title + 1-row tags, leaving rows unequal. With grid-auto-rows
+   defaulting to `auto`, each row's height tracks the tallest card
+   in it — so as filters reshuffle which cards land in which row,
+   row heights would visibly jump. Fixed height + overflow:hidden
+   gives every card the same outer dimension regardless of content,
+   and the grid stays still through filter changes. */
 .series-info {
+    height: 100px;
     padding: 10px 12px 12px;
+    overflow: hidden;
 }
 
 .series-title {
