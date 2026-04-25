@@ -40,6 +40,10 @@ struct IndexTemplate {
     /// Currently-active genre filter value from `?genre=<name>`.
     /// Same shape as `custom_list_filter`.
     genre_filter: String,
+    /// #62 PR E — `recent` (default) or `score`. The handler has
+    /// already applied the sort to `library`; this field drives the
+    /// dropdown's selected-option state.
+    sort_value: String,
 }
 
 #[derive(Template)]

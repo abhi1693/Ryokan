@@ -18,7 +18,7 @@
                native `change` (fires after blur or Enter), so
                either control standalone or in combination produces
                a single navigation. #}
-            {% if !custom_list_names.is_empty() || !genre_names.is_empty() %}
+            {% if !custom_list_names.is_empty() || !genre_names.is_empty() || !score_format.is_empty() %}
             <form method="get" action="/" class="library-filter-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                 {% if !custom_list_names.is_empty() %}
                 <label for="library-list-filter" class="visually-hidden">Filter by custom list</label>
@@ -50,6 +50,17 @@
                     <option value="{{ name }}"></option>
                     {% endfor %}
                 </datalist>
+                {% endif %}
+                {% if !score_format.is_empty() %}
+                {# #62 PR E — sort-by-user-score. Hidden when no
+                   external account is linked because there'd be no
+                   user_score values to sort by. Submits the same
+                   form so the sort + active filters compose. #}
+                <label for="library-sort" class="visually-hidden">Sort</label>
+                <select id="library-sort" name="sort" class="folder-select" onchange="this.form.submit()">
+                    <option value="recent"{% if sort_value.as_str() == "recent" %} selected{% endif %}>Recently added</option>
+                    <option value="score"{% if sort_value.as_str() == "score" %} selected{% endif %}>My score (high → low)</option>
+                </select>
                 {% endif %}
                 {% if !genre_filter.is_empty() || !custom_list_filter.is_empty() %}
                 <a class="btn btn-pill library-filter-clear" href="/" title="Clear filters">Clear</a>

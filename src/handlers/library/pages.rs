@@ -42,6 +42,14 @@ pub struct LibraryIndexQuery {
     /// both predicates).
     #[serde(default)]
     pub genre: Option<String>,
+    /// #62 PR E — `?sort=<key>` ordering. Currently supports
+    /// `recent` (default; SQL `ORDER BY added_at DESC`) and `score`
+    /// (user-score descending — only meaningful when an account is
+    /// linked, so the dropdown is hidden otherwise; unrated series
+    /// sink to the bottom). Anything unrecognized falls through to
+    /// `recent`.
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 pub async fn index(
@@ -121,6 +129,34 @@ pub async fn index(
         library.retain(|s| matching_ids.contains(&s.id));
     }
 
+    // #62 PR E — sort-by-user-score. SQL already returned series
+    // ordered by added_at DESC ("recent"); this is an opt-in
+    // re-sort applied AFTER filters so the displayed order matches
+    // the displayed set. NULL / 0.0 / negative user_score values
+    // (unrated, manually-added pre-PR-C, etc.) sort to the bottom
+    // so they don't crowd out the rated ones the user is presumably
+    // looking at.
+    let sort_key = q.sort.as_deref().unwrap_or("recent");
+    let sort_value = if sort_key == "score" && !score_format.is_empty() {
+        // partial_cmp with NaN-safe ordering: any non-positive or
+        // missing score becomes -1.0 so it sinks. Tiebreaker on
+        // title_english (alphabetical) keeps the order
+        // deterministic across renders for series at the same
+        // score.
+        library.sort_by(|a, b| {
+            let av = a.user_score.filter(|s| *s > 0.0).unwrap_or(-1.0);
+            let bv = b.user_score.filter(|s| *s > 0.0).unwrap_or(-1.0);
+            bv.partial_cmp(&av)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.title_english.cmp(&b.title_english))
+        });
+        "score".to_string()
+    } else {
+        // Fall through to the SQL-default ordering for any
+        // unrecognized sort key.
+        "recent".to_string()
+    };
+
     let template = IndexTemplate {
         page: "library".to_string(),
         library,
@@ -132,6 +168,7 @@ pub async fn index(
         custom_list_filter,
         genre_names,
         genre_filter,
+        sort_value,
     };
     Html(template.render().unwrap_or_default())
 }
