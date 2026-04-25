@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::AppState;
 use crate::models::log::LogCategory;
@@ -168,7 +168,24 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         )
         .await;
 
+        // Episode numbers already covered by a batch we grabbed earlier
+        // in this series's loop. Without this, a 12-episode BD pack
+        // covering eps 1..=12 would be re-found and re-grabbed once per
+        // remaining target — 12 redundant Nyaa sweeps, 12 episode_grab_history
+        // rows for the same release, and an inflated upgrade count in
+        // the summary log. `record_grab` deduplicates the parent
+        // grabbed_torrents row by hash, but episode_tags::record_grab
+        // is unconditional INSERT, so each iteration pollutes history.
+        let mut covered_by_batch: HashSet<i32> = HashSet::new();
+
         for target in targets {
+            // Skip targets a previously-grabbed batch already covers.
+            if let auto_search::SearchTarget::Episode(ep_num) = &target
+                && covered_by_batch.contains(ep_num)
+            {
+                continue;
+            }
+
             let label = auto_search::target_label(&target);
             // batch_episode_match=true so BD season packs can match episode targets.
             let best = auto_search::find_best_for_target(
@@ -261,6 +278,10 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             ep_nums = parsed.into_iter().collect();
                             ep_nums.sort_unstable();
                         }
+                        // Mark every episode this batch will cover as
+                        // satisfied so the rest of this series's loop
+                        // doesn't re-find / re-grab the same pack.
+                        covered_by_batch.extend(&ep_nums);
                     }
                     let _ = crate::models::grabbed_torrents::record_grab(
                         &state.db,
