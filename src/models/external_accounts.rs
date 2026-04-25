@@ -271,12 +271,21 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
 /// the new account). Per the plan doc: "user scores [are] lost" on
 /// re-link-different-account.
 pub async fn unlink(db: &SqlitePool, id: i64) -> Result<(), String> {
+    // All four steps inside one tx: a crash between them would otherwise
+    // leave the account row dangling against half-cleaned per-account
+    // state (user_score NULL'd but custom_lists still referencing the
+    // unlinked provider, etc.).
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| format!("external_accounts unlink begin: {e}"))?;
+
     // Capture the provider before the row goes away so we can scope
     // the custom-list wipe below.
     let provider: Option<String> =
         sqlx::query_scalar("SELECT provider FROM external_accounts WHERE id = ?")
             .bind(id)
-            .fetch_optional(db)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|e| format!("external_accounts read for provider: {e}"))?;
 
@@ -288,7 +297,7 @@ pub async fn unlink(db: &SqlitePool, id: i64) -> Result<(), String> {
     // ratings.
     sqlx::query("UPDATE series SET user_score = NULL WHERE synced_from_external_account_id = ?")
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("user_score wipe failed: {e}"))?;
 
@@ -299,16 +308,20 @@ pub async fn unlink(db: &SqlitePool, id: i64) -> Result<(), String> {
     // until each affected series gets re-synced. Today's only
     // producer is AL, so unlinking AL effectively clears the table.
     if let Some(provider) = provider.as_deref() {
-        crate::models::series_custom_lists::clear_for_provider(db, provider)
+        crate::models::series_custom_lists::clear_for_provider(&mut tx, provider)
             .await
             .map_err(|e| format!("series_custom_lists wipe failed: {e}"))?;
     }
 
     sqlx::query("DELETE FROM external_accounts WHERE id = ?")
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("external_accounts DELETE failed: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("external_accounts unlink commit: {e}"))?;
     Ok(())
 }
 

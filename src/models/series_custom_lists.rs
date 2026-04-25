@@ -125,10 +125,27 @@ pub async fn distinct_list_names(db: &SqlitePool) -> Result<Vec<String>, sqlx::E
 /// slate). Today's only producer is "anilist"; the schema's
 /// `provider` column scopes the wipe so a hypothetical future
 /// provider's memberships don't get cleared by another's unlink.
-pub async fn clear_for_provider(db: &SqlitePool, provider: &str) -> Result<u64, sqlx::Error> {
+///
+/// Scoped to `provider` rather than `(provider, account_id)` because
+/// `external_accounts` enforces single-account-per-provider via the
+/// uniqueness check in `link()` — at any moment there is at most one
+/// AL account, at most one MAL account, etc. If a future schema ever
+/// allows multiple accounts per provider, this wipe would need to
+/// take an `account_id` parameter (and the caller in `unlink` would
+/// need to pass it through) so a sibling account's lists aren't
+/// collateral damage on an unlink.
+///
+/// Takes a `&mut Transaction` rather than `&SqlitePool` because the
+/// only caller (`external_accounts::unlink`) needs the wipe to land
+/// atomically with the `user_score` reset and the account-row
+/// `DELETE`. Add a `_pool` variant if a non-tx caller appears.
+pub async fn clear_for_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    provider: &str,
+) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM series_custom_lists WHERE provider = ?")
         .bind(provider)
-        .execute(db)
+        .execute(&mut **tx)
         .await?;
     Ok(result.rows_affected())
 }

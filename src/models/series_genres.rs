@@ -108,26 +108,18 @@ const BACKFILL_MIGRATION_ID: &str = "series_genres_backfill_from_cache_v1";
 /// one cache row logs and skips that row rather than aborting the
 /// migration.
 pub async fn backfill_from_metadata_cache_once(db: &SqlitePool) -> Result<(), String> {
-    // Ledger table is created on demand by the same `CREATE TABLE
-    // IF NOT EXISTS` pattern other one-shots use; safe to call
-    // here even if the migrations sweep ran first.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (\
-             id TEXT PRIMARY KEY,\
-             applied_at DATETIME DEFAULT CURRENT_TIMESTAMP\
-         )",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| format!("schema_migrations create: {e}"))?;
+    use crate::models::group_source_map::{
+        ensure_schema_migrations_table, migration_already_applied,
+    };
 
-    let already =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schema_migrations WHERE id = ?")
-            .bind(BACKFILL_MIGRATION_ID)
-            .fetch_one(db)
-            .await
-            .map_err(|e| format!("schema_migrations probe: {e}"))?;
-    if already > 0 {
+    ensure_schema_migrations_table(db)
+        .await
+        .map_err(|e| format!("schema_migrations create: {e}"))?;
+
+    if migration_already_applied(db, BACKFILL_MIGRATION_ID)
+        .await
+        .map_err(|e| format!("schema_migrations probe: {e}"))?
+    {
         return Ok(());
     }
 

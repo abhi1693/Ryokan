@@ -11,7 +11,22 @@ const initialTitleLanguage = window.initialTitleLanguage || '';
 // the server-side handler (no-JS fallback). The dropdowns and sort
 // still submit-on-change because list-membership and score-sort
 // genuinely need DB work.
+//
+// 250ms debounce on `input` so a fast typist doesn't trigger a
+// full grid re-walk + replaceState per keystroke. The DOM filter is
+// cheap on a few hundred series but a power user with thousands
+// would feel the per-keystroke layout thrash from the
+// `style.display = 'none'` writes.
+let _liveSearchTimer = null;
 function liveLibrarySearch(input) {
+    if (_liveSearchTimer) clearTimeout(_liveSearchTimer);
+    _liveSearchTimer = setTimeout(() => {
+        _liveSearchTimer = null;
+        _liveLibrarySearchImmediate(input);
+    }, 250);
+}
+
+function _liveLibrarySearchImmediate(input) {
     const q = (input.value || '').trim().toLowerCase();
     const grid = document.getElementById('library-grid');
     if (!grid) return;
