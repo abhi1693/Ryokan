@@ -478,6 +478,32 @@ async fn stamp_synced_from_if_set(db: &SqlitePool, series_id: i64, account_id: O
     }
 }
 
+/// #62 PR C — write the user's personal score from the sync entry
+/// onto `series.user_score`. Skips silently when `account_id` is
+/// `None` (unit-test pathway with no live account). Normalizes AL's
+/// `0.0` "unrated" sentinel to `NULL` so the schema unambiguously
+/// means "rated" when the column is non-null; the render helper
+/// still handles 0.0 defensively for any rows that pre-date the
+/// normalization.
+///
+/// Best-effort write, same rationale as `stamp_synced_from_if_set`:
+/// a failure logs but doesn't fail the merge. A missing score just
+/// means the "You: X" badge won't render until the next tick.
+async fn stamp_user_score_if_set(
+    db: &SqlitePool,
+    series_id: i64,
+    score: f64,
+    account_id: Option<i64>,
+) {
+    if account_id.is_none() {
+        return;
+    }
+    let normalized = if score > 0.0 { Some(score) } else { None };
+    if let Err(e) = series::update_user_score(db, series_id, normalized).await {
+        tracing::warn!("series::update_user_score failed for series_id={series_id}: {e}");
+    }
+}
+
 /// Report from a removal-detection pass. `removed` is the list of
 /// `series.id` whose monitor_mode got downgraded to `None` because
 /// they were no longer in the user's AL/MAL list. Surfaces in the
@@ -605,6 +631,7 @@ async fn merge_one_jikan_entry(
         // (Watching → Dropped) must downgrade local monitor_mode
         // even when the new status's import flag is off.
         stamp_synced_from_if_set(db, row.id, account_id).await;
+        stamp_user_score_if_set(db, row.id, entry.score, account_id).await;
         // Manual override takes precedence: the user has explicitly
         // pinned this series's monitor_mode through the UI. Sync
         // honors that pin until the user clears it via "Sync from
@@ -678,6 +705,7 @@ async fn merge_one_jikan_entry(
     }
 
     stamp_synced_from_if_set(db, series_id, account_id).await;
+    stamp_user_score_if_set(db, series_id, entry.score, account_id).await;
     monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
     Ok(MergeAction::Created(NewArtworkSpec {
         series_id,
@@ -705,6 +733,7 @@ async fn merge_one_anilist_entry(
         // even when `import_dropped = false`, otherwise the series
         // silently keeps grabbing for a show the user dropped.
         stamp_synced_from_if_set(db, row.id, account_id).await;
+        stamp_user_score_if_set(db, row.id, entry.score, account_id).await;
         // Manual override takes precedence: the user pinned this
         // series's monitor_mode through the UI. Sync honors the pin
         // until the user clears it via "Sync from AL/MAL".
@@ -767,6 +796,7 @@ async fn merge_one_anilist_entry(
     }
 
     stamp_synced_from_if_set(db, series_id, account_id).await;
+    stamp_user_score_if_set(db, series_id, entry.score, account_id).await;
     monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
     Ok(MergeAction::Created(NewArtworkSpec {
         series_id,
@@ -2373,6 +2403,78 @@ mod tests {
         // Account 2's series is unaffected.
         let acct2 = series::get_by_id(&db, acct2_series).await.unwrap().unwrap();
         assert_eq!(acct2.monitor_mode, MonitorMode::All.as_str());
+    }
+
+    #[tokio::test]
+    async fn merge_writes_user_score_on_existing_series() {
+        // Sync brings in entry.score = 8.5; merge writes it to
+        // series.user_score so the "You: 8.5" badge renders. Doesn't
+        // need to be a status transition — score updates on every
+        // tick regardless of monitor_mode movement.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        let series_id = crate::test_support::seed_series(&db, 12345, "Scored").await;
+
+        let entries = vec![SyncEntry {
+            provider: external_accounts::PROVIDER_ANILIST.to_string(),
+            provider_media_id: 12345,
+            anilist_id: 12345,
+            status: NormalizedStatus::Watching,
+            progress: 4,
+            score: 8.5,
+            updated_at: 0,
+            custom_lists: Vec::new(),
+        }];
+        let outcome =
+            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), Some(1)).await;
+        // Existing series → MonitorUpdated (the seed left monitor_mode
+        // empty so target=All differs); the test pins user_score
+        // regardless of the action variant.
+        assert!(outcome.failed.is_empty());
+
+        let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.user_score,
+            Some(8.5),
+            "merge must write entry.score to user_score"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_normalizes_zero_score_to_null() {
+        // AL sends 0.0 for unrated entries. The merge normalizes that
+        // to NULL so `user_score IS NOT NULL` cleanly means "rated"
+        // for any future query. Render helper handles 0.0 defensively
+        // for older rows but new writes never produce it.
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        let series_id = crate::test_support::seed_series(&db, 12345, "Unrated").await;
+        // Pre-condition: user_score is non-null (e.g. user rated 7
+        // last sync, then unrated this sync).
+        sqlx::query("UPDATE series SET user_score = 7.0 WHERE id = ?")
+            .bind(series_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let entries = vec![SyncEntry {
+            provider: external_accounts::PROVIDER_ANILIST.to_string(),
+            provider_media_id: 12345,
+            anilist_id: 12345,
+            status: NormalizedStatus::Watching,
+            progress: 0,
+            score: 0.0,
+            updated_at: 0,
+            custom_lists: Vec::new(),
+        }];
+        let _ =
+            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), Some(1)).await;
+
+        let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.user_score, None,
+            "score=0.0 must normalize to NULL on write"
+        );
     }
 
     #[tokio::test]
