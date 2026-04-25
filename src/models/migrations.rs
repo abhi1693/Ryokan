@@ -902,6 +902,40 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // #62 PR D — AL custom-list membership. AL groups list entries
+    // into status buckets (CURRENT/PLANNING/etc.) plus zero or more
+    // user-named custom lists; a series can belong to many at once.
+    // The sync engine pulls per-entry membership in the same
+    // GraphQL response and reconciles this side table on every
+    // merge action.
+    //
+    // ON DELETE CASCADE so removing a series wipes its membership
+    // rows without a hand-tracked cleanup. UNIQUE (series_id, provider,
+    // list_name) enforces no-dup membership per (series, account).
+    // `provider` is on the row even though only AL emits these today
+    // (decision-doc baseline); a hypothetical future provider with
+    // its own custom-list concept gets a parallel namespace.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS series_custom_lists (
+            series_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            list_name TEXT NOT NULL,
+            PRIMARY KEY (series_id, provider, list_name),
+            FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_series_custom_lists_list_name \
+         ON series_custom_lists (list_name)",
+    )
+    .execute(db)
+    .await?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (

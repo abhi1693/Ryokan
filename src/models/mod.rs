@@ -15,6 +15,7 @@ pub mod pending_grabs;
 pub mod rss;
 pub mod scheduled_tasks;
 pub mod series;
+pub mod series_custom_lists;
 pub mod session;
 pub mod user;
 
