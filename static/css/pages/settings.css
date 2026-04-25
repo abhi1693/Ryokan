@@ -634,7 +634,7 @@ fieldset legend {
 
 /* ─── External Accounts — #62 PR E ────────────────────────────────
    The fieldset itself is the standard connections-tab fieldset (no
-   bespoke surface). Just three small primitives below to support
+   bespoke surface). Just two small primitives below to support
    the linked-state content:
      • .ext-alert — inline alert blocks for the auth-fail / mapping-
        fail banners. Sized to fit between fieldset's intro paragraph
@@ -642,10 +642,9 @@ fieldset legend {
      • .ext-prefs-row — wrap-flex container for the import-list
        checkbox-rows so they fit 2-3 per line on a wide viewport
        instead of stacking five-deep.
-     • .form-display — read-only value text rendered inside a
-       form-group for "label / static value" rows (Provider,
-       Username, Score format). Mirrors the input padding so the
-       column lines up with the inputs in adjacent form-groups. */
+   Identity (provider/username) is shown via the standard
+   .log-badge primitive in the legend, matching the qBittorrent /
+   Jellyfin / Deluge / etc. health-badge pattern. */
 
 .ext-alert {
     padding: 10px 12px;

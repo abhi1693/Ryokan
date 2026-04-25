@@ -231,15 +231,26 @@
            interval → actions — but rebuilt entirely from the
            connections-tab primitives. No bespoke card surface. #}
         <fieldset>
+            {# Legend health badge — same visual primitive
+               qBittorrent / Jellyfin / Deluge / Transmission /
+               rTorrent use. Server-rendered (we have the data; JS
+               on the other sections fills theirs because they
+               require a live network probe). The badge color
+               encodes connection state:
+                 • green (.log-badge-info)  → linked + auth healthy
+                 • red   (.log-badge-error) → linked + re-link required
+                 • neutral (.log-badge)     → not linked #}
             <legend>
                 External Accounts
                 {% match external_account %}
                     {% when Some with (acct) %}
-                        {# Status hint in the legend — same shape qBit
-                           and Jellyfin use for their health spans. #}
-                        <span class="form-hint">{{ acct.provider_label }} · {{ acct.username }} · last sync {{ acct.last_sync_label }}</span>
+                        {% if acct.last_sync_auth_failed %}
+                        <span class="form-hint"><span class="log-badge log-badge-error">Re-link required</span></span>
+                        {% else %}
+                        <span class="form-hint"><span class="log-badge log-badge-info">{{ acct.provider_label }} · {{ acct.username }}</span></span>
+                        {% endif %}
                     {% when None %}
-                        <span class="form-hint">Not linked</span>
+                        <span class="form-hint"><span class="log-badge">Not linked</span></span>
                 {% endmatch %}
             </legend>
             <p class="form-hint" style="margin-bottom: 12px;">
@@ -263,26 +274,6 @@
                         on the last sync. They're still in your library but won't have AniList-keyed scoring (SeaDex, etc.) until the mappings catch up.
                     </div>
                     {% endif %}
-
-                    {# Provider + score-format display row. Two
-                       form-group blocks side by side via .form-row,
-                       same primitive qBit's user/password row uses. #}
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Provider</label>
-                            <span class="form-display">{{ acct.provider_label }}</span>
-                        </div>
-                        <div class="form-group">
-                            <label>Username</label>
-                            <span class="form-display">{{ acct.username }}</span>
-                        </div>
-                        {% if !acct.score_format_label.is_empty() %}
-                        <div class="form-group">
-                            <label>Score format</label>
-                            <span class="form-display">{{ acct.score_format_label }}</span>
-                        </div>
-                        {% endif %}
-                    </div>
 
                     {# Import-list checkboxes. Wrap-flex so 2-3 fit
                        per row on a wide viewport, falling back to
@@ -351,7 +342,24 @@
                     <div class="settings-inline-actions">
                         <button type="button" class="btn btn-primary" onclick="syncWatchListNow()">Sync now</button>
                         <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
-                        <span class="form-hint">Cadence every {{ config.external_sync_interval_minutes }} min · last sync {{ acct.last_sync_label }}</span>
+                        {# Cadence + last-sync hint. The last-sync
+                           span's `data-relative-time` is the unix-
+                           epoch the JS updater (settings.js) keys
+                           off so the label re-renders ("4 minutes
+                           ago" → "5 minutes ago") without a page
+                           reload. When `last_sync_unix_ts` is None
+                           the attribute is omitted; the JS skips
+                           those elements and the "Never" text from
+                           server-render stays. #}
+                        <span class="form-hint">
+                            Cadence every {{ config.external_sync_interval_minutes }} min · last sync
+                            {% match acct.last_sync_unix_ts %}
+                                {% when Some with (ts) %}
+                                    <span data-relative-time="{{ ts }}">{{ acct.last_sync_label }}</span>
+                                {% when None %}
+                                    {{ acct.last_sync_label }}
+                            {% endmatch %}
+                        </span>
                     </div>
                 {% when None %}
                     {# Unlinked: a single form-group whose action row

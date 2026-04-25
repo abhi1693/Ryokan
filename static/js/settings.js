@@ -858,3 +858,45 @@ function saveExternalAccountPrefs() {
         .then((r) => { if (!r.ok) console.error('[ext-accounts] prefs save failed:', r.status); });
     }, 250);
 }
+
+// #62 PR E — live updater for `[data-relative-time]` elements.
+// Mirrors the Rust-side `humanize_relative_time` policy so the
+// label that JS produces matches what a fresh page load from the
+// server would produce. Re-runs every 30 seconds; the user
+// browsing Settings sees "last sync 4 minutes ago" tick over to
+// "5 minutes ago" without reloading. Idempotent: if the page has
+// no marker elements it's a no-op + the timer is skipped.
+(function () {
+    function humanize(unixTs, nowSec) {
+        const delta = Math.max(0, nowSec - unixTs);
+        if (delta < 60) return 'Just now';
+        if (delta < 3600) {
+            const m = Math.floor(delta / 60);
+            return m + ' minute' + (m === 1 ? '' : 's') + ' ago';
+        }
+        if (delta < 86400) {
+            const h = Math.floor(delta / 3600);
+            return h + ' hour' + (h === 1 ? '' : 's') + ' ago';
+        }
+        const d = Math.floor(delta / 86400);
+        return d + ' day' + (d === 1 ? '' : 's') + ' ago';
+    }
+
+    function tick() {
+        const now = Math.floor(Date.now() / 1000);
+        document.querySelectorAll('[data-relative-time]').forEach(function (el) {
+            const ts = parseInt(el.getAttribute('data-relative-time'), 10);
+            if (!Number.isFinite(ts) || ts <= 0) return;
+            el.textContent = humanize(ts, now);
+        });
+    }
+
+    // First tick immediately so any clock drift since the
+    // server-render gets corrected on page load. Then every 30s.
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', tick);
+    } else {
+        tick();
+    }
+    setInterval(tick, 30 * 1000);
+})();
