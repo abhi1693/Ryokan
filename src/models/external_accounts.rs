@@ -271,6 +271,15 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
 /// the new account). Per the plan doc: "user scores [are] lost" on
 /// re-link-different-account.
 pub async fn unlink(db: &SqlitePool, id: i64) -> Result<(), String> {
+    // Capture the provider before the row goes away so we can scope
+    // the custom-list wipe below.
+    let provider: Option<String> =
+        sqlx::query_scalar("SELECT provider FROM external_accounts WHERE id = ?")
+            .bind(id)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| format!("external_accounts read for provider: {e}"))?;
+
     // Order matters: clear user_score on rows synced from THIS
     // account BEFORE the account row goes away (the FK is set to
     // SET NULL on cascade, so after the DELETE we'd lose the join
@@ -282,6 +291,18 @@ pub async fn unlink(db: &SqlitePool, id: i64) -> Result<(), String> {
         .execute(db)
         .await
         .map_err(|e| format!("user_score wipe failed: {e}"))?;
+
+    // Drop the custom-list memberships that came from this provider.
+    // Without this, the library page's "All custom lists" dropdown
+    // keeps showing the unlinked account's list names, and a
+    // re-link to a different account inherits stale memberships
+    // until each affected series gets re-synced. Today's only
+    // producer is AL, so unlinking AL effectively clears the table.
+    if let Some(provider) = provider.as_deref() {
+        crate::models::series_custom_lists::clear_for_provider(db, provider)
+            .await
+            .map_err(|e| format!("series_custom_lists wipe failed: {e}"))?;
+    }
 
     sqlx::query("DELETE FROM external_accounts WHERE id = ?")
         .bind(id)

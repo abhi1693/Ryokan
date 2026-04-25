@@ -47,16 +47,19 @@
                        autocomplete="off"
                        oninput="liveLibrarySearch(this)"
                        onkeydown="if(event.key==='Enter'){event.preventDefault();}">
-                {% if !score_format.is_empty() %}
-                {# #62 PR E — sort-by-user-score. Hidden when no
-                   external account is linked because there'd be no
-                   user_score values to sort by. #}
+                {# Sort dropdown always renders so "Recently added"
+                   stays available — that ordering doesn't depend on
+                   any external linkage. The "My score" option only
+                   appears when an external account is linked
+                   (`score_format` non-empty); without one there's
+                   nothing to sort against. #}
                 <label for="library-sort" class="visually-hidden">Sort</label>
                 <select id="library-sort" name="sort" class="folder-select" onchange="this.form.submit()">
                     <option value="recent"{% if sort_value.as_str() == "recent" %} selected{% endif %}>Recently added</option>
+                    {% if !score_format.is_empty() %}
                     <option value="score"{% if sort_value.as_str() == "score" %} selected{% endif %}>My score (high → low)</option>
+                    {% endif %}
                 </select>
-                {% endif %}
                 {# Always rendered so its layout slot is reserved;
                    visibility flips on/off so its presence doesn't
                    shift neighbors when a filter becomes active. The

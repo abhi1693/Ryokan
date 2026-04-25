@@ -118,6 +118,21 @@ pub async fn distinct_list_names(db: &SqlitePool) -> Result<Vec<String>, sqlx::E
     Ok(rows)
 }
 
+/// Drop every membership row for the given provider. Used on
+/// account unlink so the library filter dropdown stops showing list
+/// names that came from an account the user no longer has linked
+/// (and so a re-link to a different AL account starts from a clean
+/// slate). Today's only producer is "anilist"; the schema's
+/// `provider` column scopes the wipe so a hypothetical future
+/// provider's memberships don't get cleared by another's unlink.
+pub async fn clear_for_provider(db: &SqlitePool, provider: &str) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM series_custom_lists WHERE provider = ?")
+        .bind(provider)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 /// Series ids that belong to `list_name`. Used by the library
 /// filter — handler reads this set, then filters the in-memory
 /// `Vec<Series>` against it. Cheaper than re-querying `series` with
