@@ -21,16 +21,22 @@
 //!
 //! ## Status (this commit)
 //!
-//! Skeleton only: the supervised task ticks every minute, reads the
-//! configured interval, calls `tick_once` when the cadence is due,
-//! and `tick_once` no-ops by reading the linked account and emitting
-//! a placeholder log. Subsequent commits fill in:
-//!   1. AniList `MediaListCollection` GraphQL fetch.
-//!   2. MyAnimeList animelist endpoint + access-token refresh on 401.
-//!   3. Sync engine: staging table merge + monitor-mode defaults +
-//!      bulk-mode coalescing for sync-originated adds.
+//! End-to-end fetch + merge for AniList watch lists, and AniList-
+//! resolvable MyAnimeList watch lists (via `anibridge::lookup_anilist_by_mal`).
+//! MAL entries that anibridge can't resolve are counted as
+//! `deferred_jikan` and skipped — the Jikan-fallback path that writes
+//! them under the negated-MAL-id sentinel (`-mal_id`) lands in a
+//! follow-up commit. Still pending:
+//!   1. Jikan-fallback merge for `deferred_jikan` entries.
+//!   2. Bulk-mode coalescing for sync-originated adds (defer Jellyfin
+//!      refresh + RSS sync until the first-sync drain completes).
+//!   3. Delta cursor (`list_last_synced_at`) so a tick only refetches
+//!      entries with `updatedAt > cursor`, plus a weekly full-resync
+//!      backstop.
 //!   4. Manual "Sync now" button + ProgressRegistry hook for the
 //!      sticky-toast first-sync UI.
+
+use std::collections::HashMap;
 
 use sqlx::SqlitePool;
 
@@ -38,7 +44,8 @@ use crate::AppState;
 use crate::models::external_accounts::{self, ImportPreferences};
 use crate::models::log::LogCategory;
 use crate::models::monitoring::MonitorMode;
-use crate::services::{anibridge, anilist, logger, mal};
+use crate::models::series;
+use crate::services::{anibridge, anilist, logger, mal, monitoring as monitoring_service};
 
 // ── Provider-agnostic sync entry abstraction ──────────────────────
 
@@ -285,6 +292,145 @@ pub async fn resolve_mal_anilist_ids(mut entries: Vec<SyncEntry>) -> Vec<SyncEnt
     entries
 }
 
+// ── Series merge ──────────────────────────────────────────────────
+
+/// Aggregate result from a `merge_into_library` call. Each counter
+/// tracks one outcome category so the supervised-loop summary line +
+/// future "Sync now" UI both have a single number to render per
+/// bucket. `failed` holds the per-entry errors so the operator can
+/// see specifically which AL ids didn't merge (most often: the
+/// detail-fetch returned no payload for that id, e.g. an AL deletion
+/// the user's list still references).
+#[derive(Debug, Default, Clone)]
+pub struct MergeOutcome {
+    /// Series rows freshly inserted by this merge run.
+    pub created: i32,
+    /// Series rows that already existed and whose stored monitor_mode
+    /// differed from the target — bumped to the new mode.
+    pub monitor_mode_updated: i32,
+    /// Series rows that already existed and whose monitor_mode already
+    /// matched the target — left untouched.
+    pub unchanged: i32,
+    /// MAL-sourced entries whose anibridge lookup missed; merging them
+    /// requires the Jikan-fallback path (negated-id sentinel + Jikan
+    /// metadata fetch). Counted here for visibility; the actual Jikan
+    /// merge lands in a follow-up commit.
+    pub deferred_jikan: i32,
+    /// Per-entry failures: `(anilist_id, error message)`. The merge
+    /// keeps going on a single-row failure rather than aborting; one
+    /// AL id deleted upstream shouldn't block the other 199 entries
+    /// from importing.
+    pub failed: Vec<(i64, String)>,
+}
+
+/// Merge a batch of [`SyncEntry`] into the local `series` table.
+///
+/// Caller is responsible for fetching `detail_map` (typically via
+/// `anilist::get_anime_details_batch`) for every NEW positive AL id
+/// in `entries`. Existing series don't need a detail entry — the
+/// merge only updates `monitor_mode`, leaving cached metadata alone.
+///
+/// Decision flow per entry:
+///   1. anilist_id <= 0  → deferred_jikan += 1, skip (Jikan path TBD).
+///   2. series exists and monitor_mode == target → unchanged.
+///   3. series exists and monitor_mode != target → apply_monitor_mode,
+///      monitor_mode_updated += 1.
+///   4. series doesn't exist + detail_map has it → upsert with full
+///      core, then apply target monitor_mode. created += 1.
+///   5. series doesn't exist + no detail in map → failed entry.
+///
+/// `apply_monitor_mode` runs `recompute_series_monitoring` as a side
+/// effect, so monitoring rows get rebuilt for both new and changed
+/// entries. The metadata-cache hydration + per-series classify scan
+/// that the interactive add path triggers are intentionally NOT
+/// triggered here — bulk-mode coalescing in a follow-up commit will
+/// batch them so a 200-series first sync doesn't fan out 200 spawned
+/// background tasks.
+pub async fn merge_into_library(
+    db: &SqlitePool,
+    entries: &[SyncEntry],
+    detail_map: &HashMap<i64, anilist::AnimeDetail>,
+    skip_already_watched: bool,
+) -> MergeOutcome {
+    let mut outcome = MergeOutcome::default();
+
+    for entry in entries {
+        if entry.anilist_id <= 0 {
+            outcome.deferred_jikan += 1;
+            continue;
+        }
+        let target_mode = monitor_mode_for(entry.status, skip_already_watched);
+        match merge_one_anilist_entry(db, entry, target_mode, detail_map).await {
+            Ok(MergeAction::Created) => outcome.created += 1,
+            Ok(MergeAction::MonitorUpdated) => outcome.monitor_mode_updated += 1,
+            Ok(MergeAction::Unchanged) => outcome.unchanged += 1,
+            Err(msg) => outcome.failed.push((entry.anilist_id, msg)),
+        }
+    }
+    outcome
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeAction {
+    Created,
+    MonitorUpdated,
+    Unchanged,
+}
+
+async fn merge_one_anilist_entry(
+    db: &SqlitePool,
+    entry: &SyncEntry,
+    target_mode: MonitorMode,
+    detail_map: &HashMap<i64, anilist::AnimeDetail>,
+) -> Result<MergeAction, String> {
+    let existing = series::get_by_anilist_id(db, entry.anilist_id)
+        .await
+        .map_err(|e| format!("series lookup failed: {e}"))?;
+
+    if let Some(row) = existing {
+        if row.monitor_mode == target_mode.as_str() {
+            return Ok(MergeAction::Unchanged);
+        }
+        monitoring_service::apply_monitor_mode(db, row.id, target_mode).await?;
+        return Ok(MergeAction::MonitorUpdated);
+    }
+
+    let detail = detail_map.get(&entry.anilist_id).ok_or_else(|| {
+        // Most common cause: AL deleted/merged the entry but the
+        // user's list still references it. Surface explicitly so the
+        // operator knows it isn't a DB error.
+        "no AniList detail returned for this id (deleted upstream?)".to_string()
+    })?;
+
+    let primary_title = if !detail.title_english.trim().is_empty() {
+        &detail.title_english
+    } else {
+        &detail.title_romaji
+    };
+    let (series_id, _created) = series::upsert(
+        db,
+        series::SeriesCore {
+            anilist_id: entry.anilist_id,
+            mal_id: detail.id_mal,
+            title: primary_title,
+            title_romaji: &detail.title_romaji,
+            title_english: &detail.title_english,
+            title_native: &detail.title_native,
+            cover_url: &detail.cover_url,
+            format: &detail.format,
+            status: &detail.status,
+            episodes: detail.episodes,
+            season_year: detail.season_year,
+            end_year: detail.end_year,
+        },
+    )
+    .await
+    .map_err(|e| format!("series upsert failed: {e}"))?;
+
+    monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
+    Ok(MergeAction::Created)
+}
+
 /// Run one sync iteration against the linked account. Called by the
 /// supervised loop in `main.rs::external_sync` once per configured
 /// interval.
@@ -302,8 +448,8 @@ pub async fn tick_once(state: &AppState) -> Result<String, String> {
     };
 
     match account.provider.as_str() {
-        external_accounts::PROVIDER_ANILIST => sync_anilist_dryrun(state, &account).await,
-        external_accounts::PROVIDER_MAL => sync_mal_dryrun(state, account).await,
+        external_accounts::PROVIDER_ANILIST => sync_anilist(state, &account).await,
+        external_accounts::PROVIDER_MAL => sync_mal(state, account).await,
         other => {
             // Unknown provider string — schema CHECK constraint should
             // prevent this, but surface explicitly rather than panic.
@@ -312,12 +458,14 @@ pub async fn tick_once(state: &AppState) -> Result<String, String> {
     }
 }
 
-/// Fetch the AL watch list and log a count summary. This commit
-/// validates the token + network path + GraphQL parser end-to-end
-/// without writing to `series` yet — the staging-table merge that
-/// turns the fetched entries into library rows lands in a follow-up
-/// commit alongside monitor-mode defaults and bulk-mode coalescing.
-async fn sync_anilist_dryrun(
+/// Fetch the AL watch list and merge entries into the library. AL
+/// is the simpler path: every entry's `media_id` is already the AL
+/// ID we'd write to `series.anilist_id`, so no anibridge resolution
+/// step is needed. Bulk-mode coalescing for the metadata-cache
+/// hydration + classify-scan side effects lands in a follow-up
+/// commit; for now the merge step does the upsert + monitor_mode
+/// write only.
+async fn sync_anilist(
     state: &AppState,
     account: &external_accounts::ExternalAccount,
 ) -> Result<String, String> {
@@ -343,25 +491,90 @@ async fn sync_anilist_dryrun(
     let kept = entries.len();
     let dropped = raw_total - kept;
 
+    // Pre-fetch AnimeDetail for the AL ids that aren't already in the
+    // local series table. Existing rows skip the fetch — the merge
+    // step only touches monitor_mode for those.
+    let new_ids = ids_needing_detail_fetch(&state.db, &entries).await;
+    let detail_map = if new_ids.is_empty() {
+        HashMap::new()
+    } else {
+        anilist::get_anime_details_batch(&new_ids)
+            .await
+            .map_err(|e| format!("AniList detail batch fetch failed: {e}"))?
+    };
+
+    let outcome =
+        merge_into_library(&state.db, &entries, &detail_map, prefs.skip_already_watched).await;
+
     logger::info(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "AniList watch-list fetched: {kept} entries kept ({dropped} skipped per import preferences)"
+            "AniList watch-list synced: {kept} kept ({dropped} skipped), {} created, {} monitor-mode updated, {} unchanged, {} failed",
+            outcome.created,
+            outcome.monitor_mode_updated,
+            outcome.unchanged,
+            outcome.failed.len(),
         ),
-        &format!("username={}", account.username),
+        &format!(
+            "username={} fetched_total={raw_total}",
+            account.username
+        ),
     )
     .await;
+    log_failed_entries(&state.db, &outcome).await;
 
     Ok(format!(
-        "AniList: fetched {raw_total}, kept {kept} (merge lands in a follow-up commit)"
+        "AniList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, failed {}",
+        outcome.created,
+        outcome.monitor_mode_updated,
+        outcome.unchanged,
+        outcome.failed.len(),
     ))
 }
 
-/// Fetch the MAL watch list and log a count summary. Same dry-run
-/// shape as `sync_anilist_dryrun` — validates the live token, the
-/// network path, the parser, and the on-401 refresh-and-retry
-/// dance. Doesn't merge into `series` yet.
+/// Return the AL ids in `entries` that don't yet have a `series` row
+/// — the set we need to fetch full AnimeDetail for before merging.
+/// Existing rows can skip the network entirely; we only edit their
+/// monitor_mode.
+async fn ids_needing_detail_fetch(db: &SqlitePool, entries: &[SyncEntry]) -> Vec<i64> {
+    let mut out = Vec::new();
+    for entry in entries {
+        if entry.anilist_id <= 0 {
+            continue;
+        }
+        if matches!(
+            series::get_by_anilist_id(db, entry.anilist_id).await,
+            Ok(None)
+        ) {
+            out.push(entry.anilist_id);
+        }
+    }
+    out
+}
+
+/// Pump per-entry merge failures into the dedicated AniList log
+/// category so the operator can see specifically which ids failed.
+/// Capped to the first 10 to keep one bad list from spamming the
+/// `logs` table — the count in the summary line still covers the
+/// total.
+async fn log_failed_entries(db: &SqlitePool, outcome: &MergeOutcome) {
+    for (id, msg) in outcome.failed.iter().take(10) {
+        logger::warn(
+            db,
+            LogCategory::ExternalSync,
+            &format!("Watch-list merge failed for AL id {id}"),
+            msg,
+        )
+        .await;
+    }
+}
+
+/// Fetch the MAL watch list, resolve anibridge MAL→AL where possible,
+/// and merge the resolved entries. Entries whose anibridge lookup
+/// missed are counted in `outcome.deferred_jikan` and skipped — the
+/// Jikan-fallback path that writes them under the negated-MAL-id
+/// sentinel lands in a follow-up commit.
 ///
 /// Token-refresh happens at this layer rather than inside
 /// `services::mal::fetch_animelist` because refresh requires writing
@@ -370,7 +583,7 @@ async fn sync_anilist_dryrun(
 /// second 401 returns an error rather than looping forever — that
 /// shape signals "user must re-link" and the next tick won't fix
 /// it.
-async fn sync_mal_dryrun(
+async fn sync_mal(
     state: &AppState,
     account: external_accounts::ExternalAccount,
 ) -> Result<String, String> {
@@ -442,18 +655,55 @@ async fn sync_mal_dryrun(
     let kept = normalized.len();
     let dropped = raw_total - kept;
 
+    // Resolve MAL → AL via anibridge. Misses fall back to the
+    // negated-MAL-id sentinel, which the merge step skips for now
+    // (counted as deferred_jikan).
+    let _ = anibridge::ensure_loaded().await;
+    let resolved = resolve_mal_anilist_ids(normalized).await;
+
+    let new_ids = ids_needing_detail_fetch(&state.db, &resolved).await;
+    let detail_map = if new_ids.is_empty() {
+        HashMap::new()
+    } else {
+        anilist::get_anime_details_batch(&new_ids)
+            .await
+            .map_err(|e| format!("AniList detail batch fetch failed: {e}"))?
+    };
+
+    let outcome = merge_into_library(
+        &state.db,
+        &resolved,
+        &detail_map,
+        prefs.skip_already_watched,
+    )
+    .await;
+
     logger::info(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "MyAnimeList watch-list fetched: {kept} entries kept ({dropped} skipped per import preferences)"
+            "MyAnimeList watch-list synced: {kept} kept ({dropped} skipped), {} created, {} monitor-mode updated, {} unchanged, {} deferred (no anibridge mapping), {} failed",
+            outcome.created,
+            outcome.monitor_mode_updated,
+            outcome.unchanged,
+            outcome.deferred_jikan,
+            outcome.failed.len(),
         ),
-        &format!("username={}", account.username),
+        &format!(
+            "username={} fetched_total={raw_total}",
+            account.username
+        ),
     )
     .await;
+    log_failed_entries(&state.db, &outcome).await;
 
     Ok(format!(
-        "MyAnimeList: fetched {raw_total}, kept {kept} (merge lands in a follow-up commit)"
+        "MyAnimeList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, deferred {}, failed {}",
+        outcome.created,
+        outcome.monitor_mode_updated,
+        outcome.unchanged,
+        outcome.deferred_jikan,
+        outcome.failed.len(),
     ))
 }
 
@@ -706,6 +956,201 @@ mod tests {
             assert_eq!(e.anilist_id, 0, "MAL anilist_id is 0 pre-resolution");
             assert_eq!(e.provider, external_accounts::PROVIDER_MAL);
         }
+    }
+
+    fn make_detail(
+        id: i64,
+        title_english: &str,
+        format: &str,
+        status: &str,
+    ) -> anilist::AnimeDetail {
+        anilist::AnimeDetail {
+            id,
+            id_mal: None,
+            title_romaji: title_english.to_string(),
+            title_english: title_english.to_string(),
+            title_native: title_english.to_string(),
+            cover_url: String::new(),
+            banner_url: String::new(),
+            format: format.to_string(),
+            status: status.to_string(),
+            status_display: status.to_string(),
+            episodes: Some(12),
+            duration: None,
+            season: String::new(),
+            season_year: None,
+            end_year: None,
+            description: String::new(),
+            genres: Vec::new(),
+            average_score: None,
+            average_score_display: None,
+            score_is_ten_point: false,
+            score_class: String::new(),
+            next_airing_episode: None,
+            next_airing_at: None,
+            synonyms: Vec::new(),
+            streaming_episodes: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+
+    fn entry(provider: &str, anilist_id: i64, status: NormalizedStatus) -> SyncEntry {
+        SyncEntry {
+            provider: provider.to_string(),
+            provider_media_id: anilist_id.unsigned_abs() as i64,
+            anilist_id,
+            status,
+            progress: 0,
+            score: 0.0,
+            updated_at: 0,
+            custom_lists: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_creates_new_series_with_resolved_monitor_mode() {
+        let db = crate::test_support::in_memory_pool().await;
+        let entries = vec![entry(
+            external_accounts::PROVIDER_ANILIST,
+            12345,
+            NormalizedStatus::Watching,
+        )];
+        let mut detail_map = HashMap::new();
+        detail_map.insert(12345, make_detail(12345, "Example", "TV", "RELEASING"));
+
+        let outcome = merge_into_library(&db, &entries, &detail_map, false).await;
+        assert_eq!(outcome.created, 1);
+        assert_eq!(outcome.monitor_mode_updated, 0);
+        assert_eq!(outcome.unchanged, 0);
+        assert!(outcome.failed.is_empty());
+
+        // Watching + skip_already_watched=false → monitor_mode = "all"
+        let row = series::get_by_anilist_id(&db, 12345)
+            .await
+            .unwrap()
+            .expect("series row should exist");
+        assert_eq!(row.monitor_mode, MonitorMode::All.as_str());
+        assert_eq!(row.title_english, "Example");
+    }
+
+    #[tokio::test]
+    async fn merge_updates_existing_series_when_monitor_mode_differs() {
+        let db = crate::test_support::in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 12345, "Example").await;
+        // Default seed leaves monitor_mode empty; set it to a known
+        // starting value so we can prove the merge changed it.
+        sqlx::query("UPDATE series SET monitor_mode = ? WHERE id = ?")
+            .bind(MonitorMode::Future.as_str())
+            .bind(series_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // No detail map needed — series already exists.
+        let entries = vec![entry(
+            external_accounts::PROVIDER_ANILIST,
+            12345,
+            NormalizedStatus::Watching,
+        )];
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), false).await;
+        assert_eq!(outcome.created, 0);
+        assert_eq!(outcome.monitor_mode_updated, 1);
+        assert_eq!(outcome.unchanged, 0);
+
+        let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+        assert_eq!(row.monitor_mode, MonitorMode::All.as_str());
+    }
+
+    #[tokio::test]
+    async fn merge_leaves_existing_series_alone_when_monitor_mode_matches() {
+        let db = crate::test_support::in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 12345, "Example").await;
+        sqlx::query("UPDATE series SET monitor_mode = ? WHERE id = ?")
+            .bind(MonitorMode::All.as_str())
+            .bind(series_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let entries = vec![entry(
+            external_accounts::PROVIDER_ANILIST,
+            12345,
+            NormalizedStatus::Watching,
+        )];
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), false).await;
+        assert_eq!(outcome.created, 0);
+        assert_eq!(outcome.monitor_mode_updated, 0);
+        assert_eq!(outcome.unchanged, 1);
+    }
+
+    #[tokio::test]
+    async fn merge_defers_negated_id_entries_for_jikan_path() {
+        let db = crate::test_support::in_memory_pool().await;
+        // -7777 means anibridge missed; the Jikan-fallback merge path
+        // (next commit) will handle these. For now they're counted
+        // and skipped.
+        let entries = vec![entry(
+            external_accounts::PROVIDER_MAL,
+            -7777,
+            NormalizedStatus::Watching,
+        )];
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), false).await;
+        assert_eq!(outcome.deferred_jikan, 1);
+        assert_eq!(outcome.created, 0);
+        assert!(outcome.failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn merge_records_failure_when_detail_missing_for_new_id() {
+        let db = crate::test_support::in_memory_pool().await;
+        // AL id present in entries but absent from detail_map
+        // (AL deleted the entry upstream is the canonical case).
+        let entries = vec![entry(
+            external_accounts::PROVIDER_ANILIST,
+            99999,
+            NormalizedStatus::Watching,
+        )];
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), false).await;
+        assert_eq!(outcome.created, 0);
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.failed[0].0, 99999);
+        assert!(outcome.failed[0].1.contains("no AniList detail"));
+    }
+
+    #[tokio::test]
+    async fn merge_skip_already_watched_lands_existing_for_watching_only() {
+        let db = crate::test_support::in_memory_pool().await;
+        let entries = vec![
+            entry(
+                external_accounts::PROVIDER_ANILIST,
+                100,
+                NormalizedStatus::Watching,
+            ),
+            entry(
+                external_accounts::PROVIDER_ANILIST,
+                200,
+                NormalizedStatus::Planning,
+            ),
+        ];
+        let mut detail_map = HashMap::new();
+        detail_map.insert(100, make_detail(100, "Active", "TV", "RELEASING"));
+        detail_map.insert(200, make_detail(200, "PTW", "TV", "FINISHED"));
+
+        let outcome = merge_into_library(&db, &entries, &detail_map, true).await;
+        assert_eq!(outcome.created, 2);
+
+        let watching = series::get_by_anilist_id(&db, 100).await.unwrap().unwrap();
+        let planning = series::get_by_anilist_id(&db, 200).await.unwrap().unwrap();
+        assert_eq!(
+            watching.monitor_mode,
+            MonitorMode::Existing.as_str(),
+            "skip_already_watched flips Watching → existing"
+        );
+        assert_eq!(
+            planning.monitor_mode,
+            MonitorMode::Future.as_str(),
+            "Planning still maps to future regardless of skip flag"
+        );
     }
 
     #[tokio::test]
