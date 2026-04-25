@@ -68,11 +68,18 @@
                    shift neighbors when a filter becomes active. The
                    element is also aria-hidden + tabindex=-1 in the
                    inactive state so a screen-reader / keyboard user
-                   can't reach a "Clear" link that does nothing. #}
+                   can't reach a "Clear" link that does nothing.
+
+                   The href carries the current sort through because
+                   sort is presentation, not a filter — clearing
+                   filters shouldn't snap the user back to the
+                   default "Recently added" order. The default
+                   ("recent") is omitted to keep the cleared URL
+                   tidy. #}
                 {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
-                <a class="btn btn-pill library-filter-clear" href="/" title="Clear filters">Clear</a>
+                <a class="btn btn-pill library-filter-clear" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}" title="Clear filters">Clear</a>
                 {% else %}
-                <a class="btn btn-pill library-filter-clear library-filter-clear-hidden" href="/" tabindex="-1" aria-hidden="true">Clear</a>
+                <a class="btn btn-pill library-filter-clear library-filter-clear-hidden" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}" tabindex="-1" aria-hidden="true">Clear</a>
                 {% endif %}
             </form>
             {# Reserved width pushes the right group's left edge back
@@ -102,7 +109,7 @@
         {% endif %}
     </p>
     <div class="empty-state-actions">
-        <a class="btn btn-secondary" href="/">Clear filters</a>
+        <a class="btn btn-secondary" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}">Clear filters</a>
     </div>
     {% else %}
     <p>Your library is empty.</p>

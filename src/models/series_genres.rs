@@ -14,6 +14,15 @@
 //! shape: a metadata refresh might add or remove genres for a
 //! series whose AL classification changed, and an upsert path
 //! would leak stale rows.
+//!
+//! **Read paths currently have no consumer.** [`distinct_genres`]
+//! and [`series_ids_in_genre`] were originally written for a genre
+//! dropdown on the library page; that filter was replaced by the
+//! full-text library search before #62 PR E shipped. The write
+//! paths + the one-shot backfill are kept on so the table stays
+//! warm against a future detail-page genre row or an advanced
+//! filter. Don't delete them assuming they're orphaned — check the
+//! roadmap first.
 
 use sqlx::SqlitePool;
 

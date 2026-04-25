@@ -191,10 +191,16 @@ pub async fn index(
             "title_desc".to_string()
         }
         "oldest" => {
-            // Inverse of the SQL default — reverse the slice in
-            // place rather than re-sorting on added_at, which we
-            // don't carry on the in-memory Series struct.
-            library.reverse();
+            // Sort directly on `added_at` (ISO-8601 from SQLite's
+            // CURRENT_TIMESTAMP, lexicographically chronological)
+            // rather than reverse-of-SQL-default — the latter would
+            // break silently if a future caller's needs reshaped
+            // `series::get_all`'s ORDER BY clause.
+            library.sort_by(|a, b| {
+                a.added_at
+                    .cmp(&b.added_at)
+                    .then_with(|| title_key(a).cmp(&title_key(b)))
+            });
             "oldest".to_string()
         }
         _ => "recent".to_string(),

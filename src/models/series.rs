@@ -59,6 +59,15 @@ pub struct Series {
     /// this per the account's `score_format` and never shows
     /// `You: 0` for 0.0 (AL's "unrated" sentinel).
     pub user_score: Option<f64>,
+    /// ISO-8601 string the SQLite `DEFAULT CURRENT_TIMESTAMP` writes
+    /// at insert time (e.g. `"2026-04-25 12:34:56"`). Surfaced so the
+    /// library page's "oldest first" sort can `sort_by_key` against
+    /// this column directly rather than relying on a `library.reverse()`
+    /// of the SQL default `ORDER BY added_at DESC` — that pattern broke
+    /// silently any time a future caller's needs reshaped the query's
+    /// default ordering. ISO-8601 sorts lexicographically, so a plain
+    /// `String` comparison gives chronological order without a parse.
+    pub added_at: String,
 }
 
 impl Series {
@@ -118,13 +127,14 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
             .map(|v| v != 0)
             .unwrap_or(false),
         user_score: row.try_get::<Option<f64>, _>("user_score").unwrap_or(None),
+        added_at: row.try_get("added_at").unwrap_or_default(),
     }
 }
 
 /// Get all tracked series, ordered by most recently added.
 pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -134,7 +144,7 @@ pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series WHERE id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
@@ -148,7 +158,7 @@ pub async fn get_by_anilist_id(
     anilist_id: i64,
 ) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series WHERE anilist_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE anilist_id = ?",
     )
     .bind(anilist_id)
     .fetch_optional(db)
@@ -159,7 +169,7 @@ pub async fn get_by_anilist_id(
 
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series WHERE mal_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE mal_id = ?",
     )
     .bind(mal_id)
     .fetch_optional(db)
@@ -419,7 +429,7 @@ pub async fn refresh_core_metadata(
 
 pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
