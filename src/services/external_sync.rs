@@ -21,17 +21,19 @@
 //!
 //! ## Status (this commit)
 //!
-//! End-to-end fetch + merge + delta cursor for both AniList and
-//! MyAnimeList watch lists. AL entries land under their real AL id;
-//! MAL entries that anibridge can resolve land under the resolved AL
-//! id; MAL entries that anibridge misses fall back to the
-//! Jikan-fetched-detail path and land under the `-mal_id` sentinel
+//! End-to-end fetch + merge + delta cursor + bulk-mode coalescing
+//! for both AniList and MyAnimeList watch lists. AL entries land under
+//! their real AL id; MAL entries that anibridge can resolve land under
+//! the resolved AL id; MAL entries that anibridge misses fall back to
+//! the Jikan-fetched-detail path and land under the `-mal_id` sentinel
 //! that the existing reconcile-fallbacks flow knows how to promote
-//! later. Still pending:
-//!   1. Bulk-mode coalescing for sync-originated adds (defer Jellyfin
-//!      refresh + RSS sync until the first-sync drain completes).
-//!   2. Manual "Sync now" button + ProgressRegistry hook for the
+//! later. Newly-imported series get their AnimeDetail cached + their
+//! artwork fetched + (if configured) a single Jellyfin refresh, all
+//! in one coalesced post-merge background task per tick. Still
+//! pending:
+//!   1. Manual "Sync now" button + ProgressRegistry hook for the
 //!      sticky-toast first-sync UI.
+//!   2. Settings UI for the per-account interval slider.
 
 use std::collections::HashMap;
 
@@ -41,8 +43,10 @@ use crate::AppState;
 use crate::models::external_accounts::{self, ImportPreferences};
 use crate::models::log::LogCategory;
 use crate::models::monitoring::MonitorMode;
-use crate::models::series;
-use crate::services::{anibridge, anilist, jikan, logger, mal, monitoring as monitoring_service};
+use crate::models::{metadata_cache, series};
+use crate::services::{
+    anibridge, anilist, artwork, jikan, logger, mal, monitoring as monitoring_service,
+};
 
 // ── Provider-agnostic sync entry abstraction ──────────────────────
 
@@ -318,6 +322,27 @@ pub struct MergeOutcome {
     /// AL id deleted upstream shouldn't block the other 199 entries
     /// from importing.
     pub failed: Vec<(i64, String)>,
+    /// Newly-created series rows that need artwork caching, collected
+    /// for the deferred bulk-mode pass that runs after merge. Carrying
+    /// just the IDs + image URLs (not the full AnimeDetail) keeps
+    /// memory bounded on a 500-series first sync.
+    pub new_artwork: Vec<NewArtworkSpec>,
+}
+
+/// Pointer payload for the deferred artwork-cache pass. The merge
+/// step writes one of these per newly-created series; the post-merge
+/// background task in sync_anilist / sync_mal walks the list and
+/// calls `artwork::cache_image` once per non-empty URL.
+///
+/// Both URLs may be empty when the upstream provider doesn't supply
+/// banner artwork for a series — Jikan in particular often returns
+/// only a cover image. The post-merge task skips empty URLs rather
+/// than logging a per-series failure.
+#[derive(Debug, Clone)]
+pub struct NewArtworkSpec {
+    pub series_id: i64,
+    pub cover_url: String,
+    pub banner_url: String,
 }
 
 /// Merge a batch of [`SyncEntry`] into the local `series` table.
@@ -358,7 +383,10 @@ pub async fn merge_into_library(
         }
         let target_mode = monitor_mode_for(entry.status, skip_already_watched);
         match merge_one_anilist_entry(db, entry, target_mode, detail_map).await {
-            Ok(MergeAction::Created) => outcome.created += 1,
+            Ok(MergeAction::Created(spec)) => {
+                outcome.created += 1;
+                outcome.new_artwork.push(spec);
+            }
             Ok(MergeAction::MonitorUpdated) => outcome.monitor_mode_updated += 1,
             Ok(MergeAction::Unchanged) => outcome.unchanged += 1,
             Err(msg) => outcome.failed.push((entry.anilist_id, msg)),
@@ -367,9 +395,12 @@ pub async fn merge_into_library(
     outcome
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum MergeAction {
-    Created,
+    /// New series row created. Carries the artwork spec so the bulk-
+    /// mode post-merge task can cache cover + banner without re-
+    /// fetching the AnimeDetail.
+    Created(NewArtworkSpec),
     MonitorUpdated,
     Unchanged,
 }
@@ -392,6 +423,7 @@ impl MergeOutcome {
         self.unchanged += other.unchanged;
         self.deferred_jikan = (self.deferred_jikan - handled_by_other).max(0);
         self.failed.extend(other.failed);
+        self.new_artwork.extend(other.new_artwork);
         self
     }
 }
@@ -422,7 +454,10 @@ pub async fn merge_jikan_fallback_entries(
         let mal_id = -entry.anilist_id;
         let target_mode = monitor_mode_for(entry.status, skip_already_watched);
         match merge_one_jikan_entry(db, entry, mal_id, target_mode).await {
-            Ok(MergeAction::Created) => outcome.created += 1,
+            Ok(MergeAction::Created(spec)) => {
+                outcome.created += 1;
+                outcome.new_artwork.push(spec);
+            }
             Ok(MergeAction::MonitorUpdated) => outcome.monitor_mode_updated += 1,
             Ok(MergeAction::Unchanged) => outcome.unchanged += 1,
             Err(msg) => outcome.failed.push((entry.anilist_id, msg)),
@@ -494,8 +529,29 @@ async fn merge_one_jikan_entry(
     .await
     .map_err(|e| format!("series upsert failed: {e}"))?;
 
+    // Same metadata_cache write as the AL path so a Jikan-fallback
+    // entry's UI looks the same as an AL one (description, relations
+    // — Jikan supplies most of them via /anime/{id}/full).
+    if let Err(e) = metadata_cache::upsert(
+        db,
+        series_id,
+        entry.anilist_id,
+        detail.id_mal.or(Some(mal_id)),
+        &detail,
+    )
+    .await
+    {
+        tracing::warn!(
+            "metadata_cache::upsert failed for series_id={series_id} during Jikan sync: {e}"
+        );
+    }
+
     monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
-    Ok(MergeAction::Created)
+    Ok(MergeAction::Created(NewArtworkSpec {
+        series_id,
+        cover_url: detail.cover_url.clone(),
+        banner_url: detail.banner_url.clone(),
+    }))
 }
 
 async fn merge_one_anilist_entry(
@@ -548,8 +604,23 @@ async fn merge_one_anilist_entry(
     .await
     .map_err(|e| format!("series upsert failed: {e}"))?;
 
+    // Populate the cached AnimeDetail inline so the UI sees full
+    // metadata (description, genres, relations) immediately on next
+    // page load — without this the row would render with bare
+    // series-table fields until the next 12h metadata_refresh sweep.
+    // Best-effort: a failure logs but doesn't fail the merge.
+    if let Err(e) =
+        metadata_cache::upsert(db, series_id, entry.anilist_id, detail.id_mal, detail).await
+    {
+        tracing::warn!("metadata_cache::upsert failed for series_id={series_id} during sync: {e}");
+    }
+
     monitoring_service::apply_monitor_mode(db, series_id, target_mode).await?;
-    Ok(MergeAction::Created)
+    Ok(MergeAction::Created(NewArtworkSpec {
+        series_id,
+        cover_url: detail.cover_url.clone(),
+        banner_url: detail.banner_url.clone(),
+    }))
 }
 
 /// Seven days of seconds; the weekly full-resync backstop interval.
@@ -722,6 +793,7 @@ async fn sync_anilist(
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
+    spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
         "AniList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, failed {}",
@@ -909,6 +981,7 @@ async fn sync_mal(
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
+    spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
         "MyAnimeList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, deferred {}, failed {}",
@@ -918,6 +991,84 @@ async fn sync_mal(
         outcome.deferred_jikan,
         outcome.failed.len(),
     ))
+}
+
+/// Coalesced post-merge work for sync-imported series. Runs once per
+/// tick (vs. once per series for the interactive add path) so a
+/// 200-series first sync doesn't spawn 200 background tasks. Caches
+/// cover + banner artwork sequentially through `artwork::cache_image`,
+/// then fires a single Jellyfin library refresh if any series was
+/// imported and the user has Jellyfin configured.
+///
+/// All work runs in a spawned task — the sync tick returns immediately
+/// after kicking off this future. A failure in any step logs but
+/// doesn't propagate; the artwork host being down or Jellyfin being
+/// offline shouldn't make the next tick consider the prior tick a
+/// failure (which would block the cursor advance).
+async fn spawn_post_merge_bulk_pass(state: &AppState, specs: Vec<NewArtworkSpec>) {
+    if specs.is_empty() {
+        return;
+    }
+    let db = state.db.clone();
+    let jellyfin = state.jellyfin.read().await.clone();
+    tokio::spawn(async move {
+        // Sequential rather than parallel: hammering an artwork CDN
+        // with 400 concurrent requests is the kind of thing that gets
+        // an IP rate-limited. The serial walk takes a minute or two
+        // for a fresh import; the user's library still renders during
+        // that window because cached_or_source_url falls back to the
+        // upstream URL when the local key isn't present yet.
+        for spec in &specs {
+            if !spec.cover_url.is_empty() {
+                let _ = artwork::cache_image(
+                    &db,
+                    &format!("series-{}-cover", spec.series_id),
+                    "series",
+                    Some(spec.series_id),
+                    "cover",
+                    &spec.cover_url,
+                )
+                .await;
+            }
+            if !spec.banner_url.is_empty() {
+                let _ = artwork::cache_image(
+                    &db,
+                    &format!("series-{}-banner", spec.series_id),
+                    "series",
+                    Some(spec.series_id),
+                    "banner",
+                    &spec.banner_url,
+                )
+                .await;
+            }
+        }
+        // One Jellyfin refresh at the end — covers all newly-imported
+        // series in a single call. The same coalesce avoids the
+        // pattern where 200 individual interactive adds would fire 200
+        // /Library/Refresh requests against Jellyfin and overwhelm the
+        // scan queue.
+        if let Some(client) = jellyfin
+            && let Err(e) = client.refresh_library().await
+        {
+            logger::warn(
+                &db,
+                LogCategory::Jellyfin,
+                "Sync-driven Jellyfin refresh failed",
+                &e,
+            )
+            .await;
+        }
+        logger::info(
+            &db,
+            LogCategory::ExternalSync,
+            &format!(
+                "Bulk-mode post-merge artwork cache complete ({} series)",
+                specs.len()
+            ),
+            "",
+        )
+        .await;
+    });
 }
 
 fn current_unix_ts() -> i64 {
@@ -1304,8 +1455,11 @@ mod tests {
             12345,
             NormalizedStatus::Watching,
         )];
+        let mut detail = make_detail(12345, "Example", "TV", "RELEASING");
+        detail.cover_url = "https://example/cover.jpg".to_string();
+        detail.banner_url = "https://example/banner.jpg".to_string();
         let mut detail_map = HashMap::new();
-        detail_map.insert(12345, make_detail(12345, "Example", "TV", "RELEASING"));
+        detail_map.insert(12345, detail);
 
         let outcome = merge_into_library(&db, &entries, &detail_map, false).await;
         assert_eq!(outcome.created, 1);
@@ -1320,6 +1474,21 @@ mod tests {
             .expect("series row should exist");
         assert_eq!(row.monitor_mode, MonitorMode::All.as_str());
         assert_eq!(row.title_english, "Example");
+
+        // Newly-created series MUST yield an artwork spec so the
+        // post-merge bulk-mode pass has the cover + banner URLs to
+        // fetch. Without this the spec lookup would silently no-op
+        // and the user's library would render via upstream-source
+        // fallback URLs forever.
+        assert_eq!(outcome.new_artwork.len(), 1);
+        assert_eq!(
+            outcome.new_artwork[0].cover_url,
+            "https://example/cover.jpg"
+        );
+        assert_eq!(
+            outcome.new_artwork[0].banner_url,
+            "https://example/banner.jpg"
+        );
     }
 
     #[tokio::test]
@@ -1468,6 +1637,11 @@ mod tests {
             unchanged: 10,
             deferred_jikan: 3,
             failed: Vec::new(),
+            new_artwork: vec![NewArtworkSpec {
+                series_id: 1,
+                cover_url: "c1".into(),
+                banner_url: "b1".into(),
+            }],
         };
         let jikan = MergeOutcome {
             created: 2,
@@ -1475,6 +1649,18 @@ mod tests {
             unchanged: 0,
             deferred_jikan: 0,
             failed: vec![(-9999, "Jikan rate-limited".into())],
+            new_artwork: vec![
+                NewArtworkSpec {
+                    series_id: 2,
+                    cover_url: "c2".into(),
+                    banner_url: "b2".into(),
+                },
+                NewArtworkSpec {
+                    series_id: 3,
+                    cover_url: "c3".into(),
+                    banner_url: "b3".into(),
+                },
+            ],
         };
         let combined = al.merge_pass(jikan);
         assert_eq!(combined.created, 7);
@@ -1482,6 +1668,9 @@ mod tests {
         assert_eq!(combined.unchanged, 10);
         assert_eq!(combined.deferred_jikan, 0);
         assert_eq!(combined.failed.len(), 1);
+        // Artwork specs concatenate across passes — the bulk-mode
+        // post-merge task expects the full list of new series.
+        assert_eq!(combined.new_artwork.len(), 3);
     }
 
     #[test]
@@ -1493,6 +1682,7 @@ mod tests {
             unchanged: 0,
             deferred_jikan: 5,
             failed: Vec::new(),
+            new_artwork: Vec::new(),
         };
         let jikan = MergeOutcome {
             created: 2,
@@ -1500,6 +1690,7 @@ mod tests {
             unchanged: 0,
             deferred_jikan: 0,
             failed: Vec::new(),
+            new_artwork: Vec::new(),
         };
         let combined = al.merge_pass(jikan);
         assert_eq!(combined.deferred_jikan, 3);
