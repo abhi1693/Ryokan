@@ -271,6 +271,7 @@ pub async fn series_detail(
                 title,
                 message,
                 detail: tech_detail,
+                title_language: config::get_title_language(&state.db).await,
             };
             return Html(template.render().unwrap_or_default());
         }

@@ -22,6 +22,7 @@ struct SearchTemplate {
     /// through to search.js via window.searchState so the Grab button
     /// can bypass the modal when the user's set it to `never`.
     grab_preview_mode: String,
+    title_language: String,
 }
 
 async fn load_grab_preview_mode(state: &AppState) -> String {
@@ -134,13 +135,18 @@ async fn build_opts(
 }
 
 pub async fn search_page(State(state): State<AppState>) -> Html<String> {
+    let (grab_preview_mode, title_language) = tokio::join!(
+        load_grab_preview_mode(&state),
+        crate::models::config::get_title_language(&state.db),
+    );
     let template = SearchTemplate {
         page: "search".to_string(),
         results: Vec::new(),
         query: String::new(),
         searched: false,
         has_next: false,
-        grab_preview_mode: load_grab_preview_mode(&state).await,
+        grab_preview_mode,
+        title_language,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -198,7 +204,10 @@ pub async fn search_submit(
         &std::collections::HashSet::new(),
     );
 
-    let grab_preview_mode = load_grab_preview_mode(&state).await;
+    let (grab_preview_mode, title_language) = tokio::join!(
+        load_grab_preview_mode(&state),
+        crate::models::config::get_title_language(&state.db),
+    );
     let template = SearchTemplate {
         page: "search".to_string(),
         results: response.results,
@@ -206,6 +215,7 @@ pub async fn search_submit(
         searched: true,
         has_next: response.has_next,
         grab_preview_mode,
+        title_language,
     };
     Html(template.render().unwrap_or_default())
 }

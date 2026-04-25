@@ -135,6 +135,12 @@ struct SettingsTemplate {
     /// plaintext tokens exist only in memory during outbound API
     /// calls, never in a rendered page.
     external_account: Option<ExternalAccountView>,
+    /// Mirrors `config.title_language` so `base.html`'s pre-paint FOUC
+    /// guard can bake the user's preference into the rendered page.
+    /// Without this, opening Settings (or any other page) from a fresh
+    /// browser snaps titles back to English even when the saved
+    /// preference is Romaji or Native.
+    title_language: String,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -589,6 +595,7 @@ async fn build_settings_template(
     };
 
     let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
+    let title_language = cfg.title_language.clone();
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -603,6 +610,7 @@ async fn build_settings_template(
         error: err,
         version: env!("CARGO_PKG_VERSION"),
         external_account,
+        title_language,
     }
 }
 
@@ -862,6 +870,7 @@ pub async fn settings_submit(
             .flatten()
             .map(ExternalAccountView::from_model);
         let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
+        let title_language = cfg.title_language.clone();
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
@@ -876,6 +885,7 @@ pub async fn settings_submit(
             error: Some(format!("Failed to save: {}", e)),
             version: env!("CARGO_PKG_VERSION"),
             external_account,
+            title_language,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1177,6 +1187,7 @@ pub async fn settings_submit(
         .flatten()
         .map(ExternalAccountView::from_model);
     let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
+    let title_language = cfg.title_language.clone();
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
@@ -1196,6 +1207,7 @@ pub async fn settings_submit(
         error: None,
         version: env!("CARGO_PKG_VERSION"),
         external_account,
+        title_language,
     };
     Html(template.render().unwrap_or_default())
 }

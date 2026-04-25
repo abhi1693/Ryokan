@@ -251,6 +251,22 @@ struct ConfigRow {
     external_sync_interval_minutes: i64,
 }
 
+/// Cheap title-language lookup with a safe default. Used by every page
+/// template whose `base.html`-extending render needs to bake the user's
+/// preference into the pre-paint FOUC guard. Returns `"english"` on any
+/// error (DB transient failure, no config row yet during first-run setup,
+/// pre-auth pages where no config exists) so the inline script's
+/// `data-title-language` attribute always has a non-empty value — the
+/// CSS title-switcher selector is keyed off it.
+pub async fn get_title_language(db: &SqlitePool) -> String {
+    sqlx::query_scalar::<_, String>("SELECT title_language FROM config WHERE id = 1")
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "english".to_string())
+}
+
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(

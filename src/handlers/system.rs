@@ -45,6 +45,7 @@ struct SystemTemplate {
     /// populated when `tab == "review"`; empty on every other tab so
     /// the serial fan-out stays cheap.
     review_entries: Vec<episode_tags::NeedsReviewEntry>,
+    title_language: String,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +210,7 @@ pub async fn system_page(
         ("scoring", LogCategory::Scoring.label()),
     ];
 
+    let title_language = config::get_title_language(&state.db).await;
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -230,6 +232,7 @@ pub async fn system_page(
         rss_recent,
         scheduled_tasks,
         review_entries,
+        title_language,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -336,6 +339,7 @@ pub async fn debug_settings_submit(
         rss_recent: Vec::new(),
         scheduled_tasks: scheduled_tasks::list(&state.db).await.unwrap_or_default(),
         review_entries: Vec::new(),
+        title_language: cfg.title_language.clone(),
     };
     Html(template.render().unwrap_or_default())
 }

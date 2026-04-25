@@ -16,9 +16,18 @@
     // Pre-render FOUC guard: sets the title-language data attribute on
     // <html> before any content paints. Must stay inline (non-deferred)
     // so the attribute is set before the first reflow.
+    //
+    // Fallback chain: localStorage (the per-browser override the user
+    // sets via Settings → save) → server-rendered preference baked into
+    // the template by the handler → "english" hard default. Without the
+    // server-side step, opening Ryokan from a fresh browser / device
+    // would silently snap titles back to English even though the user
+    // had `config.title_language` set otherwise — localStorage isn't
+    // shared across devices and starts empty.
     (function() {
+        const serverLang = "{{ title_language }}";
         const applyTitleLanguage = () => {
-            const lang = localStorage.getItem('titleLanguage') || 'english';
+            const lang = localStorage.getItem('titleLanguage') || serverLang || 'english';
             document.documentElement.setAttribute('data-title-language', lang);
         };
         try { applyTitleLanguage(); } catch (_) {}
