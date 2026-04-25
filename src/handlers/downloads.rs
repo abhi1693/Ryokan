@@ -398,6 +398,115 @@ mod tests {
         }
     }
 
+    // ── format_size ───────────────────────────────────────────────────
+
+    #[test]
+    fn format_size_zero_or_negative_renders_zero_bytes() {
+        // Negative bytes can't physically happen, but i64 lets the
+        // value through. The defensive `<= 0` arm exists for that
+        // case; pin it with both 0 and a negative input. The string
+        // is a literal "0 B" so the queue row renders something
+        // rather than an empty cell.
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(-1), "0 B");
+    }
+
+    #[test]
+    fn format_size_under_1_kib_uses_b_with_no_decimals() {
+        // First-tier units render with no decimal — "12 B" reads more
+        // naturally than "12.0 B" for tiny values.
+        assert_eq!(format_size(1), "1 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_size_unit_boundaries_round_to_one_decimal() {
+        // 1 KB = 1024 → "1.0 KB" (note: KB unit-string, decimal on).
+        assert_eq!(format_size(1024), "1.0 KB");
+        // 1 MB.
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        // 1 GB.
+        assert_eq!(format_size(1024i64.pow(3)), "1.0 GB");
+        // 1 TB — top unit, larger values stay in TB.
+        assert_eq!(format_size(1024i64.pow(4)), "1.0 TB");
+    }
+
+    #[test]
+    fn format_size_clamps_at_top_unit() {
+        // Beyond TB (1024^4), the index is capped at 4 (TB) so a
+        // hypothetical PB-sized torrent doesn't underflow into an
+        // empty unit slot.
+        let huge = 1024i64.pow(5);
+        assert!(format_size(huge).ends_with(" TB"), "{}", format_size(huge));
+    }
+
+    // ── format_speed ─────────────────────────────────────────────────
+
+    #[test]
+    fn format_speed_zero_renders_blank() {
+        // 0 bps means "no transfer in flight" — surface as blank so
+        // the queue row reads cleanly rather than "0 B/s".
+        assert_eq!(format_speed(0), "");
+        assert_eq!(format_speed(-1), "");
+    }
+
+    #[test]
+    fn format_speed_appends_per_second_to_size() {
+        assert_eq!(format_speed(1024), "1.0 KB/s");
+        assert_eq!(format_speed(2 * 1024 * 1024), "2.0 MB/s");
+    }
+
+    // ── format_eta ───────────────────────────────────────────────────
+
+    #[test]
+    fn format_eta_zero_or_sentinel_renders_blank() {
+        assert_eq!(format_eta(0), "");
+        assert_eq!(format_eta(-1), "");
+        // 8_640_000s = 100 days. qBit returns this as the "infinity"
+        // sentinel; treat as unknown, render blank.
+        assert_eq!(format_eta(8_640_000), "");
+        assert_eq!(format_eta(9_999_999), "");
+    }
+
+    #[test]
+    fn format_eta_seconds_only_under_one_minute() {
+        assert_eq!(format_eta(45), "45s");
+        assert_eq!(format_eta(1), "1s");
+    }
+
+    #[test]
+    fn format_eta_minutes_and_seconds_under_one_hour() {
+        assert_eq!(format_eta(60), "1m 0s");
+        assert_eq!(format_eta(125), "2m 5s");
+    }
+
+    #[test]
+    fn format_eta_hours_and_minutes_at_or_above_one_hour() {
+        // Seconds drop out at the hour level — "1h 30m 5s" would be
+        // visual noise for an ETA estimate that's already coarse.
+        assert_eq!(format_eta(3600), "1h 0m");
+        assert_eq!(format_eta(3661), "1h 1m");
+        assert_eq!(format_eta(7320), "2h 2m");
+    }
+
+    // ── normalize_tab ────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_tab_known_tabs_pass_through() {
+        assert_eq!(normalize_tab(Some("history".into())), "history");
+        assert_eq!(normalize_tab(Some("blocklist".into())), "blocklist");
+    }
+
+    #[test]
+    fn normalize_tab_unknown_or_missing_defaults_to_queue() {
+        // Queue is the natural landing — opening /downloads with no
+        // explicit tab should show what's currently transferring.
+        assert_eq!(normalize_tab(None), "queue");
+        assert_eq!(normalize_tab(Some("garbage".into())), "queue");
+        assert_eq!(normalize_tab(Some("".into())), "queue");
+    }
+
     #[test]
     fn torrent_view_is_paused_flag_matches_enum() {
         // Drives the pause/resume button on the queue row. Reading

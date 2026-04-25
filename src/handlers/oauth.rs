@@ -769,6 +769,96 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    // ── generate_state_nonce ─────────────────────────────────────────
+
+    #[test]
+    fn state_nonce_is_url_safe_and_distinct_per_call() {
+        // Same RNG-smoke check as the verifier counterpart. The state
+        // nonce gates the OAuth callback; predictability here would
+        // break the CSRF guard outright.
+        let a = generate_state_nonce();
+        let b = generate_state_nonce();
+        assert_ne!(a, b);
+        for nonce in [&a, &b] {
+            assert!(
+                nonce
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "state nonce must be URL-safe: {nonce}"
+            );
+            assert!(!nonce.is_empty());
+        }
+    }
+
+    // ── constant_time_eq ─────────────────────────────────────────────
+
+    #[test]
+    fn constant_time_eq_matches_equal_inputs() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(constant_time_eq(b"\x00\x01\xff", b"\x00\x01\xff"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_inputs() {
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        // First-byte difference must not short-circuit early — `subtle`
+        // is what guarantees this; we can only smoke-test correctness
+        // here, not timing.
+        assert!(!constant_time_eq(b"X", b"Y"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_length_mismatch() {
+        // Different-length inputs return false without a panic. Length
+        // is a public attribute (the caller's input lengths come from
+        // user-supplied strings), so this fast-path is safe.
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(!constant_time_eq(b"abc", b""));
+    }
+
+    // ── excerpt ──────────────────────────────────────────────────────
+
+    #[test]
+    fn excerpt_passes_through_short_strings_unchanged() {
+        assert_eq!(excerpt(""), "");
+        assert_eq!(excerpt("hello"), "hello");
+    }
+
+    #[test]
+    fn excerpt_caps_long_strings_with_ellipsis() {
+        // 240 chars is the cap; anything longer gets a single '…' suffix.
+        let long: String = "X".repeat(500);
+        let got = excerpt(&long);
+        // 240 X's + '…'.
+        assert!(got.starts_with(&"X".repeat(240)), "wrong prefix: {got}");
+        assert!(got.ends_with('…'));
+        assert_eq!(got.chars().count(), 241);
+    }
+
+    #[test]
+    fn excerpt_is_char_aware_does_not_panic_on_utf8_boundary() {
+        // The 240-char boundary intersects a 4-byte emoji — a byte-
+        // slice excerpt would panic at `&s[..240]`. The char-aware
+        // implementation must not.
+        let mut s = String::new();
+        s.push_str(&"a".repeat(239));
+        s.push('🎌'); // 4-byte UTF-8 char at exact char boundary 240.
+        s.push_str("trailing");
+        let got = excerpt(&s);
+        assert!(got.ends_with('…'));
+        assert_eq!(got.chars().count(), 241);
+    }
+
+    #[test]
+    fn excerpt_at_exact_cap_does_not_append_ellipsis() {
+        // Boundary: a 240-char input fits exactly — no '…' suffix.
+        let exact: String = "Y".repeat(240);
+        let got = excerpt(&exact);
+        assert_eq!(got, exact);
+        assert!(!got.ends_with('…'));
+    }
+
     #[tokio::test]
     async fn anilist_start_redirects_to_authorize_url() {
         let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
