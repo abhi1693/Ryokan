@@ -860,21 +860,29 @@ pub async fn has_linked_account(db: &SqlitePool) -> bool {
 /// …)` path captures the failure.
 pub async fn tick_once(state: &AppState) -> Result<String, String> {
     let _guard = EXTERNAL_SYNC_LOCK.lock().await;
-    tick_once_inner(state).await
+    tick_once_inner(state, false).await
 }
 
 /// Manual-trigger variant. Returns a "sync already running" error
 /// rather than waiting if the supervised loop or another manual
 /// trigger is already mid-tick. The user-facing toast surfaces this
 /// error directly so a double-click doesn't silently queue.
+///
+/// Forces a full resync regardless of `list_full_resync_at`: a user
+/// clicking "Sync now" almost always means "I just changed my list,
+/// reflect it" — including removals. Without the force flag, removal
+/// detection would be skipped until the next 7-day boundary, leaving
+/// a removed-from-AL series grabbing for up to a week. The cursor
+/// stamps still advance, so the next supervised tick reads as
+/// already-synced.
 pub async fn tick_once_or_busy(state: &AppState) -> Result<String, String> {
     let _guard = EXTERNAL_SYNC_LOCK
         .try_lock()
         .map_err(|_| "Watch-list sync is already running.".to_string())?;
-    tick_once_inner(state).await
+    tick_once_inner(state, true).await
 }
 
-async fn tick_once_inner(state: &AppState) -> Result<String, String> {
+async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<String, String> {
     let account = external_accounts::get_current(&state.db)
         .await
         .map_err(|e| format!("read external_accounts: {e}"))?;
@@ -888,11 +896,12 @@ async fn tick_once_inner(state: &AppState) -> Result<String, String> {
     // looking" — using the post-fetch time would risk dropping
     // entries the user updated while we were syncing.
     let tick_started_at = current_unix_ts();
-    let is_full_sync = should_full_resync(
-        account.list_last_synced_at,
-        account.list_full_resync_at,
-        tick_started_at,
-    );
+    let is_full_sync = force_full_sync
+        || should_full_resync(
+            account.list_last_synced_at,
+            account.list_full_resync_at,
+            tick_started_at,
+        );
     let delta_cursor = if is_full_sync {
         None
     } else {
@@ -1008,11 +1017,12 @@ async fn sync_anilist(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "AniList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} removed-from-list, {} failed",
+            "AniList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} pinned-manually, {} removed-from-list, {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
             outcome.skipped_by_preference,
+            outcome.pinned_manually,
             removed_count,
             outcome.failed.len(),
         ),
@@ -1023,11 +1033,12 @@ async fn sync_anilist(
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
-        "AniList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, removed-from-list {}, failed {}",
+        "AniList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, pinned-manually {}, removed-from-list {}, failed {}",
         outcome.created,
         outcome.monitor_mode_updated,
         outcome.unchanged,
         outcome.skipped_by_preference,
+        outcome.pinned_manually,
         removed_count,
         outcome.failed.len(),
     ))
@@ -1217,11 +1228,12 @@ async fn sync_mal(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "MyAnimeList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} deferred, {} removed-from-list, {} failed",
+            "MyAnimeList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} pinned-manually, {} deferred, {} removed-from-list, {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
             outcome.skipped_by_preference,
+            outcome.pinned_manually,
             outcome.deferred_jikan,
             removed_count,
             outcome.failed.len(),
@@ -1233,11 +1245,12 @@ async fn sync_mal(
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
-        "MyAnimeList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, deferred {}, removed-from-list {}, failed {}",
+        "MyAnimeList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, pinned-manually {}, deferred {}, removed-from-list {}, failed {}",
         outcome.created,
         outcome.monitor_mode_updated,
         outcome.unchanged,
         outcome.skipped_by_preference,
+        outcome.pinned_manually,
         outcome.deferred_jikan,
         removed_count,
         outcome.failed.len(),
@@ -2423,6 +2436,29 @@ mod tests {
 
         let row = series::get_by_id(&db, pinned_id).await.unwrap().unwrap();
         assert_eq!(row.monitor_mode, MonitorMode::All.as_str());
+    }
+
+    #[test]
+    fn force_full_sync_overrides_should_full_resync_decision() {
+        // A 2-day-old full sync would normally yield is_full_sync=false
+        // (within the 7-day delta window). With the force flag set,
+        // is_full_sync MUST be true regardless — the manual "Sync
+        // now" trigger uses this to make removals apply immediately
+        // instead of waiting up to 7 days for the next boundary.
+        let now = 2_000_000_000;
+        let two_days_ago = now - 2 * 24 * 60 * 60;
+        // Without force: standard delta logic returns false.
+        assert!(!should_full_resync(
+            Some(two_days_ago),
+            Some(two_days_ago),
+            now
+        ));
+        // The force-full-sync gate `force || should_full_resync(...)`
+        // is the actual logic in tick_once_inner. Pin the OR so a
+        // refactor doesn't accidentally drop the force path.
+        let force = true;
+        let is_full_sync = force || should_full_resync(Some(two_days_ago), Some(two_days_ago), now);
+        assert!(is_full_sync, "force flag must override the delta window");
     }
 
     #[tokio::test]

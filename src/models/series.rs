@@ -434,6 +434,28 @@ pub async fn update_monitor_mode_manual_override(
     Ok(())
 }
 
+/// Atomic write of `monitor_mode` + `monitor_mode_manual_override` in
+/// a single SQLite UPDATE so a partial write can't leave the row in
+/// the surprise state "new mode without the pin flag" — which would
+/// silently let the next sync tick overwrite the user's choice.
+/// Used by the explicit-mode branch of `set_monitoring`.
+pub async fn update_monitor_mode_with_override(
+    db: &SqlitePool,
+    id: i64,
+    monitor_mode: &str,
+    flag: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE series SET monitor_mode = ?, monitor_mode_manual_override = ? WHERE id = ?",
+    )
+    .bind(monitor_mode)
+    .bind(if flag { 1_i64 } else { 0_i64 })
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// #62 PR B — stamp the external account that most-recently synced
 /// this series. Called on every successful merge action (Created,
 /// MonitorUpdated, Unchanged) so the marker stays current even if

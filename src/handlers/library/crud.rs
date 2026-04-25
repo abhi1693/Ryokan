@@ -507,13 +507,18 @@ pub async fn set_monitoring(
     }
 
     let mode = monitoring::MonitorMode::from_str(&form.monitor_mode);
-    let summary = monitoring_service::apply_monitor_mode(&state.db, series_id, mode)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    // User-driven change pins the mode against subsequent syncs.
-    series::update_monitor_mode_manual_override(&state.db, series_id, true)
+    // Atomic write of monitor_mode + the manual-override flag in a
+    // single UPDATE so a partial failure can't leave the row in the
+    // "new mode without pin" surprise state — which would silently
+    // let the next sync tick overwrite the user's choice. The
+    // monitoring-rows recompute that follows is idempotent on
+    // episode_monitor_state; running it twice is harmless.
+    series::update_monitor_mode_with_override(&state.db, series_id, mode.as_str(), true)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let summary = monitoring_service::recompute_series_monitoring(&state.db, series_id)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     logger::info(
         &state.db,
@@ -1330,6 +1335,25 @@ mod tests {
             assert!(
                 row.monitor_mode_manual_override,
                 "explicit-mode pick must set the override flag"
+            );
+        }
+
+        #[test]
+        fn monitor_mode_sync_sentinel_matches_template_literal() {
+            // The dropdown in templates/series.html hardcodes
+            // <option value="sync">; the handler's branch keys off
+            // MONITOR_MODE_SYNC_SENTINEL. A rename of the constant
+            // would silently desync the two and the dropdown option
+            // would no-op. Pin the value so the rename forces a
+            // template edit.
+            assert_eq!(super::super::MONITOR_MODE_SYNC_SENTINEL, "sync");
+            // Also confirm the template still emits the literal —
+            // catches the inverse: someone renames the template
+            // option but forgets the const.
+            let template = include_str!("../../../templates/series.html");
+            assert!(
+                template.contains(r#"<option value="sync""#),
+                "templates/series.html must keep the sync sentinel option in sync with MONITOR_MODE_SYNC_SENTINEL"
             );
         }
 
