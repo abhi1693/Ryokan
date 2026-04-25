@@ -253,9 +253,6 @@
                         <span class="form-hint"><span class="log-badge">Not linked</span></span>
                 {% endmatch %}
             </legend>
-            <p class="form-hint" style="margin-bottom: 12px;">
-                Link your AniList or MyAnimeList account to import your watch lists into Ryokan's library. Read-only; Ryokan never writes back to the provider. One account at a time.
-            </p>
             {% match external_account %}
                 {% when Some with (acct) %}
                     {# Banners — sticky flags cleared on the next
@@ -305,7 +302,6 @@
                                 <span>Completed</span>
                             </label>
                         </div>
-                        <span class="form-hint">Watching + Plan to Watch are on by default; the active and passive lists most users want imported. Other statuses are opt-in.</span>
                     </div>
 
                     <div class="form-group">
@@ -313,7 +309,6 @@
                             <input type="checkbox" data-ext-pref="skip_already_watched" {% if acct.skip_already_watched %}checked{% endif %} onchange="saveExternalAccountPrefs()">
                             <span>Skip already-watched episodes</span>
                         </label>
-                        <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off; airing series + a caught-up user would otherwise skip everything.</span>
                     </div>
 
                     {# #62 PR B — sync cadence. Range: 15 minutes to
@@ -330,7 +325,6 @@
                                max="10080"
                                step="1"
                                value="{{ config.external_sync_interval_minutes }}">
-                        <span class="form-hint">How often the supervised task pulls your watch list. Range: 15 minutes to 7 days. Default 30 minutes; most lists change infrequently and the delta cursor keeps each tick cheap.</span>
                     </div>
 
                     {# Same .settings-inline-actions row qBit/Jellyfin
@@ -365,17 +359,14 @@
                     {# Unlinked: a single form-group whose action row
                        carries both Link buttons, mirroring how the
                        Sonarr/Radarr fieldsets present their enable
-                       checkbox at the top. Provider trade-offs are
-                       summarized in the form-hint below the buttons. #}
+                       checkbox at the top. #}
                     <div class="form-group">
                         <label>Provider</label>
                         <div class="settings-inline-actions">
                             <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('anilist')">Link AniList</button>
                             <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('mal')">Link MyAnimeList</button>
                         </div>
-                        <span class="form-hint">AniList ships five score formats (including the smiley scale) and custom lists like "Hidden Gems" that sync as filterable badges. MyAnimeList is 10-point only and entries without an AniList mapping fall back to a negated-id sentinel that's invisible to SeaDex-keyed scoring.</span>
                     </div>
-                    <p class="form-hint" style="margin-top: -4px;">Attribution: AniList and MyAnimeList data used with permission under each platform's API terms.</p>
             {% endmatch %}
         </fieldset>
 
