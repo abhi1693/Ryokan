@@ -45,6 +45,13 @@ pub struct Series {
     /// relative target (AL's own numbering) OR `target + offset` (the
     /// absolute number a SubsPlease-style release would use).
     pub cumulative_prior_episodes: i32,
+    /// #62 PR B — `1` when the user has manually pinned this series's
+    /// `monitor_mode` through the per-series UI. The watch-list sync
+    /// skips both the merge-step monitor_mode update and the removal-
+    /// detection downgrade for these rows, so a pinned mode stays
+    /// pinned across syncs. Cleared when the user picks "Sync from
+    /// AL/MAL" from the dropdown.
+    pub monitor_mode_manual_override: bool,
 }
 
 impl Series {
@@ -83,13 +90,17 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
         cumulative_prior_episodes: row
             .try_get::<i32, _>("cumulative_prior_episodes")
             .unwrap_or(0),
+        monitor_mode_manual_override: row
+            .try_get::<i64, _>("monitor_mode_manual_override")
+            .map(|v| v != 0)
+            .unwrap_or(false),
     }
 }
 
 /// Get all tracked series, ordered by most recently added.
 pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -99,7 +110,7 @@ pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
@@ -113,7 +124,7 @@ pub async fn get_by_anilist_id(
     anilist_id: i64,
 ) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE anilist_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series WHERE anilist_id = ?",
     )
     .bind(anilist_id)
     .fetch_optional(db)
@@ -124,7 +135,7 @@ pub async fn get_by_anilist_id(
 
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE mal_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series WHERE mal_id = ?",
     )
     .bind(mal_id)
     .fetch_optional(db)
@@ -384,7 +395,7 @@ pub async fn refresh_core_metadata(
 
 pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -403,6 +414,105 @@ pub async fn update_monitor_mode(
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Set or clear the manual-override flag for a series's monitor_mode.
+/// Called by `set_monitoring` (sets to 1 when the user picks an
+/// explicit mode; clears to 0 when the user picks "Sync from AL/MAL").
+/// The watch-list sync's merge step + removal-detection pass both
+/// skip series where this is 1.
+pub async fn update_monitor_mode_manual_override(
+    db: &SqlitePool,
+    id: i64,
+    flag: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE series SET monitor_mode_manual_override = ? WHERE id = ?")
+        .bind(if flag { 1_i64 } else { 0_i64 })
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Atomic write of `monitor_mode` + `monitor_mode_manual_override` in
+/// a single SQLite UPDATE so a partial write can't leave the row in
+/// the surprise state "new mode without the pin flag" — which would
+/// silently let the next sync tick overwrite the user's choice.
+/// Used by the explicit-mode branch of `set_monitoring`.
+pub async fn update_monitor_mode_with_override(
+    db: &SqlitePool,
+    id: i64,
+    monitor_mode: &str,
+    flag: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE series SET monitor_mode = ?, monitor_mode_manual_override = ? WHERE id = ?",
+    )
+    .bind(monitor_mode)
+    .bind(if flag { 1_i64 } else { 0_i64 })
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// #62 PR B — stamp the external account that most-recently synced
+/// this series. Called on every successful merge action (Created,
+/// MonitorUpdated, Unchanged) so the marker stays current even if
+/// the user manually adds a series that later appears on their AL
+/// list. The marker is what enables removal detection on full-resync:
+/// a sync-marked series whose AL id is NOT in the current fetch gets
+/// downgraded to monitor_mode=None.
+pub async fn stamp_synced_from(
+    db: &SqlitePool,
+    id: i64,
+    account_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE series SET synced_from_external_account_id = ? WHERE id = ?")
+        .bind(account_id)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Lightweight projection used by the watch-list-sync removal pass.
+/// Returns one row per `series` that was last synced from
+/// `account_id`; the consumer compares each row's `anilist_id`
+/// against the IDs in the current fetch to find missing entries.
+#[derive(Debug, Clone)]
+pub struct SyncedSeriesRow {
+    pub id: i64,
+    pub anilist_id: i64,
+    pub monitor_mode: String,
+    pub monitor_mode_manual_override: bool,
+}
+
+pub async fn list_synced_from(
+    db: &SqlitePool,
+    account_id: i64,
+) -> Result<Vec<SyncedSeriesRow>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, anilist_id, monitor_mode, monitor_mode_manual_override FROM series \
+         WHERE synced_from_external_account_id = ?",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| SyncedSeriesRow {
+            id: r.get("id"),
+            anilist_id: r.get("anilist_id"),
+            monitor_mode: r
+                .try_get("monitor_mode")
+                .unwrap_or_else(|_| "future".to_string()),
+            monitor_mode_manual_override: r
+                .try_get::<i64, _>("monitor_mode_manual_override")
+                .map(|v| v != 0)
+                .unwrap_or(false),
+        })
+        .collect())
 }
 
 /// Toggle the per-series upgrade opt-in. When false the upgrade scanner

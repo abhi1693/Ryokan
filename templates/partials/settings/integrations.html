@@ -243,7 +243,10 @@
                                 <div class="form-hint">Score format: {{ acct.score_format }}</div>
                                 {% endif %}
                             </div>
-                            <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
+                            <div class="ext-accounts-actions">
+                                <button type="button" class="btn btn-primary" onclick="syncWatchListNow()">Sync now</button>
+                                <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
+                            </div>
                         </div>
                         <div class="ext-accounts-prefs">
                             <div class="form-hint" style="margin-bottom:6px">Import lists:</div>
@@ -274,6 +277,22 @@
                                 </label>
                                 <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off — airing-series + caught-up user would skip everything otherwise.</span>
                             </div>
+                        </div>
+                        {# #62 PR B — sync cadence. Range: 15 minutes to
+                           7 days (10080 minutes). Saved as part of the
+                           outer Save Settings button (resolver coerces
+                           out-of-range values back to the 30-minute
+                           default). #}
+                        <div class="ext-accounts-interval">
+                            <label for="external_sync_interval_minutes">Sync interval (minutes)</label>
+                            <input type="number"
+                                   id="external_sync_interval_minutes"
+                                   name="external_sync_interval_minutes"
+                                   min="15"
+                                   max="10080"
+                                   step="1"
+                                   value="{{ config.external_sync_interval_minutes }}">
+                            <span class="form-hint">How often the supervised task pulls your watch list. Range: 15 minutes to 7 days. Default 30 minutes — most lists change infrequently and the delta cursor keeps each tick cheap.</span>
                         </div>
                     </div>
                 {% when None %}

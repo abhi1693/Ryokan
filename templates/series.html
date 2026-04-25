@@ -147,13 +147,23 @@
             <span class="folder-label">Monitoring:</span>
             <div class="monitoring-controls">
                 <select id="monitor-mode" class="folder-select monitoring-select" onchange="setMonitoring(this.value)">
-                    <option value="all" {% if monitor_mode.as_str() == "all" %}selected{% endif %}>All Episodes</option>
-                    <option value="future" {% if monitor_mode.as_str() == "future" %}selected{% endif %}>Future Episodes</option>
-                    <option value="missing" {% if monitor_mode.as_str() == "missing" %}selected{% endif %}>Missing Episodes</option>
-                    <option value="existing" {% if monitor_mode.as_str() == "existing" %}selected{% endif %}>Existing Episodes</option>
-                    <option value="none" {% if monitor_mode.as_str() == "none" %}selected{% endif %}>None</option>
+                    <option value="all" {% if monitor_mode_select_value == "all" %}selected{% endif %}>All Episodes</option>
+                    <option value="future" {% if monitor_mode_select_value == "future" %}selected{% endif %}>Future Episodes</option>
+                    <option value="missing" {% if monitor_mode_select_value == "missing" %}selected{% endif %}>Missing Episodes</option>
+                    <option value="existing" {% if monitor_mode_select_value == "existing" %}selected{% endif %}>Existing Episodes</option>
+                    <option value="none" {% if monitor_mode_select_value == "none" %}selected{% endif %}>None</option>
+                    {% if can_sync_from_external_account %}
+                    {# #62 PR B — clearing the manual-override flag.
+                       Only visible when the series came from sync; for
+                       manually-added series the option would be a
+                       no-op. The "follow your AL/MAL list" choice
+                       lives in the same dropdown as the manual modes
+                       so the user has one control surface for "auto
+                       vs. pinned." #}
+                    <option value="sync"{% if monitor_mode_select_value == "sync" %} selected{% endif %}>Sync from {{ sync_provider_label }}</option>
+                    {% endif %}
                 </select>
-                <span class="form-hint" id="monitor-summary">{{ monitor_mode_label }} · {{ monitored_count }} monitored</span>
+                <span class="form-hint" id="monitor-summary">{{ monitor_mode_label }} · {{ monitored_count }} monitored{% if monitor_mode_manual_override && can_sync_from_external_account %} · pinned{% endif %}</span>
             </div>
         </div>
         <div class="monitoring-divider"></div>

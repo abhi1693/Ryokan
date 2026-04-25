@@ -858,6 +858,38 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // #62 PR B — track which external_account most-recently synced
+    // each series. NULL for manually-added series + pre-PR-B rows.
+    // Used by sync's removal-detection pass: on full-resync, series
+    // marked with a sync source whose AL id is NOT in the current
+    // fetch get monitor_mode downgraded to None (the user removed
+    // them from their AL/MAL list). ON DELETE SET NULL so unlinking
+    // an account doesn't cascade-drop the imported series rows.
+    sqlx::query(
+        "ALTER TABLE series ADD COLUMN synced_from_external_account_id INTEGER \
+         REFERENCES external_accounts(id) ON DELETE SET NULL",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // #62 PR B — pinned monitor_mode flag. Set when the user changes
+    // monitor_mode through the per-series UI; cleared when the user
+    // picks "Sync from AL/MAL" from the same dropdown. The
+    // watch-list sync's merge step skips updating monitor_mode on
+    // rows where this is 1, and the removal-detection pass skips
+    // them too (a manually-pinned series stays pinned even when the
+    // user removes it from their AL list — they explicitly chose
+    // this monitor mode). Mirrors the
+    // `episode_quality_tags.manual_override` pattern used by the
+    // upgrade sweep.
+    sqlx::query(
+        "ALTER TABLE series ADD COLUMN monitor_mode_manual_override INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (
@@ -1896,6 +1928,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // column, so no per-row backfill is needed.
     sqlx::query(
         "ALTER TABLE config ADD COLUMN grab_preview_mode TEXT NOT NULL DEFAULT 'batches_only'",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // Issue #62 PR B — watch-list sync interval in minutes. Default
+    // 30 (decision #5). Range 15..=10080 enforced at the settings-
+    // save handler and clamped again on read by the supervised task,
+    // so a hand-edited DB row can't push the cadence into a value
+    // that would pressure provider rate limits or effectively
+    // disable sync.
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN external_sync_interval_minutes INTEGER NOT NULL DEFAULT 30",
     )
     .execute(db)
     .await

@@ -507,6 +507,33 @@ fn non_empty(value: &str, fallback: &str) -> String {
     }
 }
 
+/// Test-only: pre-populate the in-memory detail cache so a unit test
+/// can exercise the cache-hit code path without needing the live
+/// Jikan API. Stamped with `Instant::now()` so it stays valid for the
+/// next 15 minutes (the cache TTL) — well beyond any test suite
+/// runtime.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn seed_detail_cache_for_tests(mal_id: i64, detail: AnimeDetail) {
+    let mut cache = DETAIL_CACHE.write().await;
+    cache.insert(
+        mal_id,
+        DetailCacheEntry {
+            detail,
+            fetched_at: Instant::now(),
+        },
+    );
+}
+
+/// Test-only: drop a single entry from the detail cache so a follow-up
+/// test exercising the cache-miss branch isn't contaminated by a
+/// previous seed. The cache is process-global; tests sharing it have
+/// to clean up after themselves.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn clear_detail_cache_entry_for_tests(mal_id: i64) {
+    let mut cache = DETAIL_CACHE.write().await;
+    cache.remove(&mal_id);
+}
+
 pub async fn get_anime_detail_cached(mal_id: i64) -> Result<AnimeDetail, String> {
     {
         let cache = DETAIL_CACHE.read().await;

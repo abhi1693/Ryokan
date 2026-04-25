@@ -785,6 +785,54 @@ function unlinkExternalAccountConfirmed() {
         .catch((e) => console.error('[ext-accounts] unlink failed:', e));
 }
 
+function syncWatchListNow() {
+    if (typeof window.ryokanNewProgressId !== 'function' || typeof window.ryokanProgressToast !== 'function') {
+        // Sticky-toast helpers come from base.js; if they're missing
+        // it's a load-order bug, not a user-facing failure mode.
+        console.error('[ext-accounts] progress toast helpers not loaded');
+        return;
+    }
+    const progressId = window.ryokanNewProgressId();
+    const toast = window.ryokanProgressToast({
+        progressId,
+        title: 'Watch-list sync starting…',
+        category: 'external_sync',
+    });
+    fetch('/settings/oauth/sync-now', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ progress_id: progressId }),
+    })
+        .then((r) =>
+            // Defense in depth: finalize the toast if the response is
+            // a non-2xx OR if the body fails to parse. The handler
+            // always emits JSON now, but a future regression that
+            // serves a plain-text body must not leave the toast
+            // spinning indefinitely (worst possible failure mode —
+            // looks like work is happening when nothing is).
+            r
+                .json()
+                .catch(() => ({ ok: false, error: 'Server returned an unparseable response.' }))
+                .then((data) => ({ ok: r.ok, data }))
+        )
+        .then(({ ok, data }) => {
+            // The sync runs in the background; the toast finalizes off
+            // the progress feed when the request succeeded. A bad-
+            // state response (account unlinked between page load and
+            // click, or a transport-level error) finalizes here.
+            if (!ok || (data && data.ok === false)) {
+                toast.finalize({
+                    kind: 'error',
+                    title: 'Sync could not start',
+                    body: (data && data.error) || 'Try reloading the Settings page.',
+                });
+            }
+        })
+        .catch((err) => {
+            toast.finalize({ kind: 'error', title: 'Sync request failed', body: String(err) });
+        });
+}
+
 let _extPrefsSaveTimer = null;
 function saveExternalAccountPrefs() {
     // Debounce so the user toggling three checkboxes in a row doesn't

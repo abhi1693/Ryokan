@@ -300,6 +300,49 @@ pub struct ImportPreferences {
     pub skip_already_watched: bool,
 }
 
+/// Stamp the watch-list sync cursor(s) after a successful tick.
+/// `list_last_synced_at` is always written. `list_full_resync_at` is
+/// also written when `was_full_sync = true` — the sync engine sets
+/// this on the once-a-week backstop run so the next 6 days fall back
+/// to delta mode.
+///
+/// `now_unix_ts` is taken as a parameter rather than read inside the
+/// function so unit tests can pin a deterministic value without a
+/// clock-injection layer.
+pub async fn stamp_list_synced(
+    db: &SqlitePool,
+    id: i64,
+    now_unix_ts: i64,
+    was_full_sync: bool,
+) -> Result<(), String> {
+    if was_full_sync {
+        sqlx::query(
+            "UPDATE external_accounts
+                SET list_last_synced_at = ?,
+                    list_full_resync_at = ?
+              WHERE id = ?",
+        )
+        .bind(now_unix_ts)
+        .bind(now_unix_ts)
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("stamp_list_synced (full) failed: {e}"))?;
+    } else {
+        sqlx::query(
+            "UPDATE external_accounts
+                SET list_last_synced_at = ?
+              WHERE id = ?",
+        )
+        .bind(now_unix_ts)
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("stamp_list_synced (delta) failed: {e}"))?;
+    }
+    Ok(())
+}
+
 pub async fn update_preferences(
     db: &SqlitePool,
     id: i64,
@@ -573,6 +616,47 @@ mod tests {
         assert!(!got.import_dropped, "Dropped default off");
         assert!(!got.import_completed, "Completed default off");
         assert!(!got.skip_already_watched, "Skip-watched default off");
+    }
+
+    #[tokio::test]
+    async fn stamp_list_synced_delta_only_writes_last_synced_at() {
+        let db = in_memory_pool().await;
+        let id = link(&db, sample_anilist_request()).await.unwrap();
+        stamp_list_synced(&db, id, 1_700_000_000, false)
+            .await
+            .unwrap();
+        let got = get_current(&db).await.unwrap().unwrap();
+        assert_eq!(got.list_last_synced_at, Some(1_700_000_000));
+        assert!(
+            got.list_full_resync_at.is_none(),
+            "delta tick must not advance the full-resync cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn stamp_list_synced_full_writes_both_cursors() {
+        let db = in_memory_pool().await;
+        let id = link(&db, sample_anilist_request()).await.unwrap();
+        stamp_list_synced(&db, id, 1_700_000_000, true)
+            .await
+            .unwrap();
+        let got = get_current(&db).await.unwrap().unwrap();
+        assert_eq!(got.list_last_synced_at, Some(1_700_000_000));
+        assert_eq!(got.list_full_resync_at, Some(1_700_000_000));
+    }
+
+    #[tokio::test]
+    async fn stamp_list_synced_delta_after_full_keeps_full_cursor() {
+        // Full sync at T=100, delta at T=500 → list_last_synced_at
+        // bumps to 500, but list_full_resync_at stays at 100 (the
+        // weekly-backstop window is measured from the last full).
+        let db = in_memory_pool().await;
+        let id = link(&db, sample_anilist_request()).await.unwrap();
+        stamp_list_synced(&db, id, 100, true).await.unwrap();
+        stamp_list_synced(&db, id, 500, false).await.unwrap();
+        let got = get_current(&db).await.unwrap().unwrap();
+        assert_eq!(got.list_last_synced_at, Some(500));
+        assert_eq!(got.list_full_resync_at, Some(100));
     }
 
     #[tokio::test]

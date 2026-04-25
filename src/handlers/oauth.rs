@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::models::external_accounts::{self, LinkRequest, PROVIDER_ANILIST, PROVIDER_MAL};
 use crate::models::log::LogCategory;
-use crate::services::{logger, oauth_state};
+use crate::services::{external_sync, logger, oauth_state, progress};
 
 /// AniList public client ID. Registered 2026-04-22 against the
 /// author's AL account; the AL app page documents the redirect URI
@@ -405,6 +405,107 @@ pub async fn unlink(State(state): State<AppState>) -> impl IntoResponse {
             Json(serde_json::json!({"ok": false, "error": e})),
         ),
     }
+}
+
+// ── Manual "Sync now" trigger ────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+pub struct SyncNowForm {
+    /// Opaque client-generated id used to scope the ProgressRegistry
+    /// job. The frontend mints one (timestamp + random suffix) when
+    /// it clicks Sync now and polls `/api/progress/<id>` for live
+    /// status. Missing/empty/over-length values are treated as
+    /// "fire and forget" — the sync still runs but no progress
+    /// events are emitted.
+    #[serde(default)]
+    pub progress_id: Option<String>,
+}
+
+/// Trigger a one-off watch-list sync against the linked account.
+/// Returns 202 immediately after spawning the work; the actual sync
+/// runs as a background task and emits progress events into the
+/// registry. The frontend polls the progress endpoint to render the
+/// sticky-toast status.
+///
+/// Returns 400 when no account is linked. The supervised background
+/// task continues to run on its own cadence regardless — this is an
+/// out-of-band "do it right now" trigger, not a replacement for the
+/// scheduled tick.
+///
+/// Both error and success paths emit JSON `{ ok, error?, progress_id? }`
+/// — the frontend toast (`static/js/settings.js::syncWatchListNow`)
+/// finalizes on `ok: false`, so a plain-text error body would parse
+/// to `{}` and leave the toast spinning indefinitely.
+pub async fn sync_now(
+    State(state): State<AppState>,
+    Json(form): Json<SyncNowForm>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let account = external_accounts::get_current(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"ok": false, "error": e})),
+            )
+        })?
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "No external account is linked.",
+            })),
+        ))?;
+
+    let progress_id = progress::sanitize_progress_id(form.progress_id.as_deref());
+    let handle = if let Some(id) = progress_id.clone() {
+        Some(state.progress.register(id).await)
+    } else {
+        None
+    };
+
+    if let Some(h) = &handle {
+        h.emit(
+            "start",
+            "info",
+            format!("Starting watch-list sync for {}", account.username),
+            None,
+            false,
+        )
+        .await;
+    }
+
+    // Spawn so the HTTP response returns immediately — the sync can
+    // take minutes for a large list and we don't want the browser
+    // sitting on an open POST while the user pokes around the rest of
+    // the UI. The progress poll endpoint is how the toast gets live
+    // status during the run.
+    let spawn_state = state.clone();
+    let spawn_handle = handle.clone();
+    tokio::spawn(async move {
+        // try-lock variant so a click while a supervised tick is in
+        // flight produces an immediate "already running" toast
+        // instead of a silent multi-minute wait that the user can't
+        // tell apart from a hung backend. Supervised ticks use the
+        // await-lock variant (external_sync::tick_once).
+        let outcome = external_sync::tick_once_or_busy(&spawn_state).await;
+        if let Some(h) = spawn_handle {
+            match outcome {
+                Ok(summary) => {
+                    h.emit("done", "success", "Sync complete", Some(summary), true)
+                        .await;
+                }
+                Err(err) => {
+                    h.emit("done", "error", "Sync failed", Some(err), true)
+                        .await;
+                }
+            }
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "progress_id": progress_id,
+    })))
 }
 
 // ── Provider call helpers ────────────────────────────────────────────
@@ -779,6 +880,52 @@ mod tests {
         assert!(
             msg_2.to_lowercase().contains("no pending"),
             "second attempt must surface 'no pending authorization', got: {msg_2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_now_returns_json_body_when_no_account_linked() {
+        // Regression for the PR #94 r2 finding: this path used to
+        // return `(StatusCode, String)` which Axum serves as plain
+        // text. The frontend toast parses the body as JSON to decide
+        // whether to finalize as error; an unparseable body left the
+        // toast spinning indefinitely. The handler now emits JSON so
+        // both transport-layer and application-layer errors finalize
+        // the toast cleanly.
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        // No `external_accounts` row → handler hits the `.ok_or(...)`
+        // branch and returns the JSON-bodied 400.
+        let result = sync_now(
+            State(app_state),
+            Json(SyncNowForm {
+                progress_id: Some("p_test_1".into()),
+            }),
+        )
+        .await;
+        let (status, body) = match result {
+            Err(e) => e,
+            Ok(_) => panic!("sync_now must reject when no account is linked"),
+        };
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        let body_value = body.0.clone();
+        assert_eq!(
+            body_value.get("ok").and_then(|v| v.as_bool()),
+            Some(false),
+            "JSON body MUST carry ok:false so the toast finalizes; \
+             previous plain-text body left the spinner stuck"
+        );
+        let err_text = body_value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(
+            err_text.contains("no external account"),
+            "error string should call out the no-link state, got: {err_text}"
         );
     }
 }

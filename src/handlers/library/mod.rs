@@ -57,8 +57,31 @@ struct SeriesTemplate {
     /// Empty when we've never cached metadata (shouldn't normally
     /// happen for a series reaching this page — be defensive).
     metadata_refreshed_at: String,
+    /// Raw `monitor_mode` (`all` / `future` / `missing` / `existing` /
+    /// `none`). Distinct from `monitor_mode_select_value` which encodes
+    /// the dropdown's display state (the latter says `"sync"` when the
+    /// series is following AL/MAL with no manual override).
+    #[allow(dead_code)]
     monitor_mode: String,
     monitor_mode_label: String,
+    /// #62 PR B — `true` when the user has manually pinned monitor_mode
+    /// through the dropdown (sync's merge step skips the row). Drives
+    /// a small "pinned" hint next to the dropdown.
+    monitor_mode_manual_override: bool,
+    /// #62 PR B — `true` when an external account is linked AND this
+    /// series carries a `synced_from_external_account_id`. Gates the
+    /// "Sync from AL/MAL" dropdown option; for manually-added series
+    /// not on the user's list, the option doesn't make sense.
+    can_sync_from_external_account: bool,
+    /// "AniList" or "MyAnimeList" — used in the dropdown option label
+    /// so the user sees provider-specific copy. Empty when no account
+    /// is linked.
+    sync_provider_label: String,
+    /// #62 PR B — value the dropdown should treat as "selected" so
+    /// only one option highlights. Equals `"sync"` when the series
+    /// is following the external account (sync-tracked + override
+    /// cleared); otherwise equals `monitor_mode`.
+    monitor_mode_select_value: String,
     monitored_count: i32,
     all_monitored: bool,
     /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the
