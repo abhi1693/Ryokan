@@ -45,6 +45,37 @@ pub(crate) fn sanitize_filename(s: &str) -> String {
     media::sanitize_folder_name(s)
 }
 
+/// True when `a` and `b` resolve to the same inode (same device + same
+/// inode number). Used by [`do_file_op`] to detect "src and dst already
+/// point at the same bytes" cases — a re-import on top of a previously
+/// hardlinked dst, or a misconfiguration that resolves both paths to
+/// the same file. Without an early-out, the hardlink mode falls through
+/// to `fs::copy` on `EEXIST`, and `fs::copy` on a self-overlapping path
+/// truncates the shared inode to zero bytes (the read fd reads from the
+/// inode the write fd just truncated). That corrupts both the user's
+/// media file *and* the seeding source the torrent client still
+/// references.
+///
+/// On non-Unix targets we fall back to plain path equality, which still
+/// catches the misconfiguration case (caller passed identical paths)
+/// but misses the "hardlinked elsewhere" case. Windows hardlinks are
+/// rarer in this codebase's deployment shape (Docker / Linux is the
+/// primary target) and the path-identity check is sufficient for the
+/// catastrophic-data-loss scenario.
+#[cfg(unix)]
+fn files_share_inode(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(am), Ok(bm)) => am.dev() == bm.dev() && am.ino() == bm.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn files_share_inode(a: &Path, b: &Path) -> bool {
+    a == b
+}
+
 /// Hardlink → copy fallback. For "move" mode: rename → copy+delete fallback.
 ///
 /// Runs the whole operation under `spawn_blocking` because a Blu-ray
@@ -58,6 +89,16 @@ pub(crate) async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::R
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         if let Some(p) = dst.parent() {
             std::fs::create_dir_all(p)?;
+        }
+        // No-op when src and dst already point at the same bytes — by
+        // a prior hardlink import landing the same file twice, or by a
+        // misconfiguration that resolves both to the same path. All
+        // three modes need this guard: a self-overlapping `fs::copy`
+        // truncates the shared inode (corrupting hardlink + copy modes)
+        // and the move-mode cross-fs fallback's `remove_file(src)`
+        // after the rename would delete the only surviving copy.
+        if files_share_inode(&src, &dst) {
+            return Ok(());
         }
         match mode.as_str() {
             "move" => {
@@ -97,7 +138,20 @@ pub(crate) async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::R
                 Ok(())
             }
             _ => {
-                // "hardlink" (default): hardlink preferred, copy on failure (cross-fs).
+                // "hardlink" (default): hardlink preferred, copy on
+                // failure (cross-fs). `std::fs::hard_link` does NOT
+                // overwrite — it returns `EEXIST` if dst already exists.
+                // Clean any pre-existing dst first so a re-import
+                // doesn't fall through to the `fs::copy` fallback (which
+                // would silently degrade to a real copy, breaking the
+                // seed-safe-via-shared-inode property the user picked
+                // hardlink mode for). The same-inode short-circuit
+                // above already handled the "dst is the same file as
+                // src via prior hardlink" case; reaching here means
+                // dst is a different file we're free to replace.
+                if dst.exists() {
+                    let _ = std::fs::remove_file(&dst);
+                }
                 if std::fs::hard_link(&src, &dst).is_err() {
                     std::fs::copy(&src, &dst)?;
                 }
