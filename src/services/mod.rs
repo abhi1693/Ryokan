@@ -1,6 +1,7 @@
 pub mod anilist;
 pub mod crypto;
 pub mod download_client;
+pub mod external_sync;
 pub mod jikan;
 pub mod kitsu;
 pub mod media;

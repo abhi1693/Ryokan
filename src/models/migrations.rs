@@ -1901,6 +1901,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // Issue #62 PR B — watch-list sync interval in minutes. Default
+    // 30 (decision #5). Range 15..=10080 enforced at the settings-
+    // save handler and clamped again on read by the supervised task,
+    // so a hand-edited DB row can't push the cadence into a value
+    // that would pressure provider rate limits or effectively
+    // disable sync.
+    sqlx::query(
+        "ALTER TABLE config ADD COLUMN external_sync_interval_minutes INTEGER NOT NULL DEFAULT 30",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     Ok(())
 }
 

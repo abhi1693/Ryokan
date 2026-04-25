@@ -271,6 +271,13 @@ pub struct SettingsForm {
     /// PR C → falls back to the existing config value (or default).
     #[serde(default)]
     grab_preview_mode: Option<String>,
+    /// Issue #62 PR B — watch-list sync cadence in minutes. Clamped
+    /// to 15..=10080 (15 minutes .. 7 days) on save per decision #5.
+    /// `None` means "field absent from this form submission" and
+    /// falls through to the existing value, same pattern as
+    /// `grab_preview_mode`.
+    #[serde(default)]
+    external_sync_interval_minutes: Option<i32>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -307,6 +314,39 @@ pub(crate) fn resolve_grab_preview_mode(
         }
     } else {
         existing.unwrap_or("batches_only").to_string()
+    }
+}
+
+/// Issue #62 PR B — watch-list sync cadence default + bounds.
+pub(crate) const EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN: i32 = 30;
+pub(crate) const EXTERNAL_SYNC_INTERVAL_FLOOR_MIN: i32 = 15;
+pub(crate) const EXTERNAL_SYNC_INTERVAL_CEILING_MIN: i32 = 10080; // 7 days
+
+/// Resolve the watch-list sync interval to persist on save. Same
+/// cross-tab preservation pattern as `resolve_grab_preview_mode`:
+/// the slider lives on the Integrations tab, so Integrations saves
+/// (and no-tab POSTs) honor the form value, while saves from other
+/// tabs pass through the existing value. Out-of-range values coerce
+/// to the 30-minute default rather than the nearest bound — a value
+/// outside `15..=10080` is more likely a hand-crafted POST or a
+/// stale form than a deliberate edge.
+pub(crate) fn resolve_external_sync_interval_minutes(
+    form_value: Option<i32>,
+    tab: Option<&str>,
+    existing: Option<i32>,
+) -> i32 {
+    if tab == Some("integrations") || tab.is_none() {
+        match form_value {
+            Some(v)
+                if (EXTERNAL_SYNC_INTERVAL_FLOOR_MIN..=EXTERNAL_SYNC_INTERVAL_CEILING_MIN)
+                    .contains(&v) =>
+            {
+                v
+            }
+            _ => EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN,
+        }
+    } else {
+        existing.unwrap_or(EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN)
     }
 }
 
@@ -712,6 +752,18 @@ pub async fn settings_submit(
             form.grab_preview_mode.as_deref(),
             form.tab.as_deref(),
             existing_cfg.as_ref().map(|c| c.grab_preview_mode.as_str()),
+        ),
+        // #62 PR B — watch-list sync interval. Same Integrations-tab
+        // ownership pattern as grab_preview_mode. Range clamped to
+        // 15..=10080 (15 min .. 7 days) per decision #5; out-of-range
+        // values coerce to the default 30 rather than erroring so a
+        // hand-crafted POST can't break the supervised task.
+        external_sync_interval_minutes: resolve_external_sync_interval_minutes(
+            form.external_sync_interval_minutes,
+            form.tab.as_deref(),
+            existing_cfg
+                .as_ref()
+                .map(|c| c.external_sync_interval_minutes),
         ),
     };
 
@@ -1471,6 +1523,100 @@ mod tests {
         assert_eq!(
             resolve_grab_preview_mode(None, Some("quality"), None),
             "batches_only"
+        );
+    }
+
+    // ── #62 PR B watch-list sync interval resolver tests ───────────
+
+    #[test]
+    fn resolve_external_sync_interval_integrations_tab_accepts_in_range() {
+        // Bounds match the plan-doc-decided range (15 min .. 7 days).
+        // 15 and 10080 are inclusive endpoints.
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(15), Some("integrations"), Some(30)),
+            15
+        );
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(10080), Some("integrations"), Some(30)),
+            10080
+        );
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(60), Some("integrations"), Some(30)),
+            60
+        );
+    }
+
+    #[test]
+    fn resolve_external_sync_interval_out_of_range_coerces_to_default() {
+        // 14 and 10081 are just outside the allowed range; both coerce
+        // to the 30-minute default so a hand-crafted POST or stale
+        // form can't end up with a too-aggressive (rate-limit-
+        // pressuring) or effectively-disabled cadence persisted.
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(14), Some("integrations"), Some(30)),
+            EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
+        );
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(10081), Some("integrations"), Some(30)),
+            EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
+        );
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(0), Some("integrations"), Some(30)),
+            EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
+        );
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(-1), Some("integrations"), Some(30)),
+            EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
+        );
+    }
+
+    #[test]
+    fn resolve_external_sync_interval_other_tabs_preserve_existing() {
+        // Same cross-tab guarantee as grab_preview_mode: a Quality-
+        // tab save shouldn't reset the picker, so a Quality save also
+        // shouldn't reset the sync interval.
+        assert_eq!(
+            resolve_external_sync_interval_minutes(None, Some("quality"), Some(60)),
+            60
+        );
+        // Stray form value from a non-Integrations tab is ignored —
+        // only the existing value matters there.
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(120), Some("quality"), Some(60)),
+            60
+        );
+    }
+
+    #[test]
+    fn resolve_external_sync_interval_missing_tab_uses_form_value() {
+        // No-tab POST shape (full-form save) honors the form value
+        // same as Integrations does.
+        assert_eq!(
+            resolve_external_sync_interval_minutes(Some(120), None, Some(30)),
+            120
+        );
+    }
+
+    #[test]
+    fn resolve_external_sync_interval_missing_form_value_falls_back_to_default() {
+        // Field absent → coerce to default rather than reading from
+        // existing. Reflects "form didn't include the field" being
+        // distinct from "form sent a deliberate value." On the
+        // Integrations tab we trust the form to be authoritative.
+        assert_eq!(
+            resolve_external_sync_interval_minutes(None, Some("integrations"), Some(60)),
+            EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
+        );
+    }
+
+    #[test]
+    fn resolve_external_sync_interval_missing_existing_uses_default() {
+        // Pre-PR-B DB rows never wrote the column; the read path
+        // defaults to 30, but if it ever returns None for any other
+        // reason the resolver should still produce a valid value.
+        assert_eq!(
+            resolve_external_sync_interval_minutes(None, Some("quality"), None),
+            EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
         );
     }
 }

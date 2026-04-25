@@ -1642,6 +1642,105 @@ async fn main() {
         });
     }
 
+    // Issue #62 PR B — watch-list sync. Eleventh supervised task.
+    // Same minute-tick + minutes_since_last cadence pattern as
+    // rss_sync (so a process restart respects the persisted
+    // last-finished timestamp instead of forcing an immediate
+    // re-run). The interval is user-configurable on Settings →
+    // Integrations and is clamped on read so a hand-edited DB row
+    // can't push the cadence outside 15..=10080 minutes.
+    //
+    // The actual fetch + merge is a no-op stub at this commit;
+    // subsequent commits build the AL `MediaListCollection` query,
+    // MAL animelist + token-refresh, and the staging-table merge.
+    {
+        let ext_sync_state = state.clone();
+        tokio::spawn(async move {
+            supervise("external_sync", move || {
+                let state = ext_sync_state.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    let mut minutes_since_last: i64 =
+                        services::external_sync::minutes_since_last_run(&state.db).await;
+                    let mut consecutive_errors: i64 = 0;
+                    loop {
+                        interval.tick().await;
+                        minutes_since_last += 1;
+
+                        let cfg = match models::config::get_config(&state.db).await {
+                            Ok(Some(cfg)) => cfg,
+                            _ => continue,
+                        };
+
+                        let every = (cfg.external_sync_interval_minutes as i64).clamp(15, 10080);
+
+                        let _ = models::scheduled_tasks::touch_definition(
+                            &state.db,
+                            "external_sync",
+                            "External account sync",
+                            &format!("Every {} minutes", every),
+                            true,
+                        )
+                        .await;
+
+                        // Exponential backoff on consecutive errors:
+                        // skip 2^errors extra intervals (capped at 32).
+                        let backoff = if consecutive_errors > 0 {
+                            every * (1i64 << consecutive_errors.min(5))
+                        } else {
+                            every
+                        };
+                        if minutes_since_last < backoff {
+                            continue;
+                        }
+
+                        minutes_since_last = 0;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &state.db,
+                            "external_sync",
+                            "Watch-list sync started",
+                        )
+                        .await;
+
+                        match services::external_sync::tick_once(&state).await {
+                            Ok(detail) => {
+                                consecutive_errors = 0;
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &state.db,
+                                    "external_sync",
+                                    "ok",
+                                    &detail,
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                consecutive_errors += 1;
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &state.db,
+                                    "external_sync",
+                                    "error",
+                                    &err,
+                                )
+                                .await;
+                                services::logger::error(
+                                    &state.db,
+                                    models::log::LogCategory::ExternalSync,
+                                    "External sync failed",
+                                    &format!(
+                                        "{} (backoff: {} consecutive errors)",
+                                        err, consecutive_errors
+                                    ),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
     // Use `into_make_service_with_connect_info::<SocketAddr>()` so the auth
     // handler can pull the true client socket address via
     // `ConnectInfo<SocketAddr>`. This is the ground-truth IP the rate limiter
