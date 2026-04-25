@@ -141,6 +141,13 @@ struct MappingCache {
     anilist_to_tmdb: HashMap<i64, i64>,
     /// MAL ID → TMDB show ID (reverse lookup for MAL fallback).
     mal_to_tmdb: HashMap<i64, i64>,
+    /// MAL ID → AniList ID. Populated whenever a mappings entry pairs
+    /// both providers at the same index. Used by the watch-list sync
+    /// path (#62 PR B) to translate MAL list entries into AniList IDs
+    /// before writing to `series` — without this, every MAL-sourced
+    /// entry would land under the negated-MAL-id sentinel and become
+    /// invisible to SeaDex / AL-keyed scoring.
+    mal_to_anilist: HashMap<i64, i64>,
 }
 
 /// Ensure the mappings are loaded, downloading if necessary.
@@ -352,6 +359,19 @@ pub async fn lookup_tmdb_by_anilist(anilist_id: i64) -> Option<i64> {
         .copied()
 }
 
+/// Look up AniList ID by MAL ID. The watch-list sync (#62 PR B) calls
+/// this to resolve MAL-list entries into AL IDs before merging into
+/// `series`; on miss the caller falls back to the negated-MAL-id
+/// sentinel (`series.anilist_id = -mal_id`) so the entry still lands
+/// in the library but is flagged as needing reconciliation later.
+pub async fn lookup_anilist_by_mal(mal_id: i64) -> Option<i64> {
+    let cache = CACHE.read().await;
+    cache
+        .as_ref()
+        .and_then(|c| c.data.mal_to_anilist.get(&mal_id))
+        .copied()
+}
+
 /// Resolve a TMDB ID from either an AniList ID or a MAL ID. Tries
 /// AniList first, falls back to MAL when given. Returns 0 when neither
 /// path produces a hit — callers (the Sonarr/Radarr compat handlers)
@@ -384,10 +404,11 @@ fn parse_bytes(bytes: &[u8]) -> Result<MappingCache, String> {
         .map_err(|e| format!("Failed to parse mappings JSON: {}", e))?;
     let cache = build_cache(&data);
     tracing::info!(
-        "Anibridge mappings loaded: {} TMDB entries, {} TVDB entries, {} AniList reverse entries",
+        "Anibridge mappings loaded: {} TMDB entries, {} TVDB entries, {} AniList reverse entries, {} MAL→AL entries",
         cache.tmdb_to_anime.len(),
         cache.tvdb_to_anime.len(),
         cache.anilist_to_tmdb.len(),
+        cache.mal_to_anilist.len(),
     );
     Ok(cache)
 }
@@ -565,6 +586,7 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
     let mut tvdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>> = HashMap::new();
     let mut anilist_to_tmdb: HashMap<i64, i64> = HashMap::new();
     let mut mal_to_tmdb: HashMap<i64, i64> = HashMap::new();
+    let mut mal_to_anilist: HashMap<i64, i64> = HashMap::new();
 
     let obj = match data.as_object() {
         Some(o) => o,
@@ -574,6 +596,7 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                 tvdb_to_anime,
                 anilist_to_tmdb,
                 mal_to_tmdb,
+                mal_to_anilist,
             };
         }
     };
@@ -627,6 +650,17 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
             })
             .collect();
 
+        // MAL → AL reverse map. Populated alongside the TMDB/TVDB
+        // entries (rather than only inside the indexing loops below)
+        // because some mappings entries pair AL+MAL without naming a
+        // TMDB or TVDB show — those entries still need to feed the
+        // watch-list-sync resolver.
+        for ids in &anime_entries {
+            if let (Some(al), Some(m)) = (ids.anilist_id, ids.mal_id) {
+                mal_to_anilist.insert(m, al);
+            }
+        }
+
         // Index by each TMDB (show_id, season) found in this entry.
         for &(tmdb_id, season) in &tmdb_ids {
             let entry = tmdb_to_anime.entry((tmdb_id, season)).or_default();
@@ -667,6 +701,7 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
         tvdb_to_anime,
         anilist_to_tmdb,
         mal_to_tmdb,
+        mal_to_anilist,
     }
 }
 
@@ -900,6 +935,39 @@ mod tests {
     fn parse_bytes_on_malformed_json_returns_error() {
         let bytes = b"this is not json".to_vec();
         assert!(parse_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_bytes_populates_mal_to_anilist_for_paired_entries() {
+        // The MAL→AL reverse map is what watch-list sync (#62 PR B)
+        // uses to resolve MAL list entries before merging into series.
+        // An entry that names both anilist:N and mal:M must populate
+        // mal_to_anilist[M] = N regardless of whether it also names a
+        // TMDB or TVDB show.
+        let raw = json!({
+            "anilist:12345": {
+                "mal:67890": {}
+            }
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let cache = parse_bytes(&bytes).expect("parse_bytes should succeed");
+        assert_eq!(cache.mal_to_anilist.get(&67890), Some(&12345));
+    }
+
+    #[test]
+    fn parse_bytes_skips_mal_to_anilist_when_pair_incomplete() {
+        // An AL-only or MAL-only entry must NOT seed mal_to_anilist
+        // (we'd be writing 0 or stale ids). The watch-list sync caller
+        // falls back to the negated-MAL-id sentinel on miss; missing
+        // entries are the right surface for that.
+        let mal_only = json!({
+            "mal:67890": {
+                "tmdb_show:200:s1": {}
+            }
+        });
+        let bytes = serde_json::to_vec(&mal_only).unwrap();
+        let cache = parse_bytes(&bytes).expect("parse_bytes should succeed");
+        assert!(cache.mal_to_anilist.is_empty());
     }
 
     #[test]
