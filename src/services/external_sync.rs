@@ -200,65 +200,57 @@ pub fn import_status(status: NormalizedStatus, prefs: &ImportPreferences) -> boo
 }
 
 /// Convert a vector of AniList watch-list entries into the
-/// provider-agnostic [`SyncEntry`] shape. Drops entries whose status
-/// isn't on the user's import list. AL's `media_id` is the AniList
-/// id we'd use as `series.anilist_id`, so `anilist_id` and
-/// `provider_media_id` are identical here.
-pub fn entries_from_anilist(
-    al_entries: Vec<anilist::AniListMediaListEntry>,
-    prefs: &ImportPreferences,
-) -> Vec<SyncEntry> {
+/// provider-agnostic [`SyncEntry`] shape. **Does NOT filter by import
+/// preferences** — that decision moves to merge time, because an
+/// already-imported series whose status changed on AL still needs its
+/// `monitor_mode` updated to track the new status, even when the new
+/// status's import flag is off. Example: user has a Watching series
+/// at `monitor_mode = all`, drops it on AL, has `import_dropped = false`.
+/// Filtering at conversion time would silently leave the series at
+/// `all` and keep grabbing episodes for a show the user dropped.
+/// `merge_into_library` reads `prefs` to gate creation only.
+///
+/// AL's `media_id` is the AniList id we'd use as `series.anilist_id`,
+/// so `anilist_id` and `provider_media_id` are identical here.
+pub fn entries_from_anilist(al_entries: Vec<anilist::AniListMediaListEntry>) -> Vec<SyncEntry> {
     al_entries
         .into_iter()
-        .filter_map(|e| {
-            let status = NormalizedStatus::from_anilist(&e.status);
-            if !import_status(status, prefs) {
-                return None;
-            }
-            Some(SyncEntry {
-                provider: external_accounts::PROVIDER_ANILIST.to_string(),
-                provider_media_id: e.media_id,
-                anilist_id: e.media_id,
-                status,
-                progress: e.progress,
-                score: e.score,
-                updated_at: e.updated_at,
-                custom_lists: e.custom_lists,
-            })
+        .map(|e| SyncEntry {
+            provider: external_accounts::PROVIDER_ANILIST.to_string(),
+            provider_media_id: e.media_id,
+            anilist_id: e.media_id,
+            status: NormalizedStatus::from_anilist(&e.status),
+            progress: e.progress,
+            score: e.score,
+            updated_at: e.updated_at,
+            custom_lists: e.custom_lists,
         })
         .collect()
 }
 
 /// Convert a vector of MyAnimeList watch-list entries into
-/// [`SyncEntry`]. AL ID resolution (anibridge MAL→AL lookup, or the
-/// negated-MAL-id sentinel on miss) happens at merge time, so this
-/// commit leaves `anilist_id` at `0`. The merge engine treats `0`
-/// as "needs resolution" and fills it in before writing to series.
-pub fn entries_from_mal(
-    mal_entries: Vec<mal::MalAnimeListEntry>,
-    prefs: &ImportPreferences,
-) -> Vec<SyncEntry> {
+/// [`SyncEntry`]. **Does NOT filter by import preferences** — same
+/// rationale as `entries_from_anilist`. AL ID resolution (anibridge
+/// MAL→AL lookup, or the negated-MAL-id sentinel on miss) happens at
+/// merge time, so this leaves `anilist_id` at `0`. The merge engine
+/// treats `0` as "needs resolution" and fills it in before writing
+/// to series.
+pub fn entries_from_mal(mal_entries: Vec<mal::MalAnimeListEntry>) -> Vec<SyncEntry> {
     mal_entries
         .into_iter()
-        .filter_map(|e| {
-            let status = NormalizedStatus::from_mal(&e.status);
-            if !import_status(status, prefs) {
-                return None;
-            }
-            Some(SyncEntry {
-                provider: external_accounts::PROVIDER_MAL.to_string(),
-                provider_media_id: e.media_id,
-                // 0 means "needs resolution" — the merge step swaps
-                // this for the real AL ID (or the negated-MAL-id
-                // sentinel if anibridge has no mapping).
-                anilist_id: 0,
-                status,
-                progress: e.progress,
-                score: e.score,
-                updated_at: e.updated_at,
-                // MAL has no custom-list concept; field stays empty.
-                custom_lists: Vec::new(),
-            })
+        .map(|e| SyncEntry {
+            provider: external_accounts::PROVIDER_MAL.to_string(),
+            provider_media_id: e.media_id,
+            // 0 means "needs resolution" — the merge step swaps
+            // this for the real AL ID (or the negated-MAL-id
+            // sentinel if anibridge has no mapping).
+            anilist_id: 0,
+            status: NormalizedStatus::from_mal(&e.status),
+            progress: e.progress,
+            score: e.score,
+            updated_at: e.updated_at,
+            // MAL has no custom-list concept; field stays empty.
+            custom_lists: Vec::new(),
         })
         .collect()
 }
@@ -329,6 +321,16 @@ pub struct MergeOutcome {
     /// AL id deleted upstream shouldn't block the other 199 entries
     /// from importing.
     pub failed: Vec<(i64, String)>,
+    /// Entries that would have been created but the user's import
+    /// preferences are off for the entry's status (e.g. new Dropped
+    /// entry while `import_dropped = false`). Counted separately from
+    /// `unchanged` because the surface visible to the user is "we
+    /// skipped these on purpose" vs. "these were already in sync."
+    /// Existing-series monitor_mode updates run regardless of import
+    /// preferences — flipping a Watching series to Dropped on AL
+    /// always downgrades local monitor_mode, even with
+    /// `import_dropped = false`.
+    pub skipped_by_preference: i32,
     /// Newly-created series rows that need artwork caching, collected
     /// for the deferred bulk-mode pass that runs after merge. Carrying
     /// just the IDs + image URLs (not the full AnimeDetail) keeps
@@ -379,7 +381,7 @@ pub async fn merge_into_library(
     db: &SqlitePool,
     entries: &[SyncEntry],
     detail_map: &HashMap<i64, anilist::AnimeDetail>,
-    skip_already_watched: bool,
+    prefs: &ImportPreferences,
 ) -> MergeOutcome {
     let mut outcome = MergeOutcome::default();
 
@@ -388,14 +390,15 @@ pub async fn merge_into_library(
             outcome.deferred_jikan += 1;
             continue;
         }
-        let target_mode = monitor_mode_for(entry.status, skip_already_watched);
-        match merge_one_anilist_entry(db, entry, target_mode, detail_map).await {
+        let target_mode = monitor_mode_for(entry.status, prefs.skip_already_watched);
+        match merge_one_anilist_entry(db, entry, target_mode, detail_map, prefs).await {
             Ok(MergeAction::Created(spec)) => {
                 outcome.created += 1;
                 outcome.new_artwork.push(spec);
             }
             Ok(MergeAction::MonitorUpdated) => outcome.monitor_mode_updated += 1,
             Ok(MergeAction::Unchanged) => outcome.unchanged += 1,
+            Ok(MergeAction::SkippedByPreference) => outcome.skipped_by_preference += 1,
             Err(msg) => outcome.failed.push((entry.anilist_id, msg)),
         }
     }
@@ -410,6 +413,11 @@ enum MergeAction {
     Created(NewArtworkSpec),
     MonitorUpdated,
     Unchanged,
+    /// Entry would have been a new create, but the user's import
+    /// preferences are off for this status. Existing series with the
+    /// same status DO still get monitor_mode updated — only the
+    /// create branch checks preferences.
+    SkippedByPreference,
 }
 
 impl MergeOutcome {
@@ -424,10 +432,12 @@ impl MergeOutcome {
         let handled_by_other = other.created
             + other.monitor_mode_updated
             + other.unchanged
+            + other.skipped_by_preference
             + other.failed.len() as i32;
         self.created += other.created;
         self.monitor_mode_updated += other.monitor_mode_updated;
         self.unchanged += other.unchanged;
+        self.skipped_by_preference += other.skipped_by_preference;
         self.deferred_jikan = (self.deferred_jikan - handled_by_other).max(0);
         self.failed.extend(other.failed);
         self.new_artwork.extend(other.new_artwork);
@@ -450,7 +460,7 @@ impl MergeOutcome {
 pub async fn merge_jikan_fallback_entries(
     db: &SqlitePool,
     entries: &[SyncEntry],
-    skip_already_watched: bool,
+    prefs: &ImportPreferences,
 ) -> MergeOutcome {
     let mut outcome = MergeOutcome::default();
     for entry in entries.iter().filter(|e| e.anilist_id < 0) {
@@ -459,14 +469,15 @@ pub async fn merge_jikan_fallback_entries(
         // the sentinel keeps the AL-merge path and Jikan-merge path
         // consistent: each derives the upstream id from `anilist_id`.
         let mal_id = -entry.anilist_id;
-        let target_mode = monitor_mode_for(entry.status, skip_already_watched);
-        match merge_one_jikan_entry(db, entry, mal_id, target_mode).await {
+        let target_mode = monitor_mode_for(entry.status, prefs.skip_already_watched);
+        match merge_one_jikan_entry(db, entry, mal_id, target_mode, prefs).await {
             Ok(MergeAction::Created(spec)) => {
                 outcome.created += 1;
                 outcome.new_artwork.push(spec);
             }
             Ok(MergeAction::MonitorUpdated) => outcome.monitor_mode_updated += 1,
             Ok(MergeAction::Unchanged) => outcome.unchanged += 1,
+            Ok(MergeAction::SkippedByPreference) => outcome.skipped_by_preference += 1,
             Err(msg) => outcome.failed.push((entry.anilist_id, msg)),
         }
     }
@@ -478,6 +489,7 @@ async fn merge_one_jikan_entry(
     entry: &SyncEntry,
     mal_id: i64,
     target_mode: MonitorMode,
+    prefs: &ImportPreferences,
 ) -> Result<MergeAction, String> {
     // Two lookup paths because the row may already exist under either
     // identity. anilist_id (negated sentinel) is canonical for sync-
@@ -493,11 +505,20 @@ async fn merge_one_jikan_entry(
     };
 
     if let Some(row) = existing {
+        // Existing series → always update monitor_mode regardless
+        // of import_status preference. A status transition on AL
+        // (Watching → Dropped) must downgrade local monitor_mode
+        // even when the new status's import flag is off.
         if row.monitor_mode == target_mode.as_str() {
             return Ok(MergeAction::Unchanged);
         }
         monitoring_service::apply_monitor_mode(db, row.id, target_mode).await?;
         return Ok(MergeAction::MonitorUpdated);
+    }
+
+    // New series → only create if the user wants this status imported.
+    if !import_status(entry.status, prefs) {
+        return Ok(MergeAction::SkippedByPreference);
     }
 
     // Fetch metadata from Jikan (cached). The cached helper handles
@@ -566,17 +587,28 @@ async fn merge_one_anilist_entry(
     entry: &SyncEntry,
     target_mode: MonitorMode,
     detail_map: &HashMap<i64, anilist::AnimeDetail>,
+    prefs: &ImportPreferences,
 ) -> Result<MergeAction, String> {
     let existing = series::get_by_anilist_id(db, entry.anilist_id)
         .await
         .map_err(|e| format!("series lookup failed: {e}"))?;
 
     if let Some(row) = existing {
+        // Existing series → always update monitor_mode regardless of
+        // import_status preference. A status transition on AL
+        // (Watching → Dropped) must downgrade local monitor_mode
+        // even when `import_dropped = false`, otherwise the series
+        // silently keeps grabbing for a show the user dropped.
         if row.monitor_mode == target_mode.as_str() {
             return Ok(MergeAction::Unchanged);
         }
         monitoring_service::apply_monitor_mode(db, row.id, target_mode).await?;
         return Ok(MergeAction::MonitorUpdated);
+    }
+
+    // New series → only create if the user wants this status imported.
+    if !import_status(entry.status, prefs) {
+        return Ok(MergeAction::SkippedByPreference);
     }
 
     let detail = detail_map.get(&entry.anilist_id).ok_or_else(|| {
@@ -806,21 +838,27 @@ async fn sync_anilist(
         import_completed: account.import_completed,
         skip_already_watched: account.skip_already_watched,
     };
-    let entries = entries_from_anilist(raw, &prefs);
-    let after_prefs = entries.len();
-    let dropped = raw_total - after_prefs;
+    // Convert raw → SyncEntry without filtering: existing-series
+    // monitor_mode updates need to flow regardless of whether the
+    // user wants this status imported. The merge step gates only the
+    // create branch.
+    let entries = entries_from_anilist(raw);
+    let after_convert = entries.len();
 
     // Delta filter: drop entries that haven't changed since the last
     // successful tick. On a full-resync run delta_cursor = None, so
     // every entry passes through.
     let entries = drop_entries_before_cursor(entries, delta_cursor);
     let kept = entries.len();
-    let stale_dropped = after_prefs - kept;
+    let stale_dropped = after_convert - kept;
 
-    // Pre-fetch AnimeDetail for the AL ids that aren't already in the
-    // local series table. Existing rows skip the fetch — the merge
-    // step only touches monitor_mode for those.
-    let new_ids = ids_needing_detail_fetch(&state.db, &entries).await;
+    // Pre-fetch AnimeDetail for the AL ids that don't yet have a
+    // series row AND would be created (status passes import prefs).
+    // Existing rows skip the fetch — the merge step only touches
+    // monitor_mode for those — and not-existing-but-not-importable
+    // entries skip too, since the merge will mark them
+    // SkippedByPreference without needing the detail.
+    let new_ids = ids_needing_detail_fetch(&state.db, &entries, &prefs).await;
     let detail_map = if new_ids.is_empty() {
         HashMap::new()
     } else {
@@ -829,17 +867,17 @@ async fn sync_anilist(
             .map_err(|e| format!("AniList detail batch fetch failed: {e}"))?
     };
 
-    let outcome =
-        merge_into_library(&state.db, &entries, &detail_map, prefs.skip_already_watched).await;
+    let outcome = merge_into_library(&state.db, &entries, &detail_map, &prefs).await;
 
     logger::info(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "AniList watch-list synced: {kept} kept ({dropped} skipped, {stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} failed",
+            "AniList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
+            outcome.skipped_by_preference,
             outcome.failed.len(),
         ),
         &format!("username={} fetched_total={raw_total}", account.username),
@@ -849,22 +887,32 @@ async fn sync_anilist(
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
-        "AniList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, failed {}",
+        "AniList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, failed {}",
         outcome.created,
         outcome.monitor_mode_updated,
         outcome.unchanged,
+        outcome.skipped_by_preference,
         outcome.failed.len(),
     ))
 }
 
-/// Return the AL ids in `entries` that don't yet have a `series` row
-/// — the set we need to fetch full AnimeDetail for before merging.
-/// Existing rows can skip the network entirely; we only edit their
-/// monitor_mode.
-async fn ids_needing_detail_fetch(db: &SqlitePool, entries: &[SyncEntry]) -> Vec<i64> {
+/// Return the AL ids in `entries` that need an AnimeDetail fetch
+/// before merge: ids whose `series` row doesn't exist locally AND
+/// whose status passes the user's import preferences. Existing rows
+/// skip because the merge updates only their monitor_mode; not-
+/// existing + not-importable entries skip because the merge will
+/// SkippedByPreference them without ever needing the detail.
+async fn ids_needing_detail_fetch(
+    db: &SqlitePool,
+    entries: &[SyncEntry],
+    prefs: &ImportPreferences,
+) -> Vec<i64> {
     let mut out = Vec::new();
     for entry in entries {
         if entry.anilist_id <= 0 {
+            continue;
+        }
+        if !import_status(entry.status, prefs) {
             continue;
         }
         if matches!(
@@ -976,24 +1024,24 @@ async fn sync_mal(
         import_completed: account.import_completed,
         skip_already_watched: account.skip_already_watched,
     };
-    let normalized = entries_from_mal(entries, &prefs);
-    let after_prefs = normalized.len();
-    let dropped = raw_total - after_prefs;
+    // Convert without filter — same rationale as sync_anilist.
+    let normalized = entries_from_mal(entries);
+    let after_convert = normalized.len();
 
     // Delta filter happens BEFORE anibridge resolution / detail fetch
     // so a delta tick doesn't incur a single network call when the
     // user's list hasn't changed since last tick.
     let normalized = drop_entries_before_cursor(normalized, delta_cursor);
     let kept = normalized.len();
-    let stale_dropped = after_prefs - kept;
+    let stale_dropped = after_convert - kept;
 
     // Resolve MAL → AL via anibridge. Misses fall back to the
-    // negated-MAL-id sentinel, which the merge step skips for now
-    // (counted as deferred_jikan).
+    // negated-MAL-id sentinel, handled by merge_jikan_fallback_entries
+    // in the second pass below.
     let _ = anibridge::ensure_loaded().await;
     let resolved = resolve_mal_anilist_ids(normalized).await;
 
-    let new_ids = ids_needing_detail_fetch(&state.db, &resolved).await;
+    let new_ids = ids_needing_detail_fetch(&state.db, &resolved, &prefs).await;
     let detail_map = if new_ids.is_empty() {
         HashMap::new()
     } else {
@@ -1002,31 +1050,25 @@ async fn sync_mal(
             .map_err(|e| format!("AniList detail batch fetch failed: {e}"))?
     };
 
-    let al_outcome = merge_into_library(
-        &state.db,
-        &resolved,
-        &detail_map,
-        prefs.skip_already_watched,
-    )
-    .await;
+    let al_outcome = merge_into_library(&state.db, &resolved, &detail_map, &prefs).await;
 
     // Second pass: walk the negated-id (anibridge-miss) entries and
     // merge each via Jikan metadata. The combined outcome's
     // deferred_jikan counter falls toward zero as Jikan acts on
     // entries; anything still deferred at the end means Jikan also
     // failed (rate-limited, deleted upstream, etc.).
-    let jikan_outcome =
-        merge_jikan_fallback_entries(&state.db, &resolved, prefs.skip_already_watched).await;
+    let jikan_outcome = merge_jikan_fallback_entries(&state.db, &resolved, &prefs).await;
     let outcome = al_outcome.merge_pass(jikan_outcome);
 
     logger::info(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "MyAnimeList watch-list synced: {kept} kept ({dropped} skipped, {stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} deferred, {} failed",
+            "MyAnimeList watch-list synced: {kept} kept ({stale_dropped} pre-cursor), {} created, {} monitor-mode updated, {} unchanged, {} skipped (import prefs off), {} deferred, {} failed",
             outcome.created,
             outcome.monitor_mode_updated,
             outcome.unchanged,
+            outcome.skipped_by_preference,
             outcome.deferred_jikan,
             outcome.failed.len(),
         ),
@@ -1037,10 +1079,11 @@ async fn sync_mal(
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
-        "MyAnimeList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, deferred {}, failed {}",
+        "MyAnimeList: fetched {raw_total}, kept {kept}, created {}, updated {}, unchanged {}, skipped {}, deferred {}, failed {}",
         outcome.created,
         outcome.monitor_mode_updated,
         outcome.unchanged,
+        outcome.skipped_by_preference,
         outcome.deferred_jikan,
         outcome.failed.len(),
     ))
@@ -1163,6 +1206,13 @@ mod tests {
             import_dropped: false,
             import_completed: false,
             skip_already_watched: false,
+        }
+    }
+
+    fn prefs_with_skip_already_watched() -> ImportPreferences {
+        ImportPreferences {
+            skip_already_watched: true,
+            ..prefs_default()
         }
     }
 
@@ -1331,23 +1381,28 @@ mod tests {
     }
 
     #[test]
-    fn entries_from_anilist_drops_filtered_statuses_and_preserves_id() {
+    fn entries_from_anilist_passes_all_statuses_through_unfiltered() {
+        // Filter moved from conversion time to merge time so existing
+        // series with a filtered-out status still get monitor_mode
+        // updated (Watching → Dropped on AL must downgrade local
+        // monitor_mode even with import_dropped=false). All four
+        // statuses pass through here regardless of prefs.
         let raw = vec![
             al_entry(1, "CURRENT"),
             al_entry(2, "PLANNING"),
-            al_entry(3, "DROPPED"),   // default-off
-            al_entry(4, "COMPLETED"), // default-off
+            al_entry(3, "DROPPED"),
+            al_entry(4, "COMPLETED"),
         ];
-        let entries = entries_from_anilist(raw, &prefs_default());
-        assert_eq!(entries.len(), 2);
+        let entries = entries_from_anilist(raw);
+        assert_eq!(entries.len(), 4, "no filter at conversion time");
         assert_eq!(entries[0].provider_media_id, 1);
         assert_eq!(
             entries[0].anilist_id, 1,
             "AL provider_media_id == anilist_id"
         );
         assert_eq!(entries[0].status, NormalizedStatus::Watching);
-        assert_eq!(entries[1].provider_media_id, 2);
-        assert_eq!(entries[1].status, NormalizedStatus::Planning);
+        assert_eq!(entries[2].status, NormalizedStatus::Dropped);
+        assert_eq!(entries[3].status, NormalizedStatus::Completed);
     }
 
     fn mal_entry(media_id: i64, status: &str) -> mal::MalAnimeListEntry {
@@ -1367,7 +1422,7 @@ mod tests {
         // 0 so a regression that skips the resolution step writes a
         // visibly-broken value rather than a silently-wrong one.
         let raw = vec![mal_entry(101, "watching"), mal_entry(102, "plan_to_watch")];
-        let entries = entries_from_mal(raw, &prefs_default());
+        let entries = entries_from_mal(raw);
         assert_eq!(entries.len(), 2);
         for e in &entries {
             assert_eq!(e.anilist_id, 0, "MAL anilist_id is 0 pre-resolution");
@@ -1547,7 +1602,7 @@ mod tests {
         let mut detail_map = HashMap::new();
         detail_map.insert(12345, detail);
 
-        let outcome = merge_into_library(&db, &entries, &detail_map, false).await;
+        let outcome = merge_into_library(&db, &entries, &detail_map, &prefs_default()).await;
         assert_eq!(outcome.created, 1);
         assert_eq!(outcome.monitor_mode_updated, 0);
         assert_eq!(outcome.unchanged, 0);
@@ -1608,7 +1663,7 @@ mod tests {
             12345,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), false).await;
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default()).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.monitor_mode_updated, 1);
         assert_eq!(outcome.unchanged, 0);
@@ -1633,7 +1688,7 @@ mod tests {
             12345,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), false).await;
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default()).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.monitor_mode_updated, 0);
         assert_eq!(outcome.unchanged, 1);
@@ -1650,7 +1705,7 @@ mod tests {
             -7777,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), false).await;
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default()).await;
         assert_eq!(outcome.deferred_jikan, 1);
         assert_eq!(outcome.created, 0);
         assert!(outcome.failed.is_empty());
@@ -1666,7 +1721,7 @@ mod tests {
             99999,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_into_library(&db, &entries, &HashMap::new(), false).await;
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default()).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.failed.len(), 1);
         assert_eq!(outcome.failed[0].0, 99999);
@@ -1689,7 +1744,7 @@ mod tests {
             -555,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_jikan_fallback_entries(&db, &entries, false).await;
+        let outcome = merge_jikan_fallback_entries(&db, &entries, &prefs_default()).await;
         assert_eq!(outcome.created, 1);
         assert!(outcome.failed.is_empty());
 
@@ -1718,7 +1773,7 @@ mod tests {
             12345,
             NormalizedStatus::Watching,
         )];
-        let outcome = merge_jikan_fallback_entries(&db, &entries, false).await;
+        let outcome = merge_jikan_fallback_entries(&db, &entries, &prefs_default()).await;
         assert_eq!(outcome.created, 0);
         assert_eq!(outcome.monitor_mode_updated, 0);
         assert_eq!(outcome.unchanged, 0);
@@ -1735,6 +1790,7 @@ mod tests {
             unchanged: 10,
             deferred_jikan: 3,
             failed: Vec::new(),
+            skipped_by_preference: 1,
             new_artwork: vec![NewArtworkSpec {
                 series_id: 1,
                 cover_url: "c1".into(),
@@ -1747,6 +1803,7 @@ mod tests {
             unchanged: 0,
             deferred_jikan: 0,
             failed: vec![(-9999, "Jikan rate-limited".into())],
+            skipped_by_preference: 0,
             new_artwork: vec![
                 NewArtworkSpec {
                     series_id: 2,
@@ -1780,6 +1837,7 @@ mod tests {
             unchanged: 0,
             deferred_jikan: 5,
             failed: Vec::new(),
+            skipped_by_preference: 0,
             new_artwork: Vec::new(),
         };
         let jikan = MergeOutcome {
@@ -1788,6 +1846,7 @@ mod tests {
             unchanged: 0,
             deferred_jikan: 0,
             failed: Vec::new(),
+            skipped_by_preference: 0,
             new_artwork: Vec::new(),
         };
         let combined = al.merge_pass(jikan);
@@ -1813,7 +1872,13 @@ mod tests {
         detail_map.insert(100, make_detail(100, "Active", "TV", "RELEASING"));
         detail_map.insert(200, make_detail(200, "PTW", "TV", "FINISHED"));
 
-        let outcome = merge_into_library(&db, &entries, &detail_map, true).await;
+        let outcome = merge_into_library(
+            &db,
+            &entries,
+            &detail_map,
+            &prefs_with_skip_already_watched(),
+        )
+        .await;
         assert_eq!(outcome.created, 2);
 
         let watching = series::get_by_anilist_id(&db, 100).await.unwrap().unwrap();
@@ -1924,9 +1989,11 @@ mod tests {
     }
 
     #[test]
-    fn entries_from_mal_drops_filtered_statuses() {
-        // dropped + on_hold + completed are default-off; only
-        // watching + planning entries survive the filter.
+    fn entries_from_mal_passes_all_statuses_through_unfiltered() {
+        // Conversion no longer filters; merge step gates create-only
+        // by import preference. Every status passes through here so
+        // existing series with a filtered-out new status still get
+        // their monitor_mode updated downstream.
         let raw = vec![
             mal_entry(1, "watching"),
             mal_entry(2, "on_hold"),
@@ -1934,9 +2001,79 @@ mod tests {
             mal_entry(4, "completed"),
             mal_entry(5, "plan_to_watch"),
         ];
-        let entries = entries_from_mal(raw, &prefs_default());
-        assert_eq!(entries.len(), 2);
-        assert!(entries.iter().any(|e| e.provider_media_id == 1));
-        assert!(entries.iter().any(|e| e.provider_media_id == 5));
+        let entries = entries_from_mal(raw);
+        assert_eq!(entries.len(), 5, "no filter at conversion time");
+    }
+
+    #[tokio::test]
+    async fn merge_updates_existing_when_status_filtered_out() {
+        // Regression for the user-reported case: existing Watching
+        // series, AL transitions it to Dropped, user has
+        // import_dropped=false. The series MUST flip to monitor_mode
+        // = none anyway — otherwise a dropped show keeps grabbing
+        // forever.
+        let db = crate::test_support::in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 12345, "Example").await;
+        sqlx::query("UPDATE series SET monitor_mode = ? WHERE id = ?")
+            .bind(MonitorMode::All.as_str())
+            .bind(series_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // No detail map needed — series already exists, merge updates
+        // monitor_mode regardless of whether import_dropped is on.
+        let entries = vec![entry(
+            external_accounts::PROVIDER_ANILIST,
+            12345,
+            NormalizedStatus::Dropped,
+        )];
+        let prefs = prefs_default(); // import_dropped = false
+        assert!(!prefs.import_dropped, "test premise: import_dropped off");
+
+        let outcome = merge_into_library(&db, &entries, &HashMap::new(), &prefs).await;
+        assert_eq!(outcome.created, 0);
+        assert_eq!(outcome.monitor_mode_updated, 1);
+        assert_eq!(outcome.skipped_by_preference, 0);
+
+        let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.monitor_mode,
+            MonitorMode::None.as_str(),
+            "Dropped status must downgrade existing series to None even with import_dropped=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_skips_new_entry_when_import_pref_off() {
+        // The other side of the rule: a NEW Dropped entry with
+        // import_dropped=false should NOT create a series row. Stays
+        // out of the library entirely. Counter rolls into
+        // skipped_by_preference so the operator sees the count.
+        let db = crate::test_support::in_memory_pool().await;
+        let entries = vec![entry(
+            external_accounts::PROVIDER_ANILIST,
+            99999,
+            NormalizedStatus::Dropped,
+        )];
+        // Even though detail_map has the entry, the merge should skip
+        // creation because the user doesn't want Dropped imports.
+        let mut detail_map = HashMap::new();
+        detail_map.insert(
+            99999,
+            make_detail(99999, "Should Not Land", "TV", "FINISHED"),
+        );
+
+        let prefs = prefs_default();
+        let outcome = merge_into_library(&db, &entries, &detail_map, &prefs).await;
+        assert_eq!(outcome.created, 0);
+        assert_eq!(outcome.skipped_by_preference, 1);
+        assert!(
+            series::get_by_anilist_id(&db, 99999)
+                .await
+                .unwrap()
+                .is_none(),
+            "import_dropped=false must keep new Dropped entries out of the library"
+        );
     }
 }
