@@ -227,15 +227,26 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
         return Ok(id);
     }
 
+    // The NOT EXISTS guard rejects ANY existing row, not just
+    // different-provider ones. The earlier UPDATE step already handled
+    // the "re-link the same account" case (same provider AND same
+    // user_id) idempotently — anything reaching this INSERT either has
+    // no row yet (fresh link) or has a row that *isn't* a re-link
+    // candidate. The pre-fix narrow guard (`WHERE provider != ?`) let
+    // a same-provider-different-user link slip through to a UNIQUE(provider)
+    // constraint hit, surfacing the cryptic SQL error
+    // "external_accounts INSERT failed: UNIQUE constraint failed:
+    // external_accounts.provider" instead of the friendly
+    // "another account is already linked, unlink first" string. Widening
+    // to "any row" routes both same-provider-different-user and
+    // different-provider switches through the same friendly error.
     let inserted: Option<i64> = sqlx::query_scalar(
         "INSERT INTO external_accounts
             (provider, provider_user_id, username,
              access_token_encrypted, refresh_token_encrypted,
              access_token_expires_at, score_format, linked_at)
          SELECT ?, ?, ?, ?, ?, ?, ?, ?
-          WHERE NOT EXISTS (
-             SELECT 1 FROM external_accounts WHERE provider != ?
-          )
+          WHERE NOT EXISTS (SELECT 1 FROM external_accounts)
          RETURNING id",
     )
     .bind(&req.provider)
@@ -246,13 +257,12 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
     .bind(req.access_token_expires_at)
     .bind(&req.score_format)
     .bind(now)
-    .bind(&req.provider)
     .fetch_optional(db)
     .await
     .map_err(|e| format!("external_accounts INSERT failed: {e}"))?;
 
     inserted.ok_or_else(|| {
-        "Another external account is already linked; unlink it first before switching providers."
+        "Another external account is already linked; unlink it first before switching accounts."
             .into()
     })
 }
@@ -666,18 +676,28 @@ mod tests {
 
     #[tokio::test]
     async fn link_same_provider_different_user_id_is_rejected() {
-        // UNIQUE(provider) at the schema level fires here — a user
-        // switching MAL accounts can't double-link; they must
-        // unlink first. The update path in `link` only triggers
-        // when both provider AND user_id match.
+        // Same-provider-different-user must reach the friendly
+        // "unlink first" error, NOT the cryptic UNIQUE(provider)
+        // constraint string. The narrow `WHERE provider != ?` guard
+        // used to let this case slip past the NOT EXISTS check and
+        // hit the schema constraint at INSERT time, surfacing
+        // "external_accounts INSERT failed: UNIQUE constraint failed"
+        // to the OAuth submit toast — a confusing error for what's
+        // actually "you already linked a different account; unlink
+        // first." The widened guard now catches both same-provider
+        // and cross-provider switches with the same message.
         let db = in_memory_pool().await;
         link(&db, sample_mal_request()).await.unwrap();
         let mut other_user = sample_mal_request();
         other_user.provider_user_id = "different_mal_user".to_string();
         let err = link(&db, other_user).await.unwrap_err();
         assert!(
-            err.to_lowercase().contains("unique") || err.to_lowercase().contains("constraint"),
-            "schema UNIQUE(provider) must surface: {err}"
+            err.contains("Another external account is already linked"),
+            "expected friendly unlink-first message, got: {err}"
+        );
+        assert!(
+            !err.to_lowercase().contains("unique"),
+            "raw SQL constraint error must not leak through to the user: {err}"
         );
     }
 
