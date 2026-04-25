@@ -254,7 +254,7 @@
                 {% endmatch %}
             </legend>
             <p class="form-hint" style="margin-bottom: 12px;">
-                Link your AniList or MyAnimeList account to import your watch lists into Ryokan's library. Read-only — Ryokan never writes back to the provider. One account at a time.
+                Link your AniList or MyAnimeList account to import your watch lists into Ryokan's library. Read-only; Ryokan never writes back to the provider. One account at a time.
             </p>
             {% match external_account %}
                 {% when Some with (acct) %}
@@ -305,7 +305,7 @@
                                 <span>Completed</span>
                             </label>
                         </div>
-                        <span class="form-hint">Watching + Plan to Watch are on by default — the active and passive lists most users want imported. Other statuses are opt-in.</span>
+                        <span class="form-hint">Watching + Plan to Watch are on by default; the active and passive lists most users want imported. Other statuses are opt-in.</span>
                     </div>
 
                     <div class="form-group">
@@ -313,7 +313,7 @@
                             <input type="checkbox" data-ext-pref="skip_already_watched" {% if acct.skip_already_watched %}checked{% endif %} onchange="saveExternalAccountPrefs()">
                             <span>Skip already-watched episodes</span>
                         </label>
-                        <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off — airing series + a caught-up user would otherwise skip everything.</span>
+                        <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off; airing series + a caught-up user would otherwise skip everything.</span>
                     </div>
 
                     {# #62 PR B — sync cadence. Range: 15 minutes to
@@ -330,7 +330,7 @@
                                max="10080"
                                step="1"
                                value="{{ config.external_sync_interval_minutes }}">
-                        <span class="form-hint">How often the supervised task pulls your watch list. Range: 15 minutes to 7 days. Default 30 minutes — most lists change infrequently and the delta cursor keeps each tick cheap.</span>
+                        <span class="form-hint">How often the supervised task pulls your watch list. Range: 15 minutes to 7 days. Default 30 minutes; most lists change infrequently and the delta cursor keeps each tick cheap.</span>
                     </div>
 
                     {# Same .settings-inline-actions row qBit/Jellyfin
