@@ -29,6 +29,15 @@
                 </select>
                 {% endif %}
                 <label for="library-search" class="visually-hidden">Search library</label>
+                {# Search runs entirely client-side: `liveLibrarySearch`
+                   filters the already-rendered .series-card grid in
+                   place and stamps `?search=foo` into the URL via
+                   replaceState, so a reload still loads the right
+                   subset (the server handler stays as the no-JS
+                   fallback). Enter is prevented on the input so the
+                   form doesn't navigate; the dropdowns still
+                   submit-on-change because list and sort genuinely
+                   need server work. #}
                 <input type="search"
                        id="library-search"
                        name="search"
@@ -36,8 +45,8 @@
                        class="library-search-input"
                        value="{{ search_query }}"
                        autocomplete="off"
-                       oninput="debouncedLibrarySearchSubmit(this)"
-                       onchange="this.form.submit()">
+                       oninput="liveLibrarySearch(this)"
+                       onkeydown="if(event.key==='Enter'){event.preventDefault();}">
                 {% if !score_format.is_empty() %}
                 {# #62 PR E — sort-by-user-score. Hidden when no
                    external account is linked because there'd be no

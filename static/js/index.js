@@ -3,15 +3,81 @@
 // `getTitleByLang` below still has something to compare against.
 const initialTitleLanguage = window.initialTitleLanguage || '';
 
-// Debounced auto-submit for the library search input. Submits 250ms
-// after the user stops typing so each keystroke isn't a navigation,
-// but the page refreshes quickly enough to feel live.
-let librarySearchDebounceTimer = null;
-function debouncedLibrarySearchSubmit(input) {
-    if (librarySearchDebounceTimer) clearTimeout(librarySearchDebounceTimer);
-    librarySearchDebounceTimer = setTimeout(() => {
-        if (input.form) input.form.submit();
-    }, 250);
+// Live client-side library search. The full library is in the DOM
+// after page load, so substring-matching titles + toggling display
+// is faster than a server round-trip and avoids the page reflow. We
+// only stamp `?search=foo` into the URL via replaceState so a
+// hard reload still lands the user on the same filtered view via
+// the server-side handler (no-JS fallback). The dropdowns and sort
+// still submit-on-change because list-membership and score-sort
+// genuinely need DB work.
+function liveLibrarySearch(input) {
+    const q = (input.value || '').trim().toLowerCase();
+    const grid = document.getElementById('library-grid');
+    if (!grid) return;
+
+    let visibleCount = 0;
+    grid.querySelectorAll('.series-card').forEach((card) => {
+        // Match against all three title fields. They're in the DOM
+        // as .title-option spans (title-switcher controls which one
+        // is visible via CSS, but all three are searchable).
+        const titles = card.querySelectorAll('.title-option');
+        let matches = q === '';
+        if (!matches) {
+            for (let i = 0; i < titles.length; i++) {
+                if (titles[i].textContent.toLowerCase().includes(q)) {
+                    matches = true;
+                    break;
+                }
+            }
+        }
+        card.style.display = matches ? '' : 'none';
+        if (matches) visibleCount++;
+    });
+
+    // URL update without navigation. Other params (list, sort) are
+    // preserved so a manual reload picks up everything.
+    const url = new URL(window.location.href);
+    if (q) url.searchParams.set('search', q);
+    else url.searchParams.delete('search');
+    window.history.replaceState(null, '', url);
+
+    // Clear button visibility: track whether *any* filter is active,
+    // not just search. The list filter is reflected in the URL.
+    const hasListFilter = !!url.searchParams.get('list');
+    const clear = document.querySelector('.library-filter-clear');
+    if (clear) {
+        const anyActive = !!q || hasListFilter;
+        clear.classList.toggle('library-filter-clear-hidden', !anyActive);
+        if (anyActive) {
+            clear.removeAttribute('aria-hidden');
+            clear.removeAttribute('tabindex');
+        } else {
+            clear.setAttribute('aria-hidden', 'true');
+            clear.setAttribute('tabindex', '-1');
+        }
+    }
+
+    // No-matches inline empty state. Built once and toggled — avoids
+    // navigation while still telling the user their query found
+    // nothing.
+    let empty = document.getElementById('library-search-empty');
+    if (visibleCount === 0 && q) {
+        if (!empty) {
+            empty = document.createElement('div');
+            empty.id = 'library-search-empty';
+            empty.className = 'empty-state';
+            const p = document.createElement('p');
+            p.textContent = 'No series match your search.';
+            empty.appendChild(p);
+            grid.parentNode.insertBefore(empty, grid.nextSibling);
+        }
+        empty.style.display = '';
+        grid.style.display = 'none';
+    } else if (empty) {
+        empty.style.display = 'none';
+        grid.style.display = '';
+    }
 }
 
 function openAddModal() {
