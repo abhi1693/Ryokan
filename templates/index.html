@@ -62,11 +62,10 @@
             </form>
             {# Reserved width pushes the right group's left edge back
                to where it sat before the Needs Review button was
-               removed. Without it, the right-side flex box shrinks
-               to content and the filters slide right against Add
-               Series. Matches the deleted button's footprint
-               (padding + "Needs Review" label + the 8px gap). #}
-            <button class="btn btn-primary" style="margin-left: 140px;" onclick="openAddModal()">+ Add Series</button>
+               removed. Trimmed from the original ~140px to compensate
+               for the now-always-rendered Clear link slot (≈60px
+               with its 6px flex gap). #}
+            <button class="btn btn-primary" style="margin-left: 80px;" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>
 </div>
