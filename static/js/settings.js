@@ -580,13 +580,66 @@ function refreshJellyfin(btn) {
 // The paste-modal is built inline to avoid yet another templates/
 // partials/ file for what's essentially a single-field prompt.
 
+// Origin of the gh-pages-hosted broker page that AL/MAL redirect to
+// after user approval. The postMessage receiver below validates
+// `event.origin` against this value before reading any data.
+const EXT_BROKER_ORIGIN = 'https://johnthreekay.github.io';
+
 function startExternalAccountLink(provider) {
+    // Set up a one-shot postMessage listener BEFORE opening the
+    // popup so a fast-completing flow (already-authenticated user,
+    // already-approved app) can't deliver before we're listening.
+    // Receiver validates origin + message shape; the broker page
+    // parses token/state from the URL fragment/query and posts back
+    // here as soon as it loads, skipping the copy-paste step.
+    const expectedType = `ryokan-oauth-${provider}`;
+    let received = false;
+    const handler = (event) => {
+        if (event.origin !== EXT_BROKER_ORIGIN) return;
+        const data = event.data || {};
+        if (data.type !== expectedType) return;
+        if (received) return; // belt-and-suspenders against duplicate broker emits
+        received = true;
+        window.removeEventListener('message', handler);
+        autoSubmitExternalAccount(provider, data);
+    };
+    window.addEventListener('message', handler);
+    // Auto-clean the listener after the OAuth-state TTL (10 min) so
+    // a forgotten flow doesn't leave a stale listener attached for
+    // the rest of the session.
+    setTimeout(() => {
+        if (!received) window.removeEventListener('message', handler);
+    }, 10 * 60 * 1000);
+
     // Open the OAuth authorize flow in a new tab so the Settings
-    // page stays loaded behind it — the user will paste their
-    // token/code into the modal here after they finish approving
-    // on AniList / MyAnimeList.
-    window.open(`/settings/oauth/${provider}/start`, '_blank', 'noopener');
+    // page stays loaded behind it. NOT passing 'noopener' is
+    // deliberate — the broker page needs `window.opener` to be set
+    // so it can post values back to this tab via postMessage. The
+    // popup navigates only to URLs we control (`/start` → AL/MAL
+    // authorize → our gh-pages broker), so the standard tabnabbing
+    // protections noopener provides aren't load-bearing here.
+    window.open(`/settings/oauth/${provider}/start`, '_blank');
     openExternalAccountPasteModal(provider);
+}
+
+// Auto-fill the paste modal from a postMessage payload, then
+// submit. Falls through to the manual paste UI if something looks
+// off — value or state empty, network error on submit, etc.
+function autoSubmitExternalAccount(provider, data) {
+    const value = provider === 'anilist' ? data.access_token : data.code;
+    const stateValue = data.state || '';
+    if (!value || !stateValue) {
+        console.warn('[ext-accounts] postMessage missing fields, falling back to manual paste');
+        return;
+    }
+    const valueInput = document.getElementById('ext-accounts-paste-value');
+    const stateInput = document.getElementById('ext-accounts-paste-state');
+    if (valueInput) valueInput.value = value;
+    if (stateInput) stateInput.value = stateValue;
+    // Tiny delay so the user catches the auto-fill visually before
+    // the modal closes on success — better feedback than an instant
+    // disappear.
+    setTimeout(() => submitExternalAccountPaste(provider), 200);
 }
 
 function openExternalAccountPasteModal(provider) {
@@ -594,8 +647,8 @@ function openExternalAccountPasteModal(provider) {
     const providerLabel = isAnilist ? 'AniList' : 'MyAnimeList';
     const fieldLabel = isAnilist ? 'Access token' : 'Authorization code';
     const hint = isAnilist
-        ? 'Copy the <strong>access token</strong> displayed on the AniList callback page and paste it below.'
-        : 'Copy the <strong>authorization code</strong> displayed on the MyAnimeList callback page and paste it below.';
+        ? 'Approve in the AniList tab. The token + state will fill in here automatically once the broker page loads — no copy-paste needed in the common case. If your popup blocker prevented the tab from opening, copy the values from the broker page manually and paste them below.'
+        : 'Approve in the MyAnimeList tab. The code + state will fill in here automatically once the broker page loads — no copy-paste needed in the common case. If your popup blocker prevented the tab from opening, copy the values from the broker page manually and paste them below.';
 
     let modal = document.getElementById('ext-accounts-paste-modal');
     if (modal) modal.remove();
