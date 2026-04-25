@@ -132,25 +132,72 @@ pub async fn index(
     // (unrated, manually-added pre-PR-C, etc.) sort to the bottom
     // so they don't crowd out the rated ones the user is presumably
     // looking at.
+    // Sort selector. SQL already returned series ordered by
+    // added_at DESC ("recent"); anything else is an opt-in re-sort
+    // applied AFTER filters so the displayed order matches the
+    // displayed set. Score-based sorts gate on `!score_format.is_empty()`
+    // (an external account is linked); title sorts and oldest-first
+    // are universal. Unknown keys fall through to "recent".
     let sort_key = q.sort.as_deref().unwrap_or("recent");
-    let sort_value = if sort_key == "score" && !score_format.is_empty() {
-        // partial_cmp with NaN-safe ordering: any non-positive or
-        // missing score becomes -1.0 so it sinks. Tiebreaker on
-        // title_english (alphabetical) keeps the order
-        // deterministic across renders for series at the same
-        // score.
-        library.sort_by(|a, b| {
-            let av = a.user_score.filter(|s| *s > 0.0).unwrap_or(-1.0);
-            let bv = b.user_score.filter(|s| *s > 0.0).unwrap_or(-1.0);
-            bv.partial_cmp(&av)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.title_english.cmp(&b.title_english))
-        });
-        "score".to_string()
-    } else {
-        // Fall through to the SQL-default ordering for any
-        // unrecognized sort key.
-        "recent".to_string()
+    // Tiebreaker for non-title primary sorts: title_english,
+    // case-insensitive, with romaji/native fallback so an entry
+    // missing English doesn't sort under everything.
+    let title_key = |s: &series::Series| -> String {
+        let raw = if !s.title_english.is_empty() {
+            &s.title_english
+        } else if !s.title_romaji.is_empty() {
+            &s.title_romaji
+        } else {
+            &s.title_native
+        };
+        raw.to_lowercase()
+    };
+    let sort_value = match sort_key {
+        "score" if !score_format.is_empty() => {
+            // partial_cmp with NaN-safe ordering: any non-positive
+            // or missing score becomes -1.0 so it sinks. Tiebreaker
+            // on title keeps the order deterministic across renders
+            // for series at the same score.
+            library.sort_by(|a, b| {
+                let av = a.user_score.filter(|s| *s > 0.0).unwrap_or(-1.0);
+                let bv = b.user_score.filter(|s| *s > 0.0).unwrap_or(-1.0);
+                bv.partial_cmp(&av)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| title_key(a).cmp(&title_key(b)))
+            });
+            "score".to_string()
+        }
+        "score_asc" if !score_format.is_empty() => {
+            // Inverse: low → high. Unrated entries still sink — a
+            // missing score isn't a 0, conceptually it's "no
+            // opinion," and surfacing those above the user's
+            // explicit ratings on either end of the range is
+            // confusing.
+            library.sort_by(|a, b| {
+                let av = a.user_score.filter(|s| *s > 0.0).unwrap_or(f64::INFINITY);
+                let bv = b.user_score.filter(|s| *s > 0.0).unwrap_or(f64::INFINITY);
+                av.partial_cmp(&bv)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| title_key(a).cmp(&title_key(b)))
+            });
+            "score_asc".to_string()
+        }
+        "title_asc" => {
+            library.sort_by_key(title_key);
+            "title_asc".to_string()
+        }
+        "title_desc" => {
+            library.sort_by_key(|s| std::cmp::Reverse(title_key(s)));
+            "title_desc".to_string()
+        }
+        "oldest" => {
+            // Inverse of the SQL default — reverse the slice in
+            // place rather than re-sorting on added_at, which we
+            // don't carry on the in-memory Series struct.
+            library.reverse();
+            "oldest".to_string()
+        }
+        _ => "recent".to_string(),
     };
 
     let template = IndexTemplate {
