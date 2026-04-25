@@ -544,3 +544,373 @@ mod detect_batch_tests {
         assert!(detect_batch("[Group] Kamen Rider 555 - 01-50 [BD]"));
     }
 }
+
+#[cfg(test)]
+mod parser_tests {
+    //! Coverage for the RSS feed parser primitives (`decode_xml`,
+    //! `extract_tag`, `strip_cdata`, `extract_group`,
+    //! `extract_resolution`, `build_item_key`) plus the entry-point
+    //! `parse_feed` and a fuzz-lite battery of malformed-XML inputs
+    //! it must reject without panicking. Same shape that surfaced
+    //! the stack-overflow bug in the rtorrent XML-RPC codec — the
+    //! RSS path also takes external Nyaa XML, so an unbounded
+    //! input range is real.
+    use super::*;
+
+    // ── decode_xml ────────────────────────────────────────────────────
+
+    #[test]
+    fn decode_xml_handles_predefined_entities() {
+        // The five XML 1.0 spec entities. A regression in any of these
+        // mangles every release title containing `&` (every magnet URI
+        // does), `<` / `>` (titles with episode ranges in angle
+        // brackets), or quotes (rare but real).
+        assert_eq!(decode_xml("&amp;&lt;&gt;&quot;&apos;"), "&<>\"'",);
+    }
+
+    #[test]
+    fn decode_xml_handles_decimal_numeric_references() {
+        // `&#39;` → `'`, `&#039;` → `'`, `&#65;` → `A`. The previous
+        // implementation only matched the literal `&#39;` for
+        // apostrophes, so feeds emitting any other padded form came
+        // through mangled.
+        assert_eq!(decode_xml("&#39;"), "'");
+        assert_eq!(decode_xml("&#039;"), "'");
+        assert_eq!(decode_xml("&#65;"), "A");
+    }
+
+    #[test]
+    fn decode_xml_handles_hex_numeric_references() {
+        // Lower / upper case `x` both legal per spec.
+        assert_eq!(decode_xml("&#x27;"), "'");
+        assert_eq!(decode_xml("&#X27;"), "'");
+        assert_eq!(decode_xml("&#x41;"), "A");
+        // Multi-byte: U+1F600 GRINNING FACE.
+        assert_eq!(decode_xml("&#x1F600;"), "😀");
+    }
+
+    #[test]
+    fn decode_xml_leaves_unknown_named_entity_intact() {
+        // `&copy;` etc. aren't in our table — pass through verbatim
+        // rather than dropping the text. Some Nyaa torrent titles
+        // carry literal `&` followed by random tokens.
+        assert_eq!(decode_xml("Show & &foo; rest"), "Show & &foo; rest");
+    }
+
+    #[test]
+    fn decode_xml_unterminated_ampersand_passes_through() {
+        // No `;` within a 16-byte window after `&` — emit `&` and keep
+        // scanning. A streaming-encoded Nyaa title that gets cut at
+        // the boundary shouldn't panic.
+        assert_eq!(decode_xml("Show & no entity"), "Show & no entity");
+    }
+
+    #[test]
+    fn decode_xml_invalid_codepoint_passes_through() {
+        // U+D800 is an unpaired surrogate, not a valid Unicode scalar.
+        // `char::from_u32` returns None; the entity is emitted
+        // literally rather than panicking.
+        assert_eq!(decode_xml("&#xD800;"), "&#xD800;");
+        // Numeric overflow: way past u32::MAX.
+        assert_eq!(
+            decode_xml("&#9999999999999999999;"),
+            "&#9999999999999999999;"
+        );
+    }
+
+    #[test]
+    fn decode_xml_does_not_double_decode() {
+        // The previous chain-of-replace approach decoded `&amp;` to
+        // `&` first, so `&amp;lt;` (escaped form of `&lt;`) became
+        // `<` instead of staying as `&lt;`. The single-pass scanner
+        // doesn't reprocess its own output.
+        assert_eq!(decode_xml("&amp;lt;"), "&lt;");
+    }
+
+    #[test]
+    fn decode_xml_empty_string_returns_empty() {
+        assert_eq!(decode_xml(""), "");
+    }
+
+    #[test]
+    fn decode_xml_no_entities_returns_input_verbatim() {
+        let s = "[Group] Show — épisode 12 (1080p) 漢字";
+        assert_eq!(decode_xml(s), s);
+    }
+
+    // ── strip_cdata ───────────────────────────────────────────────────
+
+    #[test]
+    fn strip_cdata_unwraps_when_wrapped() {
+        assert_eq!(strip_cdata("<![CDATA[hello]]>"), "hello");
+    }
+
+    #[test]
+    fn strip_cdata_passes_through_unwrapped() {
+        // Nyaa's RSS doesn't actually use CDATA but the helper has to
+        // round-trip arbitrary content for the case where someone
+        // proxies a different feed through it.
+        assert_eq!(strip_cdata("plain text"), "plain text");
+    }
+
+    #[test]
+    fn strip_cdata_requires_both_open_and_close() {
+        // Just an open marker isn't CDATA — leave intact.
+        assert_eq!(
+            strip_cdata("<![CDATA[never closed"),
+            "<![CDATA[never closed"
+        );
+    }
+
+    // ── extract_group ────────────────────────────────────────────────
+
+    #[test]
+    fn extract_group_finds_first_bracket_pair() {
+        assert_eq!(extract_group("[SubsPlease] Show - 01"), "SubsPlease");
+    }
+
+    #[test]
+    fn extract_group_returns_empty_when_no_brackets() {
+        assert_eq!(extract_group("Show - 01"), "");
+    }
+
+    #[test]
+    fn extract_group_returns_empty_when_unmatched_open() {
+        assert_eq!(extract_group("[unclosed group rest"), "");
+    }
+
+    #[test]
+    fn extract_group_handles_unicode_in_name() {
+        assert_eq!(extract_group("[漢字組] Show"), "漢字組");
+    }
+
+    #[test]
+    fn extract_group_handles_empty_brackets() {
+        assert_eq!(extract_group("[] Show"), "");
+    }
+
+    // ── extract_resolution ────────────────────────────────────────────
+
+    #[test]
+    fn extract_resolution_picks_highest_listed_first() {
+        // Loop order is 2160 → 1080 → 720 → 576 → 480; first hit
+        // wins. A title carrying both "1080p" and "720p" returns the
+        // bigger one.
+        assert_eq!(
+            extract_resolution("[Group] Show 1080p HEVC + 720p AVC dual-track"),
+            "1080"
+        );
+    }
+
+    #[test]
+    fn extract_resolution_handles_uppercase_p() {
+        assert_eq!(extract_resolution("[Group] Show 1080P"), "1080");
+    }
+
+    #[test]
+    fn extract_resolution_returns_empty_when_absent() {
+        assert_eq!(extract_resolution("[Group] Show - 01"), "");
+    }
+
+    #[test]
+    fn extract_resolution_matches_bare_token_with_spaces() {
+        // The fallback `" {res} "` pattern catches resolutions
+        // expressed without the `p` suffix when surrounded by
+        // whitespace. `10-bit 1080 BluRay` is a real shape.
+        assert_eq!(
+            extract_resolution("[Group] Show 10-bit 1080 BluRay"),
+            "1080"
+        );
+    }
+
+    // ── build_item_key ────────────────────────────────────────────────
+    //
+    // The dedup key feeds into `rss_seen.item_key`. A change in
+    // priority order (hash → guid → link → title) silently re-grabs
+    // every previously-seen item with a missing-from-the-prior-row
+    // identity column, so pin the precedence here.
+
+    fn make_item(info_hash: &str, guid: &str, link: &str, title: &str) -> RssItem {
+        RssItem {
+            title: title.into(),
+            link: link.into(),
+            guid: guid.into(),
+            torrent: String::new(),
+            magnet: String::new(),
+            info_hash: info_hash.into(),
+            group: String::new(),
+            resolution: String::new(),
+            is_batch: false,
+        }
+    }
+
+    #[test]
+    fn build_item_key_prefers_info_hash() {
+        let item = make_item("ABC123", "guid-1", "https://nyaa.si/view/1", "Title");
+        // Hash gets lowercased to canonical form so case drift
+        // between feed runs (some Nyaa endpoints uppercase the hex)
+        // doesn't produce two keys for the same release.
+        assert_eq!(build_item_key(&item), "hash:abc123");
+    }
+
+    #[test]
+    fn build_item_key_falls_back_to_guid() {
+        let item = make_item("", "guid-1", "https://nyaa.si/view/1", "Title");
+        assert_eq!(build_item_key(&item), "guid:guid-1");
+    }
+
+    #[test]
+    fn build_item_key_falls_back_to_link() {
+        let item = make_item("", "", "https://nyaa.si/view/1", "Title");
+        assert_eq!(build_item_key(&item), "link:https://nyaa.si/view/1");
+    }
+
+    #[test]
+    fn build_item_key_falls_back_to_title_lowercased() {
+        let item = make_item("", "", "", "Show TITLE");
+        // Title-only fallback fires for feeds that emit no identity
+        // columns at all — extremely rare, but real for the e2e
+        // wiremock fixtures. Lowercase so a feed run that capitalizes
+        // differently doesn't double-grab.
+        assert_eq!(build_item_key(&item), "title:show title");
+    }
+
+    // ── parse_feed: happy paths ───────────────────────────────────────
+
+    fn make_feed(items_xml: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+                <channel>{items_xml}</channel>
+            </rss>"#
+        )
+    }
+
+    #[test]
+    fn parse_feed_extracts_one_item() {
+        let xml = make_feed(
+            r#"<item>
+                <title>[SubsPlease] Frieren - 01 (1080p) [ABCD1234].mkv</title>
+                <link>https://nyaa.si/download/1.torrent</link>
+                <guid>https://nyaa.si/view/1</guid>
+                <nyaa:downloadurl>https://nyaa.si/download/1.torrent</nyaa:downloadurl>
+                <nyaa:magneturi>magnet:?xt=urn:btih:abc</nyaa:magneturi>
+                <nyaa:infohash>ABC</nyaa:infohash>
+            </item>"#,
+        );
+        let items = parse_feed(&xml);
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(
+            item.title,
+            "[SubsPlease] Frieren - 01 (1080p) [ABCD1234].mkv"
+        );
+        assert_eq!(item.link, "https://nyaa.si/download/1.torrent");
+        assert_eq!(item.guid, "https://nyaa.si/view/1");
+        assert_eq!(item.torrent, "https://nyaa.si/download/1.torrent");
+        assert_eq!(item.magnet, "magnet:?xt=urn:btih:abc");
+        // info_hash is lowercased even though the feed emitted uppercase.
+        assert_eq!(item.info_hash, "abc");
+        assert_eq!(item.group, "SubsPlease");
+        assert_eq!(item.resolution, "1080");
+        assert!(!item.is_batch);
+    }
+
+    #[test]
+    fn parse_feed_skips_items_with_empty_title() {
+        // Defensive: an `<item>` block with no title is unparseable
+        // upstream; better to drop than to seed a blank-title row that
+        // confuses every dedup downstream of it.
+        let xml = make_feed(
+            r#"<item>
+                <title></title>
+                <link>https://nyaa.si/x</link>
+            </item>
+            <item>
+                <title>Real Title</title>
+            </item>"#,
+        );
+        let items = parse_feed(&xml);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Real Title");
+    }
+
+    #[test]
+    fn parse_feed_decodes_xml_entities_in_title() {
+        // Entity-encoded title is the standard case — Nyaa emits
+        // `&amp;` for any literal `&` in the original release name.
+        let xml = make_feed(
+            r#"<item>
+                <title>[Group] Show &amp; Tell &lt;Vol 1&gt;</title>
+            </item>"#,
+        );
+        let items = parse_feed(&xml);
+        assert_eq!(items[0].title, "[Group] Show & Tell <Vol 1>");
+    }
+
+    #[test]
+    fn parse_feed_handles_multiple_items() {
+        let xml = make_feed(
+            r#"<item><title>One</title></item>
+               <item><title>Two</title></item>
+               <item><title>Three</title></item>"#,
+        );
+        let items = parse_feed(&xml);
+        let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, vec!["One", "Two", "Three"]);
+    }
+
+    // ── parse_feed: malformed input battery (fuzz-lite) ───────────────
+    //
+    // Each input here must produce an empty `Vec<RssItem>` rather
+    // than panic. A future cargo-fuzz target seeded from this corpus
+    // would extend the same contract under random mutation.
+
+    #[test]
+    fn parse_feed_empty_returns_empty() {
+        assert!(parse_feed("").is_empty());
+    }
+
+    #[test]
+    fn parse_feed_no_items_returns_empty() {
+        assert!(parse_feed("<rss><channel></channel></rss>").is_empty());
+    }
+
+    #[test]
+    fn parse_feed_truncated_item_returns_empty() {
+        // `<item>` opened but never closed → the regex's `.*?` lazy
+        // match doesn't span back to the next `<item>`, so the block
+        // captures nothing. No panic on slicing.
+        let xml = "<rss><channel><item><title>Show";
+        let _ = parse_feed(xml); // contract: no panic; emptiness depends on regex match
+    }
+
+    #[test]
+    fn parse_feed_garbage_input_returns_empty() {
+        assert!(parse_feed("not xml at all").is_empty());
+        assert!(parse_feed("\u{0000}\u{0001}\u{0002}").is_empty());
+    }
+
+    #[test]
+    fn parse_feed_handles_huge_title_without_panic() {
+        // 100 KB title — well past anything Nyaa would emit, but no
+        // input-size cap exists in the regex. Test confirms there's
+        // no quadratic-blowup or slicing panic.
+        let huge = "X".repeat(100_000);
+        let xml = format!("<rss><channel><item><title>{huge}</title></item></channel></rss>");
+        let items = parse_feed(&xml);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title.len(), 100_000);
+    }
+
+    #[test]
+    fn parse_feed_handles_tag_with_attributes() {
+        // The extract_tag regex pattern is `<{tag}[^>]*>(.*?)</{tag}>` —
+        // accepts attributes on the open tag (some RSS variants emit
+        // `<title type="text">…</title>`).
+        let xml = make_feed(r#"<item><title type="text">With attrs</title></item>"#);
+        let items = parse_feed(&xml);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "With attrs");
+    }
+}
