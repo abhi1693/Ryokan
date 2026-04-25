@@ -18,7 +18,7 @@ pub async fn system_status() -> Json<SystemStatus> {
     // is the `/radarr/` prefix this shim is mounted under; everything else
     // matches the shared default.
     let mut s = SystemStatus::default_with_name("Ryokan");
-    s.version = "5.2.6.8376".to_string();
+    s.version = "6.1.1.10360".to_string();
     s.url_base = "/radarr".to_string();
     Json(s)
 }

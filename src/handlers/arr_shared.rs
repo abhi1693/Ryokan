@@ -67,7 +67,13 @@ impl SystemStatus {
     /// `app_name` for the indicator pill in its UI.
     pub fn default_with_name(app_name: &str) -> Self {
         Self {
-            version: "3.0.9.1549".to_string(),
+            // Sonarr v4 is the current line; the Radarr override below
+            // bumps to a v6 string. Seerr uses `app_name` for its UI
+            // pill and `os_name` for path-separator inference, but
+            // doesn't version-gate its v3 API client off this string.
+            // Bump these alongside upstream Sonarr / Radarr stable
+            // releases so the indicator in Seerr reads as up-to-date.
+            version: "4.0.17.2952".to_string(),
             build_time: "2024-01-01T00:00:00Z".to_string(),
             is_debug: false,
             is_production: true,
