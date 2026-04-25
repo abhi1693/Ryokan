@@ -70,7 +70,18 @@ static RE_RELEASE_ROMAN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(ii{1,2}|iv|vi{1,3}|ix)\b(?:\s*[:\-\s\.\]\)\,]|$)").unwrap());
 
 fn is_noise_number(n: i32) -> bool {
-    matches!(n, 480 | 576 | 720 | 1080 | 2160 | 264 | 265) || (1900..=2100).contains(&n)
+    // Year range only. Resolution values (480/576/720/1080/2160) and
+    // codec markers (264/265) used to live here as belt-and-suspenders
+    // protection, but `parse_release_numbers` already strips bracketed
+    // and parenthesized content (where every well-formed release puts
+    // its resolution / codec tags) before running these regexes — so
+    // an unbracketed `1080` *can* only be a real episode number, e.g.
+    // One Piece 1080. Filtering it out as "noise" was silently making
+    // those specific episodes ungrabbable for long-running shows. The
+    // 1900..=2100 year range stays because release titles legitimately
+    // carry an unbracketed year token (`Show 2024 BD`) that the dash-
+    // number regex would otherwise capture as an episode.
+    (1900..=2100).contains(&n)
 }
 
 pub fn parse_release_numbers(title: &str) -> HashSet<i32> {
@@ -1118,5 +1129,48 @@ mod tests {
         ));
         // Part N match.
         assert!(!season_mismatch("[Group] Show Part 3 - 01.mkv", 3));
+    }
+
+    #[test]
+    fn parse_release_numbers_picks_up_long_running_episode_1080() {
+        // Bracket-stripping removes [1080p]; the dash-number regex then
+        // captures the unbracketed `1080` as a real episode (One Piece
+        // E1080). Previously the noise-number filter rejected this
+        // value as "must be a resolution," silently making the One
+        // Piece 1080 episode (and 480/576/720/2160) ungrabbable.
+        let parsed = parse_release_numbers("[SubsPlease] One Piece - 1080 (1080p) [ABCD1234].mkv");
+        assert!(
+            parsed.contains(&1080),
+            "expected episode 1080 in {:?}",
+            parsed
+        );
+    }
+
+    #[test]
+    fn parse_release_numbers_picks_up_long_running_episode_720() {
+        let parsed = parse_release_numbers("[SubsPlease] One Piece - 720 (720p) [ABCD1234].mkv");
+        assert!(
+            parsed.contains(&720),
+            "expected episode 720 in {:?}",
+            parsed
+        );
+    }
+
+    #[test]
+    fn parse_release_numbers_still_rejects_year_token() {
+        // The 1900..=2100 year guard stays — without it, a release
+        // titled `Show 2024 BD 1080p` would slip the unbracketed `2024`
+        // through as an absolute episode number.
+        let parsed = parse_release_numbers("[Group] Show 2024 BD - 12 (1080p).mkv");
+        assert!(
+            !parsed.contains(&2024),
+            "year token must not be parsed as episode in {:?}",
+            parsed
+        );
+        assert!(
+            parsed.contains(&12),
+            "real episode 12 should still parse in {:?}",
+            parsed
+        );
     }
 }
