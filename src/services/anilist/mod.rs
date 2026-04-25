@@ -123,6 +123,222 @@ pub struct AnimeEntry {
     pub source: String,
 }
 
+/// One entry from a user's AniList watch list, projected to the
+/// fields the watch-list sync (issue #62 PR B) cares about.
+///
+/// Every authenticated AL list query returns `MediaListCollection`
+/// grouped by status (CURRENT / PLANNING / COMPLETED / DROPPED /
+/// PAUSED / REPEATING) plus one bucket per custom list. We dedup
+/// by `media_id` and read the per-entry `customLists` Json field
+/// for membership rather than walking the custom-list buckets, so
+/// the consumer sees a flat list with custom-list names attached.
+#[derive(Debug, Clone)]
+pub struct AniListMediaListEntry {
+    /// AniList media id (positive). The Ryokan-internal series row's
+    /// `anilist_id` is keyed off this for non-Jikan-fallback series.
+    pub media_id: i64,
+    /// Status string: `CURRENT`, `PLANNING`, `COMPLETED`, `DROPPED`,
+    /// `PAUSED`, `REPEATING`. AL's enum on the wire; the sync engine
+    /// maps it to Ryokan's monitor-mode defaults.
+    pub status: String,
+    /// Episodes the user has marked watched (per AL).
+    pub progress: i64,
+    /// User's score on AL's `scoreFormat`-relative scale. `0.0` means
+    /// unrated; never render as "You: 0".
+    pub score: f64,
+    /// Unix epoch (seconds). The sync engine uses this for delta
+    /// filtering against `external_accounts.list_last_synced_at`.
+    pub updated_at: i64,
+    pub notes: String,
+    /// Names of custom lists this entry belongs to (empty if none).
+    /// Pulled from AL's per-entry `customLists` Json field, which
+    /// returns `{"List Name": true, ...}` — we keep names where the
+    /// value is `true`.
+    pub custom_lists: Vec<String>,
+}
+
+/// Fetch the full `MediaListCollection` for an authenticated user.
+/// Returns one entry per (mediaId, status) — duplicates from the
+/// custom-list buckets are deduped on the way out, with their custom-
+/// list memberships merged onto the primary status entry.
+///
+/// AL's `MediaListCollection` query returns the entire list in a
+/// single GraphQL response (no pagination at this layer), so this is
+/// one HTTP request per call regardless of list size. Per-user-token
+/// rate limits apply; the same `throttle_before_anilist_request` /
+/// `record_rate_limit_headers` machinery the rest of `services::anilist`
+/// uses keeps this in the existing rate-limit budget.
+///
+/// Errors classify the same way other AL calls do (rate-limited /
+/// unavailable / not-found prefixes). The watch-list sync task
+/// surfaces the message verbatim under `LogCategory::ExternalSync`.
+pub async fn fetch_media_list_collection(
+    token: &str,
+    user_id: i64,
+) -> Result<Vec<AniListMediaListEntry>, String> {
+    // Just the fields the sync engine reads. Each entry's `customLists`
+    // is AL's per-entry membership map; the outer `lists[].isCustomList`
+    // is the bucket flag we use to skip the custom-list duplicates.
+    const QUERY: &str = r#"
+        query ($userId: Int!) {
+            MediaListCollection(userId: $userId, type: ANIME) {
+                lists {
+                    name
+                    isCustomList
+                    entries {
+                        mediaId
+                        status
+                        progress
+                        score
+                        updatedAt
+                        notes
+                        customLists
+                    }
+                }
+            }
+        }
+    "#;
+
+    let body = serde_json::json!({
+        "query": QUERY,
+        "variables": { "userId": user_id },
+    });
+
+    throttle_before_anilist_request().await;
+
+    let resp = HTTP_CLIENT
+        .post(ANILIST_API)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("User-Agent", "Ryokan/0.1")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("AniList MediaListCollection HTTP error: {e}"))?;
+
+    let status = resp.status();
+    record_rate_limit_headers(resp.headers());
+
+    if !status.is_success() {
+        // Same retry-after capture as the search/detail paths so
+        // subsequent ticks don't pile on while AL is asking us to
+        // back off.
+        let retry_after_secs = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            set_anilist_cooldown(retry_after_secs, ANILIST_COOLDOWN_DEFAULT);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        return Err(match status.as_u16() {
+            429 => format!("AniList rate-limited (status 429): {}", excerpt(&body)),
+            401 | 403 => format!(
+                "AniList rejected the watch-list token (status {}); user may need to re-link",
+                status
+            ),
+            code => format!("AniList unavailable (status {code}): {}", excerpt(&body)),
+        });
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("AniList MediaListCollection parse failed: {e}"))?;
+
+    if let Some(err_msg) = extract_graphql_error(&json) {
+        // GraphQL `errors[]` for an authenticated MediaListCollection
+        // call typically means an expired or revoked token (AL replies
+        // 200 with `errors[]`, not 401, when the bearer token is
+        // invalid). Match the message-prefix taxonomy the rest of
+        // services::anilist uses so downstream callers (sync task)
+        // can react appropriately:
+        //   * `AniList rate-limited` → next tick defers, stays linked
+        //   * `AniList not found` / generic → surface as `unavailable`
+        //   * Authorization-shaped messages stay as `unavailable` for
+        //     now; PR B's submit/refresh path will key off the literal
+        //     message and surface a "re-link required" banner.
+        let lower = err_msg.to_ascii_lowercase();
+        if lower.contains("too many requests") || lower.contains("rate limit") {
+            set_cooldown_until_now_plus(ANILIST_COOLDOWN_DEFAULT);
+            return Err(format!("AniList rate-limited: {err_msg}"));
+        }
+        return Err(format!("AniList unavailable: {err_msg}"));
+    }
+
+    let lists = json
+        .pointer("/data/MediaListCollection/lists")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            "AniList MediaListCollection missing data.MediaListCollection.lists".to_string()
+        })?;
+
+    // Walk only the non-custom-list buckets to avoid double-counting
+    // entries that appear under both their primary status and one or
+    // more custom-list buckets. Per-entry `customLists` Json gives us
+    // membership directly, so we don't need the bucket walk for that.
+    let mut out: Vec<AniListMediaListEntry> = Vec::new();
+    for list in lists {
+        if list
+            .get("isCustomList")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let entries = match list.get("entries").and_then(|v| v.as_array()) {
+            Some(e) => e,
+            None => continue,
+        };
+        for entry in entries {
+            let media_id = match entry.get("mediaId").and_then(|v| v.as_i64()) {
+                Some(id) => id,
+                None => continue,
+            };
+            let status = entry
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let progress = entry.get("progress").and_then(|v| v.as_i64()).unwrap_or(0);
+            let score = entry.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let updated_at = entry.get("updatedAt").and_then(|v| v.as_i64()).unwrap_or(0);
+            let notes = entry
+                .get("notes")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let custom_lists = entry
+                .get("customLists")
+                .and_then(|v| v.as_object())
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(name, on)| {
+                            if on.as_bool().unwrap_or(false) {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            out.push(AniListMediaListEntry {
+                media_id,
+                status,
+                progress,
+                score,
+                updated_at,
+                notes,
+                custom_lists,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
 /// Search AniList for anime by title, falling back to MAL/Jikan if AniList 403s.
 #[allow(dead_code)]
 pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {

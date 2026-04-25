@@ -37,7 +37,7 @@ use sqlx::SqlitePool;
 use crate::AppState;
 use crate::models::external_accounts;
 use crate::models::log::LogCategory;
-use crate::services::logger;
+use crate::services::{anilist, logger};
 
 /// Run one sync iteration against the linked account. Called by the
 /// supervised loop in `main.rs::external_sync` once per configured
@@ -55,25 +55,69 @@ pub async fn tick_once(state: &AppState) -> Result<String, String> {
         return Ok("no external account linked".to_string());
     };
 
-    // Subsequent commits replace this branch with the real provider
-    // dispatch (AL `MediaListCollection` query / MAL animelist
-    // pagination + token refresh) and the staging-table merge. For
-    // now we just confirm the linked-account decrypt succeeded and
-    // log the no-op so System → Logs shows the cadence is alive.
-    logger::debug(
+    match account.provider.as_str() {
+        external_accounts::PROVIDER_ANILIST => sync_anilist_dryrun(state, &account).await,
+        external_accounts::PROVIDER_MAL => {
+            // MAL fetch + token refresh lands in the next commit. For
+            // now log the cadence is alive and return.
+            logger::debug(
+                &state.db,
+                LogCategory::ExternalSync,
+                &format!(
+                    "watch-list sync tick (MAL placeholder): username={}",
+                    account.username
+                ),
+                "",
+            )
+            .await;
+            Ok("MAL fetch lands in a follow-up commit".to_string())
+        }
+        other => {
+            // Unknown provider string — schema CHECK constraint should
+            // prevent this, but surface explicitly rather than panic.
+            Err(format!("unknown external_accounts.provider: {other}"))
+        }
+    }
+}
+
+/// Fetch the AL watch list and log a count summary. This commit
+/// validates the token + network path + GraphQL parser end-to-end
+/// without writing to `series` yet — the staging-table merge that
+/// turns the fetched entries into library rows lands in a follow-up
+/// commit alongside monitor-mode defaults and bulk-mode coalescing.
+async fn sync_anilist_dryrun(
+    state: &AppState,
+    account: &external_accounts::ExternalAccount,
+) -> Result<String, String> {
+    let user_id: i64 = account.provider_user_id.parse().map_err(|e| {
+        format!(
+            "AL provider_user_id is not a valid integer: {} ({e})",
+            account.provider_user_id
+        )
+    })?;
+
+    let entries = anilist::fetch_media_list_collection(&account.access_token, user_id).await?;
+    let total = entries.len();
+    let with_score = entries.iter().filter(|e| e.score > 0.0).count();
+    let on_custom_lists = entries
+        .iter()
+        .filter(|e| !e.custom_lists.is_empty())
+        .count();
+
+    logger::info(
         &state.db,
         LogCategory::ExternalSync,
         &format!(
-            "watch-list sync tick (placeholder): provider={} username={}",
-            account.provider, account.username
+            "AniList watch-list fetched: {} entries ({} scored, {} on custom lists)",
+            total, with_score, on_custom_lists
         ),
-        "",
+        &format!("username={}", account.username),
     )
     .await;
 
     Ok(format!(
-        "no-op (provider={}, sync engine lands in a follow-up commit)",
-        account.provider
+        "AniList: fetched {} entries (merge lands in a follow-up commit)",
+        total
     ))
 }
 
