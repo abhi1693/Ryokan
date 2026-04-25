@@ -1705,12 +1705,15 @@ async fn main() {
 
                         // No linked account → don't churn
                         // scheduled_task_runs with one "no account"
-                        // row per cadence interval. Reset the counter
-                        // so once an account IS linked, the next tick
-                        // fires promptly instead of waiting out a
-                        // residual `every`-minutes window.
+                        // row per cadence interval. Leave the counter
+                        // alone so the next 1-minute tick re-checks
+                        // `has_linked_account` immediately (mins is
+                        // already past `backoff` here). Resetting to
+                        // 0 would force a fresh `every`-minute wait
+                        // after the user actually links — bad UX,
+                        // and the comment that used to be here lied
+                        // about it.
                         if !services::external_sync::has_linked_account(&state.db).await {
-                            minutes_since_last = 0;
                             continue;
                         }
 

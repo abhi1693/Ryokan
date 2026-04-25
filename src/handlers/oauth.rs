@@ -431,16 +431,29 @@ pub struct SyncNowForm {
 /// task continues to run on its own cadence regardless — this is an
 /// out-of-band "do it right now" trigger, not a replacement for the
 /// scheduled tick.
+///
+/// Both error and success paths emit JSON `{ ok, error?, progress_id? }`
+/// — the frontend toast (`static/js/settings.js::syncWatchListNow`)
+/// finalizes on `ok: false`, so a plain-text error body would parse
+/// to `{}` and leave the toast spinning indefinitely.
 pub async fn sync_now(
     State(state): State<AppState>,
     Json(form): Json<SyncNowForm>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let account = external_accounts::get_current(&state.db)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"ok": false, "error": e})),
+            )
+        })?
         .ok_or((
             StatusCode::BAD_REQUEST,
-            "No external account is linked.".into(),
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "No external account is linked.",
+            })),
         ))?;
 
     let progress_id = progress::sanitize_progress_id(form.progress_id.as_deref());

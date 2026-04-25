@@ -803,16 +803,28 @@ function syncWatchListNow() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ progress_id: progressId }),
     })
-        .then((r) => r.json().catch(() => ({})))
-        .then((data) => {
+        .then((r) =>
+            // Defense in depth: finalize the toast if the response is
+            // a non-2xx OR if the body fails to parse. The handler
+            // always emits JSON now, but a future regression that
+            // serves a plain-text body must not leave the toast
+            // spinning indefinitely (worst possible failure mode —
+            // looks like work is happening when nothing is).
+            r
+                .json()
+                .catch(() => ({ ok: false, error: 'Server returned an unparseable response.' }))
+                .then((data) => ({ ok: r.ok, data }))
+        )
+        .then(({ ok, data }) => {
             // The sync runs in the background; the toast finalizes off
-            // the progress feed. A bad-state response (e.g. account
-            // unlinked between page load and click) gets surfaced here.
-            if (data && data.ok === false) {
+            // the progress feed when the request succeeded. A bad-
+            // state response (account unlinked between page load and
+            // click, or a transport-level error) finalizes here.
+            if (!ok || (data && data.ok === false)) {
                 toast.finalize({
                     kind: 'error',
                     title: 'Sync could not start',
-                    body: data.error || 'Try reloading the Settings page.',
+                    body: (data && data.error) || 'Try reloading the Settings page.',
                 });
             }
         })

@@ -1484,9 +1484,11 @@ mod tests {
         // Hold the sync lock from a separate task and assert that
         // tick_once_or_busy fails fast with the user-facing message.
         // Regression for the PR #94 finding: supervised + manual
-        // races used to spawn two concurrent fetches.
-        // multi_thread runtime so the holder can sit on the lock
-        // while the test thread races against it.
+        // races used to spawn two concurrent fetches. Works on the
+        // default current_thread runtime because tokio::sync::Mutex
+        // and Notify cooperatively yield — the holder runs to the
+        // lock + notify_one + .notified() suspension point, then
+        // control returns here for the try_lock attempt.
         let lock_held = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let lh = lock_held.clone();
