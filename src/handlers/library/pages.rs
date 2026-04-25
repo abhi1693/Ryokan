@@ -123,6 +123,10 @@ pub async fn series_detail(
     // read-only and fans out in parallel.
     let mut monitor_mode = "future".to_string();
     let mut monitor_mode_label = monitoring::MonitorMode::Future.label().to_string();
+    let monitor_mode_manual_override = db_series
+        .as_ref()
+        .map(|s| s.monitor_mode_manual_override)
+        .unwrap_or(false);
     if let Some(ref tracked) = db_series {
         if let Ok(summary) =
             monitoring_service::ensure_series_monitoring_rows(&state.db, tracked).await
@@ -134,6 +138,48 @@ pub async fn series_detail(
             monitor_mode_label = tracked.monitor_mode_enum().label().to_string();
         }
     }
+
+    // #62 PR B — derive the "Sync from AL/MAL" dropdown option's
+    // visibility + label. Only show when both (a) an account is
+    // currently linked, and (b) this series row has a non-NULL
+    // synced_from_external_account_id pointing at the same account.
+    // Rule (b) keeps manually-added series (synced_from = NULL) from
+    // showing an option that wouldn't do anything useful; if the
+    // user later puts the manual series on their AL list, the next
+    // sync stamps synced_from and the option appears.
+    let synced_from = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT synced_from_external_account_id FROM series WHERE id = ?",
+    )
+    .bind(db_id.unwrap_or(0))
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+    let linked_account = crate::models::external_accounts::get_current(&state.db)
+        .await
+        .ok()
+        .flatten();
+    let can_sync_from_external_account = matches!(
+        (linked_account.as_ref(), synced_from),
+        (Some(acct), Some(sf)) if acct.id == sf
+    );
+    let sync_provider_label = match linked_account.as_ref().map(|a| a.provider.as_str()) {
+        Some(crate::models::external_accounts::PROVIDER_ANILIST) => "AniList".to_string(),
+        Some(crate::models::external_accounts::PROVIDER_MAL) => "MyAnimeList".to_string(),
+        _ => String::new(),
+    };
+    // When the series is sync-tracked and the user hasn't pinned a
+    // manual mode, the dropdown shows "Sync from AL/MAL" as selected.
+    // Otherwise the option matching the current monitor_mode is
+    // selected. Computed here so the template doesn't need a
+    // multi-clause condition per option.
+    let monitor_mode_select_value =
+        if can_sync_from_external_account && !monitor_mode_manual_override {
+            "sync".to_string()
+        } else {
+            monitor_mode.clone()
+        };
 
     // Fan out the five independent read paths. Each one was previously
     // awaited serially — on a cold cache that meant 4+ sequential DB
@@ -308,6 +354,10 @@ pub async fn series_detail(
         metadata_refreshed_at,
         monitor_mode,
         monitor_mode_label,
+        monitor_mode_manual_override,
+        can_sync_from_external_account,
+        sync_provider_label,
+        monitor_mode_select_value,
         monitored_count,
         all_monitored,
         allow_upgrades,

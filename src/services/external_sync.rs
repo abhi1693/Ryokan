@@ -335,6 +335,11 @@ pub struct MergeOutcome {
     /// always downgrades local monitor_mode, even with
     /// `import_dropped = false`.
     pub skipped_by_preference: i32,
+    /// Existing series with `monitor_mode_manual_override = 1` that
+    /// the merge step left alone. The user explicitly pinned the
+    /// monitor_mode through the UI; sync honors the pin until the
+    /// user clears it via "Sync from AL/MAL" in the dropdown.
+    pub pinned_manually: i32,
     /// Newly-created series rows that need artwork caching, collected
     /// for the deferred bulk-mode pass that runs after merge. Carrying
     /// just the IDs + image URLs (not the full AnimeDetail) keeps
@@ -404,6 +409,7 @@ pub async fn merge_into_library(
             Ok(MergeAction::MonitorUpdated) => outcome.monitor_mode_updated += 1,
             Ok(MergeAction::Unchanged) => outcome.unchanged += 1,
             Ok(MergeAction::SkippedByPreference) => outcome.skipped_by_preference += 1,
+            Ok(MergeAction::PinnedManually) => outcome.pinned_manually += 1,
             Err(msg) => outcome.failed.push((entry.anilist_id, msg)),
         }
     }
@@ -423,6 +429,11 @@ enum MergeAction {
     /// same status DO still get monitor_mode updated — only the
     /// create branch checks preferences.
     SkippedByPreference,
+    /// Existing series whose `monitor_mode_manual_override = 1` —
+    /// user explicitly pinned this monitor_mode through the UI.
+    /// Sync stamps `synced_from` so removal-detection still tracks
+    /// it but leaves the monitor_mode alone.
+    PinnedManually,
 }
 
 impl MergeOutcome {
@@ -438,11 +449,13 @@ impl MergeOutcome {
             + other.monitor_mode_updated
             + other.unchanged
             + other.skipped_by_preference
+            + other.pinned_manually
             + other.failed.len() as i32;
         self.created += other.created;
         self.monitor_mode_updated += other.monitor_mode_updated;
         self.unchanged += other.unchanged;
         self.skipped_by_preference += other.skipped_by_preference;
+        self.pinned_manually += other.pinned_manually;
         self.deferred_jikan = (self.deferred_jikan - handled_by_other).max(0);
         self.failed.extend(other.failed);
         self.new_artwork.extend(other.new_artwork);
@@ -509,6 +522,15 @@ pub async fn detect_removals(
         if s.monitor_mode == already_none {
             continue;
         }
+        // Manual override pins the user's chosen monitor_mode against
+        // both merge updates AND removal detection. The user
+        // explicitly set this mode and may want to keep grabbing the
+        // series (e.g. they took it off AL because their list was
+        // public and contained spoilers, but still want Ryokan to
+        // pick up new episodes).
+        if s.monitor_mode_manual_override {
+            continue;
+        }
         monitoring_service::apply_monitor_mode(db, s.id, MonitorMode::None).await?;
         report.removed.push(s.id);
     }
@@ -549,6 +571,7 @@ pub async fn merge_jikan_fallback_entries(
             Ok(MergeAction::MonitorUpdated) => outcome.monitor_mode_updated += 1,
             Ok(MergeAction::Unchanged) => outcome.unchanged += 1,
             Ok(MergeAction::SkippedByPreference) => outcome.skipped_by_preference += 1,
+            Ok(MergeAction::PinnedManually) => outcome.pinned_manually += 1,
             Err(msg) => outcome.failed.push((entry.anilist_id, msg)),
         }
     }
@@ -582,6 +605,13 @@ async fn merge_one_jikan_entry(
         // (Watching → Dropped) must downgrade local monitor_mode
         // even when the new status's import flag is off.
         stamp_synced_from_if_set(db, row.id, account_id).await;
+        // Manual override takes precedence: the user has explicitly
+        // pinned this series's monitor_mode through the UI. Sync
+        // honors that pin until the user clears it via "Sync from
+        // AL/MAL" in the dropdown.
+        if row.monitor_mode_manual_override {
+            return Ok(MergeAction::PinnedManually);
+        }
         if row.monitor_mode == target_mode.as_str() {
             return Ok(MergeAction::Unchanged);
         }
@@ -675,6 +705,12 @@ async fn merge_one_anilist_entry(
         // even when `import_dropped = false`, otherwise the series
         // silently keeps grabbing for a show the user dropped.
         stamp_synced_from_if_set(db, row.id, account_id).await;
+        // Manual override takes precedence: the user pinned this
+        // series's monitor_mode through the UI. Sync honors the pin
+        // until the user clears it via "Sync from AL/MAL".
+        if row.monitor_mode_manual_override {
+            return Ok(MergeAction::PinnedManually);
+        }
         if row.monitor_mode == target_mode.as_str() {
             return Ok(MergeAction::Unchanged);
         }
@@ -1914,6 +1950,7 @@ mod tests {
             deferred_jikan: 3,
             failed: Vec::new(),
             skipped_by_preference: 1,
+            pinned_manually: 0,
             new_artwork: vec![NewArtworkSpec {
                 series_id: 1,
                 cover_url: "c1".into(),
@@ -1927,6 +1964,7 @@ mod tests {
             deferred_jikan: 0,
             failed: vec![(-9999, "Jikan rate-limited".into())],
             skipped_by_preference: 0,
+            pinned_manually: 0,
             new_artwork: vec![
                 NewArtworkSpec {
                     series_id: 2,
@@ -1961,6 +1999,7 @@ mod tests {
             deferred_jikan: 5,
             failed: Vec::new(),
             skipped_by_preference: 0,
+            pinned_manually: 0,
             new_artwork: Vec::new(),
         };
         let jikan = MergeOutcome {
@@ -1970,6 +2009,7 @@ mod tests {
             deferred_jikan: 0,
             failed: Vec::new(),
             skipped_by_preference: 0,
+            pinned_manually: 0,
             new_artwork: Vec::new(),
         };
         let combined = al.merge_pass(jikan);
@@ -2320,6 +2360,69 @@ mod tests {
         // Account 2's series is unaffected.
         let acct2 = series::get_by_id(&db, acct2_series).await.unwrap().unwrap();
         assert_eq!(acct2.monitor_mode, MonitorMode::All.as_str());
+    }
+
+    #[tokio::test]
+    async fn merge_skips_existing_when_manual_override_set() {
+        // The user has pinned monitor_mode through the UI. AL says
+        // their status changed (Watching → Dropped), but the merge
+        // step MUST leave the monitor_mode alone — the user
+        // explicitly chose this.
+        let db = crate::test_support::in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 12345, "Pinned").await;
+        sqlx::query(
+            "UPDATE series SET monitor_mode = ?, monitor_mode_manual_override = 1 WHERE id = ?",
+        )
+        .bind(MonitorMode::All.as_str())
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // AL says Dropped, which would normally flip to monitor_mode=None.
+        let entries = vec![entry(
+            external_accounts::PROVIDER_ANILIST,
+            12345,
+            NormalizedStatus::Dropped,
+        )];
+        let outcome =
+            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), None).await;
+        assert_eq!(outcome.pinned_manually, 1);
+        assert_eq!(outcome.monitor_mode_updated, 0);
+
+        let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.monitor_mode,
+            MonitorMode::All.as_str(),
+            "manual override must survive a Watching → Dropped transition on AL"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_removals_skips_manual_override_pinned_series() {
+        // A series the user pinned is also off-limits to removal
+        // detection — they explicitly want to keep this monitor_mode
+        // even after removing from AL (e.g. their list went private).
+        let db = crate::test_support::in_memory_pool().await;
+        seed_account_id(&db, 1, "anilist").await;
+        let pinned_id = crate::test_support::seed_series(&db, 800, "Pinned").await;
+        force_synced_from(&db, pinned_id, 1).await;
+        force_monitor_mode(&db, pinned_id, MonitorMode::All).await;
+        sqlx::query("UPDATE series SET monitor_mode_manual_override = 1 WHERE id = ?")
+            .bind(pinned_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let fetch_ids = std::collections::HashSet::new();
+        let report = detect_removals(&db, 1, &fetch_ids).await.unwrap();
+        assert!(
+            report.removed.is_empty(),
+            "manual-override series must NOT be downgraded by removal detection"
+        );
+
+        let row = series::get_by_id(&db, pinned_id).await.unwrap().unwrap();
+        assert_eq!(row.monitor_mode, MonitorMode::All.as_str());
     }
 
     #[tokio::test]

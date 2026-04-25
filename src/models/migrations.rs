@@ -873,6 +873,23 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // #62 PR B — pinned monitor_mode flag. Set when the user changes
+    // monitor_mode through the per-series UI; cleared when the user
+    // picks "Sync from AL/MAL" from the same dropdown. The
+    // watch-list sync's merge step skips updating monitor_mode on
+    // rows where this is 1, and the removal-detection pass skips
+    // them too (a manually-pinned series stays pinned even when the
+    // user removes it from their AL list — they explicitly chose
+    // this monitor mode). Mirrors the
+    // `episode_quality_tags.manual_override` pattern used by the
+    // upgrade sweep.
+    sqlx::query(
+        "ALTER TABLE series ADD COLUMN monitor_mode_manual_override INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (

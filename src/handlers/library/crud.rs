@@ -451,6 +451,15 @@ pub async fn set_folder(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+/// Sentinel value the dropdown sends for "Sync from AL/MAL". Clears
+/// the manual-override flag without touching `monitor_mode` — the
+/// next sync tick (manual via "Sync now" or the supervised cadence)
+/// computes the AL-derived mode and applies it. Doesn't immediately
+/// flip the mode here because we don't want a stale value briefly
+/// visible while we wait for the network fetch; the dropdown UI
+/// tells the user "Will follow your AL/MAL list" until that happens.
+pub(crate) const MONITOR_MODE_SYNC_SENTINEL: &str = "sync";
+
 #[utoipa::path(
     post,
     path = "/api/library/monitoring",
@@ -467,11 +476,44 @@ pub async fn set_monitoring(
     State(state): State<AppState>,
     Json(form): Json<SetMonitoringForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let mode = monitoring::MonitorMode::from_str(&form.monitor_mode);
     let series_id = form.series_id;
+
+    // "sync" sentinel: clear the manual-override flag, leave the
+    // monitor_mode + monitoring rows in place. Next sync tick will
+    // fix them. Returns the existing summary unchanged so the UI
+    // reads the current state until the next sync.
+    if form.monitor_mode == MONITOR_MODE_SYNC_SENTINEL {
+        series::update_monitor_mode_manual_override(&state.db, series_id, false)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let summary = monitoring_service::recompute_series_monitoring(&state.db, series_id)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        logger::info(
+            &state.db,
+            LogCategory::Library,
+            &format!("Cleared monitor_mode override for series {}", series_id),
+            "next sync tick will apply the AL/MAL-derived monitor_mode",
+        )
+        .await;
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "monitor_mode": summary.mode.as_str(),
+            "monitor_mode_label": summary.mode.label(),
+            "monitor_mode_manual_override": false,
+            "monitored_count": summary.monitored_count,
+            "total_count": summary.total_count,
+        })));
+    }
+
+    let mode = monitoring::MonitorMode::from_str(&form.monitor_mode);
     let summary = monitoring_service::apply_monitor_mode(&state.db, series_id, mode)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // User-driven change pins the mode against subsequent syncs.
+    series::update_monitor_mode_manual_override(&state.db, series_id, true)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     logger::info(
         &state.db,
@@ -541,6 +583,7 @@ pub async fn set_monitoring(
         "ok": true,
         "monitor_mode": summary.mode.as_str(),
         "monitor_mode_label": summary.mode.label(),
+        "monitor_mode_manual_override": true,
         "monitored_count": summary.monitored_count,
         "total_count": summary.total_count,
     })))
@@ -1263,6 +1306,67 @@ mod tests {
             let body: serde_json::Value =
                 ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
             assert_eq!(body["monitor_mode"], "future");
+        }
+
+        #[tokio::test]
+        async fn set_monitoring_sets_manual_override_on_explicit_mode() {
+            // Any explicit-mode pick from the dropdown pins
+            // monitor_mode_manual_override = 1 so the next sync tick
+            // doesn't silently overwrite the user's choice.
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 40, "Show").await;
+            let state = build_test_app_state(db.clone(), None);
+            let form = super::super::SetMonitoringForm {
+                series_id,
+                monitor_mode: "all".to_string(),
+                auto_grab: None,
+            };
+            let body: serde_json::Value =
+                ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+            assert_eq!(body["monitor_mode"], "all");
+            assert_eq!(body["monitor_mode_manual_override"], true);
+
+            let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+            assert!(
+                row.monitor_mode_manual_override,
+                "explicit-mode pick must set the override flag"
+            );
+        }
+
+        #[tokio::test]
+        async fn set_monitoring_sync_sentinel_clears_manual_override() {
+            // The "sync" sentinel from the dropdown's "Sync from
+            // AL/MAL" option clears the override flag without touching
+            // monitor_mode — next sync tick computes the right mode
+            // from the user's current AL/MAL status. Pre-condition the
+            // series with the override on so we can assert the clear.
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 50, "Show").await;
+            sqlx::query("UPDATE series SET monitor_mode = 'all', monitor_mode_manual_override = 1 WHERE id = ?")
+                .bind(series_id)
+                .execute(&db)
+                .await
+                .unwrap();
+            let state = build_test_app_state(db.clone(), None);
+            let form = super::super::SetMonitoringForm {
+                series_id,
+                monitor_mode: "sync".to_string(),
+                auto_grab: None,
+            };
+            let body: serde_json::Value =
+                ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+            assert_eq!(body["monitor_mode_manual_override"], false);
+
+            let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+            assert!(
+                !row.monitor_mode_manual_override,
+                "the sync sentinel must clear the override flag"
+            );
+            // monitor_mode itself stays at "all" — the next sync tick
+            // is responsible for replacing it with the AL-derived
+            // value. Don't assert on the recomputed mode here since
+            // the test setup didn't change it.
+            assert_eq!(row.monitor_mode, "all");
         }
 
         // ─── set_episode_monitoring ──────────────────────────────

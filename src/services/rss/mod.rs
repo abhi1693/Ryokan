@@ -1996,6 +1996,7 @@ mod evaluate_candidate_tests {
             custom_query_tokens: String::new(),
             restrict_to_uploader: String::new(),
             cumulative_prior_episodes: 0,
+            monitor_mode_manual_override: false,
         }
     }
 
