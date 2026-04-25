@@ -132,6 +132,18 @@
     color: var(--red);
 }
 
+/* #62 PR C — user's personal AL/MAL score badge. Distinct from the
+   community-score `.tag-score-*` colors so the user can tell their
+   own rating apart at a glance. The accent tint pulls from the same
+   --accent token Ryokan uses for active-state highlights, so it
+   reads as "this is yours" without competing with the community
+   badge's score-bucket coloring. */
+.tag-user-score {
+    background: rgba(203, 166, 247, 0.16);
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+}
+
 .tag-status-releasing,
 .tag-status-not_yet_released,
 .tag-status-currently_airing,

@@ -40,6 +40,15 @@
             {% if let Some(score_text) = detail.average_score_display %}
             <span class="tag tag-score {{ detail.score_class }}">{{ score_text }}</span>
             {% endif %}
+            {# #62 PR C — user's personal score from their linked AL/MAL
+               account. Hidden when no account is linked, the series
+               isn't on the user's list, or the user hasn't rated it.
+               The display string is pre-formatted per
+               external_accounts.score_format (POINT_3 smileys, POINT_5
+               stars, POINT_10/_DECIMAL/_100 numbers, MAL integer). #}
+            {% if let Some(you_text) = user_score_display %}
+            <span class="tag tag-user-score" title="Your score on AL/MAL">You: {{ you_text }}</span>
+            {% endif %}
         </div>
 
         <div class="detail-genres">

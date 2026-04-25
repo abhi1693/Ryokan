@@ -65,6 +65,17 @@ impl Series {
     pub fn monitor_mode_enum(&self) -> MonitorMode {
         MonitorMode::from_str(&self.monitor_mode)
     }
+
+    /// #62 PR C — render the "You: X" badge string for this series
+    /// using the given `score_format` (typically the linked
+    /// `external_accounts.score_format`). Returns `None` when no
+    /// account is linked, the user hasn't rated this series, or the
+    /// score is the unrated sentinel. Library cards call this from
+    /// Askama directly so each row formats consistently with the
+    /// detail-page badge.
+    pub fn user_score_display(&self, score_format: &str) -> Option<String> {
+        crate::services::user_score::format_user_score(self.user_score, score_format)
+    }
 }
 
 fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {

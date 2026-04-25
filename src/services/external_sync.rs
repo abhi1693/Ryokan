@@ -2467,8 +2467,7 @@ mod tests {
             updated_at: 0,
             custom_lists: Vec::new(),
         }];
-        let _ =
-            merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), Some(1)).await;
+        let _ = merge_into_library(&db, &entries, &HashMap::new(), &prefs_default(), Some(1)).await;
 
         let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
         assert_eq!(

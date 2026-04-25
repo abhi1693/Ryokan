@@ -47,6 +47,12 @@
                 <span class="tag tag-res">{% if !s.format.is_empty() %}{{ s.format.replace("_", " ") }}{% else %}TBA{% endif %}</span>
                 {% if let Some(eps) = s.episodes %}<span class="tag tag-res series-eps">{{ eps }} eps</span>{% endif %}
                 <span class="tag tag-status-{{ s.status|lowercase }}">{{ s.status.replace("_", " ") }}</span>
+                {# #62 PR C — user's personal score from their linked
+                   AL/MAL account. Hidden when no account is linked or
+                   the user hasn't rated this series. #}
+                {% if let Some(you_text) = s.user_score_display(score_format.as_str()) %}
+                <span class="tag tag-user-score" title="Your score on AL/MAL">You: {{ you_text }}</span>
+                {% endif %}
             </div>
         </div>
     </a>
