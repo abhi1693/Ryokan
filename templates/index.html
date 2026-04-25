@@ -67,7 +67,13 @@
                 {% endif %}
             </form>
             {% endif %}
-            <button class="btn btn-primary" onclick="openAddModal()">+ Add Series</button>
+            {# Reserved width preserves the filter row's original
+               left edge after the Needs Review button was removed
+               — without it, the right-side flex box shrinks to
+               content and the filters slide right against Add
+               Series. Matches the deleted button's footprint
+               (padding + "Needs Review" label + the 8px gap). #}
+            <button class="btn btn-primary" style="margin-left: 140px;" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>
 </div>
