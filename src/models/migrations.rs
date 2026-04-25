@@ -964,6 +964,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // #62 PR E — count of MAL→AL mapping failures from the most
+    // recent sync run. Surfaces on the Settings → External Accounts
+    // card as a "N series couldn't be mapped to AniList" banner so
+    // the user knows which subset of their MAL list is on the
+    // negated-id sentinel path (no SeaDex keying, etc.). Set on
+    // every successful MAL sync; AL syncs leave the column at 0.
+    sqlx::query(
+        "ALTER TABLE external_accounts ADD COLUMN last_sync_deferred_count INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS series_metadata_cache (

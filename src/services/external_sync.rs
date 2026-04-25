@@ -1155,6 +1155,18 @@ async fn sync_anilist(
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
+    // #62 PR E — clear any stale MAL deferred count from a prior
+    // provider on this same account row. AL syncs never produce
+    // deferred entries (no anibridge step), so always writing 0
+    // keeps the Settings UI accurate after a provider switch.
+    if let Err(e) =
+        external_accounts::update_last_sync_deferred_count(&state.db, account.id, 0).await
+    {
+        tracing::warn!(
+            "update_last_sync_deferred_count failed for account_id={}: {e}",
+            account.id
+        );
+    }
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(
@@ -1367,6 +1379,21 @@ async fn sync_mal(
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
+    // #62 PR E — persist the MAL→AL mapping-failure count so the
+    // Settings UI can render a "N series couldn't be mapped" banner
+    // without scraping the supervised-loop summary string.
+    if let Err(e) = external_accounts::update_last_sync_deferred_count(
+        &state.db,
+        account.id,
+        outcome.deferred_jikan as i64,
+    )
+    .await
+    {
+        tracing::warn!(
+            "update_last_sync_deferred_count failed for account_id={}: {e}",
+            account.id
+        );
+    }
     spawn_post_merge_bulk_pass(state, outcome.new_artwork.clone()).await;
 
     Ok(format!(

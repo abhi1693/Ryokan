@@ -56,6 +56,12 @@ pub struct ExternalAccount {
     pub import_dropped: bool,
     pub import_completed: bool,
     pub skip_already_watched: bool,
+    /// #62 PR E — count of entries from the most recent sync that
+    /// couldn't be mapped MAL→AL via anibridge. Always 0 for AL
+    /// accounts. Surfaces on the Settings → External Accounts card
+    /// as a banner so the user can see which subset of their MAL
+    /// list is sitting on the negated-id sentinel path.
+    pub last_sync_deferred_count: i64,
 }
 
 /// Input for [`link`] — the OAuth handler populates one of these
@@ -95,6 +101,7 @@ impl std::fmt::Debug for ExternalAccount {
             .field("import_dropped", &self.import_dropped)
             .field("import_completed", &self.import_completed)
             .field("skip_already_watched", &self.skip_already_watched)
+            .field("last_sync_deferred_count", &self.last_sync_deferred_count)
             .finish()
     }
 }
@@ -133,7 +140,8 @@ pub async fn get_current(db: &SqlitePool) -> Result<Option<ExternalAccount>, Str
                 access_token_expires_at, score_format,
                 list_last_synced_at, list_full_resync_at, linked_at,
                 import_watching, import_planning, import_paused,
-                import_dropped, import_completed, skip_already_watched
+                import_dropped, import_completed, skip_already_watched,
+                last_sync_deferred_count
            FROM external_accounts
           ORDER BY linked_at DESC
           LIMIT 1",
@@ -319,6 +327,24 @@ pub struct ImportPreferences {
     pub skip_already_watched: bool,
 }
 
+/// #62 PR E — record the count of MAL→AL mapping failures from
+/// the most recent sync. AL syncs always pass `0`. Read by the
+/// Settings → External Accounts page handler to render the
+/// "N series couldn't be mapped to AniList" banner.
+pub async fn update_last_sync_deferred_count(
+    db: &SqlitePool,
+    id: i64,
+    count: i64,
+) -> Result<(), String> {
+    sqlx::query("UPDATE external_accounts SET last_sync_deferred_count = ? WHERE id = ?")
+        .bind(count)
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("update_last_sync_deferred_count: {e}"))?;
+    Ok(())
+}
+
 /// Refresh the `score_format` column. Called from the AL sync path
 /// after each successful `fetch_media_list_collection` so a user
 /// changing their POINT_X preference on AL post-link takes effect on
@@ -439,6 +465,7 @@ struct ExternalAccountRaw {
     import_dropped: bool,
     import_completed: bool,
     skip_already_watched: bool,
+    last_sync_deferred_count: i64,
 }
 
 impl ExternalAccountRaw {
@@ -478,6 +505,7 @@ impl ExternalAccountRaw {
             import_dropped: self.import_dropped,
             import_completed: self.import_completed,
             skip_already_watched: self.skip_already_watched,
+            last_sync_deferred_count: self.last_sync_deferred_count,
         })
     }
 }

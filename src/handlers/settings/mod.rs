@@ -151,6 +151,11 @@ pub(crate) struct ExternalAccountView {
     pub import_dropped: bool,
     pub import_completed: bool,
     pub skip_already_watched: bool,
+    /// #62 PR E — count of MAL→AL mapping failures from the most
+    /// recent sync. Surfaces as a "N couldn't be mapped" info banner
+    /// only when > 0 AND the linked provider is MAL (AL never
+    /// produces deferred entries; the column always reads 0 there).
+    pub last_sync_deferred_count: i64,
 }
 
 impl ExternalAccountView {
@@ -171,6 +176,7 @@ impl ExternalAccountView {
             import_dropped: a.import_dropped,
             import_completed: a.import_completed,
             skip_already_watched: a.skip_already_watched,
+            last_sync_deferred_count: a.last_sync_deferred_count,
         }
     }
 }

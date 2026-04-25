@@ -248,6 +248,19 @@
                                 <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
                             </div>
                         </div>
+                        {# #62 PR E — MAL→AL mapping-failure
+                           counter. Persisted by sync_mal at the end
+                           of every successful tick (cleared to 0 by
+                           sync_anilist so a provider switch shows
+                           accurate state). Renders only when > 0
+                           AND the linked provider is MAL. #}
+                        {% if acct.last_sync_deferred_count > 0 && acct.provider == "mal" %}
+                        <div class="ext-accounts-deferred-banner">
+                            <strong>{{ acct.last_sync_deferred_count }}</strong>
+                            series couldn't be mapped MyAnimeList→AniList on the last sync.
+                            They're still in your library but won't have AniList-keyed scoring (SeaDex, etc.) until the mappings catch up.
+                        </div>
+                        {% endif %}
                         <div class="ext-accounts-prefs">
                             <div class="form-hint" style="margin-bottom:6px">Import lists:</div>
                             <label class="checkbox-row">
