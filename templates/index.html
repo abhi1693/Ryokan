@@ -10,34 +10,15 @@
             <h2>Library</h2>
             <p class="page-desc">Your tracked anime series.</p>
         </div>
-        {# Middle column: the library search form. Its own GET form
-           so it can submit independently with debounced auto-submit
-           on the right side's filter/sort form. Hidden inputs mirror
-           the active list/sort values so a search submit doesn't
-           drop the user's other selections. #}
-        <form method="get" action="/" class="library-search-form">
-            <label for="library-search" class="visually-hidden">Search library</label>
-            <input type="search"
-                   id="library-search"
-                   name="search"
-                   placeholder="Search library…"
-                   class="library-search-input"
-                   value="{{ search_query }}"
-                   autocomplete="off"
-                   oninput="debouncedLibrarySearchSubmit(this)"
-                   onchange="this.form.submit()">
-            {% if !custom_list_filter.is_empty() %}<input type="hidden" name="list" value="{{ custom_list_filter }}">{% endif %}
-            {% if sort_value.as_str() != "recent" %}<input type="hidden" name="sort" value="{{ sort_value }}">{% endif %}
-        </form>
-
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            {% if !custom_list_names.is_empty() || !score_format.is_empty() || !search_query.is_empty() || !custom_list_filter.is_empty() %}
-            {# Right group: list + sort filters. Each onchange auto-
-               submits. A hidden `search` input carries the current
-               search query through so changing list/sort doesn't
-               drop it. #}
+            {# All filter controls in one form so they share state
+               without hidden-input mirrors. Visual order is list →
+               search → sort → clear, putting the search box between
+               the two dropdowns. Each control auto-submits on its
+               own native event; the search input uses a 250ms
+               debounce on `input` so each keystroke isn't a fresh
+               navigation. #}
             <form method="get" action="/" class="library-filter-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-                {% if !search_query.is_empty() %}<input type="hidden" name="search" value="{{ search_query }}">{% endif %}
                 {% if !custom_list_names.is_empty() %}
                 <label for="library-list-filter" class="visually-hidden">Filter by custom list</label>
                 <select id="library-list-filter" name="list" class="folder-select" onchange="this.form.submit()">
@@ -47,6 +28,16 @@
                     {% endfor %}
                 </select>
                 {% endif %}
+                <label for="library-search" class="visually-hidden">Search library</label>
+                <input type="search"
+                       id="library-search"
+                       name="search"
+                       placeholder="Search library…"
+                       class="library-search-input"
+                       value="{{ search_query }}"
+                       autocomplete="off"
+                       oninput="debouncedLibrarySearchSubmit(this)"
+                       onchange="this.form.submit()">
                 {% if !score_format.is_empty() %}
                 {# #62 PR E — sort-by-user-score. Hidden when no
                    external account is linked because there'd be no
@@ -61,7 +52,6 @@
                 <a class="btn btn-pill library-filter-clear" href="/" title="Clear filters">Clear</a>
                 {% endif %}
             </form>
-            {% endif %}
             <button class="btn btn-primary" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>

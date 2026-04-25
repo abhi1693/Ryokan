@@ -23,28 +23,21 @@
     gap: 20px;
 }
 
-/* Library search input. Sits in the middle column of the page
-   header (between the Library title and the right-side filter +
-   Add Series group). Wider min-width than the filter dropdowns
-   so it reads as a primary search affordance, not a small filter
-   field. */
-.library-search-form {
-    flex: 1 1 auto;
-    display: flex;
-    justify-content: center;
-    min-width: 0;
-}
-
+/* Library search input. Sits between the custom-list dropdown and
+   the sort dropdown in the page-header filter row. Padding + font
+   size match `.folder-select` so the three controls share a visual
+   baseline; width is generous enough to read as a primary search
+   affordance without dominating the toolbar. */
 .library-search-input {
-    padding: 7px 12px;
+    padding: 5px 10px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text);
-    font-size: 13px;
+    font-size: 12px;
     font-family: var(--font-body);
-    width: min(420px, 100%);
-    min-width: 220px;
+    width: 220px;
+    min-width: 180px;
 }
 
 .library-search-input::placeholder {
