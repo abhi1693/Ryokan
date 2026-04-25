@@ -3,6 +3,7 @@ pub mod downloads;
 pub mod grab;
 pub mod help;
 pub mod library;
+pub mod oauth;
 pub mod progress;
 pub mod search;
 pub mod settings;

@@ -222,3 +222,66 @@
             </div>
         </fieldset>
 
+        {# Issue #62 PR A — External account linkage. Two states:
+           unlinked (Link buttons for AL + MAL) and linked (provider
+           card with username + per-list import checkboxes + Unlink
+           button). Only one account can be linked at a time per
+           decision #10 — the linked state hides both Link buttons. #}
+        <fieldset class="ext-accounts-fieldset">
+            <legend>External Accounts</legend>
+            <p class="form-hint" style="margin-top:-4px;margin-bottom:12px">
+                Link your AniList or MyAnimeList account to import your watch lists into Ryokan's library. Read-only — Ryokan never writes back to the provider. One account at a time.
+            </p>
+            {% match external_account %}
+                {% when Some with (acct) %}
+                    <div class="ext-accounts-linked" data-provider="{{ acct.provider }}">
+                        <div class="ext-accounts-linked-header">
+                            <div>
+                                <div class="ext-accounts-provider-name">{{ acct.provider_label }}</div>
+                                <div class="ext-accounts-username">Linked as <strong>{{ acct.username }}</strong></div>
+                                {% if !acct.score_format.is_empty() %}
+                                <div class="form-hint">Score format: {{ acct.score_format }}</div>
+                                {% endif %}
+                            </div>
+                            <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
+                        </div>
+                        <div class="ext-accounts-prefs">
+                            <div class="form-hint" style="margin-bottom:6px">Import lists:</div>
+                            <label class="checkbox-row">
+                                <input type="checkbox" data-ext-pref="import_watching" {% if acct.import_watching %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                <span>Watching</span>
+                            </label>
+                            <label class="checkbox-row">
+                                <input type="checkbox" data-ext-pref="import_planning" {% if acct.import_planning %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                <span>Plan to Watch</span>
+                            </label>
+                            <label class="checkbox-row">
+                                <input type="checkbox" data-ext-pref="import_paused" {% if acct.import_paused %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                <span>Paused</span>
+                            </label>
+                            <label class="checkbox-row">
+                                <input type="checkbox" data-ext-pref="import_dropped" {% if acct.import_dropped %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                <span>Dropped</span>
+                            </label>
+                            <label class="checkbox-row">
+                                <input type="checkbox" data-ext-pref="import_completed" {% if acct.import_completed %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                <span>Completed</span>
+                            </label>
+                            <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-subtle)">
+                                <label class="checkbox-row">
+                                    <input type="checkbox" data-ext-pref="skip_already_watched" {% if acct.skip_already_watched %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                    <span>Skip already-watched episodes</span>
+                                </label>
+                                <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off — airing-series + caught-up user would skip everything otherwise.</span>
+                            </div>
+                        </div>
+                    </div>
+                {% when None %}
+                    <div class="ext-accounts-link-row">
+                        <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('anilist')">Link AniList</button>
+                        <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('mal')">Link MyAnimeList</button>
+                    </div>
+                    <span class="form-hint">Attribution: AniList and MyAnimeList data used with permission under each platform's API terms. Read-only scope.</span>
+            {% endmatch %}
+        </fieldset>
+

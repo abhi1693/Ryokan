@@ -75,6 +75,12 @@ pub enum LogCategory {
     /// users can introspect "why did release X win over release Y" — see
     /// plan §6.3 of `ryokan-custom-formats.md`.
     Scoring,
+    /// External-account integration (issue #62). OAuth link / unlink
+    /// lifecycle, token refresh, per-tick sync telemetry, mapping
+    /// failures on MAL → AL lookups. Users read this category on the
+    /// System → Logs page to diagnose "my AL sync stopped working"
+    /// or "a MAL entry didn't import."
+    ExternalSync,
 }
 
 impl LogCategory {
@@ -95,6 +101,7 @@ impl LogCategory {
             LogCategory::PostProcess => "post_process",
             LogCategory::Quality => "quality",
             LogCategory::Scoring => "scoring",
+            LogCategory::ExternalSync => "external_sync",
         }
     }
 
@@ -116,6 +123,7 @@ impl LogCategory {
             "post_process" => Some(LogCategory::PostProcess),
             "quality" => Some(LogCategory::Quality),
             "scoring" => Some(LogCategory::Scoring),
+            "external_sync" => Some(LogCategory::ExternalSync),
             _ => None,
         }
     }
@@ -137,6 +145,7 @@ impl LogCategory {
             LogCategory::PostProcess => "Post-Process",
             LogCategory::Quality => "Quality",
             LogCategory::Scoring => "Scoring",
+            LogCategory::ExternalSync => "External Sync",
         }
     }
 }

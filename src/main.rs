@@ -231,8 +231,67 @@ where
     }
 }
 
+/// `--sanitize-db-for-debug` entrypoint. Copies the live DB to a
+/// sibling file with all tokens / passwords / session cookies / user
+/// password hashes blanked, then prints the destination path. Used
+/// by users preparing a DB dump for a bug report so they don't leak
+/// live credentials.
+///
+/// Defaults to operating on `data/ryokan.db` → `data/ryokan-sanitized.db`,
+/// matching the repo's gitignored `data/` convention. Respects
+/// `DATABASE_URL` only if it points at a plain file path (no HTTP /
+/// remote SQLite variants) — bugged-DB sharing only makes sense for
+/// the local file case.
+async fn run_sanitize_cli() {
+    let live = resolve_live_db_path();
+    // Output lands in the CWD, not next to the live DB. If a user
+    // configured `DATABASE_URL=/etc/ryokan/db.sqlite`, dropping the
+    // sanitized copy at `/etc/ryokan/db-sanitized.sqlite` puts it
+    // squarely in path of any system backup rotation that scans
+    // `/etc`. CWD is where `cargo run` and `docker exec` land by
+    // default — predictable and user-controlled.
+    let stem = live
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ryokan");
+    let out = std::path::PathBuf::from(format!("{stem}-sanitized.db"));
+
+    match services::sanitize::run_sanitize(&live, &out).await {
+        Ok(summary) => {
+            println!("{summary}");
+        }
+        Err(e) => {
+            eprintln!("sanitize failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn resolve_live_db_path() -> std::path::PathBuf {
+    // Prefer DATABASE_URL when it's a plain sqlite file URL; otherwise
+    // the canonical default. Query strings (`?mode=rwc`) and the
+    // `sqlite://` prefix are stripped so the path handed to
+    // `std::fs::copy` is usable.
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        let without_scheme = url.strip_prefix("sqlite://").unwrap_or(&url);
+        let path_part = without_scheme.split('?').next().unwrap_or(without_scheme);
+        if !path_part.is_empty() {
+            return std::path::PathBuf::from(path_part);
+        }
+    }
+    std::path::PathBuf::from("data/ryokan.db")
+}
+
 #[tokio::main]
 async fn main() {
+    // One-shot CLI modes run BEFORE tracing init so their output isn't
+    // interleaved with startup log lines. Each mode exits the process
+    // on completion; falling through means "boot the server normally."
+    if std::env::args().any(|a| a == "--sanitize-db-for-debug") {
+        run_sanitize_cli().await;
+        std::process::exit(0);
+    }
+
     // Initialize tracing.
     tracing_subscriber::registry()
         .with(
@@ -334,6 +393,14 @@ async fn main() {
     // runtime worker during startup.
     let _ = tokio::task::spawn_blocking(models::user::warm_timing_equalizer).await;
 
+    // Warm the AEAD encryption-key LazyLock (issue #62 PR A). Same
+    // pattern as `warm_timing_equalizer`: pays the cold-start cost
+    // (env-var parse, file read, possible first-run key generation
+    // with a 0600 chmod) at boot rather than during the user's first
+    // OAuth `/submit`. Wrapped in `spawn_blocking` because the
+    // first-run path may write to disk.
+    let _ = tokio::task::spawn_blocking(services::crypto::warm_key).await;
+
     // Warm the Custom Formats cache from disk. Parse failures are logged
     // inside `load_compiled_cfs` and skipped — startup never aborts over
     // a bad CF row, so a corrupted import can't take the server down.
@@ -362,6 +429,7 @@ async fn main() {
         progress: ProgressRegistry::new(),
         users_exist,
         interactive_search_cache: services::interactive_search_cache::new(),
+        oauth_state: services::oauth_state::new(),
     };
 
     // Initialize download client from saved config. Branches on
@@ -564,6 +632,28 @@ async fn main() {
             "/settings",
             get(handlers::settings::settings_page).post(handlers::settings::settings_submit),
         )
+        // Issue #62 PR A: AL + MAL OAuth endpoints. `start` GETs
+        // redirect the user to the provider; `submit` POSTs accept
+        // the pasted token/code, validate, and persist via
+        // `external_accounts::link`. `unlink` drops the current row.
+        .route(
+            "/settings/oauth/anilist/start",
+            get(handlers::oauth::anilist_start),
+        )
+        .route(
+            "/settings/oauth/anilist/submit",
+            post(handlers::oauth::anilist_submit),
+        )
+        .route("/settings/oauth/mal/start", get(handlers::oauth::mal_start))
+        .route(
+            "/settings/oauth/mal/submit",
+            post(handlers::oauth::mal_submit),
+        )
+        .route(
+            "/settings/oauth/preferences",
+            post(handlers::oauth::update_preferences),
+        )
+        .route("/settings/oauth/unlink", post(handlers::oauth::unlink))
         .route(
             "/settings/groups",
             post(handlers::settings::settings_groups_upsert),

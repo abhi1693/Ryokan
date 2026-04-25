@@ -787,6 +787,70 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Issue #62 PR A — external AL/MAL account linkage. One row per
+    // linked provider (decision #10 limits this to one row total at
+    // any time; the "at most one" invariant is enforced in the
+    // `external_accounts` model's `link` function rather than in the
+    // schema so unlink-and-relink flows don't need migration-level
+    // logic). Access + refresh tokens are AEAD-encrypted via
+    // `services::crypto` before insert — plaintext never touches the
+    // DB. `refresh_token_encrypted` is empty-blob for AniList (which
+    // uses implicit grant and has no refresh token); MAL populates it.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS external_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            -- 'anilist' or 'mal'. CHECK keeps a typo from leaking into
+            -- the sync task's provider-dispatch match arms.
+            provider TEXT NOT NULL CHECK (provider IN ('anilist', 'mal')),
+            -- Provider's stable, rename-immune user identifier.
+            -- AL: Viewer.id (numeric, stored as string). MAL: id from
+            -- `GET /v2/users/@me?fields=id` (also numeric, also stored
+            -- as string) — MAL usernames are user-mutable, so keying
+            -- on the numeric id is what makes re-link survive a
+            -- rename on the provider side.
+            provider_user_id TEXT NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            access_token_encrypted BLOB NOT NULL,
+            refresh_token_encrypted BLOB NOT NULL DEFAULT x'',
+            -- MAL access tokens expire in 30 days; AL implicit tokens
+            -- are fixed 1-year. NULL means "no known expiry, don't
+            -- preemptively refresh" (the AL case).
+            access_token_expires_at INTEGER,
+            -- AL's POINT_3 / POINT_5 / POINT_10 / POINT_10_DECIMAL /
+            -- POINT_100 per the user's Viewer.mediaListOptions.scoreFormat.
+            -- Empty string pre-fetch. MAL hardcodes 'POINT_10'.
+            score_format TEXT NOT NULL DEFAULT '',
+            -- Delta sync cursor. NULL until the first successful sync.
+            list_last_synced_at INTEGER,
+            -- Separate cursor for the weekly full-resync backstop
+            -- (decision #4). NULL until the first full resync completes.
+            list_full_resync_at INTEGER,
+            linked_at INTEGER NOT NULL,
+            -- Per-list opt-in checkboxes surfaced on Settings →
+            -- Connections → External Accounts. Watching + PTW default
+            -- on; Paused / Dropped / Completed default off (issue body).
+            import_watching INTEGER NOT NULL DEFAULT 1,
+            import_planning INTEGER NOT NULL DEFAULT 1,
+            import_paused INTEGER NOT NULL DEFAULT 0,
+            import_dropped INTEGER NOT NULL DEFAULT 0,
+            import_completed INTEGER NOT NULL DEFAULT 0,
+            -- Per-account opt-in: skip episodes the user has already
+            -- watched on the provider (using the `progress` field).
+            -- Default off per decision #7 — airing-series case makes
+            -- on-by-default silently broken.
+            skip_already_watched INTEGER NOT NULL DEFAULT 0,
+            -- Exactly one row per provider (AL / MAL are separate
+            -- rows even though the one-at-a-time invariant means only
+            -- one will exist in practice). Enforces idempotence on
+            -- re-link of the same provider.
+            UNIQUE (provider)
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
     // tmdb_id on series is a leftover from before the Kitsu migration;
     // the column is harmless to keep for existing databases.
     sqlx::query("ALTER TABLE series ADD COLUMN tmdb_id INTEGER")

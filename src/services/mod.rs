@@ -1,9 +1,12 @@
 pub mod anilist;
+pub mod crypto;
 pub mod download_client;
 pub mod jikan;
 pub mod kitsu;
 pub mod media;
 pub mod nyaa;
+pub mod oauth_state;
+pub mod sanitize;
 pub mod scoring;
 
 pub mod jellyfin;
