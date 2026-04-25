@@ -452,7 +452,7 @@ pub(super) async fn resolve_series_context(
         let _ = metadata_cache::upsert_provider(db, detail.id, detail.id_mal, &detail).await;
     }
     if let Some(ref tracked) = db_series
-        && should_persist_detail_cache(tracked, &detail)
+        && should_persist_detail_cache(tracked.anilist_id, &detail)
     {
         let _ = metadata_cache::upsert(db, tracked.id, detail.id, detail.id_mal, &detail).await;
     }
@@ -464,11 +464,19 @@ pub(super) async fn resolve_series_context(
     Ok((db_series, provider_id, detail))
 }
 
-fn should_persist_detail_cache(tracked: &series::Series, detail: &anilist::AnimeDetail) -> bool {
-    if tracked.anilist_id <= 0 {
+fn should_persist_detail_cache(tracked_anilist_id: i64, detail: &anilist::AnimeDetail) -> bool {
+    if tracked_anilist_id <= 0 {
         return true;
     }
-    detail.id > 0 && detail.id == tracked.anilist_id
+    detail.id > 0 && detail.id == tracked_anilist_id
+}
+
+#[cfg(test)]
+pub(crate) fn should_persist_detail_cache_for_test(
+    tracked_anilist_id: i64,
+    detail: &anilist::AnimeDetail,
+) -> bool {
+    should_persist_detail_cache(tracked_anilist_id, detail)
 }
 
 pub(super) async fn reconcile_all_fallback_entries(db: &SqlitePool) -> ReconcileReport {

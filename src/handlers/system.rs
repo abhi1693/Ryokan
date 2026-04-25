@@ -79,6 +79,11 @@ fn normalize_system_tab(tab: Option<String>) -> String {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn normalize_system_tab_for_test(tab: Option<String>) -> String {
+    normalize_system_tab(tab)
+}
+
 pub async fn system_page(
     State(state): State<AppState>,
     Query(params): Query<SystemQuery>,
