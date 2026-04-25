@@ -378,12 +378,12 @@
                         {% if ep.quality_state == "grabbed" %}
                         <div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>
                         {% else if ep.quality_state == "completed" %}
-                        <span class="tag tag-quality{% if ep.manual_override %} tag-quality-manual{% endif %}">{{ ep.quality }}{% if ep.manual_override %} 📌{% endif %}</span>
+                        <span class="tag tag-quality">{{ ep.quality }}</span>
                         {% else if !ep.quality.is_empty() %}
                             {% if ep.quality_state == "failed" %}
                             <span class="tag tag-quality-failed">{{ ep.quality }} ✗</span>
                             {% else %}
-                            <span class="tag tag-quality{% if ep.manual_override %} tag-quality-manual{% endif %}">{{ ep.quality }}{% if ep.manual_override %} 📌{% endif %}</span>
+                            <span class="tag tag-quality">{{ ep.quality }}</span>
                             {% endif %}
                         {% else if ep.on_disk %}
                         <span class="tag tag-quality">UNKNOWN</span>
@@ -410,13 +410,21 @@
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="12" y2="6"/><line x1="3" y1="12" x2="10" y2="12"/><line x1="3" y1="18" x2="9" y2="18"/><circle cx="17" cy="15" r="3"/><line x1="19.2" y1="17.2" x2="21" y2="19"/></svg>
                             </span>
                         </button>
-                        <button class="icon-btn btn-episode-override" type="button" onclick="openManualOverride({{ ep.number }}, '{{ ep.class_source }}', '{{ ep.class_resolution }}', {{ ep.class_is_remux }}, {{ ep.class_is_bdmv }}, '{{ ep.class_web_kind }}')" title="Override source/resolution tag" aria-label="Override source/resolution tag for episode {{ ep.number }}">
+                        <button class="icon-btn btn-episode-override{% if ep.manual_override %} is-manual-override{% endif %}" type="button" onclick="openManualOverride({{ ep.number }}, '{{ ep.class_source }}', '{{ ep.class_resolution }}', {{ ep.class_is_remux }}, {{ ep.class_is_bdmv }}, '{{ ep.class_web_kind }}')" title="{% if ep.manual_override %}Edit pinned source/resolution tag{% else %}Override source/resolution tag{% endif %}" aria-label="{% if ep.manual_override %}Edit pinned source/resolution tag for episode {{ ep.number }}{% else %}Override source/resolution tag for episode {{ ep.number }}{% endif %}">
                             <span class="icon-btn-inner">
                                 {# Vertical sliders (Lucide sliders-vertical):
                                    reads as "adjust these values" — matches
                                    the act of overriding a source/resolution
                                    classification more directly than a
-                                   generic pencil/edit icon. #}
+                                   generic pencil/edit icon. The button
+                                   itself flips to a red highlight via the
+                                   `is-manual-override` class when an
+                                   override is active — the prior
+                                   📌 emoji on the quality tag was a
+                                   weaker signal: easy to miss in dense
+                                   episode lists, and pinned/unpinned
+                                   states drifted apart from where the
+                                   user clicks to change them. #}
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
                             </span>
                         </button>
