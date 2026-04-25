@@ -223,109 +223,189 @@
         </fieldset>
 
         {# Issue #62 PR A — External account linkage. Two states:
-           unlinked (Link buttons for AL + MAL) and linked (provider
-           card with username + per-list import checkboxes + Unlink
-           button). Only one account can be linked at a time per
-           decision #10 — the linked state hides both Link buttons. #}
+           unlinked (Link tiles for AL + MAL) and linked (compact
+           dashboard card with provider identity, sync state, prefs
+           grid, interval setting, and footer Unlink). Only one
+           account can be linked at a time per decision #10 — the
+           linked state hides both Link tiles.
+
+           Layout intent (PR-E redesign):
+             1. Identity row — provider name + username + score
+                format, accent-stripe down the left edge so the
+                provider visually identifies itself.
+             2. Status strip — last-sync timestamp + cadence + the
+                primary "Sync now" action, all on one line.
+             3. Banners (auth-failure / mapping-failure) anchored
+                between status and prefs so they read as
+                sync-related signals.
+             4. Preferences as a 2-column grid (uppercase eyebrow
+                label) — saves vertical, easier to scan.
+             5. Skip-already-watched as its own row with explainer.
+             6. Sync interval input.
+             7. Unlink as a quiet footer link, distanced from
+                Sync now so the destructive action doesn't compete
+                with the everyday one. #}
         <fieldset class="ext-accounts-fieldset">
             <legend>External Accounts</legend>
-            <p class="form-hint" style="margin-top:-4px;margin-bottom:12px">
+            <p class="form-hint ext-accounts-intro">
                 Link your AniList or MyAnimeList account to import your watch lists into Ryokan's library. Read-only — Ryokan never writes back to the provider. One account at a time.
             </p>
             {% match external_account %}
                 {% when Some with (acct) %}
-                    <div class="ext-accounts-linked" data-provider="{{ acct.provider }}">
-                        <div class="ext-accounts-linked-header">
-                            <div>
-                                <div class="ext-accounts-provider-name">{{ acct.provider_label }}</div>
-                                <div class="ext-accounts-username">Linked as <strong>{{ acct.username }}</strong></div>
-                                {% if !acct.score_format.is_empty() %}
-                                <div class="form-hint">Score format: {{ acct.score_format }}</div>
+                    <div class="ext-card" data-provider="{{ acct.provider }}">
+                        <div class="ext-card-stripe" aria-hidden="true"></div>
+                        <div class="ext-card-body">
+                            {# 1. Identity row. The accent-tinted dot
+                               anchors the provider visually so the
+                               user can tell at a glance which side
+                               they're on. #}
+                            <div class="ext-card-identity">
+                                <span class="ext-card-dot" aria-hidden="true"></span>
+                                <div class="ext-card-identity-text">
+                                    <div class="ext-card-provider">{{ acct.provider_label }}</div>
+                                    <div class="ext-card-username">{{ acct.username }}</div>
+                                </div>
+                                {% if !acct.score_format_label.is_empty() %}
+                                <span class="ext-card-meta-tag" title="Score format on {{ acct.provider_label }}">{{ acct.score_format_label }}</span>
                                 {% endif %}
                             </div>
-                            <div class="ext-accounts-actions">
-                                <button type="button" class="btn btn-primary" onclick="syncWatchListNow()">Sync now</button>
-                                <button type="button" class="btn btn-secondary" onclick="unlinkExternalAccount()">Unlink</button>
+
+                            {# 2. Status strip. last-sync timestamp on
+                               the left, primary Sync now on the
+                               right. Replaces the old "buttons in
+                               the corner" pattern that competed with
+                               the identity row visually. #}
+                            <div class="ext-card-status">
+                                <div class="ext-card-status-meta">
+                                    <span class="ext-card-status-label">Last sync</span>
+                                    <span class="ext-card-status-value">{{ acct.last_sync_label }}</span>
+                                    <span class="ext-card-status-sep" aria-hidden="true">·</span>
+                                    <span class="ext-card-status-label">Every</span>
+                                    <span class="ext-card-status-value">{{ config.external_sync_interval_minutes }} min</span>
+                                </div>
+                                <button type="button" class="btn btn-primary ext-card-sync-btn" onclick="syncWatchListNow()">
+                                    <span class="ext-card-sync-icon" aria-hidden="true">↻</span>
+                                    Sync now
+                                </button>
                             </div>
-                        </div>
-                        {# #62 PR E — re-link-required banner. Set
-                           when the most recent sync hit an auth-
-                           rejection error (AL 401/403, MAL refresh
-                           dead). Cleared by the next successful
-                           sync, so it disappears on its own once
-                           the user re-links. #}
-                        {% if acct.last_sync_auth_failed %}
-                        <div class="ext-accounts-relink-banner">
-                            <strong>Re-link required.</strong>
-                            Your {{ acct.provider_label }} authentication has expired or was revoked. Sync stopped working until you unlink and link again.
-                        </div>
-                        {% endif %}
-                        {# #62 PR E — MAL→AL mapping-failure
-                           counter. Persisted by sync_mal at the end
-                           of every successful tick (cleared to 0 by
-                           sync_anilist so a provider switch shows
-                           accurate state). Renders only when > 0
-                           AND the linked provider is MAL. #}
-                        {% if acct.last_sync_deferred_count > 0 && acct.provider == "mal" %}
-                        <div class="ext-accounts-deferred-banner">
-                            <strong>{{ acct.last_sync_deferred_count }}</strong>
-                            series couldn't be mapped MyAnimeList→AniList on the last sync.
-                            They're still in your library but won't have AniList-keyed scoring (SeaDex, etc.) until the mappings catch up.
-                        </div>
-                        {% endif %}
-                        <div class="ext-accounts-prefs">
-                            <div class="form-hint" style="margin-bottom:6px">Import lists:</div>
-                            <label class="checkbox-row">
-                                <input type="checkbox" data-ext-pref="import_watching" {% if acct.import_watching %}checked{% endif %} onchange="saveExternalAccountPrefs()">
-                                <span>Watching</span>
-                            </label>
-                            <label class="checkbox-row">
-                                <input type="checkbox" data-ext-pref="import_planning" {% if acct.import_planning %}checked{% endif %} onchange="saveExternalAccountPrefs()">
-                                <span>Plan to Watch</span>
-                            </label>
-                            <label class="checkbox-row">
-                                <input type="checkbox" data-ext-pref="import_paused" {% if acct.import_paused %}checked{% endif %} onchange="saveExternalAccountPrefs()">
-                                <span>Paused</span>
-                            </label>
-                            <label class="checkbox-row">
-                                <input type="checkbox" data-ext-pref="import_dropped" {% if acct.import_dropped %}checked{% endif %} onchange="saveExternalAccountPrefs()">
-                                <span>Dropped</span>
-                            </label>
-                            <label class="checkbox-row">
-                                <input type="checkbox" data-ext-pref="import_completed" {% if acct.import_completed %}checked{% endif %} onchange="saveExternalAccountPrefs()">
-                                <span>Completed</span>
-                            </label>
-                            <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-subtle)">
-                                <label class="checkbox-row">
+
+                            {# 3. Banners — anchored to status so they
+                                  read as sync-related signals. Both
+                                  are sticky-flag-driven; they clear
+                                  on the next successful sync. #}
+                            {% if acct.last_sync_auth_failed %}
+                            <div class="ext-card-banner ext-card-banner-error" role="alert">
+                                <span class="ext-card-banner-eyebrow">Re-link required</span>
+                                <p>Your {{ acct.provider_label }} authentication has expired or was revoked. Sync stopped working until you unlink and link again.</p>
+                            </div>
+                            {% endif %}
+                            {% if acct.last_sync_deferred_count > 0 && acct.provider == "mal" %}
+                            <div class="ext-card-banner ext-card-banner-warn">
+                                <span class="ext-card-banner-eyebrow">Mapping incomplete</span>
+                                <p><strong>{{ acct.last_sync_deferred_count }}</strong> series couldn't be mapped MyAnimeList → AniList on the last sync. They're still in your library but won't have AniList-keyed scoring (SeaDex, etc.) until the mappings catch up.</p>
+                            </div>
+                            {% endif %}
+
+                            {# 4. Preferences. 2-col grid; the
+                                  Watching/Planning bias-on default
+                                  is the user's normal mental model
+                                  (active vs. passive lists). #}
+                            <div class="ext-card-section">
+                                <span class="ext-card-eyebrow">Import lists</span>
+                                <div class="ext-card-prefs-grid">
+                                    <label class="ext-card-pref">
+                                        <input type="checkbox" data-ext-pref="import_watching" {% if acct.import_watching %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                        <span>Watching</span>
+                                    </label>
+                                    <label class="ext-card-pref">
+                                        <input type="checkbox" data-ext-pref="import_planning" {% if acct.import_planning %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                        <span>Plan to Watch</span>
+                                    </label>
+                                    <label class="ext-card-pref">
+                                        <input type="checkbox" data-ext-pref="import_paused" {% if acct.import_paused %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                        <span>Paused</span>
+                                    </label>
+                                    <label class="ext-card-pref">
+                                        <input type="checkbox" data-ext-pref="import_dropped" {% if acct.import_dropped %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                        <span>Dropped</span>
+                                    </label>
+                                    <label class="ext-card-pref">
+                                        <input type="checkbox" data-ext-pref="import_completed" {% if acct.import_completed %}checked{% endif %} onchange="saveExternalAccountPrefs()">
+                                        <span>Completed</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            {# 5. Skip-already-watched. Set apart with
+                                  its own row so it doesn't read as
+                                  just another import flag. #}
+                            <div class="ext-card-section">
+                                <label class="ext-card-pref ext-card-pref-toggle">
                                     <input type="checkbox" data-ext-pref="skip_already_watched" {% if acct.skip_already_watched %}checked{% endif %} onchange="saveExternalAccountPrefs()">
-                                    <span>Skip already-watched episodes</span>
+                                    <span class="ext-card-pref-label">
+                                        <span class="ext-card-pref-title">Skip already-watched episodes</span>
+                                        <span class="ext-card-pref-hint">Honor the <code>progress</code> field and grab only episodes past what you've already watched. Off by default — airing series + a caught-up user would otherwise skip everything.</span>
+                                    </span>
                                 </label>
-                                <span class="form-hint">When on, new imports honor the <code>progress</code> field and grab only episodes past what you've already watched. Default off — airing-series + caught-up user would skip everything otherwise.</span>
                             </div>
-                        </div>
-                        {# #62 PR B — sync cadence. Range: 15 minutes to
-                           7 days (10080 minutes). Saved as part of the
-                           outer Save Settings button (resolver coerces
-                           out-of-range values back to the 30-minute
-                           default). #}
-                        <div class="ext-accounts-interval form-group">
-                            <label for="external_sync_interval_minutes">Sync interval (minutes)</label>
-                            <input type="number"
-                                   id="external_sync_interval_minutes"
-                                   name="external_sync_interval_minutes"
-                                   min="15"
-                                   max="10080"
-                                   step="1"
-                                   value="{{ config.external_sync_interval_minutes }}">
-                            <span class="form-hint">How often the supervised task pulls your watch list. Range: 15 minutes to 7 days. Default 30 minutes — most lists change infrequently and the delta cursor keeps each tick cheap.</span>
+
+                            {# 6. Sync interval. The shown cadence on
+                                  the status strip above mirrors this
+                                  field's value, so the user can see
+                                  the effect of their edit at a
+                                  glance after Save Settings. #}
+                            <div class="ext-card-section">
+                                <span class="ext-card-eyebrow">
+                                    <label for="external_sync_interval_minutes">Sync interval</label>
+                                </span>
+                                <div class="ext-card-interval">
+                                    <input type="number"
+                                           id="external_sync_interval_minutes"
+                                           name="external_sync_interval_minutes"
+                                           min="15"
+                                           max="10080"
+                                           step="1"
+                                           value="{{ config.external_sync_interval_minutes }}">
+                                    <span class="ext-card-interval-unit">minutes</span>
+                                </div>
+                                <span class="form-hint ext-card-interval-hint">15 minutes to 7 days. Default 30. Saved with the global Save Settings button.</span>
+                            </div>
+
+                            {# 7. Footer. Unlink demoted to a quiet
+                                  text link — destructive action away
+                                  from primary, opposite corner. #}
+                            <div class="ext-card-footer">
+                                <button type="button" class="ext-card-unlink" onclick="unlinkExternalAccount()">
+                                    Unlink {{ acct.provider_label }}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 {% when None %}
-                    <div class="ext-accounts-link-row">
-                        <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('anilist')">Link AniList</button>
-                        <button type="button" class="btn btn-primary" onclick="startExternalAccountLink('mal')">Link MyAnimeList</button>
+                    {# Unlinked state: two provider tiles side by side
+                       so the user sees both options at once. Each
+                       names the score-format quirk that distinguishes
+                       it from the other — the most useful disambig
+                       for the picker. #}
+                    <div class="ext-link-grid">
+                        <div class="ext-link-tile">
+                            <div class="ext-link-tile-head">
+                                <span class="ext-link-tile-dot ext-link-tile-dot-al" aria-hidden="true"></span>
+                                <span class="ext-link-tile-name">AniList</span>
+                            </div>
+                            <p class="ext-link-tile-blurb">Five score formats including the smiley scale, plus AniList custom lists like "Hidden Gems" sync as filterable badges.</p>
+                            <button type="button" class="btn btn-primary ext-link-tile-cta" onclick="startExternalAccountLink('anilist')">Link AniList</button>
+                        </div>
+                        <div class="ext-link-tile">
+                            <div class="ext-link-tile-head">
+                                <span class="ext-link-tile-dot ext-link-tile-dot-mal" aria-hidden="true"></span>
+                                <span class="ext-link-tile-name">MyAnimeList</span>
+                            </div>
+                            <p class="ext-link-tile-blurb">10-point scoring; entries without an AniList mapping land under the negated-id sentinel and stay outside SeaDex-driven scoring.</p>
+                            <button type="button" class="btn btn-primary ext-link-tile-cta" onclick="startExternalAccountLink('mal')">Link MyAnimeList</button>
+                        </div>
                     </div>
-                    <span class="form-hint">Attribution: AniList and MyAnimeList data used with permission under each platform's API terms. Read-only scope.</span>
+                    <p class="form-hint ext-link-attribution">AniList and MyAnimeList data used with permission under each platform's API terms. Read-only scope.</p>
             {% endmatch %}
         </fieldset>
 
