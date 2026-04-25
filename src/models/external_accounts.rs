@@ -157,129 +157,88 @@ pub async fn get_current(db: &SqlitePool) -> Result<Option<ExternalAccount>, Str
 pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
     let now = current_unix_ts();
 
-    // Encrypt outside the transaction — `crypto::encrypt` is pure
-    // CPU + RNG and shouldn't hold a DB write lock while it runs.
     let access_encrypted = crypto::encrypt(req.access_token.as_bytes())
         .map_err(|e| format!("encrypt access token: {e}"))?;
     let refresh_encrypted = crypto::encrypt(req.refresh_token.as_bytes())
         .map_err(|e| format!("encrypt refresh token: {e}"))?;
 
-    // Open the transaction with `BEGIN IMMEDIATE` so the read-check-
-    // write sequence below holds the SQLite write lock from the very
-    // first SELECT onward. `Pool::begin()` would issue plain `BEGIN`
-    // (DEFERRED), which only takes locks lazily on first read/write —
-    // under WAL mode (which Ryokan enables in main.rs), two concurrent
-    // link calls for *different* providers could both open snapshot
-    // reads, both observe `count == 0`, and race to INSERT.
-    // UNIQUE(provider) catches a same-provider race but not a cross-
-    // provider one, so the one-at-a-time invariant (decision #10)
-    // needs the explicit IMMEDIATE upgrade.
+    // Two atomic statements, no explicit transaction. Each runs under
+    // SQLite's per-statement write lock, so the read-check + write
+    // are atomic without a BEGIN IMMEDIATE wrapper that has to be
+    // hand-driven through COMMIT / ROLLBACK (and could leak an open
+    // transaction back to the pool if the future is dropped between
+    // the two).
     //
-    // sqlx's `Transaction` API doesn't expose the BEGIN mode, so we
-    // acquire a connection ourselves and drive COMMIT / ROLLBACK
-    // manually. The inner `async` block returns the resolved id (or
-    // an Err on the various failure paths); the surrounding match
-    // decides COMMIT vs ROLLBACK.
-    let mut conn = db
-        .acquire()
-        .await
-        .map_err(|e| format!("external_accounts acquire: {e}"))?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| format!("external_accounts BEGIN IMMEDIATE: {e}"))?;
+    // 1) UPDATE-then-RETURNING handles the re-link case. UNIQUE(provider)
+    //    means at most one row per provider, so the `WHERE provider = ?
+    //    AND provider_user_id = ?` predicate matches 0 or 1 row. A
+    //    match returns the existing id; no rows means we fall through
+    //    to step 2.
+    //
+    // 2) INSERT-WHERE-NOT-EXISTS-RETURNING handles fresh links. The
+    //    inner `WHERE NOT EXISTS (... WHERE provider != ?)` enforces
+    //    decision #10's one-at-a-time invariant against linking a
+    //    second provider. The whole INSERT statement runs atomically
+    //    under the write lock, so two concurrent links for different
+    //    providers serialize: one sees an empty external_accounts and
+    //    inserts; the second sees the first's row and inserts 0 rows.
+    //    `RETURNING id` returns `None` in the 0-rows case, which we
+    //    surface as the "already linked" error. Same-provider /
+    //    different-user-id falls into UNIQUE(provider) at INSERT time
+    //    (separate failure mode, surfaces the constraint error).
+    let updated: Option<i64> = sqlx::query_scalar(
+        "UPDATE external_accounts
+            SET access_token_encrypted = ?,
+                refresh_token_encrypted = ?,
+                access_token_expires_at = ?,
+                score_format = ?,
+                username = ?
+          WHERE provider = ? AND provider_user_id = ?
+          RETURNING id",
+    )
+    .bind(&access_encrypted)
+    .bind(&refresh_encrypted)
+    .bind(req.access_token_expires_at)
+    .bind(&req.score_format)
+    .bind(&req.username)
+    .bind(&req.provider)
+    .bind(&req.provider_user_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("external_accounts re-link UPDATE failed: {e}"))?;
 
-    let result: Result<i64, String> = async {
-        // Re-link detection first. If a row exists for this (provider,
-        // user_id) pair, refresh its tokens + metadata in place rather
-        // than trying to insert another and hitting UNIQUE(provider).
-        let existing_id: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM external_accounts WHERE provider = ? AND provider_user_id = ? LIMIT 1",
-        )
-        .bind(&req.provider)
-        .bind(&req.provider_user_id)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(|e| format!("external_accounts lookup: {e}"))?;
-
-        if let Some(id) = existing_id {
-            sqlx::query(
-                "UPDATE external_accounts
-                    SET access_token_encrypted = ?,
-                        refresh_token_encrypted = ?,
-                        access_token_expires_at = ?,
-                        score_format = ?,
-                        username = ?
-                  WHERE id = ?",
-            )
-            .bind(&access_encrypted)
-            .bind(&refresh_encrypted)
-            .bind(req.access_token_expires_at)
-            .bind(&req.score_format)
-            .bind(&req.username)
-            .bind(id)
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| format!("re-link UPDATE failed: {e}"))?;
-            return Ok(id);
-        }
-
-        // Enforce one-account-at-a-time across providers. Same write
-        // lock is held since BEGIN IMMEDIATE, so this read sees writes
-        // from any concurrent link only after they commit (and that
-        // commit can't happen until our own COMMIT/ROLLBACK runs).
-        let any_linked: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM external_accounts WHERE provider != ?")
-                .bind(&req.provider)
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(|e| format!("external_accounts count: {e}"))?;
-        if any_linked > 0 {
-            return Err(
-                "Another external account is already linked; unlink it first before switching providers."
-                    .into(),
-            );
-        }
-
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO external_accounts
-                (provider, provider_user_id, username,
-                 access_token_encrypted, refresh_token_encrypted,
-                 access_token_expires_at, score_format, linked_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             RETURNING id",
-        )
-        .bind(&req.provider)
-        .bind(&req.provider_user_id)
-        .bind(&req.username)
-        .bind(&access_encrypted)
-        .bind(&refresh_encrypted)
-        .bind(req.access_token_expires_at)
-        .bind(&req.score_format)
-        .bind(now)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(|e| format!("external_accounts INSERT failed: {e}"))?;
-        Ok(id)
+    if let Some(id) = updated {
+        return Ok(id);
     }
-    .await;
 
-    match result {
-        Ok(id) => {
-            sqlx::query("COMMIT")
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| format!("link COMMIT: {e}"))?;
-            Ok(id)
-        }
-        Err(e) => {
-            // Best-effort ROLLBACK — if it fails, the connection's
-            // drop will roll back anyway. Surface the original error
-            // rather than masking it with a rollback failure.
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            Err(e)
-        }
-    }
+    let inserted: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO external_accounts
+            (provider, provider_user_id, username,
+             access_token_encrypted, refresh_token_encrypted,
+             access_token_expires_at, score_format, linked_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE NOT EXISTS (
+             SELECT 1 FROM external_accounts WHERE provider != ?
+          )
+         RETURNING id",
+    )
+    .bind(&req.provider)
+    .bind(&req.provider_user_id)
+    .bind(&req.username)
+    .bind(&access_encrypted)
+    .bind(&refresh_encrypted)
+    .bind(req.access_token_expires_at)
+    .bind(&req.score_format)
+    .bind(now)
+    .bind(&req.provider)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("external_accounts INSERT failed: {e}"))?;
+
+    inserted.ok_or_else(|| {
+        "Another external account is already linked; unlink it first before switching providers."
+            .into()
+    })
 }
 
 /// Remove the linked account. Per decision #8, preserves any

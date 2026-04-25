@@ -585,7 +585,29 @@ function refreshJellyfin(btn) {
 // `event.origin` against this value before reading any data.
 const EXT_BROKER_ORIGIN = 'https://johnthreekay.github.io';
 
+// Single in-flight link attempt at module scope. Holds the
+// {handler, timer, provider} for the active OAuth flow so a second
+// click on Link AL / Link MAL aborts the prior listener and the
+// prior 10-minute cleanup timer. Without this, a user clicking
+// Link AL then Link MAL before the AL flow completes would leave
+// both listeners alive — and since both modals share fixed input
+// IDs, the AL postMessage would auto-fill the MAL modal and
+// trigger an AL submit while the user was looking at MAL.
+let _extLinkAttempt = null;
+
+function clearExtLinkAttempt() {
+    if (!_extLinkAttempt) return;
+    window.removeEventListener('message', _extLinkAttempt.handler);
+    if (_extLinkAttempt.timer) clearTimeout(_extLinkAttempt.timer);
+    _extLinkAttempt = null;
+}
+
 function startExternalAccountLink(provider) {
+    // Abort any prior in-flight attempt — the user clicked Link
+    // again, so the previous flow's broker postback should not be
+    // accepted into the now-different modal.
+    clearExtLinkAttempt();
+
     // Set up a one-shot postMessage listener BEFORE opening the
     // popup so a fast-completing flow (already-authenticated user,
     // already-approved app) can't deliver before we're listening.
@@ -593,23 +615,23 @@ function startExternalAccountLink(provider) {
     // parses token/state from the URL fragment/query and posts back
     // here as soon as it loads, skipping the copy-paste step.
     const expectedType = `ryokan-oauth-${provider}`;
-    let received = false;
     const handler = (event) => {
         if (event.origin !== EXT_BROKER_ORIGIN) return;
         const data = event.data || {};
         if (data.type !== expectedType) return;
-        if (received) return; // belt-and-suspenders against duplicate broker emits
-        received = true;
-        window.removeEventListener('message', handler);
+        // Belt-and-suspenders: the attempt may already have been
+        // cleared (timeout fired, second click came in) by the time
+        // a duplicate emit lands. Only act on the still-active one.
+        if (!_extLinkAttempt || _extLinkAttempt.handler !== handler) return;
+        clearExtLinkAttempt();
         autoSubmitExternalAccount(provider, data);
     };
+    // Auto-clean after the OAuth-state TTL (10 min) so a forgotten
+    // flow doesn't leave a stale listener / timer attached for the
+    // rest of the session.
+    const timer = setTimeout(clearExtLinkAttempt, 10 * 60 * 1000);
+    _extLinkAttempt = { handler, timer, provider };
     window.addEventListener('message', handler);
-    // Auto-clean the listener after the OAuth-state TTL (10 min) so
-    // a forgotten flow doesn't leave a stale listener attached for
-    // the rest of the session.
-    setTimeout(() => {
-        if (!received) window.removeEventListener('message', handler);
-    }, 10 * 60 * 1000);
 
     // Open the OAuth authorize flow in a new tab so the Settings
     // page stays loaded behind it. NOT passing 'noopener' is
