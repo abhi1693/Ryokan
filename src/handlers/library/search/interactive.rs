@@ -267,6 +267,7 @@ pub async fn search_batch_releases(
                 }],
                 skipped: vec![],
                 quality_profile: cfg.quality_profile,
+                cancelled: false,
             }))
         }
     }

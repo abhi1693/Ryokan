@@ -34,6 +34,14 @@ pub fn normalize_title(input: &str) -> String {
     cleaned
         .split_whitespace()
         .filter(|token| {
+            // Universal release-side noise tokens — same shape as
+            // resolution/codec markers. Container extensions (mkv /
+            // mp4 / mka) survive the bracket strip because a `.` is
+            // converted to whitespace, leaving the extension as a
+            // bare token. They're release metadata, not content;
+            // dropping them frees the 1-token-alias surplus budget
+            // (issue #103) for legitimate variants like `Episode`
+            // markers and `v2` revisions.
             !matches!(
                 *token,
                 "1080p"
@@ -49,6 +57,9 @@ pub fn normalize_title(input: &str) -> String {
                     | "dual"
                     | "audio"
                     | "multisub"
+                    | "mkv"
+                    | "mp4"
+                    | "mka"
             )
         })
         .collect::<Vec<_>>()
@@ -839,6 +850,45 @@ mod tests {
                 0
             ),
             "unrelated show sharing the short alias token must be rejected"
+        );
+    }
+
+    #[test]
+    fn matches_target_short_alias_accepts_release_with_episode_marker() {
+        // PR #104 review: the 1-token alias tolerance is 1 surplus.
+        // `mkv` was eating the budget, so a release shape with one
+        // extra word like `Episode` would get rejected even though
+        // it's clearly the target's release. Add `mkv`/`mp4`/`mka`
+        // to normalize_title's filter list to free the slot. Pin
+        // the legit case here.
+        let aliases = vec!["Shortname".to_string()];
+        let no_siblings = SiblingRejectPrecompute::build(&aliases, &[]);
+        let with_episode_marker = "[Group] Shortname Episode 12 [BD 1080p].mkv";
+        assert!(
+            matches_target(
+                with_episode_marker,
+                &aliases,
+                &no_siblings,
+                &SearchTarget::Episode(12),
+                0,
+                false,
+                0
+            ),
+            "legit release with extra `Episode` marker must still match"
+        );
+        // The v2 / revision form is a similar shape.
+        let with_revision = "Shortname - 12 v2 [BD].mkv";
+        assert!(
+            matches_target(
+                with_revision,
+                &aliases,
+                &no_siblings,
+                &SearchTarget::Episode(12),
+                0,
+                false,
+                0
+            ),
+            "release with v2 revision must still match"
         );
     }
 

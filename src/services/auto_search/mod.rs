@@ -65,6 +65,13 @@ pub struct AutoSearchReport {
     pub grabbed: Vec<AutoSearchHit>,
     pub skipped: Vec<String>,
     pub quality_profile: String,
+    /// Set when the per-target loop was stopped by an external
+    /// signal (currently: series removed from library — see issue
+    /// #102). The wrapper `emit_auto_search_terminal` short-circuits
+    /// on this so the cascade-stop path's "cancelled" toast doesn't
+    /// get overwritten by a generic terminal event.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 /// Return all scored candidates for an episode target without grabbing anything.

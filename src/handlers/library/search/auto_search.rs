@@ -180,6 +180,15 @@ async fn emit_auto_search_terminal(
 ) {
     match result {
         Ok(report) => {
+            // PR #104 review: the cascade-stop path (issue #102 fix)
+            // emits its own terminal "Auto-search cancelled" toast
+            // before returning the partial report. Without this
+            // short-circuit, the wrapper would emit ANOTHER terminal
+            // event (`Nothing to search` / `Grabbed N`) that
+            // immediately overwrites the cancel message in the UI.
+            if report.cancelled {
+                return;
+            }
             let grabbed = report.grabbed.len();
             if grabbed > 0 {
                 // Show titles for ≤3 grabs, otherwise just the count —
@@ -340,6 +349,7 @@ async fn run_auto_search_targets_with_upgrades(
                 grabbed,
                 skipped,
                 quality_profile: cfg.quality_profile,
+                cancelled: true,
             });
         }
         let label = auto_search::target_label(&target);
@@ -694,6 +704,7 @@ async fn run_auto_search_targets_with_upgrades(
         grabbed,
         skipped,
         quality_profile: cfg.quality_profile,
+        cancelled: false,
     })
 }
 
