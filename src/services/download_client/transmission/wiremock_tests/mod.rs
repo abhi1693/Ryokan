@@ -24,4 +24,5 @@ mod control;
 mod files;
 mod fixture;
 mod list;
+mod seed_rules;
 mod session_handshake;

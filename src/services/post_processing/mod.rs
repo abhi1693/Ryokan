@@ -859,7 +859,27 @@ async fn import_torrent(
             // same old grab 12 times.
             for old_grab in &old_grabs {
                 if !old_grab.hash.is_empty() {
-                    let _ = client.delete(&old_grab.hash, true).await;
+                    // Issue #28 PR C — preserve PT seed rules
+                    // across upgrade-replace. The old torrent has
+                    // imported and is seeding to its per-tracker
+                    // ratio; deleting it mid-seed could ding the
+                    // user's tracker ratio. The grab row still
+                    // gets `mark_replaced` below so the upgrade
+                    // sweep doesn't re-grab.
+                    if grabbed_torrents::respects_seed_rules(&state.db, &old_grab.hash).await {
+                        logger::info(
+                            &state.db,
+                            LogCategory::QBit,
+                            &format!(
+                                "Skipping client delete for upgraded torrent {} (respect_seed_rules)",
+                                old_grab.torrent_name
+                            ),
+                            &old_grab.hash,
+                        )
+                        .await;
+                    } else {
+                        let _ = client.delete(&old_grab.hash, true).await;
+                    }
                 }
                 grabs_to_mark_replaced.insert(old_grab.id);
             }

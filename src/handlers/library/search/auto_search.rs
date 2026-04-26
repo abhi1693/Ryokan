@@ -555,6 +555,13 @@ async fn run_auto_search_targets_with_upgrades(
                                     ep_nums.sort_unstable();
                                 }
                             }
+                            // `record_grab` returns `None` on the
+                            // empty-hash + FK-violation anomaly path
+                            // documented on the model, or on a DB
+                            // error. The torrent is already in the
+                            // client at this point, so don't unwind —
+                            // skip the seed-rule + attribution stamp
+                            // and let the next reconcile pick it up.
                             let grab_id = crate::models::grabbed_torrents::record_grab(
                                 &state.db,
                                 &result.info_hash,
@@ -566,6 +573,28 @@ async fn run_auto_search_targets_with_upgrades(
                             .await
                             .ok()
                             .flatten();
+                            // Issue #28 PR C — apply per-indexer
+                            // seed rules + stamp attribution.
+                            // Nyaa grabs (indexer_id None) take the
+                            // existing path (no seed-rule call,
+                            // respect_seed_rules stays 0).
+                            if let Some(gid) = grab_id {
+                                let respected =
+                                    crate::services::download_client::apply_indexer_seed_rules(
+                                        &state.db,
+                                        &*qbit,
+                                        &result.info_hash,
+                                        result.indexer_id,
+                                    )
+                                    .await;
+                                let _ = crate::models::grabbed_torrents::set_indexer_attribution(
+                                    &state.db,
+                                    gid,
+                                    result.indexer_id,
+                                    respected,
+                                )
+                                .await;
+                            }
                             for ep_num in &ep_nums {
                                 let _ = episode_tags::record_grab(
                                     &state.db,

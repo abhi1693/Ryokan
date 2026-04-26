@@ -17,6 +17,7 @@ use crate::services::{
     source::Source,
 };
 
+pub mod autobrr_key;
 pub mod custom_formats;
 pub mod indexers;
 use custom_formats::ImportReviewView;
@@ -154,6 +155,20 @@ struct SettingsTemplate {
     /// `None` renders the bare "Add Indexer" form; same prefill
     /// pattern as the Custom Formats tab.
     indexer_edit: Option<crate::models::indexers::Indexer>,
+    /// Curated picker grid for the Settings → Indexers tab.
+    /// Always populated from the static catalog so the grid
+    /// renders identically regardless of DB state. The user
+    /// can still skip the picker by clicking one of the
+    /// `is_generic` cards or scrolling past to the form.
+    indexer_catalog: &'static [crate::services::indexer_catalog::SeededIndexer],
+    /// When the user clicks a picker card, the link sends
+    /// `?tab=indexers&template=<slug>` and this gets
+    /// populated with the matched seed so the Add form pre-
+    /// fills name / kind / private-flag / priority / min-
+    /// seeders / suggested seed-ratio. `None` renders the
+    /// generic blank form (which is what the user sees if
+    /// they bypass the picker).
+    indexer_seed: Option<&'static crate::services::indexer_catalog::SeededIndexer>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -275,6 +290,11 @@ pub struct SettingsQuery {
     /// and re-render inline so the form state is preserved.
     msg: Option<String>,
     err: Option<String>,
+    /// Indexers tab — slug from the seeded catalog
+    /// (`services::indexer_catalog`). When set on the Add path,
+    /// the form pre-fills from the matched seed instead of
+    /// rendering blank.
+    template: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -570,6 +590,7 @@ async fn build_settings_template(
     msg: Option<String>,
     err: Option<String>,
     import_review: Option<ImportReviewView>,
+    template_slug: Option<String>,
 ) -> SettingsTemplate {
     // Fan out the five independent lookups — config row, release-group
     // table, suggestion panel, custom-format list, linked external
@@ -624,6 +645,18 @@ async fn build_settings_template(
             .flatten(),
         None => None,
     };
+    // Resolve the picker template only on the Add path — the
+    // Edit form is already row-driven, so the seed would just
+    // shadow real values. `template_slug` is also discarded if
+    // it doesn't match a known seed (stale or hand-typed
+    // links fall through to the blank Add form).
+    let indexer_seed = if indexer_edit.is_none() {
+        template_slug
+            .as_deref()
+            .and_then(crate::services::indexer_catalog::find_seed)
+    } else {
+        None
+    };
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -641,6 +674,8 @@ async fn build_settings_template(
         title_language,
         indexers: indexers_res.unwrap_or_default(),
         indexer_edit,
+        indexer_catalog: crate::services::indexer_catalog::SEEDED,
+        indexer_seed,
     }
 }
 
@@ -655,6 +690,7 @@ pub async fn settings_page(
         params.msg,
         params.err,
         None,
+        params.template,
     )
     .await;
     Html(template.render().unwrap_or_default())
@@ -810,6 +846,14 @@ pub async fn settings_submit(
                 .map(|c| c.radarr_api_key.clone())
                 .unwrap_or_default()
         },
+        // Issue #28 PR D — autobrr API key. Carried forward from the
+        // existing row; rotated only via the dedicated
+        // /settings/autobrr/regenerate-key handler so a stray POST to
+        // the integrations tab can't silently wipe a working webhook.
+        autobrr_api_key: existing_cfg
+            .as_ref()
+            .map(|c| c.autobrr_api_key.clone())
+            .unwrap_or_default(),
         upgrade_search_enabled: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
             form.upgrade_search_enabled.is_some()
         } else {
@@ -921,6 +965,8 @@ pub async fn settings_submit(
             external_account,
             title_language,
             indexers,
+            indexer_catalog: crate::services::indexer_catalog::SEEDED,
+            indexer_seed: None,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1248,6 +1294,8 @@ pub async fn settings_submit(
         external_account,
         title_language,
         indexers,
+        indexer_catalog: crate::services::indexer_catalog::SEEDED,
+        indexer_seed: None,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -2042,5 +2090,140 @@ mod tests {
         assert_eq!(labels[0].implementation, "");
         assert!(!labels[0].negate);
         assert!(!labels[0].required);
+    }
+
+    /// Indexer-picker pre-fill flow on the Settings → Indexers
+    /// tab. `?template=<slug>` resolves through
+    /// [`crate::services::indexer_catalog::find_seed`] and
+    /// populates [`SettingsTemplate::indexer_seed`]; the form
+    /// then renders pre-filled defaults from the seed instead of
+    /// blank. The two precedence rules below (edit shadows seed,
+    /// unknown-slug falls through) are the load-bearing
+    /// invariants for the picker UX.
+    mod indexer_picker {
+        use super::super::*;
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+
+        #[tokio::test]
+        async fn template_slug_populates_indexer_seed() {
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let template = build_settings_template(
+                &state,
+                Some("indexers".to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some("animebytes".to_string()),
+            )
+            .await;
+            let seed = template
+                .indexer_seed
+                .expect("animebytes slug should resolve to a seed");
+            assert_eq!(seed.slug, "animebytes");
+            assert_eq!(seed.display_name, "AnimeBytes");
+            assert!(seed.is_private_tracker);
+        }
+
+        #[tokio::test]
+        async fn unknown_template_slug_falls_through_to_picker() {
+            // Stale `?template=…` links from a removed catalog
+            // entry must degrade gracefully — the user lands on
+            // the blank picker grid, not an error page.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let template = build_settings_template(
+                &state,
+                Some("indexers".to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some("does-not-exist".to_string()),
+            )
+            .await;
+            assert!(template.indexer_seed.is_none());
+        }
+
+        #[tokio::test]
+        async fn edit_id_shadows_template_slug() {
+            // `?edit_id=N&template=…` URLs must pick the row
+            // (real DB values) over the seed (catalog defaults)
+            // — otherwise an Edit click on an existing row that
+            // happened to land on a seed-less form would
+            // overwrite real values with catalog defaults on
+            // Save.
+            let db = in_memory_pool().await;
+            let row_id = crate::models::indexers::insert(
+                &db,
+                crate::models::indexers::IndexerForm {
+                    name: "Existing",
+                    kind: "torznab",
+                    url: "https://prowlarr.local/1/api",
+                    api_key: "k",
+                    priority: 25,
+                    enabled: true,
+                    is_private_tracker: false,
+                    seed_ratio: None,
+                    seed_time_minutes: None,
+                    min_seeders: 1,
+                    request_timeout_secs: None,
+                },
+            )
+            .await
+            .expect("seed indexer");
+            let state = build_test_app_state(db, None);
+            let template = build_settings_template(
+                &state,
+                Some("indexers".to_string()),
+                Some(row_id),
+                None,
+                None,
+                None,
+                Some("animebytes".to_string()),
+            )
+            .await;
+            // Prove the row's fields actually reached the
+            // template — `is_some()` alone wouldn't catch a
+            // future `get_by_id` projection bug that returned
+            // a default-constructed row but kept the
+            // seed-suppression branch intact.
+            let edit = template
+                .indexer_edit
+                .as_ref()
+                .expect("edit_id must populate indexer_edit");
+            assert_eq!(edit.name, "Existing");
+            assert_eq!(edit.id, row_id);
+            assert!(
+                template.indexer_seed.is_none(),
+                "edit_id must shadow the template slug — seed defaults would clobber real row values"
+            );
+        }
+
+        #[tokio::test]
+        async fn no_template_no_edit_renders_blank_picker() {
+            // The default landing on `?tab=indexers` shows the
+            // grid + table; neither edit_id nor template
+            // populated.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let template = build_settings_template(
+                &state,
+                Some("indexers".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert!(template.indexer_seed.is_none());
+            assert!(template.indexer_edit.is_none());
+            assert!(
+                !template.indexer_catalog.is_empty(),
+                "picker grid is always populated from the static catalog"
+            );
+        }
     }
 }

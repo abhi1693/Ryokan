@@ -26,3 +26,4 @@ mod files;
 mod fixture;
 mod hash_case;
 mod list;
+mod seed_rules;

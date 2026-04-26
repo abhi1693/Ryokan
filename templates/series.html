@@ -208,16 +208,16 @@
             <summary class="folder-label" style="cursor:pointer">Advanced search overrides</summary>
             <div class="monitoring-controls" style="display:flex;flex-direction:column;align-items:stretch;gap:14px;margin-top:10px">
                 <div class="form-group" style="margin:0">
-                    <label for="series-restrict-to-group">Restrict to Nyaa uploader</label>
-                    <input type="text" id="series-restrict-to-group" value="{{ restrict_to_uploader }}"
-                        placeholder="{% if !default_restrict_to_uploader.is_empty() %}global: {{ default_restrict_to_uploader }}{% else %}(none){% endif %}">
-                    <span class="form-hint">Per-series override of the global default. Ryokan sets <code>?u=&lt;name&gt;</code> on every Nyaa search for this show so only this uploader's releases come back. Leave blank to inherit the global default.</span>
-                </div>
-                <div class="form-group" style="margin:0">
                     <label for="series-custom-query-tokens">Custom query tokens</label>
                     <input type="text" id="series-custom-query-tokens" value="{{ custom_query_tokens }}"
                         placeholder="{% if !default_custom_query_tokens.is_empty() %}global: {{ default_custom_query_tokens }}{% else %}e.g. bd 1080p{% endif %}">
-                    <span class="form-hint">Extra keywords appended to every Nyaa search for this series. Leave blank to inherit the global default.</span>
+                    <span class="form-hint">Extra keywords appended to every search for this series (Nyaa and configured torznab / newznab indexers). Leave blank to inherit the global default.</span>
+                </div>
+                <div class="form-group" style="margin:0">
+                    <label for="series-restrict-to-group">Restrict to Nyaa uploader <span class="form-hint" style="font-weight:normal">(Nyaa only)</span></label>
+                    <input type="text" id="series-restrict-to-group" value="{{ restrict_to_uploader }}"
+                        placeholder="{% if !default_restrict_to_uploader.is_empty() %}global: {{ default_restrict_to_uploader }}{% else %}(none){% endif %}">
+                    <span class="form-hint">Per-series override of the global default. Ryokan sets <code>?u=&lt;name&gt;</code> on every Nyaa search for this show so only this uploader's releases come back. Torznab / newznab indexers ignore this. Leave blank to inherit the global default.</span>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                     <button type="button" class="btn btn-primary" onclick="saveSeriesSearchOverrides(this)">Save</button>

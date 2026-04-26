@@ -89,6 +89,13 @@ pub struct Config {
     pub sonarr_api_key: String,
     pub radarr_enabled: bool,
     pub radarr_api_key: String,
+    /// Issue #28 PR D — API key for the autobrr push webhook at
+    /// `POST /api/webhook/autobrr`. Empty string disables the
+    /// webhook entirely (the route returns 503 + Retry-After).
+    /// Generated via the Settings → Connections → autobrr panel
+    /// when the user clicks "Generate key"; the user pastes the
+    /// key into autobrr's Webhook action config.
+    pub autobrr_api_key: String,
     pub upgrade_search_enabled: bool,
     /// Floor applied to `total_cf_score` after Custom Formats evaluation.
     /// `i32::MIN` (the default) means no floor. Raised by the user via
@@ -182,6 +189,7 @@ impl Default for Config {
             sonarr_api_key: String::new(),
             radarr_enabled: false,
             radarr_api_key: String::new(),
+            autobrr_api_key: String::new(),
             upgrade_search_enabled: false,
             custom_format_minimum_score: i32::MIN,
             seadex_enabled: false,
@@ -242,6 +250,7 @@ struct ConfigRow {
     sonarr_api_key: String,
     radarr_enabled: i64,
     radarr_api_key: String,
+    autobrr_api_key: String,
     upgrade_search_enabled: i64,
     custom_format_minimum_score: i64,
     seadex_enabled: i64,
@@ -270,7 +279,7 @@ pub async fn get_title_language(db: &SqlitePool) -> String {
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes FROM config WHERE id = 1",
+        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -323,6 +332,7 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         sonarr_api_key: r.sonarr_api_key,
         radarr_enabled: r.radarr_enabled != 0,
         radarr_api_key: r.radarr_api_key,
+        autobrr_api_key: r.autobrr_api_key,
         upgrade_search_enabled: r.upgrade_search_enabled != 0,
         custom_format_minimum_score: r.custom_format_minimum_score as i32,
         seadex_enabled: r.seadex_enabled != 0,
@@ -337,8 +347,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             active_client = excluded.active_client,
             qbit_url = excluded.qbit_url,
@@ -387,6 +397,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             sonarr_api_key = excluded.sonarr_api_key,
             radarr_enabled = excluded.radarr_enabled,
             radarr_api_key = excluded.radarr_api_key,
+            autobrr_api_key = excluded.autobrr_api_key,
             upgrade_search_enabled = excluded.upgrade_search_enabled,
             custom_format_minimum_score = excluded.custom_format_minimum_score,
             seadex_enabled = excluded.seadex_enabled,
@@ -447,6 +458,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(&config.sonarr_api_key)
     .bind(if config.radarr_enabled { 1_i64 } else { 0_i64 })
     .bind(&config.radarr_api_key)
+    .bind(&config.autobrr_api_key)
     .bind(if config.upgrade_search_enabled { 1_i64 } else { 0_i64 })
     .bind(config.custom_format_minimum_score as i64)
     .bind(if config.seadex_enabled { 1_i64 } else { 0_i64 })

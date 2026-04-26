@@ -265,6 +265,33 @@ pub async fn seed_radarr_enabled(db: &SqlitePool, api_key: &str) {
         .expect("persist Radarr-enabled config");
 }
 
+/// Issue #28 PR D — write `autobrr_api_key = <provided>` so the
+/// webhook handler's auth check passes. Empty key means the
+/// webhook is disabled (returns 503), so the test seed always
+/// uses a non-empty value.
+pub async fn seed_autobrr_enabled(db: &SqlitePool, api_key: &str) {
+    let cfg = crate::models::config::Config {
+        autobrr_api_key: api_key.to_string(),
+        ..crate::models::config::Config::default()
+    };
+    crate::models::config::save_config(db, &cfg)
+        .await
+        .expect("persist autobrr-enabled config");
+}
+
+/// Issue #28 PR D — minimal router that mounts only the autobrr
+/// webhook route, for tests that exercise the handler in
+/// isolation without dragging in the rest of the protected
+/// surface.
+pub fn autobrr_webhook_router(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/api/webhook/autobrr",
+            axum::routing::post(crate::handlers::webhook::autobrr::webhook_autobrr),
+        )
+        .with_state(state)
+}
+
 /// Build a minimal Sonarr shim router: mounts the handful of system-
 /// tier endpoints under `/api/v3/*` behind the real `require_api_key`
 /// middleware. Deliberately narrower than `main.rs`'s full

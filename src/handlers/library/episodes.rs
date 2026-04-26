@@ -148,6 +148,26 @@ pub async fn delete_episode_file(
                         if grab.hash.is_empty() {
                             continue;
                         }
+                        // Issue #28 PR C — skip the client-side
+                        // delete for grabs from a PT indexer with
+                        // seed rules in effect; the client owns
+                        // when seeding ends. The grab row still
+                        // gets `mark_removed` so the upgrade sweep
+                        // doesn't re-grab.
+                        if grabbed_torrents::respects_seed_rules(&state.db, &grab.hash).await {
+                            logger::info(
+                                &state.db,
+                                LogCategory::QBit,
+                                &format!(
+                                    "Skipping client delete for {} (respect_seed_rules); client will stop on its own ratio policy",
+                                    grab.torrent_name
+                                ),
+                                &grab.hash,
+                            )
+                            .await;
+                            let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
+                            continue;
+                        }
                         match client.delete(&grab.hash, true).await {
                             Ok(()) => {
                                 qbit_removed.push(grab.torrent_name.clone());
@@ -474,9 +494,28 @@ pub async fn mark_episode_failed(
         let client = { state.download_client.read().await.as_ref().cloned() };
         if let Some(client) = client {
             for old in &old_grabs {
-                if !old.hash.is_empty()
-                    && let Err(e) = client.delete(&old.hash, true).await
-                {
+                if old.hash.is_empty() {
+                    continue;
+                }
+                // Issue #28 PR C — preserve PT seed rules across
+                // episode-replace. The old torrent has already
+                // imported successfully and is seeding to its
+                // per-tracker ratio/time policy; deleting it
+                // mid-seed could ding the user's tracker ratio.
+                if grabbed_torrents::respects_seed_rules(&state.db, &old.hash).await {
+                    crate::services::logger::info(
+                        &state.db,
+                        crate::models::log::LogCategory::QBit,
+                        &format!(
+                            "Skipping client delete for replaced torrent {} (respect_seed_rules)",
+                            old.torrent_name
+                        ),
+                        &old.hash,
+                    )
+                    .await;
+                    continue;
+                }
+                if let Err(e) = client.delete(&old.hash, true).await {
                     crate::services::logger::warn(
                         &state.db,
                         crate::models::log::LogCategory::QBit,

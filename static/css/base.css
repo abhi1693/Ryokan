@@ -161,6 +161,32 @@ body {
     padding: 32px 24px 80px;
 }
 
+/* Free-standing links (form-hint copy, alert bodies, descriptions)
+   pick up the accent color so they read as actionable across every
+   tab. Buttons styled as anchors (`a.btn`, `.system-tab`,
+   `.cf-card-name`, etc.) keep their per-class color via higher
+   specificity, so this rule only catches "naked" `<a>` elements. */
+a {
+    color: var(--accent);
+}
+
+a:hover {
+    color: var(--accent-hover);
+}
+
+/* HTML5 [hidden] enforcement. The UA stylesheet's
+   `[hidden] { display: none }` is specificity (0,1,0) and loses
+   the cascade tier vs ANY author rule that explicitly sets a
+   `display` value on a class selector at the same specificity —
+   e.g. `.log-badge { display: inline-block }` makes a
+   `<span class="log-badge" hidden>` render *visibly*, which is
+   how the External Accounts "Re-link required" badge in the
+   legend stayed on screen even when the server emitted the
+   `hidden` attribute correctly. !important here pins the spec
+   semantics so future utility classes don't have to remember
+   to tack on `[hidden]`-specific rules. */
+[hidden] { display: none !important; }
+
 /* Screen-reader-only utility — keeps a label in the a11y tree
    while hiding it visually. Used by the library custom-list filter
    where the dropdown is self-evident but assistive tech still

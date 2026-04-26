@@ -50,12 +50,15 @@ fieldset legend {
 }
 
 .settings-subheading {
-    margin: 24px 0 8px;
-    font-size: 13px;
+    margin: 28px 0 10px;
+    font-size: 15px;
     font-weight: 600;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    color: var(--text-bright);
+    /* Drop uppercase + wide tracking so subheadings sit visually
+       above the per-field labels (which keep the small + uppercase
+       + dim treatment) instead of reading as just another label. */
+    text-transform: none;
+    letter-spacing: 0;
 }
 
 .settings-subheading:first-of-type {
@@ -369,13 +372,17 @@ fieldset legend {
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    transition: border-color 0.15s, background 0.15s;
+    transition: border-color 0.15s, background 0.15s, transform 0.05s;
     min-height: 120px;
 }
 
 .cf-card:hover {
-    border-color: var(--border-accent);
+    border-color: var(--accent);
     background: var(--bg);
+}
+
+.cf-card:active {
+    transform: translateY(1px);
 }
 
 .cf-card-selected {
@@ -708,5 +715,121 @@ fieldset legend {
     color: var(--text);
     font-size: 14px;
     font-family: var(--font-body);
+}
+
+/* Indexer picker grid (Settings → Indexers) — clickable cards
+   that pre-fill the Add form with a curated tracker template.
+   Same shape as .cf-card-grid but lighter — cards are plain
+   anchors here (one tap per card) instead of multi-control
+   tiles. */
+.indexer-catalog-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+    margin-top: 16px;
+}
+
+.indexer-catalog-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: inherit;
+    text-decoration: none;
+    transition: border-color 0.15s, background 0.15s, transform 0.05s;
+    min-height: 100px;
+}
+
+.indexer-catalog-card:hover {
+    border-color: var(--accent);
+    background: var(--bg);
+}
+
+.indexer-catalog-card:active {
+    transform: translateY(1px);
+}
+
+/* Generic fall-through cards sit visually behind the curated set
+   so the user notices the named trackers first. Border lighter
+   instead of the named-card hover shape. */
+.indexer-catalog-card-generic {
+    background: var(--bg);
+    border-style: dashed;
+}
+
+.indexer-catalog-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.indexer-catalog-card-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+    line-height: 1.3;
+}
+
+.indexer-catalog-card-pill {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    flex-shrink: 0;
+}
+
+.indexer-catalog-card-pill-private {
+    background: rgba(243, 139, 168, 0.16);
+    color: var(--red, #f38ba8);
+}
+
+.indexer-catalog-card-pill-public {
+    background: rgba(166, 227, 161, 0.16);
+    color: var(--green, #a6e3a1);
+}
+
+.indexer-catalog-card-blurb {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.45;
+}
+
+/* X close button at the top-left of the indexer pre-fill form.
+   Mirrors the modal-header close-button styling so the two
+   "leave this view" affordances read as the same control —
+   bg-elevated bubble, border, circular, accent on hover. */
+.indexer-seed-close {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+}
+
+.indexer-seed-close:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+}
+
+/* Notes panel shown above the pre-filled form when a seed has
+   tracker-specific gotchas the user should read before saving
+   (passkey-vs-apikey differences, category numbers, ratio-target
+   suggestions). */
+.indexer-seed-notes {
+    margin: 12px 0 16px;
+    padding: 12px 14px;
+    background: rgba(203, 166, 247, 0.08);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.55;
 }
 

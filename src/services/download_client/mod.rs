@@ -145,6 +145,139 @@ pub trait DownloadClient: Send + Sync {
     /// Distinct from the `active_client` discriminator
     /// (lowercase-snake: `"qbittorrent"` etc.).
     fn sonarr_impl_name(&self) -> &'static str;
+
+    /// Issue #28 PR C — apply per-torrent seed-rule overrides
+    /// after [`add_torrent`]. Caller invokes this immediately after
+    /// the grab when the source indexer has seed rules configured;
+    /// the client enforces the rule on its own (Ryokan doesn't
+    /// poll seed state to decide when to stop).
+    ///
+    /// Per-impl wire mapping:
+    /// - **qBit**: `POST /torrents/setShareLimits` with
+    ///   `ratioLimit` (`-2` = no limit, `-1` = use global, float =
+    ///   set) and `seedingTimeLimit` (`-2`/`-1`/minutes).
+    /// - **Deluge**: `core.set_torrent_options` with
+    ///   `stop_at_ratio: true` + `stop_ratio` for ratio; idle-time
+    ///   stop is not supported by Deluge core, time_minutes is a
+    ///   no-op there with a debug log.
+    /// - **Transmission**: `torrent-set` with `seedRatioLimit` +
+    ///   `seedRatioMode: 1` (override global) for ratio,
+    ///   `seedIdleLimit` + `seedIdleMode: 1` for idle minutes.
+    /// - **rTorrent**: `d.ratio.min.set` / `d.ratio.max.set` /
+    ///   `d.ratio.upload.set` for ratio (ratio group convention);
+    ///   no native idle-time stop, time_minutes is a no-op with a
+    ///   debug log.
+    ///
+    /// `Option`-wrapped fields mean "no rule configured for this
+    /// dimension." Per-impl handling diverges:
+    /// - **Deluge / Transmission / rTorrent** leave the per-torrent
+    ///   setting untouched on `None` — they only write the field
+    ///   they were given.
+    /// - **qBit's `setShareLimits` always writes BOTH `ratioLimit`
+    ///   and `seedingTimeLimit`** in one call (the API takes them
+    ///   as a pair); `None` is translated to `-1` (use global
+    ///   default), which means a previously-set per-torrent ratio
+    ///   would be reset to global if `set_seed_rules` is later
+    ///   called with `ratio: None`.
+    ///
+    /// In practice this is fine because the call site is
+    /// [`apply_indexer_seed_rules`] — invoked exactly once per
+    /// grab, immediately after `add_torrent`, on a torrent that
+    /// has no prior per-torrent overrides. If a future caller
+    /// updates rules on a long-lived torrent, the qBit divergence
+    /// becomes load-bearing and the impl will need a read-then-
+    /// write.
+    ///
+    /// Default impl is a no-op so impls can adopt the trait method
+    /// incrementally and the build doesn't break the moment a new
+    /// client lands. Callers must not assume seed rules took effect
+    /// for clients that haven't overridden this — the
+    /// `respect_seed_rules` grab-row flag exists separately.
+    async fn set_seed_rules(&self, _info_hash: &str, _rules: SeedRules) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Per-torrent seed-rule overrides. Both fields are optional —
+/// `None` means "don't change this rule on the client side."
+/// Issue #28 PR C maps these to the client's native API per the
+/// trait method's per-impl mapping table.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SeedRules {
+    /// Stop seeding when the ratio reaches this value. `None`
+    /// leaves the client's global ratio policy in place.
+    pub ratio: Option<f64>,
+    /// Stop seeding after this many minutes of seed time. `None`
+    /// leaves the client's global time policy in place. Not all
+    /// clients support this — see the trait method header.
+    pub time_minutes: Option<u64>,
+}
+
+impl SeedRules {
+    /// Construct from a [`crate::models::indexers::Indexer`] row.
+    /// Maps the row's `seed_ratio` and `seed_time_minutes` columns
+    /// directly. Returns a no-op `SeedRules` (both fields None)
+    /// when the row has no rules configured — callers can call
+    /// [`is_empty`] to skip the wire call entirely.
+    pub fn from_indexer_row(row: &crate::models::indexers::Indexer) -> Self {
+        Self {
+            ratio: row.seed_ratio,
+            time_minutes: row.seed_time_minutes.map(|n| n.max(0) as u64),
+        }
+    }
+
+    /// True when no rules are configured; the caller can skip the
+    /// wire call entirely.
+    pub fn is_empty(&self) -> bool {
+        self.ratio.is_none() && self.time_minutes.is_none()
+    }
+}
+
+/// Issue #28 PR C — apply per-indexer seed rules after a successful
+/// `add_torrent`. Looks up the indexer row by id, builds a
+/// [`SeedRules`], and calls the trait method.
+///
+/// Returns `true` when rules were attempted (regardless of wire
+/// success) so the caller can flip `grabbed_torrents.respect_seed_rules
+/// = 1`. The flag tracks "this grab carries indexer-specific seed
+/// rules" — even if the wire call failed, the user-configured intent
+/// stands and the delete-path skip should still respect it.
+///
+/// Returns `false` for Nyaa grabs (`indexer_id == None`), grabs from
+/// indexers without seed rules, or DB read failures. In all three
+/// cases the grab behaves the same as a v1.4 Nyaa grab.
+///
+/// Wire-call failures log at `warn` and DON'T propagate — a
+/// `setShareLimits` glitch shouldn't fail a successful grab. The
+/// upgrade sweep can re-apply rules on the next pass if the user
+/// observes the gap.
+pub async fn apply_indexer_seed_rules(
+    db: &sqlx::SqlitePool,
+    client: &dyn DownloadClient,
+    info_hash: &str,
+    indexer_id: Option<i64>,
+) -> bool {
+    let Some(id) = indexer_id else {
+        return false;
+    };
+    let row = match crate::models::indexers::get_by_id(db, id).await {
+        Ok(Some(r)) => r,
+        _ => return false,
+    };
+    let rules = SeedRules::from_indexer_row(&row);
+    if rules.is_empty() {
+        return false;
+    }
+    if let Err(e) = client.set_seed_rules(info_hash, rules).await {
+        crate::services::logger::warn(
+            db,
+            crate::models::log::LogCategory::Grab,
+            &format!("indexer #{} ({}): set_seed_rules failed", row.id, row.name),
+            &format!("{info_hash}: {e}"),
+        )
+        .await;
+    }
+    true
 }
 
 /// Outcome of an [`DownloadClient::add_torrent`] call.

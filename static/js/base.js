@@ -51,6 +51,13 @@
             bodyEl.textContent = opts.body || 'Are you sure?';
             yesBtn.textContent = opts.yesLabel || 'Yes';
             noBtn.textContent = opts.noLabel || 'No';
+            // Destructive-action treatment: red Yes button when
+            // `danger` is set, default accent otherwise. Class is
+            // toggled (not replaced) so any other classes the
+            // button picks up later won't be clobbered. Reset on
+            // close() so the next confirm starts neutral.
+            yesBtn.classList.toggle('btn-danger', !!opts.danger);
+            yesBtn.classList.toggle('btn-primary', !opts.danger);
             // Build extras checkboxes.
             extrasEl.innerHTML = '';
             for (const e of current.extras) {
@@ -478,6 +485,49 @@ window.addEventListener('DOMContentLoaded', function () {
         const body = (el.textContent || '').trim();
         if (!body) return;
         window.ryokanToast({kind: kind, title: title, body: body, log: false});
+    });
+});
+
+// Declarative confirm-on-submit. Any <form data-ryokan-confirm-title="...">
+// has its submit intercepted; the in-app ryokanConfirm modal is shown
+// with the configured copy, and the form only submits if the user
+// confirms. Replaces the browser-native `onclick="return confirm(...)"`
+// pattern so destructive actions get the same dark-themed dialog as
+// the rest of the app instead of a system-styled popup that doesn't
+// match.
+//
+// Supported attributes:
+//   data-ryokan-confirm-title    (required — picking up the attr is
+//                                 the opt-in signal)
+//   data-ryokan-confirm-body     ("Are you sure?" if absent)
+//   data-ryokan-confirm-yes      ("Yes")
+//   data-ryokan-confirm-no       ("Cancel")
+//   data-ryokan-confirm-danger   (any truthy value tints the Yes
+//                                 button red — use for destructive
+//                                 actions like delete / regenerate)
+window.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('form[data-ryokan-confirm-title]').forEach(function (form) {
+        form.addEventListener('submit', function (ev) {
+            ev.preventDefault();
+            const title = form.getAttribute('data-ryokan-confirm-title') || 'Confirm';
+            const body = form.getAttribute('data-ryokan-confirm-body') || 'Are you sure?';
+            const yesLabel = form.getAttribute('data-ryokan-confirm-yes') || 'Yes';
+            const noLabel = form.getAttribute('data-ryokan-confirm-no') || 'Cancel';
+            const danger = !!form.getAttribute('data-ryokan-confirm-danger');
+            window.ryokanConfirm({
+                title: title, body: body, yesLabel: yesLabel, noLabel: noLabel,
+                danger: danger,
+            }).then(function (result) {
+                if (!result || !result.ok) return;
+                // HTMLFormElement.submit() bypasses event handlers
+                // by spec — this listener won't re-fire, so no
+                // re-prompt loop possible. (If we ever switch to
+                // requestSubmit() to re-enable native form
+                // validation, we'll need a flag to skip the second
+                // intercept.)
+                form.submit();
+            });
+        });
     });
 });
 

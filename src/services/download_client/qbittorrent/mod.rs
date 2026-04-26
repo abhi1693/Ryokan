@@ -694,6 +694,53 @@ impl DownloadClient for QbitClient {
     fn sonarr_impl_name(&self) -> &'static str {
         "QBittorrent"
     }
+
+    /// Issue #28 PR C — qBit's per-torrent share-limit endpoint.
+    ///
+    /// Wire shape: `POST /api/v2/torrents/setShareLimits` with
+    /// form fields `hashes`, `ratioLimit`, `seedingTimeLimit`, and
+    /// `inactiveSeedingTimeLimit`. Per qBit 4.5+ docs:
+    /// - `-2.0` / `-2` = no limit (override the global default
+    ///   for "limit").
+    /// - `-1.0` / `-1` = use the global default.
+    /// - any other value = the per-torrent override.
+    ///
+    /// Ryokan's [`SeedRules`] uses `Option<f64>` / `Option<u64>` —
+    /// `None` translates to `-1` so the per-torrent rule defers to
+    /// the global default (the `respect_seed_rules` flag tracks
+    /// whether ANY rule is in effect, so a None field doesn't
+    /// mean "no rule" at the model layer).
+    /// `inactiveSeedingTimeLimit` isn't in the trait; pass `-1`
+    /// (use global) verbatim.
+    async fn set_seed_rules(&self, info_hash: &str, rules: super::SeedRules) -> Result<(), String> {
+        let ratio = rules
+            .ratio
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "-1".to_string());
+        let seeding_time = rules
+            .time_minutes
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "-1".to_string());
+        let form = [
+            ("hashes", info_hash),
+            ("ratioLimit", ratio.as_str()),
+            ("seedingTimeLimit", seeding_time.as_str()),
+            ("inactiveSeedingTimeLimit", "-1"),
+        ];
+        let resp = self
+            .do_post_form("/api/v2/torrents/setShareLimits", &form)
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "qbit setShareLimits failed: {} {}",
+                status,
+                body.trim()
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn to_download_item(raw: QbitRawTorrent) -> DownloadItem {

@@ -750,6 +750,44 @@ impl DownloadClient for RtorrentClient {
     fn sonarr_impl_name(&self) -> &'static str {
         "RTorrent"
     }
+
+    /// Issue #28 PR C — apply per-torrent ratio rules via
+    /// rTorrent's `d.ratio.max.set` XML-RPC.
+    ///
+    /// Wire shape: `d.ratio.max.set` takes the hash + a ratio
+    /// value **in per-mille** (ratio × 1000). So `1.5` becomes
+    /// `1500`. This is rTorrent's standard ratio-group convention;
+    /// `d.ratio.min.set` and `d.ratio.upload.set` exist too but
+    /// govern graduated stopping behavior we don't need here.
+    /// `d.ratio.max.set` alone gives "stop seeding at exactly this
+    /// ratio," which matches the per-indexer rule semantics.
+    ///
+    /// Like Deluge, rTorrent has no native idle-time stop in core —
+    /// `time_minutes` logs at debug and is a no-op. The
+    /// `seedingtime` view extension exists in some setups but
+    /// isn't part of the canonical rTorrent API surface.
+    ///
+    /// Hash uppercase: rTorrent's wire protocol expects upper-hex
+    /// for every `d.<method>` call keyed by hash. The conversion
+    /// happens here, not at call sites — same convention as the
+    /// rest of the file.
+    async fn set_seed_rules(&self, info_hash: &str, rules: super::SeedRules) -> Result<(), String> {
+        if let Some(ratio) = rules.ratio {
+            let permille = (ratio * 1000.0).round() as i64;
+            let hash_uc = info_hash.to_ascii_uppercase();
+            self.call(
+                "d.ratio.max.set",
+                &[XmlValue::String(hash_uc), XmlValue::Int(permille)],
+            )
+            .await?;
+        }
+        if rules.time_minutes.is_some() {
+            tracing::debug!(
+                "rtorrent: time_minutes seed-rule ignored — no native idle-time stop in core"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Resolve a filesystem path to remove for `delete(delete_files=true)`,
