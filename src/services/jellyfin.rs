@@ -197,13 +197,23 @@ fn normalize_base_url(base_url: &str) -> String {
 /// IPs as local and emitted an `http://172.200.x.x:…` URL — the
 /// Jellyfin API key would then ride a plain-text request to a public
 /// host.
+///
+/// IPv6 loopback handling: only the bracketed form (`[::1]` or
+/// `[::1]:port`) and the bare `::1` exact match count. An earlier
+/// fix tried to also accept `::1:port` (bracketless host:port), but
+/// that prefix mis-matches valid non-loopback addresses like
+/// `::1:abcd:1234` (which expands to `0:0:0:0:0:1:abcd:1234`) —
+/// the same shape as the original 172.x bug. RFC 3986 requires
+/// brackets around an IPv6 host in a URL anyway, so any input that
+/// would lose the bracketless prefix path was already malformed.
 fn is_local_address(lower: &str) -> bool {
     if lower.starts_with("localhost") || lower.starts_with("127.") {
         return true;
     }
-    // IPv6 loopback. `[::1]` literal form is what users actually
-    // type in URL bars; the bare `::1` form is also accepted.
-    if lower.starts_with("[::1]") || lower == "::1" || lower.starts_with("::1:") {
+    // IPv6 loopback — bracketed form (`[::1]` / `[::1]:port`) or the
+    // bare `::1` exact literal. See doc comment for why the bracketless
+    // `::1:port` prefix was deliberately dropped.
+    if lower.starts_with("[::1]") || lower == "::1" {
         return true;
     }
     if lower.starts_with("10.") || lower.starts_with("192.168.") {
@@ -351,6 +361,24 @@ mod tests {
             assert!(
                 normalize_base_url(addr).starts_with("http://"),
                 "{addr} should be classified as IPv6 loopback (http://), got {:?}",
+                normalize_base_url(addr)
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_ipv6_non_loopback_with_one_hextet_classified_as_public() {
+        // PR #101 review: the earlier fix accepted `::1:port` as a
+        // bracketless loopback shorthand, which over-matched valid
+        // non-loopback IPv6 addresses whose second hextet starts with
+        // `1`. `::1:abcd:1234` expands to `0:0:0:0:0:1:abcd:1234` —
+        // public, not loopback. Pin both that the bracketless input
+        // gets HTTPS now and that the bracketed loopback path still
+        // works.
+        for addr in ["::1:abcd:1234", "::1:9000:9000:9000"] {
+            assert!(
+                normalize_base_url(addr).starts_with("https://"),
+                "{addr} is non-loopback IPv6; expected https://, got {:?}",
                 normalize_base_url(addr)
             );
         }

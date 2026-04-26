@@ -567,6 +567,14 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // reconciler dispatches on the (legacy, new) presence matrix so
     // each starting state moves to the correct end state without
     // creating ghost columns.
+    //
+    // Cleanup of pre-existing vestiges: DBs that already passed
+    // through the v1 ADD-then-RENAME-with-.ok() pattern carry the
+    // stray `force_tmdb_fallback` INTEGER alongside the live
+    // `force_kitsu_fallback` column. The (true, true) arm of the
+    // reconciler DROPs the legacy column on next boot, so a long-
+    // running install picks up the cleanup automatically — no
+    // operator action required.
     reconcile_column_rename_typed(
         db,
         "config",
