@@ -272,6 +272,19 @@
     .form-row { grid-template-columns: 1fr; }
 }
 
+/* Solid-fill overrides of the muted `.btn-secondary` / `.btn-danger`
+   defined earlier in this file. Source-order wins, so these are the
+   styles that actually render — the earlier rules survive only as
+   the muted-rgba fallback if these are deleted. Don't trim either
+   block thinking it's redundant: the `data-ryokan-confirm-danger`
+   opt in `static/js/base.js` toggles `.btn-danger` on the modal Yes
+   button to render the red destructive treatment, and that depends
+   on the solid-fill version below winning the cascade. The earlier
+   muted-rgba block stays for buttons that want a softer red (e.g.
+   inline-delete `<button class="btn-icon btn-danger">` row actions
+   that shouldn't shout). If consolidating, fold both versions into
+   classed variants (`.btn-danger-solid` vs `.btn-danger-muted`)
+   rather than picking one. */
 .btn-secondary {
     background: var(--bg-elevated);
     color: var(--text);

@@ -100,6 +100,12 @@
             </div>
             <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
                 <button class="btn btn-secondary" type="button" id="ryokan-confirm-no">No</button>
+                <!-- `btn-primary` is the load-bearing neutral default for the danger toggle.
+                     `static/js/base.js` calls `classList.toggle('btn-primary', !opts.danger)`
+                     paired with `classList.toggle('btn-danger', opts.danger)` to swap between
+                     the accent and destructive treatments per confirm. If you change the
+                     non-danger class here, update both toggle calls or destructive confirms
+                     will end up with both classes set. -->
                 <button class="btn btn-primary" type="button" id="ryokan-confirm-yes">Yes</button>
             </div>
         </div>

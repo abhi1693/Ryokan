@@ -2184,7 +2184,17 @@ mod tests {
                 Some("animebytes".to_string()),
             )
             .await;
-            assert!(template.indexer_edit.is_some());
+            // Prove the row's fields actually reached the
+            // template — `is_some()` alone wouldn't catch a
+            // future `get_by_id` projection bug that returned
+            // a default-constructed row but kept the
+            // seed-suppression branch intact.
+            let edit = template
+                .indexer_edit
+                .as_ref()
+                .expect("edit_id must populate indexer_edit");
+            assert_eq!(edit.name, "Existing");
+            assert_eq!(edit.id, row_id);
             assert!(
                 template.indexer_seed.is_none(),
                 "edit_id must shadow the template slug — seed defaults would clobber real row values"

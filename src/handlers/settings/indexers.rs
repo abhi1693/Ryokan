@@ -426,8 +426,17 @@ mod tests {
         #[tokio::test]
         async fn delete_toast_falls_back_to_id_for_missing_row() {
             // A delete for a row that no longer exists (race or
-            // stale tab) shouldn't emit a malformed toast — the
-            // handler falls back to `id=N` when name lookup fails.
+            // stale tab) reaches the success path because SQLite's
+            // `DELETE WHERE id = ?` is a no-op success on a
+            // missing row, not an error. The handler's
+            // pre-delete `get_by_id(...)` returns None, so
+            // `display_name` falls back to `format!("id={}", id)`
+            // and the toast becomes "Indexer 'id=9999' deleted".
+            // The positive assertion below pins that fallback —
+            // a future change that returned `Err(NotFound)`
+            // for a missing row, or that dropped the id-fallback,
+            // would surface here instead of slipping by under a
+            // weaker `!contains("''")` check.
             let db = in_memory_pool().await;
             let state = build_test_app_state(db, None);
             let resp =
@@ -435,13 +444,15 @@ mod tests {
             use axum::response::IntoResponse;
             let resp = resp.into_response();
             let location = extract_location(resp);
-            // The actual delete fails, so the handler takes the
-            // err path. Either way we should never see a literal
-            // "''" in the message — it'd render as `Indexer ''
-            // deleted`.
+            // `=` percent-encodes to `%3D` (uppercase via
+            // `urlencoding::encode`); accept lowercase too in
+            // case the encoder ever changes.
             assert!(
-                !location.contains("Indexer%20%27%27") && !location.contains("Indexer+%27%27"),
-                "missing-row delete should not emit empty-quoted toast; got: {location}"
+                location.contains("Indexer%20%27id%3D9999%27%20deleted")
+                    || location.contains("Indexer+%27id%3D9999%27+deleted")
+                    || location.contains("Indexer%20%27id%3d9999%27%20deleted")
+                    || location.contains("Indexer+%27id%3d9999%27+deleted"),
+                "expected id-based fallback in deleted-toast; got: {location}"
             );
         }
     }

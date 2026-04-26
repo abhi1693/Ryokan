@@ -352,10 +352,15 @@ mod tests {
         assert!(!ab.is_generic);
 
         let nekobt = find_seed("nekobt").expect("nekobt seed exists");
-        assert!(
-            !nekobt.is_private_tracker,
-            "nekoBT is public — user confirmation 2026-04-26"
-        );
+        // nekoBT is the only catalog entry whose public/private
+        // status doesn't match a widely-cited source — the
+        // upstream classification was set per the project owner's
+        // direct knowledge of the tracker. If the assertion fails,
+        // verify nekoBT's current registration model (open vs
+        // invite-only) before flipping the catalog entry; the
+        // is_private_tracker flag drives the per-series upgrade-
+        // opt-in default and shouldn't toggle on a stale rumor.
+        assert!(!nekobt.is_private_tracker, "nekoBT is public");
 
         let generic = find_seed("generic-torznab").expect("generic torznab seed exists");
         assert!(generic.is_generic);
