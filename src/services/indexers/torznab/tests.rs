@@ -306,6 +306,28 @@ fn search_response_pubdate_handles_positive_timezone_offset() {
     );
 }
 
+#[test]
+fn search_response_pubdate_handles_negative_timezone_offset() {
+    // PR #107 round-2 review fix #9: pin the only branch in the
+    // sign-flip math (`* if sign == '+' { -1 } else { 1 }`) that
+    // wasn't otherwise exercised. -0500 = "5 hours behind UTC", so
+    // 19:00 local on 1969-12-31 is 00:00 UTC on 1970-01-01 = epoch.
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0">
+<channel><item>
+  <title>Show</title>
+  <guid>g1</guid>
+  <pubDate>Wed, 31 Dec 1969 19:00:00 -0500</pubDate>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(
+        result[0].publish_date, 0,
+        "5 hours behind UTC at 19:00 local on 1969-12-31 = epoch UTC"
+    );
+}
+
 // ── parse_caps_response ──────────────────────────────────────────
 
 const CAPS_RESPONSE_BASIC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>

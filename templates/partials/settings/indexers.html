@@ -73,6 +73,7 @@
             <label>
                 API Key
                 <input type="text" name="api_key" autocomplete="off" value="{{ edit.api_key }}">
+                <span class="form-hint">Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
             </label>
             <label>
                 Priority
@@ -81,6 +82,27 @@
             <label>
                 Min Seeders
                 <input type="number" name="min_seeders" value="{{ edit.min_seeders }}" min="0">
+            </label>
+            <label>
+                Request Timeout (seconds)
+                <input type="number" name="request_timeout_secs"
+                       value="{% if let Some(secs) = edit.request_timeout_secs %}{{ secs }}{% endif %}"
+                       min="1" max="600" placeholder="30">
+                <span class="form-hint">Per-indexer override. Blank uses the default (30s, or RYOKAN_INDEXER_DEFAULT_TIMEOUT_SECS env). Range 1–600.</span>
+            </label>
+            <label>
+                Seed Ratio
+                <input type="number" name="seed_ratio" step="0.1" min="0"
+                       value="{% if let Some(r) = edit.seed_ratio %}{{ r }}{% endif %}"
+                       placeholder="(client default)">
+                <span class="form-hint">Per-torrent seed ratio passed to the download client at add time (PR C). Blank inherits the client's global default.</span>
+            </label>
+            <label>
+                Seed Time (minutes)
+                <input type="number" name="seed_time_minutes" min="0"
+                       value="{% if let Some(m) = edit.seed_time_minutes %}{{ m }}{% endif %}"
+                       placeholder="(client default)">
+                <span class="form-hint">Per-torrent minimum seed time. Blank inherits the client's global default.</span>
             </label>
             <label class="checkbox-label">
                 <input type="checkbox" name="enabled" {% if edit.enabled %}checked{% endif %}>
@@ -121,6 +143,7 @@
                 API Key
                 <input type="text" name="api_key" autocomplete="off"
                        placeholder="from Prowlarr Settings &rarr; General">
+                <span class="form-hint">Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
             </label>
             <label>
                 Priority
@@ -131,6 +154,21 @@
                 Min Seeders
                 <input type="number" name="min_seeders" value="1" min="0">
                 <span class="form-hint">Releases below this floor are dropped before scoring.</span>
+            </label>
+            <label>
+                Request Timeout (seconds)
+                <input type="number" name="request_timeout_secs" min="1" max="600" placeholder="30">
+                <span class="form-hint">Per-indexer override. Blank uses the default (30s).</span>
+            </label>
+            <label>
+                Seed Ratio
+                <input type="number" name="seed_ratio" step="0.1" min="0" placeholder="(client default)">
+                <span class="form-hint">Per-torrent seed ratio passed to the download client at add time (PR C).</span>
+            </label>
+            <label>
+                Seed Time (minutes)
+                <input type="number" name="seed_time_minutes" min="0" placeholder="(client default)">
+                <span class="form-hint">Per-torrent minimum seed time.</span>
             </label>
             <label class="checkbox-label">
                 <input type="checkbox" name="enabled" checked>

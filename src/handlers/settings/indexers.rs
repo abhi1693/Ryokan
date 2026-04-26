@@ -156,6 +156,21 @@ pub async fn settings_indexers_delete(
     State(state): State<AppState>,
     Form(form): Form<IndexerDeleteForm>,
 ) -> Redirect {
+    // PR #107 round-2 review fix #3: SQLite can't add a real FK via
+    // ALTER TABLE, so `grabbed_torrents.indexer_id` is structurally
+    // unconstrained. NULL out matching rows explicitly here so the
+    // post-delete state matches the migration comment's "ON DELETE
+    // SET NULL" semantics. `pending_grabs.indexer_id` (already
+    // nullable per its CREATE TABLE) gets the same treatment for
+    // consistency.
+    let _ = sqlx::query("UPDATE grabbed_torrents SET indexer_id = NULL WHERE indexer_id = ?")
+        .bind(form.id)
+        .execute(&state.db)
+        .await;
+    let _ = sqlx::query("UPDATE pending_grabs SET indexer_id = NULL WHERE indexer_id = ?")
+        .bind(form.id)
+        .execute(&state.db)
+        .await;
     match delete(&state.db, form.id).await {
         Ok(_) => {
             logger::info(

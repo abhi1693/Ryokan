@@ -2108,11 +2108,15 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
 
     // Issue #28 PR A — `grabbed_torrents.indexer_id` records which
-    // indexer surfaced each grab. Nullable + ON DELETE SET NULL so
-    // deleting an indexer doesn't erase grab history. NULL means
-    // "pre-#28 grab, assume Nyaa." The upgrade sweep keys per-
-    // indexer rules off this column; absent an FK, it's read-only
-    // metadata.
+    // indexer surfaced each grab. Nullable, no real FK: SQLite
+    // can't add a FOREIGN KEY constraint via ALTER TABLE, so the
+    // column is structurally unconstrained. The
+    // `settings_indexers_delete` handler (PR #107 round-2 fix #3)
+    // NULLs out matching rows explicitly to keep grab history
+    // readable post-delete. NULL means either "pre-#28 grab,
+    // assume Nyaa" or "indexer was deleted after this grab" —
+    // both shapes are equivalent for the upgrade sweep, which
+    // treats NULL as "no per-indexer rules apply."
     sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN indexer_id INTEGER")
         .execute(db)
         .await

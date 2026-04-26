@@ -259,10 +259,15 @@ pub struct IndexerSearchOutcome {
 /// every release from those indexers would slip past dedup and
 /// flood the candidate set.
 ///
-/// **Interactive search uses a different policy:** no cross-indexer
-/// dedup, one row per `(indexer, infohash)` pair so the user can
-/// pick their preferred tracker. That helper is
-/// [`merge_for_interactive_search`].
+/// **Interactive search policy (decision #3):** when interactive
+/// search learns to fan out to indexers, it should NOT dedup across
+/// indexers — one row per `(indexer, infohash)` so the user can
+/// pick a preferred tracker. That path is intentionally Nyaa-only
+/// in v1.5.0 (PR B); the per-tracker-row behavior lands in PR C
+/// alongside the seed-rules wiring it depends on. The
+/// `merge_for_interactive_search` helper that previously lived
+/// here was removed in PR #107 round-2 review since it was dead
+/// code; PR C reintroduces it when there's a caller.
 pub fn dedup_for_auto_search(releases: Vec<Release>) -> Vec<Release> {
     let mut by_key: HashMap<String, Release> = HashMap::new();
     for release in releases {
@@ -310,38 +315,6 @@ pub fn dedup_for_auto_search(releases: Vec<Release>) -> Vec<Release> {
     out
 }
 
-/// Interactive-search merge: no cross-indexer dedup. Returns one
-/// row per `(indexer_id, info_hash | guid)` pair so the user sees
-/// per-tracker rows in the search-results table and can pick
-/// based on tracker-specific factors (ratio rules, freeleech,
-/// upload-goals). Sorted by priority then by published date
-/// descending so newer releases bubble up within the same
-/// indexer.
-pub fn merge_for_interactive_search(releases: Vec<Release>) -> Vec<Release> {
-    let mut by_key: HashMap<(i64, String), Release> = HashMap::new();
-    for release in releases {
-        let inner = if !release.info_hash.is_empty() {
-            release.info_hash.to_ascii_lowercase()
-        } else if !release.guid.is_empty() {
-            release.guid.clone()
-        } else {
-            format!("__{}", release.title)
-        };
-        let key = (release.indexer_id, inner);
-        // Same-key collisions inside one indexer are degenerate
-        // (same release listed twice in one response) — keep the
-        // first.
-        by_key.entry(key).or_insert(release);
-    }
-    let mut out: Vec<Release> = by_key.into_values().collect();
-    out.sort_by(|a, b| {
-        a.indexer_priority
-            .cmp(&b.indexer_priority)
-            .then(b.publish_date.cmp(&a.publish_date))
-    });
-    out
-}
-
 /// PR #107 review fix #4: build a fresh `Vec<Arc<dyn Indexer>>`
 /// from the DB and wrap it in the [`crate::IndexerCache`] swap-on-
 /// write Arc. Called once at startup and again from the
@@ -366,6 +339,48 @@ pub async fn rebuild_cache(db: &sqlx::SqlitePool) -> crate::IndexerCache {
             }
         })
         .collect();
+
+    // PR #107 round-2 review fix #6: lazy caps probe for rows that
+    // haven't been probed yet. Detached `tokio::spawn`s so a slow
+    // indexer can't block startup or the post-edit settings save.
+    // No retry on failure — the next rebuild_cache call (next
+    // settings edit, next process restart) re-tries any row whose
+    // caps_json is still empty.
+    for (row, client) in rows.iter().zip(clients.iter()) {
+        if !row.caps_json.is_empty() {
+            continue;
+        }
+        let db_clone = db.clone();
+        let client_clone = client.clone();
+        let row_id = row.id;
+        let row_name = row.name.clone();
+        tokio::spawn(async move {
+            match client_clone.caps().await {
+                Ok(caps) => {
+                    if let Ok(json) = serde_json::to_string(&caps)
+                        && let Err(e) =
+                            crate::models::indexers::update_caps(&db_clone, row_id, &json).await
+                    {
+                        tracing::warn!(
+                            "indexers: caps probe persist failed for #{} ({}): {}",
+                            row_id,
+                            row_name,
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "indexers: caps probe failed for #{} ({}): {}",
+                        row_id,
+                        row_name,
+                        e
+                    );
+                }
+            }
+        });
+    }
+
     Arc::new(tokio::sync::RwLock::new(Arc::new(clients)))
 }
 
@@ -689,50 +704,6 @@ mod tests {
         assert_eq!(out[0].indexer_priority, 5);
         assert_eq!(out[1].indexer_priority, 25);
         assert_eq!(out[2].indexer_priority, 50);
-    }
-
-    // ── merge_for_interactive_search ────────────────────────────────
-
-    #[test]
-    fn interactive_keeps_one_row_per_indexer_per_release() {
-        // Decision #3 — interactive search shows the user one row
-        // per (indexer, infohash) so they can pick their preferred
-        // tracker.
-        let input = vec![
-            release(1, 5, "abc123", "g1", "Show (Tracker A)", 10),
-            release(2, 50, "abc123", "g2", "Show (Tracker B)", 8),
-        ];
-        let out = merge_for_interactive_search(input);
-        assert_eq!(out.len(), 2, "both indexers' rows visible to user");
-    }
-
-    #[test]
-    fn interactive_collapses_dup_within_same_indexer() {
-        // A torznab response listing the same release twice (e.g.,
-        // post + announce) should still show one row.
-        let input = vec![
-            release(1, 5, "abc123", "g1", "Show", 10),
-            release(1, 5, "abc123", "g1", "Show", 10),
-        ];
-        let out = merge_for_interactive_search(input);
-        assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    fn interactive_sorts_by_priority_then_publish_date_desc() {
-        let mut newer = release(1, 5, "h1", "g1", "Newer", 5);
-        newer.publish_date = 1_000_000;
-        let mut older = release(1, 5, "h2", "g2", "Older", 5);
-        older.publish_date = 500_000;
-        let other = release(2, 50, "h3", "g3", "Other indexer", 5);
-        let input = vec![older, newer, other];
-        let out = merge_for_interactive_search(input);
-        assert_eq!(out.len(), 3);
-        // Within indexer 1: newer first.
-        assert_eq!(out[0].title, "Newer");
-        assert_eq!(out[1].title, "Older");
-        // Indexer 2 last (priority 50).
-        assert_eq!(out[2].title, "Other indexer");
     }
 
     // ── Helper unit tests (PR #107 review fix #10) ──────────────────
