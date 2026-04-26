@@ -1274,6 +1274,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Issue #28 PR E — per-series PT upgrade opt-in. Default 0 (off).
+    // The upgrade sweep skips a candidate when the source indexer is
+    // a private tracker (`indexers.is_private_tracker = 1`) and this
+    // flag is 0. Initial / manual / interactive grabs aren't gated —
+    // the user explicitly chose those. The flag only affects the
+    // background upgrade sweep, which can re-grab existing episodes
+    // from PTs without the user's knowledge if left default-on.
+    sqlx::query("ALTER TABLE series ADD COLUMN allow_pt_upgrades INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     // Radarr API compatibility layer for Seerr integration (anime movies).
     sqlx::query("ALTER TABLE config ADD COLUMN radarr_enabled INTEGER NOT NULL DEFAULT 0")
         .execute(db)

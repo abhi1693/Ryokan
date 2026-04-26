@@ -47,6 +47,7 @@ use services::{
         handlers::library::crud::set_monitoring,
         handlers::library::crud::set_episode_monitoring,
         handlers::library::crud::set_allow_upgrades,
+        handlers::library::crud::set_allow_pt_upgrades,
         handlers::library::crud::set_search_overrides,
         handlers::library::crud::set_manual_override,
         handlers::library::crud::reclassify_episode,
@@ -545,6 +546,10 @@ async fn main() {
         .route(
             "/api/library/allow-upgrades",
             post(handlers::library::crud::set_allow_upgrades),
+        )
+        .route(
+            "/api/library/allow-pt-upgrades",
+            post(handlers::library::crud::set_allow_pt_upgrades),
         )
         .route(
             "/api/library/search-overrides",

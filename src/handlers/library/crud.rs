@@ -18,8 +18,8 @@ use super::reconcile::reconcile_all_fallback_entries;
 use super::search::{AutoSearchQuery, auto_search_series};
 use super::{
     AddSeriesForm, BulkManualOverrideForm, ReclassifyEpisodeForm, RemoveSeriesForm,
-    SetAllowUpgradesForm, SetEpisodeMonitoringForm, SetFolderForm, SetManualOverrideForm,
-    SetMonitoringForm, SetSearchOverridesForm,
+    SetAllowPtUpgradesForm, SetAllowUpgradesForm, SetEpisodeMonitoringForm, SetFolderForm,
+    SetManualOverrideForm, SetMonitoringForm, SetSearchOverridesForm,
 };
 
 #[utoipa::path(
@@ -672,6 +672,46 @@ pub async fn set_allow_upgrades(
         "ok": true,
         "series_id": form.series_id,
         "allow_upgrades": form.allow,
+    })))
+}
+
+/// Issue #28 PR E — toggle the per-series PT upgrade opt-in.
+/// Default off; the upgrade sweep won't grab a private-tracker
+/// release as the chosen upgrade for this series unless the
+/// flag is on. Initial grabs and manual searches aren't gated.
+#[utoipa::path(
+    post,
+    path = "/api/library/allow-pt-upgrades",
+    tag = "Library",
+    summary = "Toggle series PT upgrade opt-in",
+    description = "Enable or disable private-tracker-sourced upgrades for a single tracked series. Default off — when off, the upgrade sweep skips upgrade candidates whose source indexer is marked private (`indexers.is_private_tracker = 1`). Initial grabs and manual searches aren't affected.",
+    request_body = SetAllowPtUpgradesForm,
+    responses(
+        (status = 200, description = "PT upgrade opt-in toggled", body = serde_json::Value),
+        (status = 500, description = "Database error"),
+    ),
+)]
+pub async fn set_allow_pt_upgrades(
+    State(state): State<AppState>,
+    Json(form): Json<SetAllowPtUpgradesForm>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    series::update_allow_pt_upgrades(&state.db, form.series_id, form.allow)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!(
+            "PT upgrade opt-in for series {} set to {}",
+            form.series_id, form.allow
+        ),
+        "",
+    )
+    .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "series_id": form.series_id,
+        "allow_pt_upgrades": form.allow,
     })))
 }
 
@@ -1467,6 +1507,124 @@ mod tests {
             )
             .await;
             assert_eq!(body["allow_upgrades"], true);
+        }
+
+        // ─── set_allow_pt_upgrades (#28 PR E) ─────────────────────
+
+        #[tokio::test]
+        async fn set_allow_pt_upgrades_persists_flag_and_defaults_off() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 41, "Show").await;
+            let state = build_test_app_state(db.clone(), None);
+
+            // Default state — series.allow_pt_upgrades should be 0
+            // even though we haven't called the toggle yet. Pin the
+            // default-off invariant so a future migration that
+            // changes the column default to 1 has to be deliberate.
+            let stored: i64 =
+                sqlx::query_scalar("SELECT allow_pt_upgrades FROM series WHERE id = ?")
+                    .bind(series_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(stored, 0, "PT upgrade opt-in must default OFF");
+
+            // Flip on.
+            let body: serde_json::Value = ok_json(
+                set_allow_pt_upgrades(
+                    State(state.clone()),
+                    AxumJson(super::super::SetAllowPtUpgradesForm {
+                        series_id,
+                        allow: true,
+                    }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(body["allow_pt_upgrades"], true);
+            let stored: i64 =
+                sqlx::query_scalar("SELECT allow_pt_upgrades FROM series WHERE id = ?")
+                    .bind(series_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(stored, 1);
+
+            // Flip off.
+            let body: serde_json::Value = ok_json(
+                set_allow_pt_upgrades(
+                    State(state),
+                    AxumJson(super::super::SetAllowPtUpgradesForm {
+                        series_id,
+                        allow: false,
+                    }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(body["allow_pt_upgrades"], false);
+            let stored: i64 =
+                sqlx::query_scalar("SELECT allow_pt_upgrades FROM series WHERE id = ?")
+                    .bind(series_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(stored, 0);
+        }
+
+        #[tokio::test]
+        async fn set_allow_pt_upgrades_independent_of_allow_upgrades() {
+            // The two flags are orthogonal — flipping one shouldn't
+            // affect the other. Pin the invariant since both columns
+            // live on the same row and a stray UPDATE on the wrong
+            // column would silently ride out under simpler tests.
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 42, "Show").await;
+            let state = build_test_app_state(db.clone(), None);
+
+            // allow_upgrades on, allow_pt_upgrades on.
+            ok_json(
+                set_allow_upgrades(
+                    State(state.clone()),
+                    AxumJson(super::super::SetAllowUpgradesForm {
+                        series_id,
+                        allow: true,
+                    }),
+                )
+                .await,
+            )
+            .await;
+            ok_json(
+                set_allow_pt_upgrades(
+                    State(state.clone()),
+                    AxumJson(super::super::SetAllowPtUpgradesForm {
+                        series_id,
+                        allow: true,
+                    }),
+                )
+                .await,
+            )
+            .await;
+            // Now flip allow_upgrades off; allow_pt_upgrades must
+            // stay on.
+            ok_json(
+                set_allow_upgrades(
+                    State(state),
+                    AxumJson(super::super::SetAllowUpgradesForm {
+                        series_id,
+                        allow: false,
+                    }),
+                )
+                .await,
+            )
+            .await;
+            let row: (i64, i64) =
+                sqlx::query_as("SELECT allow_upgrades, allow_pt_upgrades FROM series WHERE id = ?")
+                    .bind(series_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(row, (0, 1), "allow_pt_upgrades must persist independently");
         }
 
         // ─── set_search_overrides ────────────────────────────────

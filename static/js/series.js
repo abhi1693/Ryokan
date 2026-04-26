@@ -1308,6 +1308,49 @@ function setAllowUpgrades(allow) {
     });
 }
 
+// Issue #28 PR E — toggle the per-series PT upgrade opt-in.
+// Mirror of setAllowUpgrades; lives on the same page, hits the
+// parallel /api/library/allow-pt-upgrades endpoint, reverts the
+// checkbox state on failure so the UI never lies about what's
+// persisted.
+function setAllowPtUpgrades(allow) {
+    const dbId = parseInt(SD.dbId);
+    if (!dbId) return;
+    const checkbox = document.getElementById('allow-pt-upgrades');
+    const status = document.getElementById('allow-pt-upgrades-status');
+    if (checkbox) checkbox.disabled = true;
+    const originalHint = status ? status.textContent : '';
+    if (status) status.textContent = 'Saving…';
+
+    fetch('/api/library/allow-pt-upgrades', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ series_id: dbId, allow: allow })
+    })
+    .then(async r => {
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Failed to update PT-upgrades toggle');
+        return data;
+    })
+    .then(_ => {
+        if (status) status.textContent = allow
+            ? 'PT-sourced upgrades enabled for this series.'
+            : 'PT-sourced upgrades disabled — sweep will skip private-tracker candidates.';
+        if (checkbox) checkbox.disabled = false;
+    })
+    .catch(err => {
+        if (status) status.textContent = err.message || 'Failed to update PT-upgrades toggle';
+        if (checkbox) {
+            checkbox.checked = !allow;
+            checkbox.disabled = false;
+        }
+        // Restore original hint after a beat so a transient error
+        // doesn't permanently mask the default copy.
+        setTimeout(() => { if (status && originalHint) status.textContent = originalHint; }, 4000);
+    });
+}
+
 // #23 — Save per-series search overrides (Nyaa uploader + custom tokens).
 // Empty inputs clear the override server-side so the series falls back
 // to the global default in Settings → Quality.

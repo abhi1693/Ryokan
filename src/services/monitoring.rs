@@ -298,6 +298,7 @@ mod tests {
             folder_name: String::new(),
             monitor_mode: "all".to_string(),
             allow_upgrades: true,
+            allow_pt_upgrades: false,
             custom_query_tokens: String::new(),
             restrict_to_uploader: String::new(),
             cumulative_prior_episodes: 0,

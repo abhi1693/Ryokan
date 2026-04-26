@@ -61,6 +61,22 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     // a CF mid-sweep, the next scheduled run picks it up.
     let cfs = state.custom_formats.read().await.clone();
 
+    // Issue #28 PR E — snapshot the set of PT indexer IDs once per
+    // sweep so the per-series PT-upgrade gate doesn't re-read the
+    // IndexerCache (or hit the DB) on every result. The set is used
+    // to skip an upgrade candidate when the source indexer is private
+    // and the series hasn't opted in via `allow_pt_upgrades`. Empty
+    // when the user has zero PT indexers configured — the gate then
+    // never fires.
+    let pt_indexer_ids: HashSet<i64> = {
+        let snapshot = state.indexers.read().await.clone();
+        snapshot
+            .iter()
+            .filter(|i| i.is_private_tracker())
+            .map(|i| i.id())
+            .collect()
+    };
+
     logger::info(
         &state.db,
         LogCategory::AutoSearch,
@@ -212,6 +228,41 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             let Some(result) = best else {
                 continue;
             };
+
+            // Issue #28 PR E — PT upgrade gate. When a user hasn't
+            // opted this series in to PT-sourced upgrades and the
+            // chosen candidate came from a private tracker, skip
+            // the upgrade. The user can still grab from PT manually
+            // (initial grab + manual search aren't gated) — this
+            // only stops the background sweep from silently
+            // re-grabbing existing episodes from a PT and racking
+            // up Hit-and-Run liability.
+            //
+            // Trade-off: skipping here means we might miss a
+            // legitimate non-PT upgrade that was ranked second
+            // behind the PT pick. Acceptable for v1.5 — the next
+            // sweep tick (24h cadence) re-runs and the non-PT
+            // candidate would then be the top pick if the PT one
+            // dropped off. If users hit this in practice, we can
+            // upgrade to candidate-pool filtering inside
+            // `find_best_for_target` later.
+            if !row.allow_pt_upgrades
+                && let Some(idx_id) = result.indexer_id
+                && pt_indexer_ids.contains(&idx_id)
+            {
+                logger::debug(
+                    &state.db,
+                    LogCategory::AutoSearch,
+                    &format!(
+                        "Upgrade: {} {} skipped — PT-sourced and series.allow_pt_upgrades = 0",
+                        title,
+                        auto_search::target_label(&target),
+                    ),
+                    &format!("indexer_id={idx_id}"),
+                )
+                .await;
+                continue;
+            }
 
             // Classify the incoming release once; reused for upgrade verification,
             // grab logging, and episode tag persistence below.
