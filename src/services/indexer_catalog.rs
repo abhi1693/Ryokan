@@ -223,3 +223,153 @@ pub const SEEDED: &[SeededIndexer] = &[
 pub fn find_seed(slug: &str) -> Option<&'static SeededIndexer> {
     SEEDED.iter().find(|s| s.slug == slug)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Slug uniqueness is load-bearing — `find_seed` returns the
+    /// first match, so a duplicate would silently shadow the
+    /// later entry on the picker.
+    #[test]
+    fn slugs_are_unique() {
+        let mut seen: HashSet<&'static str> = HashSet::new();
+        for s in SEEDED {
+            assert!(seen.insert(s.slug), "duplicate slug: {}", s.slug);
+        }
+    }
+
+    /// Slugs land in a `?template=<slug>` query param, so they
+    /// must be URL-safe without escaping. ASCII alnum + `-` is
+    /// the safe set.
+    #[test]
+    fn slugs_are_url_safe() {
+        for s in SEEDED {
+            assert!(
+                s.slug
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "slug {:?} contains a non-URL-safe character",
+                s.slug
+            );
+            assert!(!s.slug.is_empty(), "empty slug not allowed");
+        }
+    }
+
+    /// Display names are user-facing — empty would render a
+    /// blank card heading.
+    #[test]
+    fn display_names_are_non_empty() {
+        for s in SEEDED {
+            assert!(
+                !s.display_name.is_empty(),
+                "empty display_name for slug {:?}",
+                s.slug
+            );
+        }
+    }
+
+    /// Picker convention (mirrors Sonarr): `is_generic` entries
+    /// always sit at the end of the grid so the curated list
+    /// reads first. A reorder that buried Generic Torznab in
+    /// the middle would break the picker UX.
+    #[test]
+    fn generic_entries_come_last() {
+        let mut seen_generic = false;
+        for s in SEEDED {
+            if s.is_generic {
+                seen_generic = true;
+            } else {
+                assert!(
+                    !seen_generic,
+                    "non-generic seed {:?} appears after a generic entry; \
+                     Generic cards must sit at the end of the grid",
+                    s.slug
+                );
+            }
+        }
+        assert!(
+            seen_generic,
+            "catalog must include at least one generic fallback (Generic Torznab / Newznab)"
+        );
+    }
+
+    /// The picker grid renders both PRIVATE and PUBLIC pills;
+    /// having neither would mean a tester wouldn't exercise the
+    /// pill-class branch.
+    #[test]
+    fn catalog_covers_private_and_public_and_generic() {
+        let private_count = SEEDED
+            .iter()
+            .filter(|s| s.is_private_tracker && !s.is_generic)
+            .count();
+        let public_count = SEEDED
+            .iter()
+            .filter(|s| !s.is_private_tracker && !s.is_generic)
+            .count();
+        let generic_count = SEEDED.iter().filter(|s| s.is_generic).count();
+        assert!(private_count > 0, "expected at least one private tracker");
+        assert!(public_count > 0, "expected at least one public tracker");
+        assert!(generic_count >= 2, "expected the two generic fall-throughs");
+    }
+
+    /// `default_kind` must be `torznab` or `newznab` — the
+    /// upsert handler validates the same enum, so a catalog
+    /// entry with another value would fail the form roundtrip.
+    #[test]
+    fn default_kind_is_torznab_or_newznab() {
+        for s in SEEDED {
+            assert!(
+                matches!(s.default_kind, "torznab" | "newznab"),
+                "seed {:?} has invalid kind {:?}",
+                s.slug,
+                s.default_kind
+            );
+        }
+    }
+
+    /// `default_priority` must fall in the form's accepted
+    /// range (1..=50) — same validation the handler applies on
+    /// upsert.
+    #[test]
+    fn default_priority_in_range() {
+        for s in SEEDED {
+            assert!(
+                (1..=50).contains(&s.default_priority),
+                "seed {:?} priority {} out of [1, 50]",
+                s.slug,
+                s.default_priority
+            );
+        }
+    }
+
+    #[test]
+    fn find_seed_resolves_known_slugs() {
+        let ab = find_seed("animebytes").expect("animebytes seed exists");
+        assert_eq!(ab.display_name, "AnimeBytes");
+        assert!(ab.is_private_tracker);
+        assert!(!ab.is_generic);
+
+        let nekobt = find_seed("nekobt").expect("nekobt seed exists");
+        assert!(
+            !nekobt.is_private_tracker,
+            "nekoBT is public — user confirmation 2026-04-26"
+        );
+
+        let generic = find_seed("generic-torznab").expect("generic torznab seed exists");
+        assert!(generic.is_generic);
+        assert_eq!(generic.default_kind, "torznab");
+    }
+
+    #[test]
+    fn find_seed_returns_none_for_unknown_slug() {
+        assert!(find_seed("does-not-exist").is_none());
+        assert!(find_seed("").is_none());
+        // Case-sensitive — slugs are URL-safe lowercase by
+        // convention. A user hand-typing `?template=AnimeBytes`
+        // (capital) should fall through to the picker rather
+        // than silently match.
+        assert!(find_seed("AnimeBytes").is_none());
+    }
+}

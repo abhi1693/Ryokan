@@ -297,4 +297,152 @@ mod tests {
         assert_eq!(parse_optional_f64(&Some(String::new())), None);
         assert_eq!(parse_optional_f64(&Some("2.5".into())), Some(2.5));
     }
+
+    /// Toast wording is user-facing — `?msg=Saved` was the
+    /// pre-PR-108 default and didn't tell the user what
+    /// happened. The current handler emits
+    /// `Indexer '<name>' added` / `... updated` / `... deleted`
+    /// so the toast reads naturally. These tests pin that
+    /// surface in case a future refactor shortens or reformats
+    /// the message.
+    mod toast_format {
+        use super::super::*;
+        use crate::models::indexers::{IndexerForm, KIND_TORZNAB, insert};
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+        use axum::extract::{Form, State};
+
+        fn extract_location(resp: axum::response::Response) -> String {
+            resp.headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        }
+
+        fn upsert_form(id: Option<i64>, name: &str) -> IndexerUpsertForm {
+            IndexerUpsertForm {
+                id,
+                name: name.to_string(),
+                kind: "torznab".to_string(),
+                url: "https://prowlarr.local/1/api".to_string(),
+                api_key: "k".to_string(),
+                priority: Some("25".to_string()),
+                enabled: Some("on".to_string()),
+                is_private_tracker: None,
+                seed_ratio: None,
+                seed_time_minutes: None,
+                min_seeders: Some("1".to_string()),
+                request_timeout_secs: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn upsert_insert_toast_names_added_indexer() {
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let resp =
+                settings_indexers_upsert(State(state), Form(upsert_form(None, "Test Indexer")))
+                    .await;
+            let location = extract_location(resp);
+            // `'` percent-encodes to %27 via urlencoding::encode.
+            assert!(
+                location.contains("msg=Indexer%20%27Test%20Indexer%27%20added")
+                    || location.contains("msg=Indexer+%27Test+Indexer%27+added"),
+                "expected descriptive 'added' toast in redirect URL; got: {location}"
+            );
+        }
+
+        #[tokio::test]
+        async fn upsert_update_toast_names_updated_indexer() {
+            let db = in_memory_pool().await;
+            // Seed an existing row so the update branch fires.
+            let row_id = insert(
+                &db,
+                IndexerForm {
+                    name: "Original Name",
+                    kind: KIND_TORZNAB,
+                    url: "https://prowlarr.local/1/api",
+                    api_key: "k",
+                    priority: 25,
+                    enabled: true,
+                    is_private_tracker: false,
+                    seed_ratio: None,
+                    seed_time_minutes: None,
+                    min_seeders: 1,
+                    request_timeout_secs: None,
+                },
+            )
+            .await
+            .expect("seed indexer");
+            let state = build_test_app_state(db, None);
+            let resp =
+                settings_indexers_upsert(State(state), Form(upsert_form(Some(row_id), "Renamed")))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("msg=Indexer%20%27Renamed%27%20updated")
+                    || location.contains("msg=Indexer+%27Renamed%27+updated"),
+                "expected 'updated' toast naming the new value; got: {location}"
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_toast_names_removed_indexer() {
+            let db = in_memory_pool().await;
+            let row_id = insert(
+                &db,
+                IndexerForm {
+                    name: "Doomed",
+                    kind: KIND_TORZNAB,
+                    url: "https://prowlarr.local/1/api",
+                    api_key: "k",
+                    priority: 25,
+                    enabled: true,
+                    is_private_tracker: false,
+                    seed_ratio: None,
+                    seed_time_minutes: None,
+                    min_seeders: 1,
+                    request_timeout_secs: None,
+                },
+            )
+            .await
+            .expect("seed indexer");
+            let state = build_test_app_state(db, None);
+            let resp =
+                settings_indexers_delete(State(state), Form(IndexerDeleteForm { id: row_id }))
+                    .await;
+            // `delete` returns Redirect (not Response); `IntoResponse`
+            // turns it into a Response that has the Location header.
+            use axum::response::IntoResponse;
+            let resp = resp.into_response();
+            let location = extract_location(resp);
+            assert!(
+                location.contains("msg=Indexer%20%27Doomed%27%20deleted")
+                    || location.contains("msg=Indexer+%27Doomed%27+deleted"),
+                "expected 'deleted' toast naming the removed row; got: {location}"
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_toast_falls_back_to_id_for_missing_row() {
+            // A delete for a row that no longer exists (race or
+            // stale tab) shouldn't emit a malformed toast — the
+            // handler falls back to `id=N` when name lookup fails.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let resp =
+                settings_indexers_delete(State(state), Form(IndexerDeleteForm { id: 9999 })).await;
+            use axum::response::IntoResponse;
+            let resp = resp.into_response();
+            let location = extract_location(resp);
+            // The actual delete fails, so the handler takes the
+            // err path. Either way we should never see a literal
+            // "''" in the message — it'd render as `Indexer ''
+            // deleted`.
+            assert!(
+                !location.contains("Indexer%20%27%27") && !location.contains("Indexer+%27%27"),
+                "missing-row delete should not emit empty-quoted toast; got: {location}"
+            );
+        }
+    }
 }

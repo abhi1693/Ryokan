@@ -2091,4 +2091,129 @@ mod tests {
         assert!(!labels[0].negate);
         assert!(!labels[0].required);
     }
+
+    /// Indexer-picker pre-fill flow on the Settings → Indexers
+    /// tab. `?template=<slug>` resolves through
+    /// [`crate::services::indexer_catalog::find_seed`] and
+    /// populates [`SettingsTemplate::indexer_seed`]; the form
+    /// then renders pre-filled defaults from the seed instead of
+    /// blank. The two precedence rules below (edit shadows seed,
+    /// unknown-slug falls through) are the load-bearing
+    /// invariants for the picker UX.
+    mod indexer_picker {
+        use super::super::*;
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+
+        #[tokio::test]
+        async fn template_slug_populates_indexer_seed() {
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let template = build_settings_template(
+                &state,
+                Some("indexers".to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some("animebytes".to_string()),
+            )
+            .await;
+            let seed = template
+                .indexer_seed
+                .expect("animebytes slug should resolve to a seed");
+            assert_eq!(seed.slug, "animebytes");
+            assert_eq!(seed.display_name, "AnimeBytes");
+            assert!(seed.is_private_tracker);
+        }
+
+        #[tokio::test]
+        async fn unknown_template_slug_falls_through_to_picker() {
+            // Stale `?template=…` links from a removed catalog
+            // entry must degrade gracefully — the user lands on
+            // the blank picker grid, not an error page.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let template = build_settings_template(
+                &state,
+                Some("indexers".to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some("does-not-exist".to_string()),
+            )
+            .await;
+            assert!(template.indexer_seed.is_none());
+        }
+
+        #[tokio::test]
+        async fn edit_id_shadows_template_slug() {
+            // `?edit_id=N&template=…` URLs must pick the row
+            // (real DB values) over the seed (catalog defaults)
+            // — otherwise an Edit click on an existing row that
+            // happened to land on a seed-less form would
+            // overwrite real values with catalog defaults on
+            // Save.
+            let db = in_memory_pool().await;
+            let row_id = crate::models::indexers::insert(
+                &db,
+                crate::models::indexers::IndexerForm {
+                    name: "Existing",
+                    kind: "torznab",
+                    url: "https://prowlarr.local/1/api",
+                    api_key: "k",
+                    priority: 25,
+                    enabled: true,
+                    is_private_tracker: false,
+                    seed_ratio: None,
+                    seed_time_minutes: None,
+                    min_seeders: 1,
+                    request_timeout_secs: None,
+                },
+            )
+            .await
+            .expect("seed indexer");
+            let state = build_test_app_state(db, None);
+            let template = build_settings_template(
+                &state,
+                Some("indexers".to_string()),
+                Some(row_id),
+                None,
+                None,
+                None,
+                Some("animebytes".to_string()),
+            )
+            .await;
+            assert!(template.indexer_edit.is_some());
+            assert!(
+                template.indexer_seed.is_none(),
+                "edit_id must shadow the template slug — seed defaults would clobber real row values"
+            );
+        }
+
+        #[tokio::test]
+        async fn no_template_no_edit_renders_blank_picker() {
+            // The default landing on `?tab=indexers` shows the
+            // grid + table; neither edit_id nor template
+            // populated.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let template = build_settings_template(
+                &state,
+                Some("indexers".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert!(template.indexer_seed.is_none());
+            assert!(template.indexer_edit.is_none());
+            assert!(
+                !template.indexer_catalog.is_empty(),
+                "picker grid is always populated from the static catalog"
+            );
+        }
+    }
 }

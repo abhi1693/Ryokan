@@ -56,6 +56,16 @@
    partials/settings/indexers.html and binds via the `form`
    attribute. Empty body — the endpoint needs no payload, just a
    POST. #}
+{# Two emit branches deliberately: when a key is configured,
+   regenerating it invalidates an existing autobrr deployment, so
+   the form carries the data-ryokan-confirm-* attrs that route the
+   click through the danger-styled in-app confirm modal. When no
+   key is configured (first-time Generate), there's nothing to
+   invalidate — clicking Generate fires immediately without a
+   confirm prompt. The asymmetry is intentional: a fresh
+   generation has no stale-tab race worth guarding against because
+   a key existing for a moment longer than expected hurts no
+   running deployment. #}
 {% if tab == "indexers" && !config.autobrr_api_key.is_empty() %}
 <form id="autobrr-regen-form"
       method="post" action="/settings/autobrr/regenerate-key"

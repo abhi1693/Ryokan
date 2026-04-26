@@ -51,6 +51,13 @@
             bodyEl.textContent = opts.body || 'Are you sure?';
             yesBtn.textContent = opts.yesLabel || 'Yes';
             noBtn.textContent = opts.noLabel || 'No';
+            // Destructive-action treatment: red Yes button when
+            // `danger` is set, default accent otherwise. Class is
+            // toggled (not replaced) so any other classes the
+            // button picks up later won't be clobbered. Reset on
+            // close() so the next confirm starts neutral.
+            yesBtn.classList.toggle('btn-danger', !!opts.danger);
+            yesBtn.classList.toggle('btn-primary', !opts.danger);
             // Build extras checkboxes.
             extrasEl.innerHTML = '';
             for (const e of current.extras) {
@@ -501,11 +508,6 @@ window.addEventListener('DOMContentLoaded', function () {
 window.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('form[data-ryokan-confirm-title]').forEach(function (form) {
         form.addEventListener('submit', function (ev) {
-            // First-pass interception only. Once the user confirms
-            // we re-fire submit() programmatically, which dispatches
-            // the event again — the data-ryokan-confirmed flag
-            // tells us to let it through that time.
-            if (form.dataset.ryokanConfirmed === '1') return;
             ev.preventDefault();
             const title = form.getAttribute('data-ryokan-confirm-title') || 'Confirm';
             const body = form.getAttribute('data-ryokan-confirm-body') || 'Are you sure?';
@@ -514,15 +516,15 @@ window.addEventListener('DOMContentLoaded', function () {
             const danger = !!form.getAttribute('data-ryokan-confirm-danger');
             window.ryokanConfirm({
                 title: title, body: body, yesLabel: yesLabel, noLabel: noLabel,
+                danger: danger,
             }).then(function (result) {
                 if (!result || !result.ok) return;
-                if (danger) {
-                    // ryokanConfirm doesn't currently style the Yes
-                    // button red; flag is reserved for a future
-                    // visual tweak. Submission semantics don't
-                    // change.
-                }
-                form.dataset.ryokanConfirmed = '1';
+                // HTMLFormElement.submit() bypasses event handlers
+                // by spec — this listener won't re-fire, so no
+                // re-prompt loop possible. (If we ever switch to
+                // requestSubmit() to re-enable native form
+                // validation, we'll need a flag to skip the second
+                // intercept.)
                 form.submit();
             });
         });
