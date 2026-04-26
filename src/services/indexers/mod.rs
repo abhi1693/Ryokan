@@ -817,4 +817,60 @@ mod tests {
         // century-handling in the civil-from-days math.
         assert_eq!(super::format_publish_date(946_684_800), "2000-01-01 00:00");
     }
+
+    // ── rebuild_cache row/client pairing (PR #107 round-4 review fix #2) ─
+
+    #[tokio::test]
+    async fn rebuild_cache_drops_bad_rows_without_misaligning_clients() {
+        // PR #107 round-3 review fix #1 was a real correctness bug:
+        // when `from_row_arc` failed for a row mid-list, the
+        // positional `rows.iter().zip(clients.iter())` pairing
+        // realigned wrongly, causing the caps probe to write the
+        // wrong row's caps under the surviving row's id.
+        //
+        // This test pins the pairing fix: insert [A_good, B_bad,
+        // C_good] (B has an empty URL so from_row_arc rejects it),
+        // call rebuild_cache, and assert the cache contains exactly
+        // A and C in priority order. A future refactor that re-
+        // introduces a parallel-collect pattern would silently
+        // regress without this regression guard.
+        use crate::models::indexers::{IndexerForm, KIND_TORZNAB, insert};
+
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+
+        let mk = |name: &str, url: &str, priority: i32| IndexerForm {
+            name: Box::leak(name.to_string().into_boxed_str()),
+            kind: KIND_TORZNAB,
+            url: Box::leak(url.to_string().into_boxed_str()),
+            api_key: "k",
+            priority,
+            enabled: true,
+            is_private_tracker: false,
+            seed_ratio: None,
+            seed_time_minutes: None,
+            min_seeders: 0,
+            request_timeout_secs: None,
+        };
+        let a_id = insert(&db, mk("A", "https://a.example/api", 5))
+            .await
+            .unwrap();
+        let _b_id = insert(&db, mk("B_bad", "", 25)).await.unwrap();
+        let c_id = insert(&db, mk("C", "https://c.example/api", 50))
+            .await
+            .unwrap();
+
+        let cache = rebuild_cache(&db).await;
+        let snapshot = cache.read().await.clone();
+
+        assert_eq!(snapshot.len(), 2, "B (bad URL) must be dropped");
+        // Ordered by priority asc — A (5) then C (50).
+        assert_eq!(snapshot[0].id(), a_id, "first surviving entry must be A");
+        assert_eq!(snapshot[1].id(), c_id, "second surviving entry must be C");
+        // Specifically: B's id must NOT appear in the cache.
+        assert!(
+            !snapshot.iter().any(|c| c.id() == _b_id),
+            "B's id must not survive — its client was never instantiated"
+        );
+    }
 }

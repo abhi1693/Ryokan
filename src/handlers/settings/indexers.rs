@@ -147,7 +147,7 @@ pub async fn settings_indexers_upsert(
     path = "/settings/indexers/delete",
     tag = "Settings",
     summary = "Delete an indexer",
-    description = "Removes the indexer row by id. Existing grabbed_torrents rows referencing this indexer keep their indexer_id (NULL FK semantics), so grab history isn't lost.",
+    description = "Removes the indexer row by id. Existing grabbed_torrents and pending_grabs rows referencing this indexer have their indexer_id NULLed in the same transaction, so grab history is preserved with the FK cleared. SQLite can't enforce a real ON DELETE SET NULL via ALTER TABLE so the model layer (`models::indexers::delete`) handles it explicitly.",
     responses(
         (status = 303, description = "Redirect back to the indexers tab"),
     ),
@@ -173,6 +173,7 @@ pub async fn settings_indexers_delete(
             .await;
             // PR #107 review fix #4: same cache refresh as upsert.
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
+            Redirect::to("/settings?tab=indexers")
         }
         Err(e) => {
             logger::error(
@@ -182,9 +183,13 @@ pub async fn settings_indexers_delete(
                 &e.to_string(),
             )
             .await;
+            // PR #107 round-4 review fix #3: surface the failure
+            // via `&err=` so the user sees an inline banner instead
+            // of a quiet success-looking redirect. Mirrors the
+            // upsert handler's "Save failed" pattern.
+            Redirect::to("/settings?tab=indexers&err=Delete+failed")
         }
     }
-    Redirect::to("/settings?tab=indexers")
 }
 
 /// Coerce the priority form field into the Sonarr-convention
