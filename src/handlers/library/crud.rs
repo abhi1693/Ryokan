@@ -292,6 +292,18 @@ pub async fn remove_series(
                     if hash.is_empty() {
                         continue;
                     }
+                    // Issue #28 PR C — preserve PT seed rules across
+                    // series removal. A user wiping a series from the
+                    // library typically wants ratio policies honored
+                    // (their PT account's ratio is downstream of
+                    // every grab). The grabbed_torrents row gets
+                    // deleted below regardless via
+                    // delete_all_for_series, so the upgrade sweep
+                    // can't re-grab the same hash.
+                    if grabbed_torrents::respects_seed_rules(&state.db, hash).await {
+                        torrents_removed += 1; // counted as "handled"
+                        continue;
+                    }
                     match client.delete(hash, true).await {
                         Ok(()) => torrents_removed += 1,
                         Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),

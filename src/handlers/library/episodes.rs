@@ -494,9 +494,28 @@ pub async fn mark_episode_failed(
         let client = { state.download_client.read().await.as_ref().cloned() };
         if let Some(client) = client {
             for old in &old_grabs {
-                if !old.hash.is_empty()
-                    && let Err(e) = client.delete(&old.hash, true).await
-                {
+                if old.hash.is_empty() {
+                    continue;
+                }
+                // Issue #28 PR C — preserve PT seed rules across
+                // episode-replace. The old torrent has already
+                // imported successfully and is seeding to its
+                // per-tracker ratio/time policy; deleting it
+                // mid-seed could ding the user's tracker ratio.
+                if grabbed_torrents::respects_seed_rules(&state.db, &old.hash).await {
+                    crate::services::logger::info(
+                        &state.db,
+                        crate::models::log::LogCategory::QBit,
+                        &format!(
+                            "Skipping client delete for replaced torrent {} (respect_seed_rules)",
+                            old.torrent_name
+                        ),
+                        &old.hash,
+                    )
+                    .await;
+                    continue;
+                }
+                if let Err(e) = client.delete(&old.hash, true).await {
                     crate::services::logger::warn(
                         &state.db,
                         crate::models::log::LogCategory::QBit,
