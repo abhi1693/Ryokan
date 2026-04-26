@@ -254,9 +254,16 @@ fn truncate_body(s: &str) -> String {
 }
 
 fn default_timeout_from_env() -> Option<u64> {
+    // PR #107 review fix #11: clamp the env-var override into the
+    // same [1, 600] range the form-side parser enforces. Without
+    // this, a misconfigured deployment with `RYOKAN_INDEXER_DEFAULT_
+    // TIMEOUT_SECS=0` would force every search to time out
+    // immediately; a `=99999` value would block the search loop
+    // for hours per indexer.
     std::env::var("RYOKAN_INDEXER_DEFAULT_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| (1..=600).contains(n))
 }
 
 #[cfg(test)]
@@ -424,6 +431,28 @@ mod tests {
                 description: "unknown".to_string()
             })
             .contains("other")
+        );
+        // PR #107 review fix #15: 910 = API disabled.
+        assert!(
+            format_torznab_error(&TorznabError {
+                code: 910,
+                description: "API disabled".to_string()
+            })
+            .contains("disabled")
+        );
+        assert!(
+            format_torznab_error(&TorznabError {
+                code: 102,
+                description: "permissions".to_string()
+            })
+            .contains("permissions")
+        );
+        assert!(
+            format_torznab_error(&TorznabError {
+                code: 300,
+                description: "no such item".to_string()
+            })
+            .contains("missing")
         );
     }
 }

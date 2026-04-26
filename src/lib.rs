@@ -51,10 +51,18 @@ use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
 use services::{
-    custom_formats::CompiledCfCache, download_client::DownloadClient,
+    custom_formats::CompiledCfCache, download_client::DownloadClient, indexers::Indexer,
     interactive_search_cache::InteractiveSearchCache, jellyfin::JellyfinClient,
     oauth_state::OAuthStateStore, progress::ProgressRegistry,
 };
+
+/// PR #107 review fix #4: cached `Vec<Arc<dyn Indexer>>` swapped on
+/// `Settings → Indexers` edits. Mirrors [`CompiledCfCache`] —
+/// outer `RwLock` owns swap; inner `Arc<Vec<_>>` is cheap-cloned
+/// out on the search hot path so the read lock releases before the
+/// per-query fan-out begins. Avoids rebuilding reqwest::Client
+/// instances on every per-target search.
+pub type IndexerCache = Arc<RwLock<Arc<Vec<Arc<dyn Indexer>>>>>;
 
 /// Shared application state available to all handlers. Lives in the
 /// library crate (rather than `main.rs`) so integration tests can
@@ -70,6 +78,12 @@ pub struct AppState {
     /// out on the scoring hot path so the read lock releases before the
     /// per-candidate evaluation loop begins.
     pub custom_formats: CompiledCfCache,
+    /// Cached indexer clients (PR #107 review fix #4). Same swap-
+    /// on-write pattern as `custom_formats` — rebuilt by the
+    /// Settings → Indexers handlers on add/edit/delete, and read
+    /// lock-free via `Arc::clone` on the search path. Avoids
+    /// rebuilding reqwest clients per search.
+    pub indexers: IndexerCache,
     /// In-memory progress registry for long-running user-triggered jobs
     /// (currently the manual auto-search). The frontend mints an opaque
     /// `progress_id`, the trigger handler binds it via

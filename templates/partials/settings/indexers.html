@@ -31,6 +31,7 @@
                     <td>{% if idx.is_private_tracker %}Yes{% else %}No{% endif %}</td>
                     <td>{% if idx.enabled %}Enabled{% else %}Disabled{% endif %}</td>
                     <td>
+                        <a href="/settings?tab=indexers&edit_id={{ idx.id }}" class="btn btn-small">Edit</a>
                         <form method="post" action="/settings/indexers/delete" style="display:inline">
                             <input type="hidden" name="id" value="{{ idx.id }}">
                             <button type="submit" class="btn btn-danger btn-small"
@@ -46,11 +47,57 @@
         </div>
         {% endif %}
 
+        {% if let Some(edit) = indexer_edit %}
+        <h3 class="settings-subheading">Edit Indexer</h3>
+        <p class="form-hint">
+            Updating <strong>{{ edit.name }}</strong>.
+            <a href="/settings?tab=indexers">Cancel and return to Add Indexer.</a>
+        </p>
+        <form method="post" action="/settings/indexers/upsert" class="settings-subform">
+            <input type="hidden" name="id" value="{{ edit.id }}">
+            <label>
+                Name
+                <input type="text" name="name" required maxlength="100" value="{{ edit.name }}">
+            </label>
+            <label>
+                Kind
+                <select name="kind">
+                    <option value="torznab" {% if edit.kind == "torznab" %}selected{% endif %}>torznab</option>
+                    <option value="newznab" {% if edit.kind == "newznab" %}selected{% endif %}>newznab</option>
+                </select>
+            </label>
+            <label>
+                URL
+                <input type="url" name="url" required value="{{ edit.url }}">
+            </label>
+            <label>
+                API Key
+                <input type="text" name="api_key" autocomplete="off" value="{{ edit.api_key }}">
+            </label>
+            <label>
+                Priority
+                <input type="number" name="priority" value="{{ edit.priority }}" min="1" max="50">
+            </label>
+            <label>
+                Min Seeders
+                <input type="number" name="min_seeders" value="{{ edit.min_seeders }}" min="0">
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" name="enabled" {% if edit.enabled %}checked{% endif %}>
+                Enabled
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" name="is_private_tracker" {% if edit.is_private_tracker %}checked{% endif %}>
+                Private tracker
+            </label>
+            <button type="submit" class="btn btn-primary">Save Changes</button>
+        </form>
+        {% else %}
         <h3 class="settings-subheading">Add Indexer</h3>
         <p class="form-hint">
             Paste the full torznab base URL from Prowlarr's "Copy Torznab URL" button (or
             Jackett's per-indexer torznab URL). The URL ends in <code>/api</code>; do not
-            add query params yourself — Ryokan appends <code>?t=…&amp;apikey=…</code>.
+            add query params yourself; Ryokan appends <code>?t=…&amp;apikey=…</code>.
         </p>
         <form method="post" action="/settings/indexers/upsert" class="settings-subform">
             <label>
@@ -96,4 +143,5 @@
             </label>
             <button type="submit" class="btn btn-primary">Add Indexer</button>
         </form>
+        {% endif %}
     </fieldset>

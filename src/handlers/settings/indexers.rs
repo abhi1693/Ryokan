@@ -74,6 +74,13 @@ pub async fn settings_indexers_upsert(
     if url.is_empty() {
         return Redirect::to("/settings?tab=indexers&err=URL+required").into_response();
     }
+    // PR #107 review fix #12: catch typos at save time rather
+    // than at the next search. reqwest::Url::parse is what the
+    // client uses internally; round-tripping it here surfaces
+    // missing scheme / malformed host immediately.
+    if reqwest::Url::parse(url).is_err() {
+        return Redirect::to("/settings?tab=indexers&err=Invalid+URL+syntax").into_response();
+    }
     let priority = parse_priority(&form.priority);
     let min_seeders = parse_optional_i32(&form.min_seeders, 1).max(0);
     let request_timeout_secs = parse_optional_secs(&form.request_timeout_secs);
@@ -116,6 +123,10 @@ pub async fn settings_indexers_upsert(
                 &format!("id={id}, priority={priority}"),
             )
             .await;
+            // PR #107 review fix #4: rebuild the IndexerCache so
+            // the next search picks up the new/edited row without
+            // a process restart.
+            crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
             Redirect::to("/settings?tab=indexers&msg=Saved").into_response()
         }
         Err(e) => {
@@ -154,6 +165,8 @@ pub async fn settings_indexers_delete(
                 "",
             )
             .await;
+            // PR #107 review fix #4: same cache refresh as upsert.
+            crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
         }
         Err(e) => {
             logger::error(

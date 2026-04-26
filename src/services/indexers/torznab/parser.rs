@@ -122,7 +122,13 @@ fn parse_item_block(block: &str, indexer_id: i64, indexer_priority: i32) -> Rele
         .unwrap_or_default();
     let magnet = attr("magneturl").unwrap_or_default();
 
-    let categories = parse_categories(&attrs);
+    // PR #107 review fix #2: use the multi-value extractor so a
+    // release marked with BOTH `5070` and `5999` (the AnimeTosho-
+    // via-Prowlarr mis-tag from Prowlarr#1253) surfaces both ids.
+    // The single-value `parse_categories` only returns the first
+    // observed value, which would silently break the title-parse
+    // fallback the doc comment promises.
+    let categories = extract_all_categories(block);
     let download_volume_factor = attr("downloadvolumefactor").and_then(|s| s.parse::<f32>().ok());
     let upload_volume_factor = attr("uploadvolumefactor").and_then(|s| s.parse::<f32>().ok());
 
@@ -223,23 +229,6 @@ fn parse_torznab_attrs(block: &str) -> HashMap<String, String> {
         out.entry(name).or_insert(value);
     }
     out
-}
-
-/// `category` can repeat — e.g. a release marked both "TV" and
-/// "Anime". Pull every numeric value into a Vec so callers can
-/// check `contains(&5070)` for anime regardless of which other
-/// cats the indexer also assigned.
-fn parse_categories(attrs: &HashMap<String, String>) -> Vec<i32> {
-    // Single-value path covers most cases. The torznab attr regex
-    // collapses repeats into the first; we re-scan the raw block
-    // separately for the multi-value case.
-    let mut cats: Vec<i32> = Vec::new();
-    if let Some(raw) = attrs.get("category")
-        && let Ok(n) = raw.parse::<i32>()
-    {
-        cats.push(n);
-    }
-    cats
 }
 
 /// Variant of [`parse_torznab_attrs`] that captures EVERY value

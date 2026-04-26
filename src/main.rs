@@ -432,12 +432,19 @@ async fn main() {
     let users_exist_initial = models::user::has_users(&db).await.unwrap_or(false);
     let users_exist = Arc::new(std::sync::atomic::AtomicBool::new(users_exist_initial));
 
+    // PR #107 review fix #4: build the indexer cache at startup.
+    // Failed instantiations (empty URL, reqwest build) are logged
+    // and dropped via `services::indexers::rebuild_cache` so the
+    // surviving rows still fan out.
+    let indexers = services::indexers::rebuild_cache(&db).await;
+
     // Build shared state.
     let state = AppState {
         db: db.clone(),
         download_client: Arc::new(RwLock::new(None)),
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
+        indexers,
         progress: ProgressRegistry::new(),
         users_exist,
         interactive_search_cache: services::interactive_search_cache::new(),

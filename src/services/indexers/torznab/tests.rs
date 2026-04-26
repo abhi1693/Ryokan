@@ -222,6 +222,31 @@ fn search_response_empty_channel_returns_empty_releases_not_error() {
 }
 
 #[test]
+fn search_response_carries_multiple_categories_when_release_is_double_tagged() {
+    // PR #107 review fix #2: regression for the AnimeTosho-via-
+    // Prowlarr 5999/5070 mis-tag (Prowlarr#1253). A release marked
+    // with both `5070` (Anime) and `5999` (Other) used to surface
+    // only the first because the single-value attr map dropped
+    // repeats. The fix routes through `extract_all_categories`
+    // which scans the raw block.
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel><item>
+  <title>Show</title>
+  <guid>g1</guid>
+  <torznab:attr name="category" value="5999"/>
+  <torznab:attr name="category" value="5070"/>
+  <torznab:attr name="seeders" value="10"/>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(result[0].categories.len(), 2, "both cats must surface");
+    assert!(result[0].categories.contains(&5070), "5070 missing");
+    assert!(result[0].categories.contains(&5999), "5999 missing");
+}
+
+#[test]
 fn search_response_collects_unrecognized_attrs_into_extra() {
     // Anything beyond the well-known torznab:attr set lands in
     // `extra` so the inspector can show indexer-specific metadata

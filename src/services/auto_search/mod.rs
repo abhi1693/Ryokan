@@ -313,6 +313,7 @@ pub async fn find_all_for_target(
     scored
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn find_best_for_target(
     db: &SqlitePool,
     detail: &AnimeDetail,
@@ -321,6 +322,7 @@ pub async fn find_best_for_target(
     allow_batch: bool,
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
 ) -> Option<SearchResult> {
     collect_scored_for_target(
         db,
@@ -330,6 +332,7 @@ pub async fn find_best_for_target(
         allow_batch,
         batch_episode_match,
         cfs,
+        indexers_cache,
     )
     .await
     .into_iter()
@@ -358,8 +361,9 @@ pub async fn find_best_batch_for_target(
     config: &Config,
     target: &SearchTarget,
     cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
 ) -> Option<SearchResult> {
-    collect_scored_batches_for_target(db, detail, config, target, cfs)
+    collect_scored_batches_for_target(db, detail, config, target, cfs, indexers_cache)
         .await
         .into_iter()
         .next()
@@ -378,6 +382,7 @@ pub async fn collect_scored_batches_for_target(
     config: &Config,
     target: &SearchTarget,
     cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
 ) -> Vec<SearchResult> {
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
@@ -425,7 +430,8 @@ pub async fn collect_scored_batches_for_target(
     }
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
-    let indexers = load_indexer_clients(db).await;
+    let indexers_arc = indexers_cache.read().await.clone();
+    let indexers: &[std::sync::Arc<dyn crate::services::indexers::Indexer>] = &indexers_arc[..];
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
@@ -440,7 +446,7 @@ pub async fn collect_scored_batches_for_target(
         seadex_hashes: &seadex_hashes,
         restrict_user: &series_ctx.restrict_user,
         absolute_offset: series_ctx.absolute_offset,
-        indexers: &indexers,
+        indexers,
     };
 
     // Standard query sweep — picks up any batches that happen to surface
@@ -573,6 +579,7 @@ pub async fn collect_scored_batches_for_target(
 /// expensive collection pass. Filtering to batches post-sort gives the
 /// same answer as filtering pre-scoring because `rescore_for_auto_search`
 /// applies its per-target batch bump uniformly inside each target kind.
+#[allow(clippy::too_many_arguments)]
 async fn collect_scored_for_target(
     db: &SqlitePool,
     detail: &AnimeDetail,
@@ -581,6 +588,7 @@ async fn collect_scored_for_target(
     allow_batch: bool,
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
 ) -> Vec<SearchResult> {
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
@@ -651,7 +659,8 @@ async fn collect_scored_for_target(
     }
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
-    let indexers = load_indexer_clients(db).await;
+    let indexers_arc = indexers_cache.read().await.clone();
+    let indexers: &[std::sync::Arc<dyn crate::services::indexers::Indexer>] = &indexers_arc[..];
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
@@ -666,7 +675,7 @@ async fn collect_scored_for_target(
         seadex_hashes: &seadex_hashes,
         restrict_user: &series_ctx.restrict_user,
         absolute_offset: series_ctx.absolute_offset,
-        indexers: &indexers,
+        indexers,
     };
 
     // Phase 1: standard queries (primary aliases + episode variants).
@@ -979,27 +988,37 @@ async fn run_queries(
     // pool. Empty `ctx.indexers` (the v1.4 default) skips this
     // pass entirely so behavior is unchanged for users who
     // haven't configured any indexers.
-    let mut indexer_responses: Vec<crate::services::nyaa::SearchResult> = Vec::new();
-    if !ctx.indexers.is_empty() {
-        // One torznab query per text query — same fan-out shape
-        // as Nyaa. The indexer impls handle their own per-row
-        // timeouts; a slow indexer holds up only its own slot.
-        for query in queries {
-            let search_query = crate::services::indexers::SearchQuery {
-                q: query.clone(),
-                categories: Vec::new(), // default → 5070 (anime)
-                limit: None,
-                offset: None,
-            };
-            let outcomes =
-                crate::services::indexers::fan_out_search(ctx.indexers, &search_query).await;
+    //
+    // PR #107 review fix #1+#3: collect raw `Release` records
+    // (not pre-converted to SearchResult) so `dedup_for_auto_search`
+    // can apply priority-based attribution + max-seeders aggregation
+    // across indexers reporting the same infohash. Per-query
+    // fan-outs run concurrently via `buffer_unordered` so a slow
+    // indexer holds up only its own slot, not subsequent queries.
+    let indexer_releases: Vec<crate::services::indexers::Release> = if ctx.indexers.is_empty() {
+        Vec::new()
+    } else {
+        let outcome_streams: Vec<_> = stream::iter(queries.iter().cloned())
+            .map(|query| async move {
+                let search_query = crate::services::indexers::SearchQuery {
+                    q: query.clone(),
+                    categories: Vec::new(),
+                    limit: None,
+                    offset: None,
+                };
+                (
+                    query,
+                    crate::services::indexers::fan_out_search(ctx.indexers, &search_query).await,
+                )
+            })
+            .buffer_unordered(nyaa::NYAA_BUFFER)
+            .collect()
+            .await;
+        let mut releases: Vec<crate::services::indexers::Release> = Vec::new();
+        for (query, outcomes) in outcome_streams {
             for outcome in outcomes {
                 match outcome.result {
-                    Ok(releases) => {
-                        for r in releases {
-                            indexer_responses.push(r.into_search_result());
-                        }
-                    }
+                    Ok(rs) => releases.extend(rs),
                     Err(e) => {
                         tracing::debug!(
                             "indexer fan-out failed for '{}' on indexer #{} ({}): {}",
@@ -1012,7 +1031,18 @@ async fn run_queries(
                 }
             }
         }
-    }
+        // Cross-indexer + cross-query dedup with priority attribution
+        // (decision #3): when two indexers report the same infohash,
+        // the lowest-priority-number indexer wins attribution and
+        // seeders aggregate via `max`. Without this the per-`run_queries`
+        // `seen` HashSet (further down) would attribute by HashMap
+        // iteration order — nondeterministic.
+        crate::services::indexers::dedup_for_auto_search(releases)
+    };
+    let indexer_responses: Vec<crate::services::nyaa::SearchResult> = indexer_releases
+        .into_iter()
+        .map(|r| r.into_search_result())
+        .collect();
 
     for resp in responses {
         let results = match resp {
@@ -1103,39 +1133,6 @@ async fn run_queries(
         }
         candidates.push(result);
     }
-}
-
-/// Issue #28 PR B — load every enabled indexer row from the DB
-/// and instantiate a `TorznabIndexer` per row. Failed instantiations
-/// (empty URL, reqwest client build failure) are logged and dropped
-/// rather than poisoning the whole sweep — partial fan-out is
-/// always better than no fan-out.
-async fn load_indexer_clients(
-    db: &SqlitePool,
-) -> Vec<std::sync::Arc<dyn crate::services::indexers::Indexer>> {
-    let rows = match crate::models::indexers::list_enabled(db).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("failed to load indexers from DB: {e}");
-            return Vec::new();
-        }
-    };
-    rows.iter()
-        .filter_map(|row| {
-            match crate::services::indexers::torznab::TorznabIndexer::from_row_arc(row) {
-                Ok(idx) => Some(idx),
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to instantiate indexer #{} ({}): {}",
-                        row.id,
-                        row.name,
-                        e
-                    );
-                    None
-                }
-            }
-        })
-        .collect()
 }
 
 /// Run queries for interactive search with relaxed matching.

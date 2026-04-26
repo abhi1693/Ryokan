@@ -148,6 +148,12 @@ struct SettingsTemplate {
     /// list. Empty on a fresh install since no indexers exist
     /// until the user adds one.
     indexers: Vec<crate::models::indexers::Indexer>,
+    /// PR #107 review fix #5: when the indexers tab is active
+    /// and `?edit_id=N` is set, populate this with the matching
+    /// row so the upsert form prefills from the existing values.
+    /// `None` renders the bare "Add Indexer" form; same prefill
+    /// pattern as the Custom Formats tab.
+    indexer_edit: Option<crate::models::indexers::Indexer>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -608,6 +614,16 @@ async fn build_settings_template(
 
     let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
     let title_language = cfg.title_language.clone();
+    // PR #107 review fix #5: resolve the indexer edit prefill the
+    // same way CF does. `edit_id` is shared across tabs — at most
+    // one tab consumes it at a time.
+    let indexer_edit = match edit_id {
+        Some(id) => crate::models::indexers::get_by_id(&state.db, id)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -624,6 +640,7 @@ async fn build_settings_template(
         external_account,
         title_language,
         indexers: indexers_res.unwrap_or_default(),
+        indexer_edit,
     }
 }
 
@@ -899,6 +916,7 @@ pub async fn settings_submit(
             custom_format_import_review: None,
             message: None,
             error: Some(format!("Failed to save: {}", e)),
+            indexer_edit: None,
             version: env!("CARGO_PKG_VERSION"),
             external_account,
             title_language,
@@ -1225,6 +1243,7 @@ pub async fn settings_submit(
         // the user changes integration settings).
         message: Some(notices.join(" ")),
         error: None,
+        indexer_edit: None,
         version: env!("CARGO_PKG_VERSION"),
         external_account,
         title_language,

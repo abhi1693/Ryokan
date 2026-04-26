@@ -42,8 +42,13 @@
 //!   `5999` (Other) — title-parse fallback is required if the cat
 //!   doesn't include 5070.
 //! - **Per-indexer rate limits live inside Prowlarr/Jackett,** not
-//!   the indexer itself. They surface as `429 Retry-After`. Mirror
-//!   the cooldown pattern from [`crate::services::anilist::rate_limit`].
+//!   the indexer itself. They surface as `429 Retry-After`. The
+//!   client surfaces the retry_after seconds in the error message;
+//!   no process-wide cooldown is applied yet — every fan-out re-
+//!   issues whether the previous burst hit a 429 or not. PR C
+//!   wires the cooldown table mirroring
+//!   [`crate::services::anilist::rate_limit`]; until then, a
+//!   429-storm just logs at debug level and keeps trying.
 //! - **`tvsearch` with `cat=5070&q=<title>` is the right anime
 //!   path.** `season`/`ep` params don't translate cleanly because
 //!   anime trackers key on absolute episode numbers in titles.
@@ -337,6 +342,44 @@ pub fn merge_for_interactive_search(releases: Vec<Release>) -> Vec<Release> {
     out
 }
 
+/// PR #107 review fix #4: build a fresh `Vec<Arc<dyn Indexer>>`
+/// from the DB and wrap it in the [`crate::IndexerCache`] swap-on-
+/// write Arc. Called once at startup and again from the
+/// Settings → Indexers handlers on add/edit/delete so the cache
+/// stays current. Failed instantiations log + drop, same partial-
+/// fan-out posture as the old in-line `load_indexer_clients`.
+pub async fn rebuild_cache(db: &sqlx::SqlitePool) -> crate::IndexerCache {
+    let rows = match crate::models::indexers::list_enabled(db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("indexers: failed to load from DB: {e}");
+            Vec::new()
+        }
+    };
+    let clients: Vec<Arc<dyn Indexer>> = rows
+        .iter()
+        .filter_map(|row| match torznab::TorznabIndexer::from_row_arc(row) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                tracing::warn!("indexers: skipping #{} ({}) — {}", row.id, row.name, e);
+                None
+            }
+        })
+        .collect();
+    Arc::new(tokio::sync::RwLock::new(Arc::new(clients)))
+}
+
+/// Swap fresh contents into an existing cache without reallocating
+/// the outer Arc. Used by the Settings handlers after an upsert /
+/// delete so handler code holding `state.indexers.clone()`
+/// continues to see the new list on the next read.
+pub async fn refresh_cache_in_place(cache: &crate::IndexerCache, db: &sqlx::SqlitePool) {
+    let rebuilt = rebuild_cache(db).await;
+    let new_inner = rebuilt.read().await.clone();
+    let mut guard = cache.write().await;
+    *guard = new_inner;
+}
+
 /// Concurrent fan-out across configured indexers. Each indexer
 /// runs in its own future with the indexer's own request timeout;
 /// a slow indexer holds up only its own slot, not the whole
@@ -381,6 +424,7 @@ impl Release {
         let group = extract_group_from_title(&self.title);
         let resolution = extract_resolution_from_title(&self.title);
         let is_batch = detect_batch_from_title(&self.title);
+        let indexer_id = self.indexer_id;
         crate::services::nyaa::SearchResult {
             title: self.title,
             link: self.link.clone(),
@@ -410,6 +454,12 @@ impl Release {
             // pubDate from the release as ISO-ish; the rest of
             // Ryokan's UI only renders the string verbatim.
             upload_date: format_publish_date(self.publish_date),
+            // PR #107 review fix #7: propagate the indexer_id so
+            // grabbed_torrents.indexer_id can be populated at grab
+            // time. Without this, the FK column added in PR A is
+            // dormant — nothing surfaces the source indexer to the
+            // grab path.
+            indexer_id: Some(indexer_id),
         }
     }
 }
@@ -437,10 +487,12 @@ fn extract_group_from_title(title: &str) -> String {
 }
 
 fn extract_resolution_from_title(title: &str) -> String {
-    for needle in ["2160p", "1080p", "720p", "480p", "1080P", "720P"] {
-        if title.contains(needle) {
-            // Strip the trailing 'p' so we match Nyaa's `resolution`
-            // shape ("1080" not "1080p"). Case-insensitive.
+    // PR #107 review fix #10: case-insensitive single pass instead
+    // of two separate lists. Covers 2160P / 480P uppercase that the
+    // earlier list missed.
+    let lower = title.to_ascii_lowercase();
+    for needle in ["2160p", "1080p", "720p", "480p"] {
+        if lower.contains(needle) {
             let digits: String = needle.chars().take_while(|c| c.is_ascii_digit()).collect();
             return digits;
         }
@@ -449,12 +501,35 @@ fn extract_resolution_from_title(title: &str) -> String {
 }
 
 fn detect_batch_from_title(title: &str) -> bool {
-    let lower = title.to_lowercase();
-    lower.contains("batch")
-        || lower.contains("season pack")
-        || lower.contains("complete")
-        || lower.contains("[bd]")
-        || lower.contains("(bd)")
+    // PR #107 review fix #9: tighten "complete" matching with a
+    // word-boundary-equivalent check. The earlier substring scan
+    // matched "Incomplete Edition" and similar negated forms.
+    // Now require the keyword to be flanked by whitespace, brackets,
+    // or string boundaries — matches the way real release titles
+    // tag a batch ("Show - Complete", "[Group] Show Complete BD").
+    let lower = title.to_ascii_lowercase();
+    if lower.contains("[bd]") || lower.contains("(bd)") || lower.contains("season pack") {
+        return true;
+    }
+    for needle in ["batch", "complete"] {
+        if let Some(idx) = lower.find(needle) {
+            let before_ok = idx == 0
+                || lower
+                    .as_bytes()
+                    .get(idx - 1)
+                    .is_some_and(|&b| !b.is_ascii_alphabetic());
+            let after = idx + needle.len();
+            let after_ok = after == lower.len()
+                || lower
+                    .as_bytes()
+                    .get(after)
+                    .is_some_and(|&b| !b.is_ascii_alphabetic());
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn format_bytes_human(bytes: u64) -> String {
@@ -658,5 +733,102 @@ mod tests {
         assert_eq!(out[1].title, "Older");
         // Indexer 2 last (priority 50).
         assert_eq!(out[2].title, "Other indexer");
+    }
+
+    // ── Helper unit tests (PR #107 review fix #10) ──────────────────
+
+    #[test]
+    fn extract_group_pulls_first_bracketed_segment() {
+        assert_eq!(
+            super::extract_group_from_title("[GroupX] Show - 01 [BD 1080p].mkv"),
+            "GroupX"
+        );
+    }
+
+    #[test]
+    fn extract_group_skips_pure_numeric_brackets() {
+        // Some indexers prefix with a numeric ID (`[1234]` etc.).
+        // Skip those — they're not the release group.
+        assert_eq!(
+            super::extract_group_from_title("[12345] [GroupX] Show.mkv"),
+            "GroupX"
+        );
+    }
+
+    #[test]
+    fn extract_group_returns_empty_when_no_brackets() {
+        assert_eq!(super::extract_group_from_title("Show - 01.mkv"), "");
+    }
+
+    #[test]
+    fn extract_resolution_handles_uppercase_p() {
+        // PR #107 review fix #10: 2160P / 480P with uppercase P
+        // weren't covered by the original list; the case-insensitive
+        // pass catches both.
+        assert_eq!(
+            super::extract_resolution_from_title("Show 2160P.mkv"),
+            "2160"
+        );
+        assert_eq!(super::extract_resolution_from_title("Show 480P.mkv"), "480");
+        assert_eq!(super::extract_resolution_from_title("Show [1080P]"), "1080");
+    }
+
+    #[test]
+    fn extract_resolution_returns_empty_when_no_marker() {
+        assert_eq!(super::extract_resolution_from_title("Show - 01.mkv"), "");
+    }
+
+    #[test]
+    fn detect_batch_word_boundary_blocks_incomplete_edition() {
+        // PR #107 review fix #9: "Incomplete" used to trigger because
+        // the substring contains "complete". The word-boundary check
+        // rejects it now.
+        assert!(!super::detect_batch_from_title(
+            "Show Incomplete Edition.mkv"
+        ));
+        // Real "Complete" still triggers.
+        assert!(super::detect_batch_from_title("Show Complete BD.mkv"));
+        // Other markers stay positive.
+        assert!(super::detect_batch_from_title("[Group] Show Batch.mkv"));
+        assert!(super::detect_batch_from_title(
+            "[Group] Show Season Pack.mkv"
+        ));
+        assert!(super::detect_batch_from_title("Show [BD]"));
+    }
+
+    #[test]
+    fn format_bytes_human_zero_renders_empty() {
+        assert_eq!(super::format_bytes_human(0), "");
+    }
+
+    #[test]
+    fn format_bytes_human_under_gib_uses_mib() {
+        assert_eq!(super::format_bytes_human(500 * 1024 * 1024), "500 MiB");
+    }
+
+    #[test]
+    fn format_bytes_human_at_or_above_gib_uses_gib() {
+        assert_eq!(super::format_bytes_human(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(super::format_bytes_human(2 * 1024u64.pow(3)), "2.0 GiB");
+    }
+
+    #[test]
+    fn format_publish_date_zero_or_negative_renders_empty() {
+        assert_eq!(super::format_publish_date(0), "");
+        assert_eq!(super::format_publish_date(-1), "");
+    }
+
+    #[test]
+    fn format_publish_date_round_trips_known_dates() {
+        // Epoch + 1s.
+        assert_eq!(super::format_publish_date(1), "1970-01-01 00:00");
+        // One full day in (non-leap 1970).
+        assert_eq!(super::format_publish_date(86_400), "1970-01-02 00:00");
+        // 2000-01-01 00:00:00 UTC = 946684800. Y2K boundary; verifies
+        // century-handling in the civil-from-days math.
+        assert_eq!(
+            super::format_publish_date(946_684_800),
+            "2000-01-01 00:00"
+        );
     }
 }

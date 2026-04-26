@@ -198,7 +198,14 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             let label = auto_search::target_label(&target);
             // batch_episode_match=true so BD season packs can match episode targets.
             let best = auto_search::find_best_for_target(
-                &state.db, &detail, &cfg, &target, true, true, &cfs,
+                &state.db,
+                &detail,
+                &cfg,
+                &target,
+                true,
+                true,
+                &cfs,
+                &state.indexers,
             )
             .await;
 
