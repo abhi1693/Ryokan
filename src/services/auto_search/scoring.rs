@@ -311,12 +311,21 @@ pub(super) fn rescore_for_auto_search_with_breakdown(
         }
         SearchTarget::Episode(ep) => {
             if result.is_batch {
-                add(
-                    &mut parts,
-                    "Batch Penalty (episode target)",
-                    -20,
-                    Some("single-episode grab preferred".to_string()),
-                );
+                if !batch_search_mode {
+                    // Same gate the SearchTarget::Single arm uses: the
+                    // user explicitly asked for batches when batch_search_mode
+                    // is on, so penalizing every candidate -20 for being a
+                    // batch is uniform across the slate (doesn't change
+                    // ranking) but produces a confusing "Batch Penalty
+                    // (episode target): single-episode grab preferred"
+                    // line on every row in the breakdown. Suppress.
+                    add(
+                        &mut parts,
+                        "Batch Penalty (episode target)",
+                        -20,
+                        Some("single-episode grab preferred".to_string()),
+                    );
+                }
             } else {
                 add(&mut parts, "Single-Episode Target", 10, None);
             }

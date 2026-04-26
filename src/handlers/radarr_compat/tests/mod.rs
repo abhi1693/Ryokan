@@ -3,4 +3,5 @@
 //! endpoints follow in a later PR.
 
 mod auth;
+mod helpers;
 mod system;

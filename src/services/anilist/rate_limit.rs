@@ -369,6 +369,30 @@ pub(super) fn set_anilist_cooldown(retry_after_secs: Option<u64>, default_dur: D
     set_cooldown_until_now_plus(dur);
 }
 
+/// Apply the AL rate-limit policy to a response from any AL endpoint
+/// reachable outside the `services::anilist` module. Records the
+/// `X-RateLimit-*` headroom counters on every response (so the next
+/// in-module AL call sees a fresh-from-AL view of the window), and
+/// flips the process-wide cooldown on 429 / 5xx so subsequent AL
+/// calls (metadata sync, library page render, scoring path) back
+/// off.
+///
+/// Exists so the link-flow viewer fetch in `handlers::oauth` can
+/// fully participate in the same throttle state as the in-module
+/// callers without exposing the internal `(super)` primitives.
+/// Mirrors the per-response `record_rate_limit_headers` call plus
+/// the 429/5xx branch in `fetch_media_list_collection`.
+pub fn note_external_anilist_response(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) {
+    record_rate_limit_headers(headers);
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        let dur = cooldown_from_headers(headers, ANILIST_COOLDOWN_DEFAULT);
+        set_cooldown_until_now_plus(dur);
+    }
+}
+
 /// Set the cooldown-until marker to `now + dur`. Used by `mod.rs` call sites
 /// that have already computed a duration via `cooldown_from_headers` — they
 /// don't need the `compute_cooldown_duration` step.

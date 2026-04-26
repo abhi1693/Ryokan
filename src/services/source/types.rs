@@ -564,3 +564,320 @@ impl ClassificationResult {
         base
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Coverage for the pure source-type primitives. None of these
+    //! touch the DB or the network — `from_str` / `as_str` /
+    //! `rank()` / `label()` are all pure functions, but they're
+    //! load-bearing: every classification result that ends up in
+    //! `episode_quality_tags`, every CF spec evaluation, and every
+    //! Sonarr-format quality string the user sees flows through these.
+    //! A regression in any of them silently mis-tags every episode.
+    //!
+    //! The from_str round-trips also lock in the case-insensitive +
+    //! variant-spelling acceptance that real-world tag strings use
+    //! (`"WEB-DL"` vs `"webdl"` vs `"web.dl"`).
+    use super::*;
+
+    // ── Source ────────────────────────────────────────────────────────
+
+    #[test]
+    fn source_rank_orders_correctly() {
+        // Strict total order; ties only between equal variants.
+        assert!(Source::BluRay.rank() > Source::Web.rank());
+        assert!(Source::Web.rank() > Source::Dvd.rank());
+        assert!(Source::Dvd.rank() > Source::Hdtv.rank());
+        assert!(Source::Hdtv.rank() > Source::Tv.rank());
+        assert!(Source::Tv.rank() > Source::Unknown.rank());
+    }
+
+    #[test]
+    fn source_from_str_accepts_canonical_and_variant_forms() {
+        // Trash-Guides CFs and historical Ryokan rows both feed strings
+        // through here, so the variant set has to cover what each emits.
+        assert_eq!(Source::from_str("BluRay"), Source::BluRay);
+        assert_eq!(Source::from_str("blu-ray"), Source::BluRay);
+        assert_eq!(Source::from_str("BD"), Source::BluRay);
+        assert_eq!(Source::from_str("bdrip"), Source::BluRay);
+        assert_eq!(Source::from_str("BDRemux"), Source::BluRay);
+        assert_eq!(Source::from_str("bdmv"), Source::BluRay);
+        assert_eq!(Source::from_str("WEB"), Source::Web);
+        assert_eq!(Source::from_str("Web-DL"), Source::Web);
+        assert_eq!(Source::from_str("WebDl"), Source::Web);
+        assert_eq!(Source::from_str("WEBRip"), Source::Web);
+        assert_eq!(Source::from_str("DVD"), Source::Dvd);
+        assert_eq!(Source::from_str("HDTV"), Source::Hdtv);
+        assert_eq!(Source::from_str("TV"), Source::Tv);
+    }
+
+    #[test]
+    fn source_from_str_unknown_for_garbage() {
+        // Defensive default — a rogue tag string can't bypass the
+        // classifier into a real source.
+        assert_eq!(Source::from_str(""), Source::Unknown);
+        assert_eq!(Source::from_str("not-a-source"), Source::Unknown);
+        assert_eq!(Source::from_str("4K"), Source::Unknown); // resolution, not source
+    }
+
+    #[test]
+    fn source_from_str_trims_whitespace() {
+        // Real persisted tags occasionally carry trailing whitespace
+        // from older write paths.
+        assert_eq!(Source::from_str("  bluray  "), Source::BluRay);
+        assert_eq!(Source::from_str("\tweb\n"), Source::Web);
+    }
+
+    // ── WebKind ───────────────────────────────────────────────────────
+
+    #[test]
+    fn web_kind_rank_webdl_beats_webrip_beats_unknown() {
+        assert!(WebKind::WebDl.rank() > WebKind::WebRip.rank());
+        assert!(WebKind::WebRip.rank() > WebKind::Unknown.rank());
+    }
+
+    #[test]
+    fn web_kind_from_str_accepts_canonical_and_punctuated() {
+        // Real tags carry every separator: `WEB-DL`, `WEBDL`, `WEB.DL`.
+        assert_eq!(WebKind::from_str("WEB-DL"), WebKind::WebDl);
+        assert_eq!(WebKind::from_str("webdl"), WebKind::WebDl);
+        assert_eq!(WebKind::from_str("web.dl"), WebKind::WebDl);
+        assert_eq!(WebKind::from_str("WEBRip"), WebKind::WebRip);
+        assert_eq!(WebKind::from_str("web-rip"), WebKind::WebRip);
+        assert_eq!(WebKind::from_str("web.rip"), WebKind::WebRip);
+    }
+
+    #[test]
+    fn web_kind_unknown_renders_as_empty_string() {
+        // The empty string is the contract — non-empty would pollute
+        // `BD-1080p` / `WEB-1080p` style labels with a stray suffix
+        // for the bare-WEB case the WebKind::Unknown variant exists for.
+        assert_eq!(WebKind::Unknown.as_str(), "");
+        assert_eq!(WebKind::WebDl.as_str(), "WEB-DL");
+        assert_eq!(WebKind::WebRip.as_str(), "WEBRip");
+    }
+
+    // ── Resolution ────────────────────────────────────────────────────
+
+    #[test]
+    fn resolution_from_str_accepts_bare_and_suffixed() {
+        // Settings-page emits `"1080"`; episode tags emit `"1080p"`.
+        // Both paths flow through here.
+        assert_eq!(Resolution::from_str("1080"), Resolution::R1080p);
+        assert_eq!(Resolution::from_str("1080p"), Resolution::R1080p);
+        assert_eq!(Resolution::from_str("1080P"), Resolution::R1080p);
+        assert_eq!(Resolution::from_str("1080i"), Resolution::R1080p);
+        assert_eq!(Resolution::from_str("720"), Resolution::R720p);
+        assert_eq!(Resolution::from_str("720p"), Resolution::R720p);
+        assert_eq!(Resolution::from_str("480"), Resolution::R480p);
+        assert_eq!(Resolution::from_str("576p"), Resolution::R576p);
+    }
+
+    #[test]
+    fn resolution_from_str_accepts_4k_aliases() {
+        // `4k` / `UHD` are user-facing aliases for 2160p.
+        for alias in ["2160", "2160p", "4k", "4K", "uhd", "UHD"] {
+            assert_eq!(
+                Resolution::from_str(alias),
+                Resolution::R2160p,
+                "alias {alias} should map to 2160p"
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_from_str_unknown_for_garbage() {
+        assert_eq!(Resolution::from_str(""), Resolution::Unknown);
+        assert_eq!(Resolution::from_str("not-a-res"), Resolution::Unknown);
+        // Sonarr's 360 / 540 don't get tier'd by Ryokan.
+        assert_eq!(Resolution::from_str("360p"), Resolution::Unknown);
+        assert_eq!(Resolution::from_str("540p"), Resolution::Unknown);
+    }
+
+    #[test]
+    fn resolution_from_dimensions_loose_lower_bounds() {
+        // Lower-bound thresholds absorb anamorphic + cropped variants.
+        // Pin the exact bands documented on `from_dimensions`.
+        assert_eq!(Resolution::from_dimensions(3840, 2160), Resolution::R2160p);
+        assert_eq!(Resolution::from_dimensions(1920, 1080), Resolution::R1080p);
+        assert_eq!(Resolution::from_dimensions(1280, 720), Resolution::R720p);
+        // Anamorphic 720p (704×480 squished from 720×480) lands in the
+        // 480 band.
+        assert_eq!(Resolution::from_dimensions(704, 480), Resolution::R480p);
+        // PAL DVD (720×576).
+        assert_eq!(Resolution::from_dimensions(720, 576), Resolution::R576p);
+        // Below the floor → Unknown.
+        assert_eq!(Resolution::from_dimensions(640, 360), Resolution::Unknown);
+        // Boundary case: exactly the threshold.
+        assert_eq!(Resolution::from_dimensions(0, 460), Resolution::R480p);
+        assert_eq!(Resolution::from_dimensions(0, 459), Resolution::Unknown);
+    }
+
+    // ── ClassificationResult::label ──────────────────────────────────
+    //
+    // The label string is what `episode_quality_tags.quality_tag`
+    // stores AND what the UI renders. A regression here mis-tags
+    // every episode for the affected source class.
+
+    fn cr(source: Source, res: Resolution, is_remux: bool, is_bdmv: bool) -> ClassificationResult {
+        ClassificationResult {
+            source,
+            resolution: res,
+            is_remux,
+            web_kind: WebKind::Unknown,
+            is_bdmv,
+            confidence: 1.0,
+            needs_review: false,
+            evidence: Vec::new(),
+            decision_rule: DecisionRule::Empty,
+        }
+    }
+
+    #[test]
+    fn label_canonical_sonarr_shapes() {
+        // The four shapes the user sees most often. These strings are
+        // the contract Sonarr-compat code matches against.
+        assert_eq!(
+            cr(Source::BluRay, Resolution::R1080p, false, false).label(),
+            "BD-1080p"
+        );
+        assert_eq!(
+            cr(Source::BluRay, Resolution::R1080p, true, false).label(),
+            "BD-1080p Remux"
+        );
+        assert_eq!(
+            cr(Source::BluRay, Resolution::R1080p, false, true).label(),
+            "BD-1080p RAW"
+        );
+        assert_eq!(
+            cr(Source::Web, Resolution::R1080p, false, false).label(),
+            "WEB-1080p"
+        );
+        assert_eq!(
+            cr(Source::Hdtv, Resolution::R1080p, false, false).label(),
+            "HDTV-1080p"
+        );
+        assert_eq!(
+            cr(Source::Dvd, Resolution::R480p, false, false).label(),
+            "DVD-480p"
+        );
+    }
+
+    #[test]
+    fn label_collapses_webdl_to_bare_web() {
+        // Issue #48: WebDl renders as bare WEB so users don't see two
+        // labels for what's effectively the same tier. WebRip stays
+        // distinct because that's the lower-quality variant power
+        // users want to spot.
+        let mut webdl = cr(Source::Web, Resolution::R1080p, false, false);
+        webdl.web_kind = WebKind::WebDl;
+        assert_eq!(webdl.label(), "WEB-1080p");
+
+        let mut webrip = cr(Source::Web, Resolution::R1080p, false, false);
+        webrip.web_kind = WebKind::WebRip;
+        assert_eq!(webrip.label(), "WEBRip-1080p");
+    }
+
+    #[test]
+    fn label_bdmv_takes_precedence_over_remux_when_both_set() {
+        // Defensive: classifier shouldn't set both, but if it does,
+        // BDMV wins per `bluray_tier()` — `is_bdmv` checks first.
+        let cr = cr(Source::BluRay, Resolution::R1080p, true, true);
+        assert_eq!(cr.label(), "BD-1080p RAW");
+    }
+
+    #[test]
+    fn label_unknown_source_falls_back_to_resolution_only() {
+        // No source determined but resolution available — show the
+        // resolution alone rather than emit "Unknown-1080p" or similar.
+        assert_eq!(
+            cr(Source::Unknown, Resolution::R1080p, false, false).label(),
+            "1080p"
+        );
+    }
+
+    #[test]
+    fn label_all_unknown_is_unknown() {
+        assert_eq!(
+            cr(Source::Unknown, Resolution::Unknown, false, false).label(),
+            "Unknown"
+        );
+    }
+
+    #[test]
+    fn label_known_source_unknown_resolution_drops_resolution_suffix() {
+        // BD-Unknown isn't useful; just `BD` is what the UI wants.
+        assert_eq!(
+            cr(Source::BluRay, Resolution::Unknown, false, false).label(),
+            "BD"
+        );
+        // Sub-tier still lands.
+        assert_eq!(
+            cr(Source::BluRay, Resolution::Unknown, true, false).label(),
+            "BD Remux"
+        );
+    }
+
+    // ── ClassificationResult::rank ───────────────────────────────────
+
+    #[test]
+    fn rank_resolution_dominates_over_source() {
+        // Web-1080p > BluRay-720p (resolution dominates the tuple).
+        let web = cr(Source::Web, Resolution::R1080p, false, false);
+        let bd = cr(Source::BluRay, Resolution::R720p, false, false);
+        assert!(web.rank() > bd.rank());
+    }
+
+    #[test]
+    fn rank_bluray_tier_breaks_ties() {
+        // Same source + resolution, BDMV > Remux > plain.
+        let plain = cr(Source::BluRay, Resolution::R1080p, false, false);
+        let remux = cr(Source::BluRay, Resolution::R1080p, true, false);
+        let bdmv = cr(Source::BluRay, Resolution::R1080p, false, true);
+        assert!(remux.rank() > plain.rank());
+        assert!(bdmv.rank() > remux.rank());
+    }
+
+    #[test]
+    fn rank_web_kind_breaks_ties() {
+        // Pins the actual rank order: WebDl (2) > WebRip (1) >
+        // Unknown (0). The `WebKind` docstring claims bare-WEB "slots
+        // between WebRip and WebDl," but the code sits Unknown at the
+        // bottom — explicit WebRip outranks an untagged Web release.
+        // A consequence is that a `WEBRip` row on disk never gets
+        // upgraded by a same-resolution bare-WEB release (the upgrade
+        // gate compares `incoming.rank > existing.rank`); whether
+        // that's the intended semantics is a separate decision, but
+        // the test pins the current behavior so a refactor that
+        // touches the rank order has to confront the doc/code
+        // mismatch.
+        let mut webdl = cr(Source::Web, Resolution::R1080p, false, false);
+        webdl.web_kind = WebKind::WebDl;
+        let mut webrip = cr(Source::Web, Resolution::R1080p, false, false);
+        webrip.web_kind = WebKind::WebRip;
+        let webunknown = cr(Source::Web, Resolution::R1080p, false, false);
+        assert!(webdl.rank() > webrip.rank());
+        assert!(webrip.rank() > webunknown.rank());
+    }
+
+    // ── SourceEvidence::new clamps confidence to 0..=1 ───────────────
+
+    #[test]
+    fn source_evidence_new_clamps_confidence() {
+        // Layer authors emit confidences from heterogeneous sources;
+        // clamp at the boundary so a buggy 1.5 doesn't dominate
+        // aggregation, and a -0.1 doesn't subtract from the running sum.
+        assert_eq!(
+            SourceEvidence::new(Source::BluRay, 1.5, Origin::Filename, "").confidence,
+            1.0
+        );
+        assert_eq!(
+            SourceEvidence::new(Source::BluRay, -0.1, Origin::Filename, "").confidence,
+            0.0
+        );
+        assert_eq!(
+            SourceEvidence::new(Source::BluRay, 0.5, Origin::Filename, "").confidence,
+            0.5
+        );
+    }
+}

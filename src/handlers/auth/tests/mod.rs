@@ -34,6 +34,7 @@
 mod csrf;
 mod forgot_password;
 mod proxy_headers;
+mod sanitize;
 mod sessions;
 mod setup;
 mod throttle;

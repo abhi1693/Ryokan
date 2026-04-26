@@ -45,6 +45,37 @@ pub(crate) fn sanitize_filename(s: &str) -> String {
     media::sanitize_folder_name(s)
 }
 
+/// True when `a` and `b` resolve to the same inode (same device + same
+/// inode number). Used by [`do_file_op`] to detect "src and dst already
+/// point at the same bytes" cases — a re-import on top of a previously
+/// hardlinked dst, or a misconfiguration that resolves both paths to
+/// the same file. Without an early-out, the hardlink mode falls through
+/// to `fs::copy` on `EEXIST`, and `fs::copy` on a self-overlapping path
+/// truncates the shared inode to zero bytes (the read fd reads from the
+/// inode the write fd just truncated). That corrupts both the user's
+/// media file *and* the seeding source the torrent client still
+/// references.
+///
+/// On non-Unix targets we fall back to plain path equality, which still
+/// catches the misconfiguration case (caller passed identical paths)
+/// but misses the "hardlinked elsewhere" case. Windows hardlinks are
+/// rarer in this codebase's deployment shape (Docker / Linux is the
+/// primary target) and the path-identity check is sufficient for the
+/// catastrophic-data-loss scenario.
+#[cfg(unix)]
+fn files_share_inode(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(am), Ok(bm)) => am.dev() == bm.dev() && am.ino() == bm.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn files_share_inode(a: &Path, b: &Path) -> bool {
+    a == b
+}
+
 /// Hardlink → copy fallback. For "move" mode: rename → copy+delete fallback.
 ///
 /// Runs the whole operation under `spawn_blocking` because a Blu-ray
@@ -58,6 +89,16 @@ pub(crate) async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::R
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         if let Some(p) = dst.parent() {
             std::fs::create_dir_all(p)?;
+        }
+        // No-op when src and dst already point at the same bytes — by
+        // a prior hardlink import landing the same file twice, or by a
+        // misconfiguration that resolves both to the same path. All
+        // three modes need this guard: a self-overlapping `fs::copy`
+        // truncates the shared inode (corrupting hardlink + copy modes)
+        // and the move-mode cross-fs fallback's `remove_file(src)`
+        // after the rename would delete the only surviving copy.
+        if files_share_inode(&src, &dst) {
+            return Ok(());
         }
         match mode.as_str() {
             "move" => {
@@ -97,7 +138,20 @@ pub(crate) async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::R
                 Ok(())
             }
             _ => {
-                // "hardlink" (default): hardlink preferred, copy on failure (cross-fs).
+                // "hardlink" (default): hardlink preferred, copy on
+                // failure (cross-fs). `std::fs::hard_link` does NOT
+                // overwrite — it returns `EEXIST` if dst already exists.
+                // Clean any pre-existing dst first so a re-import
+                // doesn't fall through to the `fs::copy` fallback (which
+                // would silently degrade to a real copy, breaking the
+                // seed-safe-via-shared-inode property the user picked
+                // hardlink mode for). The same-inode short-circuit
+                // above already handled the "dst is the same file as
+                // src via prior hardlink" case; reaching here means
+                // dst is a different file we're free to replace.
+                if dst.exists() {
+                    let _ = std::fs::remove_file(&dst);
+                }
                 if std::fs::hard_link(&src, &dst).is_err() {
                     std::fs::copy(&src, &dst)?;
                 }
@@ -218,6 +272,33 @@ async fn load_series_import_ctx(
 /// Process a single completed torrent. Returns `true` if at least one file was
 /// imported, `false` if there was nothing to do yet.
 ///
+/// Outcome of an [`import_torrent`] call. Replaces the older
+/// `Result<bool, String>` shape so the caller can distinguish four
+/// states the prior bool flattened together:
+///
+/// - `NotReady` — torrent complete but no video files visible yet
+///   (qBit still finalizing, or the pack is all samples/.nfo). Leave
+///   the grab pending so the next tick retries.
+/// - `Imported` — every video file landed.
+/// - `PartiallyImported { failed_episodes }` — some files imported,
+///   some failed (typically transient: disk full mid-copy, source
+///   vanished, permission flake on one file). Mark the grab imported
+///   so the user sees the partial success in the Downloads page, but
+///   surface a single SUMMARY error log naming the missing episodes
+///   so the failure is greppable in System → Logs rather than buried
+///   among per-file errors.
+/// - `AllFailed { failed_episodes }` — files were attempted but every
+///   `do_file_op` failed. Mark the grab failed rather than leaving it
+///   pending forever — the previous Ok(false) collapse meant a disk-
+///   full pack would re-attempt every tick, generating duplicate
+///   error logs without ever escalating to a user-visible failure.
+pub(crate) enum ImportOutcome {
+    NotReady,
+    Imported,
+    PartiallyImported { failed_episodes: Vec<i32> },
+    AllFailed { failed_episodes: Vec<i32> },
+}
+
 /// Phase 2: if the grab has routing rows in `grabbed_torrent_series`
 /// (written by the auto-expand path when a megapack contained sibling
 /// entries), each file is routed to the sibling's own library folder
@@ -230,7 +311,7 @@ async fn import_torrent(
     grab: &grabbed_torrents::GrabbedTorrent,
     torrent_hash: &str,
     torrent_save_path: &str,
-) -> Result<bool, String> {
+) -> Result<ImportOutcome, String> {
     let client = state
         .download_client
         .read()
@@ -371,7 +452,7 @@ async fn import_torrent(
         // like a finished video file. Most of the time this is a race
         // where the post-proc tick beat qBit's per-file progress update;
         // the next tick will find the files. Rare pathological case is
-        // a samples/.nfo-only torrent that stays Ok(false) forever —
+        // a samples/.nfo-only torrent that stays NotReady forever —
         // those would need the stuck-pending timeout fix (future work,
         // tracked separately from this commit).
         logger::debug(
@@ -384,7 +465,7 @@ async fn import_torrent(
             "",
         )
         .await;
-        return Ok(false);
+        return Ok(ImportOutcome::NotReady);
     }
 
     // Determine the source base path. Pick the per-client download
@@ -444,6 +525,16 @@ async fn import_torrent(
     let mut imported_eps_by_series: std::collections::BTreeMap<i64, Vec<(i32, i64, String)>> =
         std::collections::BTreeMap::new();
     let mut imported_count = 0_usize;
+    // Episode numbers (post-offset, the same value the rest of the
+    // codebase uses) that reached `do_file_op` but failed. Drives the
+    // PartiallyImported / AllFailed branches below so partial failures
+    // surface as a single summary log rather than scattered per-file
+    // errors. Files that never reached the file op (couldn't parse an
+    // episode number, offset produced a non-positive result, series
+    // context failed to load) skip via `continue` and aren't counted —
+    // those paths already log their own warning and aren't retryable
+    // by re-running the file op.
+    let mut failed_episodes: Vec<i32> = Vec::new();
 
     // Old grab ids we've marked as replaced during this import pass,
     // paired with the new `grab.id` that superseded them. Deduped via
@@ -953,12 +1044,19 @@ async fn import_torrent(
                     &e.to_string(),
                 )
                 .await;
+                failed_episodes.push(ep_num);
             }
         }
     }
 
     if imported_count == 0 {
-        return Ok(false);
+        // Distinguish "no video files visible yet" (handled earlier as
+        // NotReady) from "video files were attempted but every one
+        // failed." The latter shouldn't sit pending forever.
+        if failed_episodes.is_empty() {
+            return Ok(ImportOutcome::NotReady);
+        }
+        return Ok(ImportOutcome::AllFailed { failed_episodes });
     }
 
     // Flush the `grabbed_torrents.state = 'replaced'` updates collected
@@ -1095,7 +1193,11 @@ async fn import_torrent(
         }
     }
 
-    Ok(true)
+    if failed_episodes.is_empty() {
+        Ok(ImportOutcome::Imported)
+    } else {
+        Ok(ImportOutcome::PartiallyImported { failed_episodes })
+    }
 }
 
 /// Run one post-processing cycle. Called by the background task every minute.
@@ -1259,7 +1361,7 @@ pub async fn run_once(state: &AppState) {
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
         match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path).await {
-            Ok(true) => {
+            Ok(ImportOutcome::Imported) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
                 // #27 — log every successful import so there's a trail
@@ -1285,7 +1387,54 @@ pub async fn run_once(state: &AppState) {
                 // still get the same flip as before via the
                 // `routes.is_empty()` fallback there.
             }
-            Ok(false) => {
+            Ok(ImportOutcome::PartiallyImported { failed_episodes }) => {
+                // Some files imported, some failed. Mark the grab
+                // imported because the user does have partial data on
+                // disk and the Downloads page should reflect that — but
+                // also emit a single SUMMARY error log so the failure
+                // is greppable in System → Logs rather than scattered
+                // across N per-file errors. Without this, a 24-episode
+                // pack that lost one file to a transient disk-full
+                // would silently report as fully imported and the user
+                // would only notice in Jellyfin.
+                any_imported = true;
+                let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
+                logger::error(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Partial import for '{}' — {} episode(s) failed",
+                        grab.torrent_name,
+                        failed_episodes.len()
+                    ),
+                    &format!(
+                        "series_id={} failed_episodes={:?}",
+                        grab.series_id, failed_episodes
+                    ),
+                )
+                .await;
+            }
+            Ok(ImportOutcome::AllFailed { failed_episodes }) => {
+                // Every video file we attempted failed. Mark the grab
+                // failed so the user can see and act — leaving it
+                // pending would re-run the same broken import every
+                // tick and just spam the log without ever escalating.
+                logger::error(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Import failed for '{}' — every file errored",
+                        grab.torrent_name
+                    ),
+                    &format!(
+                        "series_id={} failed_episodes={:?}",
+                        grab.series_id, failed_episodes
+                    ),
+                )
+                .await;
+                let _ = grabbed_torrents::mark_failed(&state.db, grab.id).await;
+            }
+            Ok(ImportOutcome::NotReady) => {
                 // Torrent complete but no video files yet — leave as pending.
                 // The caller (qBit) might still be finalizing the files,
                 // or the torrent could be all samples/.nfo (pathological).

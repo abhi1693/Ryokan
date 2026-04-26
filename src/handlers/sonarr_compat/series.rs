@@ -15,7 +15,8 @@ use crate::models::{config, monitoring, series};
 use crate::services::{anibridge, anilist, logger, monitoring as monitoring_service};
 
 use super::helpers::{
-    build_sonarr_series_from_search, build_sonarr_series_from_tracked, lookup_by_external_id,
+    build_sonarr_series_from_search, build_sonarr_series_from_tracked, cached_detail_for,
+    lookup_by_external_id,
 };
 use super::types::{AddSeriesBody, CommandBody, SonarrSeries, UpdateSeriesBody};
 
@@ -44,12 +45,17 @@ pub async fn series_lookup(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
+    // One batched DB read keyed on every AL id we got back, instead of
+    // N sequential round-trips per result. Seerr polls this endpoint
+    // every connection-test and every search submission.
+    let result_ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+    let db_by_id = series::get_by_anilist_ids(&state.db, &result_ids)
+        .await
+        .unwrap_or_default();
+
     let mut sonarr_results = Vec::new();
     for r in results {
-        let db_series = series::get_by_anilist_id(&state.db, r.id)
-            .await
-            .ok()
-            .flatten();
+        let db_series = db_by_id.get(&r.id);
 
         let tmdb_id = anibridge::resolve_tmdb_id(r.id, r.id_mal).await;
         let title = if !r.title_english.is_empty() {
@@ -58,13 +64,8 @@ pub async fn series_lookup(
             &r.title_romaji
         };
 
-        sonarr_results.push(build_sonarr_series_from_search(
-            &r,
-            title,
-            tmdb_id,
-            db_series.as_ref(),
-            &cfg,
-        ));
+        sonarr_results
+            .push(build_sonarr_series_from_search(&r, title, tmdb_id, db_series, &cfg).await);
     }
 
     Ok(Json(sonarr_results))
@@ -87,7 +88,8 @@ pub async fn list_series(
     let mut results = Vec::new();
     for s in &tracked {
         let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
-        results.push(build_sonarr_series_from_tracked(s, tmdb_id, &cfg));
+        let detail = cached_detail_for(&state.db, s.id).await;
+        results.push(build_sonarr_series_from_tracked(s, detail.as_ref(), tmdb_id, &cfg).await);
     }
 
     Ok(Json(results))
@@ -110,7 +112,10 @@ pub async fn get_series(
         .ok_or((StatusCode::NOT_FOUND, "Series not found".to_string()))?;
 
     let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
-    Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
+    let detail = cached_detail_for(&state.db, s.id).await;
+    Ok(Json(
+        build_sonarr_series_from_tracked(&s, detail.as_ref(), tmdb_id, &cfg).await,
+    ))
 }
 
 /// POST /api/v3/series — add a new series.
@@ -507,9 +512,10 @@ pub async fn add_series(
     // cours exist in Ryokan's DB but don't need to be reflected in the
     // Sonarr response shape.
     let primary = &processed[0];
-    Ok(Json(build_sonarr_series_from_tracked(
-        primary, tvdb_id, &cfg,
-    )))
+    let detail = cached_detail_for(&state.db, primary.id).await;
+    Ok(Json(
+        build_sonarr_series_from_tracked(primary, detail.as_ref(), tvdb_id, &cfg).await,
+    ))
 }
 
 /// PUT /api/v3/series — update an existing series.
@@ -548,7 +554,10 @@ pub async fn update_series(
         .unwrap_or_default();
 
     let tmdb_id = anibridge::resolve_tmdb_id(s.anilist_id, s.mal_id).await;
-    Ok(Json(build_sonarr_series_from_tracked(&s, tmdb_id, &cfg)))
+    let detail = cached_detail_for(&state.db, s.id).await;
+    Ok(Json(
+        build_sonarr_series_from_tracked(&s, detail.as_ref(), tmdb_id, &cfg).await,
+    ))
 }
 
 /// POST /api/v3/command — execute a command. Seerr sends SeriesSearch.

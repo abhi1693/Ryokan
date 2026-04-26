@@ -115,12 +115,25 @@ pub struct EpisodeFile {
     pub size_display: String,
 }
 
-/// Scan a series folder for video files and parse episode info from filenames.
-pub fn scan_series_folder(media_root: &str, folder_name: &str) -> Vec<EpisodeFile> {
+/// Scan a series folder for video files and parse episode info from
+/// filenames. The recursive `std::fs::read_dir` walk runs inside
+/// `spawn_blocking` so a deep multi-season tree on a slow / network-
+/// mounted media root can't stall a Tokio worker — Sonarr/Radarr poll
+/// the compat handlers aggressively and the RSS/upgrade/post-processing
+/// background tasks share the same runtime.
+pub async fn scan_series_folder(media_root: &str, folder_name: &str) -> Vec<EpisodeFile> {
     if media_root.is_empty() || folder_name.is_empty() {
         return Vec::new();
     }
 
+    let media_root = media_root.to_string();
+    let folder_name = folder_name.to_string();
+    tokio::task::spawn_blocking(move || scan_series_folder_blocking(&media_root, &folder_name))
+        .await
+        .unwrap_or_default()
+}
+
+fn scan_series_folder_blocking(media_root: &str, folder_name: &str) -> Vec<EpisodeFile> {
     let series_path = Path::new(media_root).join(folder_name);
     if !series_path.is_dir() {
         return Vec::new();

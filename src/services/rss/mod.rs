@@ -332,6 +332,19 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     }
     let client = state.download_client.read().await.clone();
 
+    // One compiled-CF snapshot for the whole RSS pass so each item's
+    // score reflects the user's CF profile. Without this thread-through
+    // the auto-search path applied CFs but the RSS path silently
+    // bypassed them — a 10-bit/x265/FLAC release the user explicitly
+    // boosted via CF would tie or lose to a plain release on the
+    // every-60s auto-grab path while ranking correctly in the manual
+    // search UI. SeaDex hashes are passed empty for now: per-series
+    // SeaDex lookups would add N round-trips per cycle and the
+    // hardcoded `seadex_enabled` toggle bonus only matters when SeaDex
+    // is consulted, which only the auto/upgrade paths do today.
+    let cfs = state.custom_formats.read().await.clone();
+    let empty_seadex_hashes: HashSet<String> = HashSet::new();
+
     let whitelist = quality::parse_group_list(&cfg.preferred_groups);
     let blacklist = quality::parse_group_list(&cfg.blocked_groups);
     let all_meta: Vec<SeriesMeta> = tracked.iter().map(SeriesMeta::from_series).collect();
@@ -506,11 +519,14 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .filter(|ep| monitored_eps.contains(ep))
             .collect();
 
-        let disk_files = disk_cache
-            .entry(found.series.folder_name.clone())
-            .or_insert_with(|| {
-                media::scan_series_folder(&cfg.media_root, &found.series.folder_name)
-            });
+        let disk_files = if let Some(cached) = disk_cache.get(&found.series.folder_name) {
+            cached
+        } else {
+            let files = media::scan_series_folder(&cfg.media_root, &found.series.folder_name).await;
+            disk_cache
+                .entry(found.series.folder_name.clone())
+                .or_insert(files)
+        };
         let qtags = if let Some(cached) = quality_tags_cache.get(&found.series.id) {
             cached
         } else {
@@ -611,6 +627,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             &found.resolved_eps,
             found.alias_score,
             found.parsed.parse_mode,
+            &cfs,
+            &empty_seadex_hashes,
         )
         .await;
         pending.push(PendingCandidate {
@@ -1021,6 +1039,7 @@ fn canonical_episode_key(found: &MatchResult, is_batch: bool) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn score_candidate(
     db: &sqlx::SqlitePool,
     cfg: &config::Config,
@@ -1029,6 +1048,8 @@ async fn score_candidate(
     parsed_eps: &HashSet<i32>,
     alias_score: f32,
     parse_mode: &str,
+    cfs: &[crate::services::custom_formats::CompiledCustomFormat],
+    seadex_hashes: &HashSet<String>,
 ) -> i32 {
     let preferred_source = Source::from_str(&cfg.preferred_source);
     let preferred_resolution = Resolution::from_str(&cfg.preferred_resolution);
@@ -1095,6 +1116,24 @@ async fn score_candidate(
         "range" => score += 10,
         _ => score -= 10,
     }
+
+    // CF overlay — the auto-search and upgrade paths fold the user's
+    // compiled Custom Formats into scoring at the equivalent layer; RSS
+    // used to skip this and silently rank candidates by the heuristic
+    // pieces above only. `total_cf_score_for_release` saturates the
+    // sum across CFs so a 10k-magnitude TRaSH boost can't wrap to a
+    // negative on overflow. RssItem doesn't carry size_bytes today, so
+    // CFs with a Size spec (rare in TRaSH-anime) won't match — known
+    // limitation, separable from this fix.
+    score = score.saturating_add(crate::services::custom_formats::total_cf_score_for_release(
+        cfs,
+        &classification,
+        &item.title,
+        &item.group,
+        0,
+        &item.info_hash,
+        seadex_hashes,
+    ));
 
     score
 }

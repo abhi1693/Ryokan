@@ -139,6 +139,58 @@ pub(super) fn total_cf_score(cfs: &[CompiledCustomFormat], ctx: &EvalContext) ->
         .fold(0i32, i32::saturating_add)
 }
 
+/// Variant of [`total_cf_score`] for callers that have the candidate's
+/// fields directly rather than a full [`SearchResult`]. Internally
+/// builds a minimal `SearchResult` shim — only `title`, `group`,
+/// `size_bytes`, and `info_hash` are read by any spec kernel (see
+/// [`evaluate_spec_kernel`]); the rest are filled with defaults.
+///
+/// Currently used by the RSS sync path, which carries `RssItem` (a
+/// strict subset of `SearchResult`'s fields) and would otherwise
+/// have no way into the CF evaluator. Without this helper RSS
+/// auto-grab silently bypasses every CF the user has configured —
+/// only the auto-search and upgrade-search paths would respect them.
+pub fn total_cf_score_for_release(
+    cfs: &[CompiledCustomFormat],
+    classification: &super::ClassificationResult,
+    title: &str,
+    group: &str,
+    size_bytes: i64,
+    info_hash: &str,
+    seadex_hashes: &std::collections::HashSet<String>,
+) -> i32 {
+    let result = super::SearchResult {
+        title: title.to_string(),
+        group: group.to_string(),
+        size_bytes,
+        info_hash: info_hash.to_string(),
+        link: String::new(),
+        magnet: String::new(),
+        torrent: String::new(),
+        size: String::new(),
+        seeders: 0,
+        leechers: 0,
+        downloads: 0,
+        resolution: String::new(),
+        quality_label: String::new(),
+        source: String::new(),
+        web_kind: String::new(),
+        is_remux: false,
+        is_bdmv: false,
+        is_batch: false,
+        is_trusted: false,
+        score: 0,
+        score_breakdown: Vec::new(),
+        upload_date: String::new(),
+    };
+    let ctx = EvalContext {
+        result: &result,
+        classification,
+        seadex_hashes,
+    };
+    total_cf_score(cfs, &ctx)
+}
+
 /// Same total as [`total_cf_score`], but also returns the per-CF
 /// breakdown of every matching CF with a non-zero score contribution,
 /// in `custom_formats.id` order (the natural iteration order of the

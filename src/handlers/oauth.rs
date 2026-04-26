@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::models::external_accounts::{self, LinkRequest, PROVIDER_ANILIST, PROVIDER_MAL};
 use crate::models::log::LogCategory;
-use crate::services::{external_sync, logger, oauth_state, progress};
+use crate::services::{anilist, external_sync, logger, oauth_state, progress};
 
 /// AniList public client ID. Registered 2026-04-22 against the
 /// author's AL account; the AL app page documents the redirect URI
@@ -532,12 +532,19 @@ async fn fetch_anilist_viewer(token: &str) -> Result<AniListViewer, String> {
         .map_err(|e| format!("AniList HTTP error: {e}"))?;
 
     let status = resp.status();
+    let headers = resp.headers().clone();
     let body = resp
         .text()
         .await
         .map_err(|e| format!("AniList response read failed: {e}"))?;
+    // Participate in the same rate-limit cooldown the in-module AL
+    // callers use. Without this, a 429 / 5xx during link doesn't flip
+    // the process-wide cooldown, so a metadata sync or library-page
+    // render firing right after the link attempt charges in unaware
+    // and earns its own 429.
+    anilist::note_external_anilist_response(status, &headers);
     if !status.is_success() {
-        return Err(format!("AniList returned {status}: {body}"));
+        return Err(format!("AniList returned {status}: {}", excerpt(&body)));
     }
 
     // The GraphQL shape is `{"data": {"Viewer": { id, name, mediaListOptions: { scoreFormat } }}}`.
@@ -606,11 +613,18 @@ async fn exchange_mal_code(code: &str, verifier: &str) -> Result<MalTokenRespons
         .await
         .map_err(|e| format!("MAL token response read failed: {e}"))?;
     if !status.is_success() {
-        return Err(format!("MAL token endpoint returned {status}: {body}"));
+        return Err(format!(
+            "MAL token endpoint returned {status}: {}",
+            excerpt(&body)
+        ));
     }
 
-    serde_json::from_str::<MalTokenResponse>(&body)
-        .map_err(|e| format!("MAL token response parse failed: {e} (body: {body})"))
+    serde_json::from_str::<MalTokenResponse>(&body).map_err(|e| {
+        format!(
+            "MAL token response parse failed: {e} (body: {})",
+            excerpt(&body)
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -640,11 +654,11 @@ async fn fetch_mal_me(token: &str) -> Result<MalUserInfo, String> {
         .await
         .map_err(|e| format!("MAL @me response read failed: {e}"))?;
     if !status.is_success() {
-        return Err(format!("MAL @me returned {status}: {body}"));
+        return Err(format!("MAL @me returned {status}: {}", excerpt(&body)));
     }
 
     serde_json::from_str::<MalUserInfo>(&body)
-        .map_err(|e| format!("MAL @me parse failed: {e} (body: {body})"))
+        .map_err(|e| format!("MAL @me parse failed: {e} (body: {})", excerpt(&body)))
 }
 
 // ── Small helpers ────────────────────────────────────────────────────
@@ -710,6 +724,25 @@ fn current_unix_ts() -> i64 {
         .unwrap_or(0)
 }
 
+/// Truncate a provider response body for an error string. Both AL and
+/// MAL can return large bodies on edge failure modes (Cloudflare HTML
+/// when AL is melting, MAL's own error pages); without this cap, a
+/// `Sync now` toast or the link-flow error renders multi-KB inline.
+/// **Char-aware** rather than byte-aware: a multi-byte UTF-8 sequence
+/// crossing the 240-byte boundary would panic a byte-slice. Mirrors
+/// the same-named helpers in `services::mal` and
+/// `services::anilist::rate_limit`.
+fn excerpt(s: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let mut iter = s.chars();
+    let prefix: String = iter.by_ref().take(MAX_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,6 +767,96 @@ mod tests {
         let a = generate_pkce_verifier();
         let b = generate_pkce_verifier();
         assert_ne!(a, b);
+    }
+
+    // ── generate_state_nonce ─────────────────────────────────────────
+
+    #[test]
+    fn state_nonce_is_url_safe_and_distinct_per_call() {
+        // Same RNG-smoke check as the verifier counterpart. The state
+        // nonce gates the OAuth callback; predictability here would
+        // break the CSRF guard outright.
+        let a = generate_state_nonce();
+        let b = generate_state_nonce();
+        assert_ne!(a, b);
+        for nonce in [&a, &b] {
+            assert!(
+                nonce
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "state nonce must be URL-safe: {nonce}"
+            );
+            assert!(!nonce.is_empty());
+        }
+    }
+
+    // ── constant_time_eq ─────────────────────────────────────────────
+
+    #[test]
+    fn constant_time_eq_matches_equal_inputs() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(constant_time_eq(b"\x00\x01\xff", b"\x00\x01\xff"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_inputs() {
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        // First-byte difference must not short-circuit early — `subtle`
+        // is what guarantees this; we can only smoke-test correctness
+        // here, not timing.
+        assert!(!constant_time_eq(b"X", b"Y"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_length_mismatch() {
+        // Different-length inputs return false without a panic. Length
+        // is a public attribute (the caller's input lengths come from
+        // user-supplied strings), so this fast-path is safe.
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(!constant_time_eq(b"abc", b""));
+    }
+
+    // ── excerpt ──────────────────────────────────────────────────────
+
+    #[test]
+    fn excerpt_passes_through_short_strings_unchanged() {
+        assert_eq!(excerpt(""), "");
+        assert_eq!(excerpt("hello"), "hello");
+    }
+
+    #[test]
+    fn excerpt_caps_long_strings_with_ellipsis() {
+        // 240 chars is the cap; anything longer gets a single '…' suffix.
+        let long: String = "X".repeat(500);
+        let got = excerpt(&long);
+        // 240 X's + '…'.
+        assert!(got.starts_with(&"X".repeat(240)), "wrong prefix: {got}");
+        assert!(got.ends_with('…'));
+        assert_eq!(got.chars().count(), 241);
+    }
+
+    #[test]
+    fn excerpt_is_char_aware_does_not_panic_on_utf8_boundary() {
+        // The 240-char boundary intersects a 4-byte emoji — a byte-
+        // slice excerpt would panic at `&s[..240]`. The char-aware
+        // implementation must not.
+        let mut s = String::new();
+        s.push_str(&"a".repeat(239));
+        s.push('🎌'); // 4-byte UTF-8 char at exact char boundary 240.
+        s.push_str("trailing");
+        let got = excerpt(&s);
+        assert!(got.ends_with('…'));
+        assert_eq!(got.chars().count(), 241);
+    }
+
+    #[test]
+    fn excerpt_at_exact_cap_does_not_append_ellipsis() {
+        // Boundary: a 240-char input fits exactly — no '…' suffix.
+        let exact: String = "Y".repeat(240);
+        let got = excerpt(&exact);
+        assert_eq!(got, exact);
+        assert!(!got.ends_with('…'));
     }
 
     #[tokio::test]

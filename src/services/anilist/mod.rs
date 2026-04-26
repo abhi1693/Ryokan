@@ -15,7 +15,9 @@ use rate_limit::{
     excerpt, extract_graphql_error, record_rate_limit_headers, set_anilist_cooldown,
     set_cooldown_until_now_plus, throttle_before_anilist_request,
 };
-pub use rate_limit::{anilist_cooldown_active, is_rate_limit_error};
+pub use rate_limit::{
+    anilist_cooldown_active, is_rate_limit_error, note_external_anilist_response,
+};
 
 const ANILIST_API_DEFAULT: &str = "https://graphql.anilist.co";
 
@@ -135,6 +137,14 @@ pub struct AnimeEntry {
     pub episodes: Option<i32>,
     pub season_year: Option<i32>,
     pub source: String,
+    /// Average viewer score on the provider's native scale: AL is
+    /// 0-100, Jikan ingest multiplies by 10 to match. `None` for
+    /// entries with no community score yet (unaired / recently
+    /// added). Used by the Sonarr/Radarr shims to populate the
+    /// `ratings` field — Sonarr expects a 0-10 float, so the
+    /// downstream conversion divides by 10.
+    #[serde(default)]
+    pub average_score: Option<i32>,
 }
 
 /// One entry from a user's AniList watch list, projected to the
@@ -517,6 +527,8 @@ pub async fn search_anime_with_options(
                         format
                         status
                         episodes
+                        seasonYear
+                        averageScore
                     }
                 }
             }
@@ -654,19 +666,31 @@ pub async fn search_anime_with_options(
 
     let entries: Vec<AnimeEntry> = media
         .iter()
-        .map(|m| AnimeEntry {
-            id: m["id"].as_i64().unwrap_or(0),
-            id_mal: m["idMal"].as_i64(),
-            title_romaji: m["title"]["romaji"].as_str().unwrap_or("").to_string(),
-            title_english: m["title"]["english"].as_str().unwrap_or("").to_string(),
-            title_native: m["title"]["native"].as_str().unwrap_or("").to_string(),
-            cover_url: m["coverImage"]["large"].as_str().unwrap_or("").to_string(),
-            format: m["format"].as_str().unwrap_or("").to_string(),
-            status: m["status"].as_str().unwrap_or("").to_string(),
-            status_display: prettify_status(m["status"].as_str().unwrap_or("")),
-            episodes: m["episodes"].as_i64().filter(|&n| n > 0).map(|e| e as i32),
-            season_year: m["seasonYear"].as_i64().map(|y| y as i32),
-            source: "anilist".to_string(),
+        .filter_map(|m| {
+            // Drop entries with a missing/non-numeric id rather than
+            // collapsing them to 0. A 0-id record would slip past the
+            // `id > 0` filters elsewhere only by virtue of being equal
+            // to 0 (which is filtered out), but it can still leak into
+            // SEARCH_CACHE for SEARCH_CACHE_TTL and confuse the UI.
+            let id = m["id"].as_i64().filter(|&n| n > 0)?;
+            Some(AnimeEntry {
+                id,
+                id_mal: m["idMal"].as_i64(),
+                title_romaji: m["title"]["romaji"].as_str().unwrap_or("").to_string(),
+                title_english: m["title"]["english"].as_str().unwrap_or("").to_string(),
+                title_native: m["title"]["native"].as_str().unwrap_or("").to_string(),
+                cover_url: m["coverImage"]["large"].as_str().unwrap_or("").to_string(),
+                format: m["format"].as_str().unwrap_or("").to_string(),
+                status: m["status"].as_str().unwrap_or("").to_string(),
+                status_display: prettify_status(m["status"].as_str().unwrap_or("")),
+                episodes: m["episodes"].as_i64().filter(|&n| n > 0).map(|e| e as i32),
+                season_year: m["seasonYear"].as_i64().map(|y| y as i32),
+                source: "anilist".to_string(),
+                average_score: m["averageScore"]
+                    .as_i64()
+                    .filter(|&n| n > 0)
+                    .map(|s| s as i32),
+            })
         })
         .collect();
 
@@ -1121,14 +1145,17 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Option<AnimeDetai
         return Ok(None);
     }
 
-    Ok(Some(parse_media_node(m)))
+    Ok(parse_media_node(m))
 }
 
 /// Convert a single Media node from the AniList GraphQL response into
 /// `AnimeDetail`. Used by both the single-id `fetch_media_detail` path
 /// and the batched `get_anime_details_batch` path so the field plucking
-/// logic only lives in one place.
-fn parse_media_node(m: &serde_json::Value) -> AnimeDetail {
+/// logic only lives in one place. Returns `None` when the `id` field is
+/// missing or non-numeric — every downstream consumer requires `id > 0`,
+/// so a 0-id placeholder would just leak into caches and confuse later
+/// `id > 0` filters into thinking the entry is a Jikan-fallback row.
+fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
     let streaming_episodes = m["streamingEpisodes"]
         .as_array()
         .map(|arr| {
@@ -1175,8 +1202,9 @@ fn parse_media_node(m: &serde_json::Value) -> AnimeDetail {
         })
         .unwrap_or_default();
 
-    AnimeDetail {
-        id: m["id"].as_i64().unwrap_or(0),
+    let id = m["id"].as_i64().filter(|&n| n > 0)?;
+    Some(AnimeDetail {
+        id,
         id_mal: m["idMal"].as_i64(),
         title_romaji: m["title"]["romaji"].as_str().unwrap_or("").to_string(),
         title_english: m["title"]["english"].as_str().unwrap_or("").to_string(),
@@ -1220,7 +1248,7 @@ fn parse_media_node(m: &serde_json::Value) -> AnimeDetail {
             .unwrap_or_default(),
         streaming_episodes,
         relations,
-    }
+    })
 }
 
 /// Look up an anime by MAL id and return the full `AnimeDetail` payload
@@ -1417,17 +1445,17 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
             // `get_anime_detail` calls for these ids hit the cache.
             let mut cache = DETAIL_CACHE.write().await;
             for node in media {
-                let detail = parse_media_node(node);
-                if detail.id > 0 {
-                    cache.insert(
-                        detail.id,
-                        CacheEntry {
-                            detail: detail.clone(),
-                            fetched_at: Instant::now(),
-                        },
-                    );
-                    out.insert(detail.id, detail);
-                }
+                let Some(detail) = parse_media_node(node) else {
+                    continue;
+                };
+                cache.insert(
+                    detail.id,
+                    CacheEntry {
+                        detail: detail.clone(),
+                        fetched_at: Instant::now(),
+                    },
+                );
+                out.insert(detail.id, detail);
             }
             // Light eviction — same shape as the single-id path so a
             // big batch can't unbounded-grow the cache. Drop expired
@@ -1560,6 +1588,7 @@ mod tests {
             episodes: Some(12),
             season_year: Some(2020),
             source: "anilist".into(),
+            average_score: Some(85),
         }];
         search_cache_put(key.clone(), entries.clone());
         let got = search_cache_get(&key).expect("cached value should be present");

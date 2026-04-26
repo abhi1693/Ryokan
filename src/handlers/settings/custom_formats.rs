@@ -1555,4 +1555,80 @@ mod tests {
             "Imported 2, failed 1. First error: oops"
         );
     }
+
+    // ── cf_redirect ──────────────────────────────────────────────────
+
+    #[test]
+    fn cf_redirect_minimal_just_returns_tab_url() {
+        // The base shape — no params at all means a clean redirect
+        // to the CF tab. Used after a delete-no-confirm that
+        // shouldn't surface a flash.
+        assert_eq!(
+            cf_redirect(None, None, None),
+            "/settings?tab=custom_formats"
+        );
+    }
+
+    #[test]
+    fn cf_redirect_with_edit_id_appends_query_param() {
+        // The edit drawer's redirect on save: send the user back to
+        // the same row they were editing.
+        assert_eq!(
+            cf_redirect(Some(42), None, None),
+            "/settings?tab=custom_formats&edit_id=42"
+        );
+    }
+
+    #[test]
+    fn cf_redirect_url_encodes_msg_and_err() {
+        // A message like "Imported 2, skipped 1." has commas + a
+        // space that must be percent-encoded so the resulting URL
+        // parses correctly. A naive concat would produce a broken
+        // querystring on the receiving page.
+        let url = cf_redirect(None, Some("imported 2 of 3"), None);
+        assert!(url.contains("&msg="));
+        // Spaces are percent-encoded — `urlencoding` uses %20 (not '+').
+        assert!(url.contains("%20") || url.contains("imported%202%20of%203"));
+
+        // Err side encodes identically.
+        let url_err = cf_redirect(None, None, Some("regex compile failed: oops"));
+        assert!(url_err.contains("&err="));
+        assert!(url_err.contains("%20"));
+    }
+
+    #[test]
+    fn cf_redirect_includes_edit_id_msg_and_err_simultaneously() {
+        // Edit-drawer save + flash + warning: all three params land
+        // on the same redirect when present.
+        let url = cf_redirect(Some(7), Some("saved"), Some("warning"));
+        assert!(url.contains("edit_id=7"));
+        assert!(url.contains("&msg=saved"));
+        assert!(url.contains("&err=warning"));
+    }
+
+    // ── parse_default_cf_entries ─────────────────────────────────────
+
+    #[test]
+    fn parse_default_cf_entries_returns_nonempty_array() {
+        // The bundled `static/default_custom_formats.json` is wired
+        // in via `include_str!` and must always parse — a syntax
+        // error there breaks the "Install defaults" / "Reset
+        // defaults" buttons silently. Pin both that it parses and
+        // that it has entries.
+        let entries = parse_default_cf_entries().expect("default CFs must parse");
+        assert!(
+            !entries.is_empty(),
+            "bundled default CFs must contain at least one entry"
+        );
+        // Every entry should be an object with at least a `name`
+        // field — defends against a future commit replacing the
+        // content with an array of strings or similar.
+        for entry in &entries {
+            assert!(entry.is_object(), "default CF entry must be an object");
+            assert!(
+                entry.get("name").and_then(|v| v.as_str()).is_some(),
+                "default CF entry missing 'name' field: {entry}"
+            );
+        }
+    }
 }

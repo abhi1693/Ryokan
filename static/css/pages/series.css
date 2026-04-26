@@ -815,6 +815,26 @@
     color: var(--red);
 }
 
+/* `is-manual-override` flags the quality-override button when the
+ * episode currently carries a pinned classification. Reuses the
+ * red palette from `is-error` (already in scope on this page) but
+ * keeps the hover lift + accent-border behavior so the button still
+ * reads as "click me to edit"; without the hover override it would
+ * look disabled. The persistent red signals "an override is active
+ * here" — replaces the prior 📌 emoji on the quality tag, which
+ * was easy to miss in dense episode lists. */
+.icon-btn.is-manual-override {
+    border-color: rgba(211, 125, 125, 0.55);
+    background: rgba(211, 125, 125, 0.16);
+    color: var(--red);
+}
+
+.icon-btn.is-manual-override:hover:not(:disabled) {
+    border-color: var(--red);
+    background: rgba(211, 125, 125, 0.22);
+    transform: translateY(-1px);
+}
+
 .btn.is-loading {
     opacity: 0.85;
 }

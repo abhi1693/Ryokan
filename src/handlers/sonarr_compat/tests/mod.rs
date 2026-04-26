@@ -13,4 +13,5 @@
 //!     break Seerr without a test failure.
 
 mod auth;
+mod helpers;
 mod system;

@@ -97,6 +97,14 @@ pub struct AppState {
     /// 10-minute TTL sweeps forgotten flows. See
     /// [`services::oauth_state`] for scope + lifecycle.
     pub oauth_state: OAuthStateStore,
+    /// Wall-clock timestamp captured at process boot. Used by the
+    /// Sonarr/Radarr shims' `system_status` endpoint so Seerr's UI
+    /// pill reports the actual time the connected app came online —
+    /// the prior hardcoded "2024-01-01T00:00:00Z" effectively claimed
+    /// the indexer had been up for over a year regardless of when
+    /// Ryokan was last restarted, which made the pill useless as a
+    /// liveness signal.
+    pub start_time: chrono::DateTime<chrono::Utc>,
 }
 
 impl FromRef<AppState> for SqlitePool {

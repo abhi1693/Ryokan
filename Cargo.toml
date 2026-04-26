@@ -1,6 +1,6 @@
 [package]
 name = "ryokan"
-version = "1.4.1"
+version = "1.4.5"
 edition = "2024"
 rust-version = "1.95"
 
@@ -118,7 +118,6 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Misc
 chrono = { version = "0.4", features = ["serde"] }
-dotenvy = "0.15"
 urlencoding = "2"
 regex-lite = "0.1"
 # fancy-regex is used only by the Custom Formats parser (Sonarr-v4

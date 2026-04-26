@@ -159,7 +159,7 @@ async fn scan_for_unclassified(
             if row.folder_name.is_empty() {
                 continue;
             }
-            let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name);
+            let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name).await;
             if disk_files.is_empty() {
                 continue;
             }

@@ -1721,4 +1721,286 @@ mod tests {
             EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN
         );
     }
+
+    // ── validate_source ───────────────────────────────────────────────
+    //
+    // Settings save uses these to coerce form values into
+    // canonical-lowercase strings the rest of the codebase reads
+    // back via `Source::from_str`. A regression that forgot to
+    // canonicalize would persist mixed-case values and break the
+    // CF / scoring matchers that case-sensitive-compare the column.
+
+    #[test]
+    fn validate_source_canonicalizes_known_values_to_lowercase() {
+        // The user-facing dropdown emits canonical strings, but
+        // hand-crafted POSTs / older DB rows can carry mixed case.
+        // Every recognized variant lands in lowercase.
+        assert_eq!(validate_source("BluRay", "web"), "bluray");
+        assert_eq!(validate_source("BD", "web"), "bluray");
+        assert_eq!(validate_source("BDRIP", "web"), "bluray");
+        assert_eq!(validate_source("Web-DL", "bluray"), "web");
+        assert_eq!(validate_source("WEBRIP", "bluray"), "web");
+        assert_eq!(validate_source("HDTV", "web"), "hdtv");
+        assert_eq!(validate_source("DVD", "web"), "dvd");
+    }
+
+    #[test]
+    fn validate_source_falls_back_to_default_on_unknown() {
+        // A garbage form value resolves to the supplied default
+        // rather than persisting `Unknown` — every read path
+        // assumes a known variant.
+        assert_eq!(validate_source("garbage", "web"), "web");
+        assert_eq!(validate_source("", "bluray"), "bluray");
+        // The default itself isn't canonicalized — it's a static
+        // string the caller already chose.
+        assert_eq!(validate_source("unknown-source", "WEB"), "WEB");
+    }
+
+    #[test]
+    fn validate_source_trims_whitespace() {
+        // `Source::from_str` trims, so the validator inherits that.
+        assert_eq!(validate_source("  bluray  ", "web"), "bluray");
+    }
+
+    // ── validate_cutoff_source ────────────────────────────────────────
+
+    #[test]
+    fn validate_cutoff_source_passes_through_bluray_subtiers() {
+        // The cutoff dropdown surfaces three BluRay tiers: plain
+        // bluray, bluray_remux, bluray_bdmv. The latter two are stored
+        // as-is so `parse_cutoff_source` can branch on the exact string.
+        assert_eq!(
+            validate_cutoff_source("bluray_remux", "bluray"),
+            "bluray_remux"
+        );
+        assert_eq!(
+            validate_cutoff_source("bluray_bdmv", "bluray"),
+            "bluray_bdmv"
+        );
+    }
+
+    #[test]
+    fn validate_cutoff_source_falls_through_to_validate_source_for_other_values() {
+        // Plain BluRay / WEB / etc. take the regular validate_source
+        // path, including canonicalization.
+        assert_eq!(validate_cutoff_source("BluRay", "web"), "bluray");
+        assert_eq!(validate_cutoff_source("garbage", "bluray"), "bluray");
+    }
+
+    #[test]
+    fn validate_cutoff_source_is_case_sensitive_on_subtier_markers() {
+        // `bluray_remux` / `bluray_bdmv` are exact-match in the
+        // passthrough — `BLURAY_REMUX` doesn't get the special
+        // treatment. It then falls through to validate_source where
+        // `Source::from_str` (which underscore-matches "bdremux" /
+        // "bluray" / etc., but NOT "bluray_remux") returns Unknown
+        // → the default fires. Net result: a hand-crafted POST with
+        // an uppercase sub-tier marker silently loses both the
+        // sub-tier intent AND the BluRay source classification —
+        // ends up with the supplied default. Worth pinning so a
+        // refactor that adds case-folding to either path has to
+        // confront this asymmetry.
+        assert_eq!(validate_cutoff_source("BLURAY_REMUX", "web"), "web");
+    }
+
+    // ── validate_resolution ───────────────────────────────────────────
+
+    #[test]
+    fn validate_resolution_strips_p_suffix_for_db_storage() {
+        // The DB column convention is bare-digit strings ("1080") so
+        // `Resolution::from_str` reads them back uniformly. The
+        // validator strips the trailing `p` Settings emits with the
+        // dropdown.
+        assert_eq!(validate_resolution("1080p", "1080"), "1080");
+        assert_eq!(validate_resolution("720p", "1080"), "720");
+        assert_eq!(validate_resolution("2160p", "1080"), "2160");
+        assert_eq!(validate_resolution("480p", "1080"), "480");
+    }
+
+    #[test]
+    fn validate_resolution_accepts_bare_digit() {
+        // Both shapes in the wild — bare digit and suffixed.
+        assert_eq!(validate_resolution("1080", "720"), "1080");
+        assert_eq!(validate_resolution("720", "1080"), "720");
+    }
+
+    #[test]
+    fn validate_resolution_accepts_4k_aliases() {
+        // 4k / UHD aliases canonicalize to "2160" via Resolution::from_str.
+        assert_eq!(validate_resolution("4k", "1080"), "2160");
+        assert_eq!(validate_resolution("UHD", "1080"), "2160");
+    }
+
+    #[test]
+    fn validate_resolution_falls_back_to_default_on_garbage() {
+        assert_eq!(validate_resolution("garbage", "1080"), "1080");
+        assert_eq!(validate_resolution("", "720"), "720");
+        // Sonarr's 360p / 540p don't have Ryokan tiers and fold to
+        // the default rather than persisting an unrecognized value.
+        assert_eq!(validate_resolution("360p", "1080"), "1080");
+        assert_eq!(validate_resolution("540p", "1080"), "1080");
+    }
+
+    // ── normalize_settings_tab ───────────────────────────────────────
+
+    #[test]
+    fn normalize_settings_tab_known_tabs_pass_through() {
+        for tab in ["quality", "custom_formats", "groups", "general"] {
+            assert_eq!(normalize_settings_tab(Some(tab.into())), tab);
+        }
+    }
+
+    #[test]
+    fn normalize_settings_tab_unknown_or_missing_defaults_to_integrations() {
+        // Integrations is the default landing — first-run users
+        // most often need to wire a download client + Jellyfin
+        // before doing anything else, so that's the natural first
+        // tab.
+        assert_eq!(normalize_settings_tab(None), "integrations");
+        assert_eq!(
+            normalize_settings_tab(Some("garbage".into())),
+            "integrations"
+        );
+        assert_eq!(normalize_settings_tab(Some("".into())), "integrations");
+    }
+
+    // ── min_score_display ────────────────────────────────────────────
+
+    #[test]
+    fn min_score_display_renders_blank_for_no_floor_sentinel() {
+        // i32::MIN is the "no minimum score floor" sentinel — must
+        // render as an empty string so the input shows blank, not
+        // "-2147483648".
+        assert_eq!(min_score_display(i32::MIN), "");
+    }
+
+    #[test]
+    fn min_score_display_renders_normal_values_as_string() {
+        assert_eq!(min_score_display(0), "0");
+        assert_eq!(min_score_display(50), "50");
+        assert_eq!(min_score_display(-5), "-5");
+        // Just-above-the-sentinel renders normally — only the exact
+        // i32::MIN value is special.
+        assert_eq!(min_score_display(i32::MIN + 1), (i32::MIN + 1).to_string());
+    }
+
+    // ── humanize_relative_time ───────────────────────────────────────
+
+    #[test]
+    fn humanize_relative_time_none_renders_never() {
+        // No row in scheduled_task_runs yet → "Never", which is
+        // what the Settings dashboard shows for unrun tasks.
+        assert_eq!(humanize_relative_time(None), "Never");
+    }
+
+    fn now_ts() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn humanize_relative_time_under_one_minute_says_just_now() {
+        assert_eq!(humanize_relative_time(Some(now_ts())), "Just now");
+        assert_eq!(humanize_relative_time(Some(now_ts() - 30)), "Just now");
+    }
+
+    #[test]
+    fn humanize_relative_time_under_one_hour_uses_minutes() {
+        // The pluralization arm: 1 minute is singular, 2+ is plural.
+        assert_eq!(humanize_relative_time(Some(now_ts() - 60)), "1 minute ago");
+        assert_eq!(
+            humanize_relative_time(Some(now_ts() - 120)),
+            "2 minutes ago"
+        );
+        assert_eq!(
+            humanize_relative_time(Some(now_ts() - 30 * 60)),
+            "30 minutes ago"
+        );
+    }
+
+    #[test]
+    fn humanize_relative_time_under_one_day_uses_hours() {
+        assert_eq!(humanize_relative_time(Some(now_ts() - 3600)), "1 hour ago");
+        assert_eq!(humanize_relative_time(Some(now_ts() - 7200)), "2 hours ago");
+        // 23h59m is still in hours.
+        assert_eq!(
+            humanize_relative_time(Some(now_ts() - (23 * 3600 + 59 * 60))),
+            "23 hours ago"
+        );
+    }
+
+    #[test]
+    fn humanize_relative_time_one_day_or_more_uses_days() {
+        assert_eq!(humanize_relative_time(Some(now_ts() - 86400)), "1 day ago");
+        assert_eq!(
+            humanize_relative_time(Some(now_ts() - 86400 * 7)),
+            "7 days ago"
+        );
+    }
+
+    #[test]
+    fn humanize_relative_time_future_timestamp_renders_just_now() {
+        // Defensive: a clock skew or pre-clock-init timestamp could
+        // produce ts > now. The `.max(0)` keeps the delta non-negative
+        // so we render "Just now" rather than "-N days ago".
+        assert_eq!(humanize_relative_time(Some(now_ts() + 10000)), "Just now");
+    }
+
+    // ── extract_spec_labels ──────────────────────────────────────────
+
+    #[test]
+    fn extract_spec_labels_parses_spec_array_into_views() {
+        let json = r#"{
+            "name": "BD",
+            "specifications": [
+                {"name": "BluRay", "implementation": "ReleaseTitleSpecification", "negate": false, "required": true},
+                {"name": "WEB", "implementation": "ReleaseTitleSpecification", "negate": true, "required": false}
+            ]
+        }"#;
+        let labels = extract_spec_labels(json);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].name, "BluRay");
+        assert_eq!(labels[0].implementation, "ReleaseTitleSpecification");
+        assert!(!labels[0].negate);
+        assert!(labels[0].required);
+        assert_eq!(labels[1].name, "WEB");
+        assert!(labels[1].negate);
+        assert!(!labels[1].required);
+    }
+
+    #[test]
+    fn extract_spec_labels_returns_empty_on_invalid_json() {
+        // Defensive: a parse failure mustn't bubble up — the caller
+        // already surfaces the raw parse error via `parse_error`,
+        // and the spec-pill row just renders empty.
+        assert!(extract_spec_labels("{not json").is_empty());
+        assert!(extract_spec_labels("").is_empty());
+    }
+
+    #[test]
+    fn extract_spec_labels_returns_empty_when_specifications_missing() {
+        // CF JSON without a "specifications" array (e.g. malformed
+        // import or partial CF in flight) yields zero labels rather
+        // than a panic.
+        assert!(extract_spec_labels(r#"{"name": "BD"}"#).is_empty());
+        // Wrong type for "specifications" → also empty.
+        assert!(extract_spec_labels(r#"{"specifications": "oops"}"#).is_empty());
+    }
+
+    #[test]
+    fn extract_spec_labels_uses_defaults_for_missing_fields() {
+        // Each spec entry that omits a field falls back to the
+        // typed default — empty strings for `name`/`implementation`,
+        // false for both bools. This is what unblocks rendering
+        // half-imported CFs in the edit drawer.
+        let json = r#"{"specifications": [{}]}"#;
+        let labels = extract_spec_labels(json);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].name, "");
+        assert_eq!(labels[0].implementation, "");
+        assert!(!labels[0].negate);
+        assert!(!labels[0].required);
+    }
 }

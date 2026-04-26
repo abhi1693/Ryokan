@@ -219,3 +219,106 @@ async fn missing_source_returns_error_not_panic() {
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     assert!(!dst.exists());
 }
+
+// ─── Re-import safety: src and dst already share an inode ──────────
+//
+// All three of these tests exercise the same scenario from a
+// different angle: the user re-runs an import where dst is already
+// a hardlink to src (the steady-state result of every prior
+// "hardlink" mode import). Without the same-inode guard, hardlink
+// mode falls through to `fs::copy` on EEXIST, and `fs::copy` on a
+// dst that points to the same inode as src truncates the shared
+// inode to zero — wiping both the user's media file and the seeding
+// source the torrent client still references.
+
+#[tokio::test]
+async fn hardlink_mode_is_noop_when_dst_already_hardlinked_to_src() {
+    let dir = TempDir::new().unwrap();
+    let src = write_src(&dir, "src.mkv", b"important-payload");
+    let dst = dir.path().join("dst.mkv");
+
+    // Pre-link to mirror the steady state after a prior import.
+    fs::hard_link(&src, &dst).expect("seed hardlink");
+    let pre_ino = fs::metadata(&src).unwrap().ino();
+    assert_eq!(fs::metadata(&dst).unwrap().ino(), pre_ino);
+
+    // Re-run the import. The bug: without the guard, `fs::copy`'s
+    // O_TRUNC on the shared inode would empty both files.
+    do_file_op("hardlink", &src, &dst)
+        .await
+        .expect("re-import must succeed");
+
+    assert_eq!(
+        fs::read(&src).unwrap(),
+        b"important-payload",
+        "src bytes must survive a re-import"
+    );
+    assert_eq!(
+        fs::read(&dst).unwrap(),
+        b"important-payload",
+        "dst bytes must survive a re-import (regression: would have been empty)"
+    );
+    assert_eq!(
+        fs::metadata(&src).unwrap().ino(),
+        fs::metadata(&dst).unwrap().ino(),
+        "src and dst should still share an inode"
+    );
+}
+
+#[tokio::test]
+async fn copy_mode_is_noop_when_paths_resolve_to_same_inode() {
+    // Misconfiguration variant: user's per-client download path and
+    // their media root resolve to the same file via hardlink. Copy
+    // mode would truncate the shared inode the same way.
+    let dir = TempDir::new().unwrap();
+    let src = write_src(&dir, "src.mkv", b"payload");
+    let dst = dir.path().join("dst.mkv");
+    fs::hard_link(&src, &dst).expect("seed hardlink");
+
+    do_file_op("copy", &src, &dst).await.expect("copy noop");
+
+    assert_eq!(fs::read(&src).unwrap(), b"payload");
+    assert_eq!(fs::read(&dst).unwrap(), b"payload");
+}
+
+#[tokio::test]
+async fn move_mode_is_noop_when_paths_resolve_to_same_inode() {
+    // Move mode's cross-fs fallback path is `copy → rename → remove(src)`.
+    // If src and dst share an inode, the `remove_file(src)` after the
+    // rename would delete the only surviving copy. The same-inode
+    // guard short-circuits to a no-op so neither path runs.
+    let dir = TempDir::new().unwrap();
+    let src = write_src(&dir, "src.mkv", b"payload");
+    let dst = dir.path().join("dst.mkv");
+    fs::hard_link(&src, &dst).expect("seed hardlink");
+
+    do_file_op("move", &src, &dst).await.expect("move noop");
+
+    // Both paths still resolve to the file with the original bytes.
+    assert!(src.exists(), "src must not be deleted when same-inode");
+    assert!(dst.exists(), "dst must still exist when same-inode");
+    assert_eq!(fs::read(&src).unwrap(), b"payload");
+}
+
+#[tokio::test]
+async fn hardlink_mode_replaces_unrelated_preexisting_dst() {
+    // Distinct from the same-inode case: dst exists but points at a
+    // different file (e.g. a stale leftover from a prior failed
+    // import). `fs::hard_link` returns EEXIST without overwriting,
+    // so the function must clean dst first to land a fresh hardlink
+    // rather than silently fall through to `fs::copy` and lose the
+    // shared-inode property.
+    let dir = TempDir::new().unwrap();
+    let src = write_src(&dir, "src.mkv", b"new-payload");
+    let dst = dir.path().join("dst.mkv");
+    fs::write(&dst, b"stale-unrelated-bytes").expect("seed unrelated dst");
+
+    do_file_op("hardlink", &src, &dst).await.expect("relink");
+
+    assert_eq!(fs::read(&dst).unwrap(), b"new-payload");
+    assert_eq!(
+        fs::metadata(&src).unwrap().ino(),
+        fs::metadata(&dst).unwrap().ino(),
+        "dst must share src's inode after the relink, not be a copy"
+    );
+}

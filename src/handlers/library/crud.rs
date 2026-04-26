@@ -989,7 +989,7 @@ pub async fn reclassify_episode(
         ));
     }
 
-    let disk_files = media::scan_series_folder(&cfg.media_root, &series_row.folder_name);
+    let disk_files = media::scan_series_folder(&cfg.media_root, &series_row.folder_name).await;
     let file = disk_files
         .iter()
         .find(|f| {
