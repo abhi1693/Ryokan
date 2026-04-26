@@ -91,6 +91,8 @@ use services::{
         // Settings — Indexers (issue #28 PR B)
         handlers::settings::indexers::settings_indexers_upsert,
         handlers::settings::indexers::settings_indexers_delete,
+        // Settings — autobrr API key rotation (issue #28 PR D)
+        handlers::settings::autobrr_key::settings_autobrr_regenerate_key,
         // Webhooks (issue #28 PR D)
         handlers::webhook::autobrr::webhook_autobrr,
         handlers::system::api_logs_poll,
@@ -700,6 +702,10 @@ async fn main() {
         .route(
             "/settings/indexers/delete",
             post(handlers::settings::indexers::settings_indexers_delete),
+        )
+        .route(
+            "/settings/autobrr/regenerate-key",
+            post(handlers::settings::autobrr_key::settings_autobrr_regenerate_key),
         )
         .route(
             "/settings/custom-formats/minimum-score",

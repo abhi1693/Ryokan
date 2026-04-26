@@ -17,6 +17,7 @@ use crate::services::{
     source::Source,
 };
 
+pub mod autobrr_key;
 pub mod custom_formats;
 pub mod indexers;
 use custom_formats::ImportReviewView;
