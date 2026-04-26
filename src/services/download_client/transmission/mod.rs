@@ -565,6 +565,47 @@ impl DownloadClient for TransmissionClient {
     fn sonarr_impl_name(&self) -> &'static str {
         "Transmission"
     }
+
+    /// Issue #28 PR C — apply per-torrent seed rules via
+    /// Transmission's `torrent-set` RPC.
+    ///
+    /// Wire shape: `torrent-set` with `ids: [hash]` plus the
+    /// per-mode + per-limit pairs. Transmission has separate
+    /// "mode" enums for ratio + idle:
+    /// - `seedRatioMode`: 0 = global default, 1 = per-torrent
+    ///   override using `seedRatioLimit`, 2 = unlimited.
+    /// - `seedIdleMode`: same enum, gated by `seedIdleLimit`
+    ///   (in MINUTES, matching Ryokan's `SeedRules.time_minutes`).
+    ///
+    /// `None` fields are intentionally omitted from the args
+    /// rather than sent as `mode: 0` — Ryokan's policy is "leave
+    /// as-is" for None, not "reset to global default", so any
+    /// pre-existing per-torrent rule from a previous PR-C grab
+    /// stays in place.
+    async fn set_seed_rules(&self, info_hash: &str, rules: super::SeedRules) -> Result<(), String> {
+        let mut args = serde_json::Map::new();
+        args.insert("ids".to_string(), json!([info_hash.to_ascii_lowercase()]));
+        if let Some(ratio) = rules.ratio {
+            args.insert(
+                "seedRatioLimit".to_string(),
+                serde_json::Number::from_f64(ratio)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            args.insert("seedRatioMode".to_string(), json!(1));
+        }
+        if let Some(minutes) = rules.time_minutes {
+            args.insert("seedIdleLimit".to_string(), json!(minutes));
+            args.insert("seedIdleMode".to_string(), json!(1));
+        }
+        // Only `ids` set means no rules to apply — skip the wire call.
+        if args.len() == 1 {
+            return Ok(());
+        }
+        self.send("torrent-set", serde_json::Value::Object(args))
+            .await?;
+        Ok(())
+    }
 }
 
 fn to_download_item(raw: TxRawTorrent) -> DownloadItem {

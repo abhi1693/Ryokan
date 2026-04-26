@@ -726,6 +726,47 @@ impl DownloadClient for DelugeClient {
     fn sonarr_impl_name(&self) -> &'static str {
         "Deluge"
     }
+
+    /// Issue #28 PR C — apply per-torrent ratio rules via Deluge's
+    /// `core.set_torrent_options` API.
+    ///
+    /// Wire shape (live-probed against Deluge 2.x):
+    /// `core.set_torrent_options([torrent_id], {options})` where
+    /// the options dict carries `stop_at_ratio: bool` + `stop_ratio:
+    /// float`. Setting `stop_at_ratio: true` flips the per-torrent
+    /// override so this torrent stops at its own ratio instead of
+    /// inheriting the global setting.
+    ///
+    /// Deluge core has **no idle-time stop concept** — torrents
+    /// stop on ratio only. `time_minutes`, when set, surfaces as a
+    /// debug log so operators see the no-op rather than thinking
+    /// it was applied. The autoremoveplus plugin extends Deluge
+    /// with idle-time stops but isn't bundled with vanilla Deluge,
+    /// so Ryokan can't assume it.
+    async fn set_seed_rules(&self, info_hash: &str, rules: super::SeedRules) -> Result<(), String> {
+        let hash_lower = info_hash.to_ascii_lowercase();
+        let mut options = serde_json::Map::new();
+        if let Some(ratio) = rules.ratio {
+            options.insert("stop_at_ratio".to_string(), serde_json::Value::Bool(true));
+            options.insert(
+                "stop_ratio".to_string(),
+                serde_json::Number::from_f64(ratio)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if rules.time_minutes.is_some() {
+            tracing::debug!(
+                "deluge: time_minutes seed-rule ignored — Deluge core has no idle-time stop"
+            );
+        }
+        if options.is_empty() {
+            return Ok(());
+        }
+        self.rpc("core.set_torrent_options", json!([[hash_lower], options]))
+            .await?;
+        Ok(())
+    }
 }
 
 fn is_duplicate_add_error(msg: &str) -> bool {
