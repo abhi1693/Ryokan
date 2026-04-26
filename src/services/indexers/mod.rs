@@ -329,10 +329,16 @@ pub async fn rebuild_cache(db: &sqlx::SqlitePool) -> crate::IndexerCache {
             Vec::new()
         }
     };
-    let clients: Vec<Arc<dyn Indexer>> = rows
-        .iter()
-        .filter_map(|row| match torznab::TorznabIndexer::from_row_arc(row) {
-            Ok(idx) => Some(idx),
+    // PR #107 round-3 review fix #1: pair the row + client
+    // together through the SAME filter_map so a `from_row_arc`
+    // failure drops both halves atomically. The previous
+    // `rows.iter().zip(clients.iter())` realigned positionally —
+    // skipping row B would silently pair row B with client C and
+    // write C's caps_json under B's id when the probe later ran.
+    let pairs: Vec<(crate::models::indexers::Indexer, Arc<dyn Indexer>)> = rows
+        .into_iter()
+        .filter_map(|row| match torznab::TorznabIndexer::from_row_arc(&row) {
+            Ok(idx) => Some((row, idx)),
             Err(e) => {
                 tracing::warn!("indexers: skipping #{} ({}) — {}", row.id, row.name, e);
                 None
@@ -346,7 +352,7 @@ pub async fn rebuild_cache(db: &sqlx::SqlitePool) -> crate::IndexerCache {
     // No retry on failure — the next rebuild_cache call (next
     // settings edit, next process restart) re-tries any row whose
     // caps_json is still empty.
-    for (row, client) in rows.iter().zip(clients.iter()) {
+    for (row, client) in &pairs {
         if !row.caps_json.is_empty() {
             continue;
         }
@@ -356,19 +362,30 @@ pub async fn rebuild_cache(db: &sqlx::SqlitePool) -> crate::IndexerCache {
         let row_name = row.name.clone();
         tokio::spawn(async move {
             match client_clone.caps().await {
-                Ok(caps) => {
-                    if let Ok(json) = serde_json::to_string(&caps)
-                        && let Err(e) =
+                Ok(caps) => match serde_json::to_string(&caps) {
+                    Ok(json) => {
+                        if let Err(e) =
                             crate::models::indexers::update_caps(&db_clone, row_id, &json).await
-                    {
+                        {
+                            tracing::warn!(
+                                "indexers: caps probe persist failed for #{} ({}): {}",
+                                row_id,
+                                row_name,
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // PR #107 round-3 review fix #5: don't
+                        // swallow serialize failures silently.
                         tracing::warn!(
-                            "indexers: caps probe persist failed for #{} ({}): {}",
+                            "indexers: caps serialize failed for #{} ({}): {}",
                             row_id,
                             row_name,
                             e
                         );
                     }
-                }
+                },
                 Err(e) => {
                     tracing::debug!(
                         "indexers: caps probe failed for #{} ({}): {}",
@@ -381,6 +398,7 @@ pub async fn rebuild_cache(db: &sqlx::SqlitePool) -> crate::IndexerCache {
         });
     }
 
+    let clients: Vec<Arc<dyn Indexer>> = pairs.into_iter().map(|(_, c)| c).collect();
     Arc::new(tokio::sync::RwLock::new(Arc::new(clients)))
 }
 

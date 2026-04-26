@@ -193,11 +193,36 @@ pub async fn update(db: &SqlitePool, id: i64, form: IndexerForm<'_>) -> Result<(
     Ok(())
 }
 
+/// PR #107 round-3 review fix #3: delete the indexer row and
+/// NULL out FK columns in dependent tables atomically.
+///
+/// SQLite can't add a real `FOREIGN KEY ... ON DELETE SET NULL`
+/// constraint via `ALTER TABLE` after the parent column has shipped,
+/// so the SET NULL behavior the migration comment promises has to
+/// be enforced at the application layer. Doing it inside a
+/// transaction keeps the three statements as one logical operation:
+/// either every dependent row is NULL'd and the indexer is gone,
+/// or nothing changed.
+///
+/// The `_ = ?.execute(...)` shape swallowed individual statement
+/// errors before; now the `?` operator on each statement aborts
+/// the transaction and surfaces the error to the caller, which
+/// the handler logs.
 pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    sqlx::query("UPDATE grabbed_torrents SET indexer_id = NULL WHERE indexer_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE pending_grabs SET indexer_id = NULL WHERE indexer_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM indexers WHERE id = ?")
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -330,6 +355,82 @@ mod tests {
         assert!(get_by_id(&db, id).await.unwrap().is_some());
         delete(&db, id).await.unwrap();
         assert!(get_by_id(&db, id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_nulls_out_grabbed_torrents_indexer_id() {
+        // PR #107 round-3 review fix #4: regression for the
+        // SET-NULL transaction. Insert an indexer + a grab row
+        // pointing at it, delete the indexer, assert the grab row's
+        // indexer_id is NULL (not orphaned, not deleted).
+        let db = fresh_db().await;
+        let indexer_id = insert(&db, sample_form()).await.unwrap();
+
+        // First we need a series row for grabbed_torrents to FK to.
+        // Use the test_support seed helper if available; otherwise
+        // a minimal raw insert.
+        let series_id: i64 = sqlx::query_scalar(
+            "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+             VALUES (1, 't', 't', 'f') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO grabbed_torrents (hash, torrent_name, series_id, indexer_id) \
+             VALUES ('h', 't', ?, ?)",
+        )
+        .bind(series_id)
+        .bind(indexer_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        delete(&db, indexer_id).await.expect("delete must succeed");
+
+        // Indexer row gone.
+        assert!(get_by_id(&db, indexer_id).await.unwrap().is_none());
+
+        // Grab row stays, but its indexer_id is NULL.
+        let leftover_indexer_id: Option<i64> =
+            sqlx::query_scalar("SELECT indexer_id FROM grabbed_torrents WHERE hash = 'h'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            leftover_indexer_id, None,
+            "delete must NULL out grabbed_torrents.indexer_id, not orphan it"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_preserves_optional_fields_when_form_round_trips() {
+        // PR #107 round-3 review fix #4: regression for the
+        // template-field-missing bug from round 2. If a future
+        // template tweak drops one of the optional inputs, an
+        // edit-without-changes would NULL the column. The model-
+        // layer round-trip catches it: pass the same form values
+        // through update() twice and assert nothing drifts.
+        let db = fresh_db().await;
+        let mut full = sample_form();
+        full.seed_ratio = Some(2.5);
+        full.seed_time_minutes = Some(120);
+        full.request_timeout_secs = Some(60);
+        let id = insert(&db, full).await.unwrap();
+
+        // Re-issue an update with the same shape — simulates the
+        // user clicking Save with no edits.
+        let mut same = sample_form();
+        same.seed_ratio = Some(2.5);
+        same.seed_time_minutes = Some(120);
+        same.request_timeout_secs = Some(60);
+        update(&db, id, same).await.unwrap();
+
+        let row = get_by_id(&db, id).await.unwrap().unwrap();
+        assert_eq!(row.seed_ratio, Some(2.5));
+        assert_eq!(row.seed_time_minutes, Some(120));
+        assert_eq!(row.request_timeout_secs, Some(60));
     }
 
     #[tokio::test]
