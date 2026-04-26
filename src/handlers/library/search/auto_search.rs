@@ -555,6 +555,13 @@ async fn run_auto_search_targets_with_upgrades(
                                     ep_nums.sort_unstable();
                                 }
                             }
+                            // `record_grab` returns `None` on the
+                            // empty-hash + FK-violation anomaly path
+                            // documented on the model, or on a DB
+                            // error. The torrent is already in the
+                            // client at this point, so don't unwind —
+                            // skip the seed-rule + attribution stamp
+                            // and let the next reconcile pick it up.
                             let grab_id = crate::models::grabbed_torrents::record_grab(
                                 &state.db,
                                 &result.info_hash,

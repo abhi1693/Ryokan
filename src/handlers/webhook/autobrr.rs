@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
-use crate::handlers::auth::sanitize_for_log;
+use crate::handlers::auth::sanitize_for_log_capped;
 use crate::models::log::LogCategory;
 use crate::models::{config, grabbed_torrents};
 use crate::services::download_client::{self, AddOutcome};
@@ -233,23 +233,13 @@ pub async fn webhook_autobrr(
     // imported. Same shape as the RSS dedup — autobrr can race
     // against torznab polling (and against the user manually
     // adding via the UI).
-    let safe_release = sanitize_for_log(&payload.torrent_name);
-    if !info_hash_lc.is_empty() && grabbed_torrents::is_known_hash(&state.db, &info_hash_lc).await {
-        logger::info(
-            &state.db,
-            LogCategory::Grab,
-            &format!("autobrr: skipping {safe_release} — hash already in grabbed_torrents"),
-            &info_hash_lc,
-        )
-        .await;
-        return skipped("duplicate hash already grabbed");
-    }
-
-    // PR #108 review #1 — also dedup against the blocklist.
-    // `is_known_hash` filters on `state IN ('pending', 'imported')`,
-    // so a release the user explicitly blocklisted (state='failed')
-    // would slip past it and re-enter the client on the next IRC
-    // announce, silently undoing blocklist intent.
+    let safe_release = sanitize_for_log_capped(&payload.torrent_name, 256);
+    // PR #108 review round 2 #4 — check blocklist BEFORE the
+    // pending/imported dedup. When both rows exist (rare: user
+    // blocklists a release the post-proc is still cleaning up,
+    // then autobrr re-pushes), the blocklist hit is the more-
+    // actionable telemetry. Both branches return skipped, but
+    // the operator wants to see "blocklisted" not "duplicate."
     if !info_hash_lc.is_empty()
         && grabbed_torrents::is_blocklisted(&state.db, &info_hash_lc)
             .await
@@ -263,6 +253,17 @@ pub async fn webhook_autobrr(
         )
         .await;
         return skipped("hash is blocklisted");
+    }
+
+    if !info_hash_lc.is_empty() && grabbed_torrents::is_known_hash(&state.db, &info_hash_lc).await {
+        logger::info(
+            &state.db,
+            LogCategory::Grab,
+            &format!("autobrr: skipping {safe_release} — hash already in grabbed_torrents"),
+            &info_hash_lc,
+        )
+        .await;
+        return skipped("duplicate hash already grabbed");
     }
 
     // Match the indexer name (case-insensitive) so seed rules
@@ -282,7 +283,7 @@ pub async fn webhook_autobrr(
             .find(|i| i.name().trim().eq_ignore_ascii_case(payload.indexer.trim()))
             .map(|i| i.id())
     };
-    let safe_indexer = sanitize_for_log(&payload.indexer);
+    let safe_indexer = sanitize_for_log_capped(&payload.indexer, 256);
     if indexer_id.is_none() {
         // Per the plan: "If autobrr names a release from an
         // unconfigured indexer, surface it as an error in logs +
@@ -390,7 +391,7 @@ pub async fn webhook_autobrr(
         AddOutcome::Added => "added",
         AddOutcome::AlreadyPresent => "already_present",
     };
-    let safe_filter = sanitize_for_log(&payload.filter);
+    let safe_filter = sanitize_for_log_capped(&payload.filter, 256);
     let size_label = if payload.size_bytes > 0 {
         format!(", size_bytes={}", payload.size_bytes)
     } else {

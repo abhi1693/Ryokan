@@ -175,12 +175,29 @@ pub(crate) fn client_ip_from_request_with_trust(
 /// attacker-supplied text (e.g. `form.username`) in a log line. Keeps
 /// newlines / terminal escapes / multi-kilobyte probes from showing up
 /// in the auth_log table and the tracing stream.
+///
+/// Default cap is 64 chars — appropriate for usernames + identifier-
+/// shaped fields. Longer attacker-controlled strings (release titles,
+/// indexer names, autobrr filter labels) should call
+/// [`sanitize_for_log_capped`] with a larger cap so their tail isn't
+/// truncated; the *security* concern here is the control-char filter,
+/// not the length, and a release name without its CRC / extension is
+/// noticeably harder to grep for in System → Logs.
 pub(crate) fn sanitize_for_log(s: &str) -> String {
+    sanitize_for_log_capped(s, 64)
+}
+
+/// Length-parameterized variant of [`sanitize_for_log`]. Same control-
+/// char filter and trim, configurable take-N. Use 256 for release
+/// titles / indexer names / filter labels; the larger budget still
+/// truncates a multi-KB probe but preserves a normal anime release
+/// title intact.
+pub(crate) fn sanitize_for_log_capped(s: &str, max_len: usize) -> String {
     let trimmed = s.trim();
     trimmed
         .chars()
         .filter(|c| !c.is_control())
-        .take(64)
+        .take(max_len)
         .collect()
 }
 

@@ -49,15 +49,12 @@ async fn seed_indexer(db: &SqlitePool, name: &str) -> i64 {
     .unwrap()
 }
 
-/// Reload `state.indexers` from the test DB. The handler reads
-/// from the IndexerCache (PR #108 review fix #6) rather than
-/// running a fresh `list_all` per push, so tests that seed via
-/// `seed_indexer` must trigger the same swap-on-write pattern
-/// the production Settings handlers use.
+/// Reload `state.indexers` from the test DB via the same helper
+/// the production Settings handlers call after upsert/delete
+/// (PR #108 review round 2 #2). Keeps tests honest about
+/// exercising the same swap-on-write code path.
 async fn rebuild_indexer_cache(state: &crate::AppState) {
-    let fresh = crate::services::indexers::rebuild_cache(&state.db).await;
-    let new_inner = fresh.read().await.clone();
-    *state.indexers.write().await = new_inner;
+    crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
 }
 
 async fn seed_series(db: &SqlitePool) -> i64 {
