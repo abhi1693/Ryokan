@@ -425,6 +425,7 @@ pub async fn collect_scored_batches_for_target(
     }
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
+    let indexers = load_indexer_clients(db).await;
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
@@ -439,6 +440,7 @@ pub async fn collect_scored_batches_for_target(
         seadex_hashes: &seadex_hashes,
         restrict_user: &series_ctx.restrict_user,
         absolute_offset: series_ctx.absolute_offset,
+        indexers: &indexers,
     };
 
     // Standard query sweep — picks up any batches that happen to surface
@@ -649,6 +651,7 @@ async fn collect_scored_for_target(
     }
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
+    let indexers = load_indexer_clients(db).await;
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
@@ -663,6 +666,7 @@ async fn collect_scored_for_target(
         seadex_hashes: &seadex_hashes,
         restrict_user: &series_ctx.restrict_user,
         absolute_offset: series_ctx.absolute_offset,
+        indexers: &indexers,
     };
 
     // Phase 1: standard queries (primary aliases + episode variants).
@@ -881,6 +885,13 @@ struct AutoQueryCtx<'a> {
     /// hasn't populated yet, which collapses to the legacy
     /// strict-relative behavior.
     absolute_offset: i32,
+    /// Issue #28 PR B — torznab/newznab indexers to fan out to
+    /// alongside the Nyaa-direct fetch. Loaded once at the top of
+    /// `collect_scored_for_target` so the per-`run_queries` call
+    /// doesn't re-read the DB. Empty slice = Nyaa-only behavior
+    /// (the v1.4 default; what every install sees until the user
+    /// adds a row in Settings → Indexers).
+    indexers: &'a [std::sync::Arc<dyn crate::services::indexers::Indexer>],
 }
 
 /// Same idea, but for the interactive-search helper which has a
@@ -961,6 +972,48 @@ async fn run_queries(
         .collect()
         .await;
 
+    // Issue #28 PR B — fan out to configured torznab/newznab
+    // indexers concurrently with the Nyaa stream. The indexer
+    // results land in the same `candidates` Vec via the same
+    // dedup/match pipeline; downstream scoring sees a unified
+    // pool. Empty `ctx.indexers` (the v1.4 default) skips this
+    // pass entirely so behavior is unchanged for users who
+    // haven't configured any indexers.
+    let mut indexer_responses: Vec<crate::services::nyaa::SearchResult> = Vec::new();
+    if !ctx.indexers.is_empty() {
+        // One torznab query per text query — same fan-out shape
+        // as Nyaa. The indexer impls handle their own per-row
+        // timeouts; a slow indexer holds up only its own slot.
+        for query in queries {
+            let search_query = crate::services::indexers::SearchQuery {
+                q: query.clone(),
+                categories: Vec::new(), // default → 5070 (anime)
+                limit: None,
+                offset: None,
+            };
+            let outcomes =
+                crate::services::indexers::fan_out_search(ctx.indexers, &search_query).await;
+            for outcome in outcomes {
+                match outcome.result {
+                    Ok(releases) => {
+                        for r in releases {
+                            indexer_responses.push(r.into_search_result());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "indexer fan-out failed for '{}' on indexer #{} ({}): {}",
+                            query,
+                            outcome.indexer_id,
+                            outcome.indexer_name,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     for resp in responses {
         let results = match resp {
             Ok(v) => v.results,
@@ -1016,6 +1069,73 @@ async fn run_queries(
             candidates.push(result);
         }
     }
+
+    // Indexer results go through the same dedup + match gate as
+    // Nyaa results so downstream scoring is uniform. The dedup
+    // key (info_hash | title) catches the case of an indexer
+    // surfacing a release Nyaa already returned via Prowlarr's
+    // Nyaa indexer — no double-counting.
+    for result in indexer_responses {
+        let dedupe_key = if !result.info_hash.is_empty() {
+            result.info_hash.clone()
+        } else {
+            result.title.to_lowercase()
+        };
+        if !seen.insert(dedupe_key) {
+            continue;
+        }
+        if !ctx.allow_batch && result.is_batch {
+            continue;
+        }
+        let is_seadex_best = is_seadex_match(&result.info_hash, ctx.seadex_hashes);
+        if !is_seadex_best
+            && !matches_target(
+                &result.title,
+                ctx.aliases,
+                ctx.sibling_precompute,
+                ctx.target,
+                ctx.expected_season,
+                ctx.batch_episode_match && result.is_batch,
+                ctx.absolute_offset,
+            )
+        {
+            continue;
+        }
+        candidates.push(result);
+    }
+}
+
+/// Issue #28 PR B — load every enabled indexer row from the DB
+/// and instantiate a `TorznabIndexer` per row. Failed instantiations
+/// (empty URL, reqwest client build failure) are logged and dropped
+/// rather than poisoning the whole sweep — partial fan-out is
+/// always better than no fan-out.
+async fn load_indexer_clients(
+    db: &SqlitePool,
+) -> Vec<std::sync::Arc<dyn crate::services::indexers::Indexer>> {
+    let rows = match crate::models::indexers::list_enabled(db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("failed to load indexers from DB: {e}");
+            return Vec::new();
+        }
+    };
+    rows.iter()
+        .filter_map(|row| {
+            match crate::services::indexers::torznab::TorznabIndexer::from_row_arc(row) {
+                Ok(idx) => Some(idx),
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to instantiate indexer #{} ({}): {}",
+                        row.id,
+                        row.name,
+                        e
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Run queries for interactive search with relaxed matching.

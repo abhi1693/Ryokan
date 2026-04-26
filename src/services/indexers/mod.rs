@@ -344,11 +344,6 @@ pub fn merge_for_interactive_search(releases: Vec<Release>) -> Vec<Release> {
 /// items rather than propagated — the auto-search inspector
 /// shows per-indexer success/failure instead of failing the
 /// whole search when one indexer dies.
-///
-/// PR A wires the helper but no callers exist yet. PR B's
-/// auto-search integration calls this after the Nyaa-direct
-/// fetch and merges the [`Release`] vecs from successful
-/// outcomes via [`dedup_for_auto_search`].
 pub async fn fan_out_search(
     indexers: &[Arc<dyn Indexer>],
     query: &SearchQuery,
@@ -362,6 +357,143 @@ pub async fn fan_out_search(
         }
     });
     join_all(futures).await
+}
+
+impl Release {
+    /// Convert a torznab/newznab [`Release`] into the
+    /// [`crate::services::nyaa::SearchResult`] shape so the
+    /// downstream auto-search loop can dedup + score indexer
+    /// results alongside Nyaa results without a separate code
+    /// path.
+    ///
+    /// Classification fields (`source`, `web_kind`, `is_remux`,
+    /// `is_bdmv`, `quality_label`) are left empty — the
+    /// downstream `classify_release` call fills them via the
+    /// filename + ffprobe + temporal + group-map layers (the
+    /// Nyaa-description-body layer is unavailable for indexer
+    /// results, but the other four are load-bearing).
+    ///
+    /// Group + resolution are extracted via the same simple
+    /// patterns the Nyaa scraper uses on raw release titles —
+    /// good enough for scoring, not as accurate as the full
+    /// anitomy pass.
+    pub fn into_search_result(self) -> crate::services::nyaa::SearchResult {
+        let group = extract_group_from_title(&self.title);
+        let resolution = extract_resolution_from_title(&self.title);
+        let is_batch = detect_batch_from_title(&self.title);
+        crate::services::nyaa::SearchResult {
+            title: self.title,
+            link: self.link.clone(),
+            magnet: self.magnet,
+            torrent: self.link,
+            size: format_bytes_human(self.size_bytes),
+            size_bytes: self.size_bytes as i64,
+            seeders: self.seeders,
+            leechers: self.leechers,
+            downloads: 0,
+            group,
+            resolution,
+            quality_label: String::new(),
+            source: String::new(),
+            web_kind: String::new(),
+            is_remux: false,
+            is_bdmv: false,
+            is_batch,
+            // Indexer results don't carry Nyaa's "trusted uploader"
+            // flag. Default false — scoring won't apply the trusted
+            // bonus, which is acceptable for v1 (PT releases
+            // typically have other quality signals).
+            is_trusted: false,
+            score: 0,
+            info_hash: self.info_hash,
+            score_breakdown: Vec::new(),
+            // pubDate from the release as ISO-ish; the rest of
+            // Ryokan's UI only renders the string verbatim.
+            upload_date: format_publish_date(self.publish_date),
+        }
+    }
+}
+
+fn extract_group_from_title(title: &str) -> String {
+    // First `[Group]` bracket is the convention. Second-bracket
+    // (e.g., `[BD 1080p]`) is metadata; ignore. Empty when no
+    // bracketed group is present.
+    let bytes = title.as_bytes();
+    let mut start = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'[' {
+            start = Some(i + 1);
+        } else if b == b']'
+            && let Some(s) = start
+        {
+            let inner = &title[s..i];
+            if !inner.is_empty() && !inner.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return inner.to_string();
+            }
+            start = None;
+        }
+    }
+    String::new()
+}
+
+fn extract_resolution_from_title(title: &str) -> String {
+    for needle in ["2160p", "1080p", "720p", "480p", "1080P", "720P"] {
+        if title.contains(needle) {
+            // Strip the trailing 'p' so we match Nyaa's `resolution`
+            // shape ("1080" not "1080p"). Case-insensitive.
+            let digits: String = needle.chars().take_while(|c| c.is_ascii_digit()).collect();
+            return digits;
+        }
+    }
+    String::new()
+}
+
+fn detect_batch_from_title(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    lower.contains("batch")
+        || lower.contains("season pack")
+        || lower.contains("complete")
+        || lower.contains("[bd]")
+        || lower.contains("(bd)")
+}
+
+fn format_bytes_human(bytes: u64) -> String {
+    if bytes == 0 {
+        return String::new();
+    }
+    let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    if gib >= 1.0 {
+        format!("{:.1} GiB", gib)
+    } else {
+        format!("{:.0} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn format_publish_date(unix_ts: i64) -> String {
+    if unix_ts <= 0 {
+        return String::new();
+    }
+    // Match Nyaa's "YYYY-MM-DD HH:MM" UTC shape. Civil-calendar
+    // expansion mirrors the parser's days-since-epoch math.
+    let days = unix_ts.div_euclid(86400);
+    let secs_of_day = unix_ts.rem_euclid(86400);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+
+    // Howard Hinnant's civil_from_days, inverse of the parser's
+    // days_from_civil.
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, hour, minute)
 }
 
 #[cfg(test)]
