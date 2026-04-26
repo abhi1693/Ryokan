@@ -586,11 +586,16 @@ impl DownloadClient for TransmissionClient {
         let mut args = serde_json::Map::new();
         args.insert("ids".to_string(), json!([info_hash.to_ascii_lowercase()]));
         if let Some(ratio) = rules.ratio {
+            // serde_json::Number::from_f64 returns None for NaN /
+            // ±Inf. A Null on the wire would unset the per-torrent
+            // ratio limit — bail loudly so the operator sees the
+            // bad config instead of a torrent that seeds forever.
+            let ratio_num = serde_json::Number::from_f64(ratio).ok_or_else(|| {
+                format!("transmission set_seed_rules: ratio {ratio} is not a finite number")
+            })?;
             args.insert(
                 "seedRatioLimit".to_string(),
-                serde_json::Number::from_f64(ratio)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                serde_json::Value::Number(ratio_num),
             );
             args.insert("seedRatioMode".to_string(), json!(1));
         }

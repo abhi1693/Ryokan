@@ -55,8 +55,9 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
+use crate::handlers::auth::sanitize_for_log;
 use crate::models::log::LogCategory;
-use crate::models::{config, grabbed_torrents, indexers as indexer_model};
+use crate::models::{config, grabbed_torrents};
 use crate::services::download_client::{self, AddOutcome};
 use crate::services::{logger, rss};
 
@@ -232,18 +233,36 @@ pub async fn webhook_autobrr(
     // imported. Same shape as the RSS dedup — autobrr can race
     // against torznab polling (and against the user manually
     // adding via the UI).
+    let safe_release = sanitize_for_log(&payload.torrent_name);
     if !info_hash_lc.is_empty() && grabbed_torrents::is_known_hash(&state.db, &info_hash_lc).await {
         logger::info(
             &state.db,
             LogCategory::Grab,
-            &format!(
-                "autobrr: skipping {} — hash already in grabbed_torrents",
-                payload.torrent_name
-            ),
+            &format!("autobrr: skipping {safe_release} — hash already in grabbed_torrents"),
             &info_hash_lc,
         )
         .await;
         return skipped("duplicate hash already grabbed");
+    }
+
+    // PR #108 review #1 — also dedup against the blocklist.
+    // `is_known_hash` filters on `state IN ('pending', 'imported')`,
+    // so a release the user explicitly blocklisted (state='failed')
+    // would slip past it and re-enter the client on the next IRC
+    // announce, silently undoing blocklist intent.
+    if !info_hash_lc.is_empty()
+        && grabbed_torrents::is_blocklisted(&state.db, &info_hash_lc)
+            .await
+            .unwrap_or(false)
+    {
+        logger::info(
+            &state.db,
+            LogCategory::Grab,
+            &format!("autobrr: skipping {safe_release} — hash is blocklisted"),
+            &info_hash_lc,
+        )
+        .await;
+        return skipped("hash is blocklisted");
     }
 
     // Match the indexer name (case-insensitive) so seed rules
@@ -251,14 +270,20 @@ pub async fn webhook_autobrr(
     // tracker name (e.g., "AnimeBytes") and Ryokan's indexer row
     // for the corresponding torznab feed should match by name —
     // the user picks the row's name when adding via Settings.
-    let indexer_row = match indexer_model::list_all(&state.db).await {
-        Ok(rows) => rows
-            .into_iter()
-            .find(|r| r.name.trim().eq_ignore_ascii_case(payload.indexer.trim())),
-        Err(_) => None,
+    //
+    // Reads the cached `Vec<Arc<dyn Indexer>>` rather than
+    // hitting the DB so a high-rate autobrr push doesn't
+    // re-query `indexers` per call. The cache is rebuilt on
+    // Settings → Indexers edits.
+    let indexer_id = {
+        let snapshot = state.indexers.read().await.clone();
+        snapshot
+            .iter()
+            .find(|i| i.name().trim().eq_ignore_ascii_case(payload.indexer.trim()))
+            .map(|i| i.id())
     };
-    let indexer_id = indexer_row.as_ref().map(|r| r.id);
-    if indexer_row.is_none() {
+    let safe_indexer = sanitize_for_log(&payload.indexer);
+    if indexer_id.is_none() {
         // Per the plan: "If autobrr names a release from an
         // unconfigured indexer, surface it as an error in logs +
         // skip rather than grab with default rules." A user who
@@ -269,10 +294,9 @@ pub async fn webhook_autobrr(
             &state.db,
             LogCategory::Grab,
             &format!(
-                "autobrr: '{}' refers to an indexer Ryokan doesn't have configured — skipping {}",
-                payload.indexer, payload.torrent_name
+                "autobrr: '{safe_indexer}' refers to an indexer Ryokan doesn't have configured — skipping {safe_release}"
             ),
-            &payload.indexer,
+            &safe_indexer,
         )
         .await;
         return skipped("indexer not configured in Ryokan");
@@ -288,11 +312,8 @@ pub async fn webhook_autobrr(
             logger::info(
                 &state.db,
                 LogCategory::Grab,
-                &format!(
-                    "autobrr: no tracked series matched release '{}'",
-                    payload.torrent_name
-                ),
-                &payload.torrent_name,
+                &format!("autobrr: no tracked series matched release '{safe_release}'"),
+                &safe_release,
             )
             .await;
             return skipped("no tracked series matched the release title");
@@ -308,7 +329,7 @@ pub async fn webhook_autobrr(
                 &state.db,
                 LogCategory::Grab,
                 "autobrr: no download client configured — cannot dispatch push",
-                &payload.torrent_name,
+                &safe_release,
             )
             .await;
             return err_json(
@@ -323,10 +344,7 @@ pub async fn webhook_autobrr(
             logger::error(
                 &state.db,
                 LogCategory::Grab,
-                &format!(
-                    "autobrr: client add_torrent failed for '{}'",
-                    payload.torrent_name
-                ),
+                &format!("autobrr: client add_torrent failed for '{safe_release}'"),
                 &e,
             )
             .await;
@@ -337,6 +355,14 @@ pub async fn webhook_autobrr(
     // Record the grab + apply per-indexer seed rules + stamp
     // attribution. Same flow as the auto_search inner loop's
     // post-grab block.
+    //
+    // `record_grab` returns `None` when the row couldn't be
+    // persisted (DB error, or the empty-hash + FK-violation
+    // anomaly path documented on the model). The torrent is
+    // already in the client at this point, so we don't unwind —
+    // we just skip the seed-rule + attribution stamp. The user
+    // sees the grab via `client.list_scoped()`; the missing
+    // grab row gets caught by the next reconcile pass.
     let grab_id = grabbed_torrents::record_grab(
         &state.db,
         &info_hash_lc,
@@ -364,14 +390,20 @@ pub async fn webhook_autobrr(
         AddOutcome::Added => "added",
         AddOutcome::AlreadyPresent => "already_present",
     };
+    let safe_filter = sanitize_for_log(&payload.filter);
+    let size_label = if payload.size_bytes > 0 {
+        format!(", size_bytes={}", payload.size_bytes)
+    } else {
+        String::new()
+    };
     logger::info(
         &state.db,
         LogCategory::Grab,
         &format!(
             "autobrr push: '{}' → series #{} ({}) [{}]",
-            payload.torrent_name, series.id, series.title, outcome_label
+            safe_release, series.id, series.title, outcome_label
         ),
-        &format!("indexer={}, filter={}", payload.indexer, payload.filter),
+        &format!("indexer={safe_indexer}, filter={safe_filter}{size_label}"),
     )
     .await;
     ok(format!(

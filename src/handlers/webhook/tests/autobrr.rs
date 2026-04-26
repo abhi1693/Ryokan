@@ -49,6 +49,17 @@ async fn seed_indexer(db: &SqlitePool, name: &str) -> i64 {
     .unwrap()
 }
 
+/// Reload `state.indexers` from the test DB. The handler reads
+/// from the IndexerCache (PR #108 review fix #6) rather than
+/// running a fresh `list_all` per push, so tests that seed via
+/// `seed_indexer` must trigger the same swap-on-write pattern
+/// the production Settings handlers use.
+async fn rebuild_indexer_cache(state: &crate::AppState) {
+    let fresh = crate::services::indexers::rebuild_cache(&state.db).await;
+    let new_inner = fresh.read().await.clone();
+    *state.indexers.write().await = new_inner;
+}
+
 async fn seed_series(db: &SqlitePool) -> i64 {
     use crate::models::series::{SeriesCore, upsert};
     let (id, _) = upsert(
@@ -138,6 +149,7 @@ async fn no_tracked_series_skips_with_200() {
     seed_autobrr_enabled(&db, KEY).await;
     seed_indexer(&db, "Nyaa").await;
     let state = build_test_app_state(db, None);
+    rebuild_indexer_cache(&state).await;
     let app = autobrr_webhook_router(state);
 
     let body = r#"{"torrent_name": "Some Random Title", "info_hash": "h", "magnet_uri": "magnet:m", "indexer": "Nyaa"}"#;
@@ -166,12 +178,49 @@ async fn duplicate_hash_skips_with_200() {
     .await
     .unwrap();
     let state = build_test_app_state(db, None);
+    rebuild_indexer_cache(&state).await;
     let app = autobrr_webhook_router(state);
 
     let body = r#"{"torrent_name": "Test Show - 01", "info_hash": "deadbeef00", "magnet_uri": "magnet:m", "indexer": "Nyaa"}"#;
     let (status, body) = post_payload(app, body).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("duplicate hash"), "body: {body}");
+}
+
+#[tokio::test]
+async fn blocklisted_hash_skips_with_200() {
+    // Hash exists in `grabbed_torrents` in `failed` state — i.e.
+    // the user blocklisted it. `is_known_hash` filters to
+    // pending/imported and would let this through; the handler's
+    // separate `is_blocklisted` check must catch it so an IRC
+    // re-announce can't silently re-grab a blocklisted release.
+    let db = in_memory_pool().await;
+    seed_autobrr_enabled(&db, KEY).await;
+    seed_indexer(&db, "Nyaa").await;
+    let series_id = seed_series(&db).await;
+    let grab_id = crate::models::grabbed_torrents::record_grab(
+        &db,
+        "deadbeef99",
+        "Test Show - 01",
+        series_id,
+        &[1],
+        false,
+    )
+    .await
+    .unwrap()
+    .expect("record_grab returns id");
+    crate::models::grabbed_torrents::mark_failed(&db, grab_id)
+        .await
+        .unwrap();
+    let state = build_test_app_state(db, None);
+    rebuild_indexer_cache(&state).await;
+    let app = autobrr_webhook_router(state);
+
+    let body = r#"{"torrent_name": "Test Show - 01", "info_hash": "deadbeef99", "magnet_uri": "magnet:m", "indexer": "Nyaa"}"#;
+    let (status, body) = post_payload(app, body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("\"status\":\"skipped\""), "body: {body}");
+    assert!(body.contains("blocklisted"), "body: {body}");
 }
 
 #[tokio::test]
@@ -184,6 +233,7 @@ async fn no_download_client_returns_503() {
     seed_indexer(&db, "Nyaa").await;
     seed_series(&db).await;
     let state = build_test_app_state(db, None);
+    rebuild_indexer_cache(&state).await;
     let app = autobrr_webhook_router(state);
 
     let body = r#"{"torrent_name": "Test Show - 01 [BD 1080p]", "info_hash": "feedface", "magnet_uri": "magnet:m", "indexer": "Nyaa"}"#;

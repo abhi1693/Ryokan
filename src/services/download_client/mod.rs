@@ -168,11 +168,25 @@ pub trait DownloadClient: Send + Sync {
     ///   no native idle-time stop, time_minutes is a no-op with a
     ///   debug log.
     ///
-    /// `Option`-wrapped fields mean "leave as-is" — None doesn't
-    /// reset the per-torrent setting to the client default, it just
-    /// doesn't touch it. A caller that wants to clear a previously-
-    /// set ratio passes `Some(0.0)` (or the impl-specific "use
-    /// global" sentinel; consult per-impl headers).
+    /// `Option`-wrapped fields mean "no rule configured for this
+    /// dimension." Per-impl handling diverges:
+    /// - **Deluge / Transmission / rTorrent** leave the per-torrent
+    ///   setting untouched on `None` — they only write the field
+    ///   they were given.
+    /// - **qBit's `setShareLimits` always writes BOTH `ratioLimit`
+    ///   and `seedingTimeLimit`** in one call (the API takes them
+    ///   as a pair); `None` is translated to `-1` (use global
+    ///   default), which means a previously-set per-torrent ratio
+    ///   would be reset to global if `set_seed_rules` is later
+    ///   called with `ratio: None`.
+    ///
+    /// In practice this is fine because the call site is
+    /// [`apply_indexer_seed_rules`] — invoked exactly once per
+    /// grab, immediately after `add_torrent`, on a torrent that
+    /// has no prior per-torrent overrides. If a future caller
+    /// updates rules on a long-lived torrent, the qBit divergence
+    /// becomes load-bearing and the impl will need a read-then-
+    /// write.
     ///
     /// Default impl is a no-op so impls can adopt the trait method
     /// incrementally and the build doesn't break the moment a new
@@ -255,13 +269,13 @@ pub async fn apply_indexer_seed_rules(
         return false;
     }
     if let Err(e) = client.set_seed_rules(info_hash, rules).await {
-        tracing::warn!(
-            "indexer #{} ({}): set_seed_rules failed for {}: {}",
-            row.id,
-            row.name,
-            info_hash,
-            e
-        );
+        crate::services::logger::warn(
+            db,
+            crate::models::log::LogCategory::Grab,
+            &format!("indexer #{} ({}): set_seed_rules failed", row.id, row.name),
+            &format!("{info_hash}: {e}"),
+        )
+        .await;
     }
     true
 }

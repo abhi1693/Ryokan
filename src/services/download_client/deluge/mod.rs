@@ -747,12 +747,18 @@ impl DownloadClient for DelugeClient {
         let hash_lower = info_hash.to_ascii_lowercase();
         let mut options = serde_json::Map::new();
         if let Some(ratio) = rules.ratio {
+            // serde_json::Number::from_f64 returns None for NaN /
+            // ±Inf. A Null in the options dict would silently
+            // unset the per-torrent stop_ratio on the wire — bail
+            // loudly so the operator sees the bad config instead
+            // of a torrent that seeds forever.
+            let ratio_num = serde_json::Number::from_f64(ratio).ok_or_else(|| {
+                format!("deluge set_seed_rules: ratio {ratio} is not a finite number")
+            })?;
             options.insert("stop_at_ratio".to_string(), serde_json::Value::Bool(true));
             options.insert(
                 "stop_ratio".to_string(),
-                serde_json::Number::from_f64(ratio)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                serde_json::Value::Number(ratio_num),
             );
         }
         if rules.time_minutes.is_some() {

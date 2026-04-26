@@ -479,8 +479,10 @@ pub async fn respects_seed_rules(db: &SqlitePool, info_hash: &str) -> bool {
     if info_hash.is_empty() {
         return false;
     }
+    // `WHERE respect_seed_rules = 1` makes the row's mere existence
+    // the answer — no need to read the column value back.
     sqlx::query_scalar::<_, i64>(
-        "SELECT respect_seed_rules FROM grabbed_torrents \
+        "SELECT 1 FROM grabbed_torrents \
          WHERE hash = ? AND respect_seed_rules = 1 \
          ORDER BY id DESC LIMIT 1",
     )
@@ -489,8 +491,7 @@ pub async fn respects_seed_rules(db: &SqlitePool, info_hash: &str) -> bool {
     .await
     .ok()
     .flatten()
-    .map(|n| n != 0)
-    .unwrap_or(false)
+    .is_some()
 }
 
 /// Mark every `pending` grab row as `failed`. Used by the #63 Phase 2
