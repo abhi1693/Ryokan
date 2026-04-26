@@ -18,6 +18,7 @@ use crate::services::{
 };
 
 pub mod custom_formats;
+pub mod indexers;
 use custom_formats::ImportReviewView;
 
 /// View-model wrapper rendered on the Custom Formats tab. Surfaces

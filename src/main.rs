@@ -88,6 +88,9 @@ use services::{
         handlers::settings::custom_formats::settings_custom_formats_reset_defaults,
         handlers::settings::custom_formats::settings_custom_formats_export,
         handlers::settings::custom_formats::settings_custom_formats_test,
+        // Settings — Indexers (issue #28 PR B)
+        handlers::settings::indexers::settings_indexers_upsert,
+        handlers::settings::indexers::settings_indexers_delete,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
         handlers::system::api_logs_client,
@@ -680,6 +683,14 @@ async fn main() {
         .route(
             "/settings/custom-formats/delete",
             post(handlers::settings::custom_formats::settings_custom_formats_delete),
+        )
+        .route(
+            "/settings/indexers/upsert",
+            post(handlers::settings::indexers::settings_indexers_upsert),
+        )
+        .route(
+            "/settings/indexers/delete",
+            post(handlers::settings::indexers::settings_indexers_delete),
         )
         .route(
             "/settings/custom-formats/minimum-score",

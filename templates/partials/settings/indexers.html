@@ -1,47 +1,99 @@
     <fieldset>
         <legend>Indexers</legend>
-        <p class="form-hint">Torznab and newznab indexers (Prowlarr, Jackett, raw torznab). Nyaa stays directly integrated and doesn't need a row here.</p>
+        <p class="form-hint">
+            Torznab and newznab indexers (Prowlarr, Jackett, raw torznab). Nyaa stays directly
+            integrated and doesn't need a row here. Sharing a Prowlarr instance with an existing
+            Sonarr install is supported out of the box: Prowlarr's torznab endpoint is keyed by
+            apikey, so Sonarr's "Apps" sync isn't an authorization gate.
+        </p>
 
-        {% if indexers.is_empty() %}
-        <div class="empty-state">
-            <p>No indexers configured.</p>
-            <p class="form-hint">
-                Indexer support is being rolled out across issue #28's PR sequence:
-                this tab is the foundation. Adding, editing, and querying torznab
-                or newznab indexers lands in the next PR. For now, Ryokan continues
-                to search Nyaa directly with no behavioral change.
-            </p>
-            <p class="form-hint">
-                When the rest of the surface ships, this is where you'll paste the
-                "Copy Torznab Url" output from Prowlarr or Jackett along with the
-                API key, set per-indexer seed rules, and order by priority.
-            </p>
-        </div>
-        {% else %}
+        {% if !indexers.is_empty() %}
         <div class="table-scroll-wrap">
         <table class="indexers-table">
             <thead>
                 <tr>
+                    <th>Priority</th>
                     <th>Name</th>
                     <th>Kind</th>
-                    <th>Priority</th>
+                    <th>URL</th>
                     <th>Private</th>
                     <th>Status</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
                 {% for idx in indexers %}
                 <tr>
+                    <td>{{ idx.priority }}</td>
                     <td>{{ idx.name }}</td>
                     <td>{{ idx.kind }}</td>
-                    <td>{{ idx.priority }}</td>
+                    <td><code>{{ idx.url }}</code></td>
                     <td>{% if idx.is_private_tracker %}Yes{% else %}No{% endif %}</td>
                     <td>{% if idx.enabled %}Enabled{% else %}Disabled{% endif %}</td>
+                    <td>
+                        <form method="post" action="/settings/indexers/delete" style="display:inline">
+                            <input type="hidden" name="id" value="{{ idx.id }}">
+                            <button type="submit" class="btn btn-danger btn-small"
+                                    onclick="return confirm('Delete indexer {{ idx.name }}?');">
+                                Delete
+                            </button>
+                        </form>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
         </div>
-        <p class="form-hint">Add/edit/delete forms land in the next PR.</p>
         {% endif %}
+
+        <h3 class="settings-subheading">Add Indexer</h3>
+        <p class="form-hint">
+            Paste the full torznab base URL from Prowlarr's "Copy Torznab URL" button (or
+            Jackett's per-indexer torznab URL). The URL ends in <code>/api</code>; do not
+            add query params yourself — Ryokan appends <code>?t=…&amp;apikey=…</code>.
+        </p>
+        <form method="post" action="/settings/indexers/upsert" class="settings-subform">
+            <label>
+                Name
+                <input type="text" name="name" required maxlength="100"
+                       placeholder="e.g. Prowlarr - Nyaa">
+            </label>
+            <label>
+                Kind
+                <select name="kind">
+                    <option value="torznab" selected>torznab</option>
+                    <option value="newznab">newznab</option>
+                </select>
+            </label>
+            <label>
+                URL
+                <input type="url" name="url" required
+                       placeholder="https://prowlarr.local/1/api">
+            </label>
+            <label>
+                API Key
+                <input type="text" name="api_key" autocomplete="off"
+                       placeholder="from Prowlarr Settings &rarr; General">
+            </label>
+            <label>
+                Priority
+                <input type="number" name="priority" value="25" min="1" max="50">
+                <span class="form-hint">Lower = preferred. Range 1–50, default 25.</span>
+            </label>
+            <label>
+                Min Seeders
+                <input type="number" name="min_seeders" value="1" min="0">
+                <span class="form-hint">Releases below this floor are dropped before scoring.</span>
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" name="enabled" checked>
+                Enabled
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" name="is_private_tracker">
+                Private tracker
+                <span class="form-hint">Marks this indexer as PT for the per-series upgrade opt-in.</span>
+            </label>
+            <button type="submit" class="btn btn-primary">Add Indexer</button>
+        </form>
     </fieldset>
