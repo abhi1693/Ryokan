@@ -207,6 +207,7 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
             info_hash,
             score_breakdown: Vec::new(),
             upload_date: upload_date.clone(),
+            indexer_id: None,
         };
 
         let (total, breakdown) =
@@ -503,6 +504,7 @@ pub(super) fn parse_view_page(
         // The view page doesn't render the listing-table date column.
         // Callers on this path (SeaDex-bypass) get an empty string.
         upload_date: String::new(),
+        indexer_id: None,
     };
 
     let (total, breakdown) =
@@ -978,6 +980,7 @@ mod tests {
             info_hash: String::new(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            indexer_id: None,
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;
@@ -1021,6 +1024,7 @@ mod tests {
             info_hash: String::new(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            indexer_id: None,
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;

@@ -335,6 +335,7 @@ mod tests {
             info_hash: String::new(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            indexer_id: None,
         }
     }
 

@@ -374,6 +374,7 @@ async fn run_auto_search_targets_with_upgrades(
             allow_batch,
             is_upgrade,
             &cfs,
+            &state.indexers,
         )
         .await
         {

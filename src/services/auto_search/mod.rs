@@ -313,6 +313,7 @@ pub async fn find_all_for_target(
     scored
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn find_best_for_target(
     db: &SqlitePool,
     detail: &AnimeDetail,
@@ -321,6 +322,7 @@ pub async fn find_best_for_target(
     allow_batch: bool,
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
 ) -> Option<SearchResult> {
     collect_scored_for_target(
         db,
@@ -330,6 +332,7 @@ pub async fn find_best_for_target(
         allow_batch,
         batch_episode_match,
         cfs,
+        indexers_cache,
     )
     .await
     .into_iter()
@@ -358,8 +361,9 @@ pub async fn find_best_batch_for_target(
     config: &Config,
     target: &SearchTarget,
     cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
 ) -> Option<SearchResult> {
-    collect_scored_batches_for_target(db, detail, config, target, cfs)
+    collect_scored_batches_for_target(db, detail, config, target, cfs, indexers_cache)
         .await
         .into_iter()
         .next()
@@ -378,6 +382,7 @@ pub async fn collect_scored_batches_for_target(
     config: &Config,
     target: &SearchTarget,
     cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
 ) -> Vec<SearchResult> {
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
@@ -425,6 +430,8 @@ pub async fn collect_scored_batches_for_target(
     }
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
+    let indexers_arc = indexers_cache.read().await.clone();
+    let indexers: &[std::sync::Arc<dyn crate::services::indexers::Indexer>] = &indexers_arc[..];
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
@@ -439,6 +446,7 @@ pub async fn collect_scored_batches_for_target(
         seadex_hashes: &seadex_hashes,
         restrict_user: &series_ctx.restrict_user,
         absolute_offset: series_ctx.absolute_offset,
+        indexers,
     };
 
     // Standard query sweep — picks up any batches that happen to surface
@@ -571,6 +579,7 @@ pub async fn collect_scored_batches_for_target(
 /// expensive collection pass. Filtering to batches post-sort gives the
 /// same answer as filtering pre-scoring because `rescore_for_auto_search`
 /// applies its per-target batch bump uniformly inside each target kind.
+#[allow(clippy::too_many_arguments)]
 async fn collect_scored_for_target(
     db: &SqlitePool,
     detail: &AnimeDetail,
@@ -579,6 +588,7 @@ async fn collect_scored_for_target(
     allow_batch: bool,
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
 ) -> Vec<SearchResult> {
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
@@ -649,6 +659,8 @@ async fn collect_scored_for_target(
     }
 
     let categories = quality::nyaa_categories_for_format(&detail.format, config.allow_non_english);
+    let indexers_arc = indexers_cache.read().await.clone();
+    let indexers: &[std::sync::Arc<dyn crate::services::indexers::Indexer>] = &indexers_arc[..];
 
     let ctx = AutoQueryCtx {
         aliases: &aliases,
@@ -663,6 +675,7 @@ async fn collect_scored_for_target(
         seadex_hashes: &seadex_hashes,
         restrict_user: &series_ctx.restrict_user,
         absolute_offset: series_ctx.absolute_offset,
+        indexers,
     };
 
     // Phase 1: standard queries (primary aliases + episode variants).
@@ -881,6 +894,13 @@ struct AutoQueryCtx<'a> {
     /// hasn't populated yet, which collapses to the legacy
     /// strict-relative behavior.
     absolute_offset: i32,
+    /// Issue #28 PR B — torznab/newznab indexers to fan out to
+    /// alongside the Nyaa-direct fetch. Loaded once at the top of
+    /// `collect_scored_for_target` so the per-`run_queries` call
+    /// doesn't re-read the DB. Empty slice = Nyaa-only behavior
+    /// (the v1.4 default; what every install sees until the user
+    /// adds a row in Settings → Indexers).
+    indexers: &'a [std::sync::Arc<dyn crate::services::indexers::Indexer>],
 }
 
 /// Same idea, but for the interactive-search helper which has a
@@ -961,6 +981,69 @@ async fn run_queries(
         .collect()
         .await;
 
+    // Issue #28 PR B — fan out to configured torznab/newznab
+    // indexers concurrently with the Nyaa stream. The indexer
+    // results land in the same `candidates` Vec via the same
+    // dedup/match pipeline; downstream scoring sees a unified
+    // pool. Empty `ctx.indexers` (the v1.4 default) skips this
+    // pass entirely so behavior is unchanged for users who
+    // haven't configured any indexers.
+    //
+    // PR #107 review fix #1+#3: collect raw `Release` records
+    // (not pre-converted to SearchResult) so `dedup_for_auto_search`
+    // can apply priority-based attribution + max-seeders aggregation
+    // across indexers reporting the same infohash. Per-query
+    // fan-outs run concurrently via `buffer_unordered` so a slow
+    // indexer holds up only its own slot, not subsequent queries.
+    let indexer_releases: Vec<crate::services::indexers::Release> = if ctx.indexers.is_empty() {
+        Vec::new()
+    } else {
+        let outcome_streams: Vec<_> = stream::iter(queries.iter().cloned())
+            .map(|query| async move {
+                let search_query = crate::services::indexers::SearchQuery {
+                    q: query.clone(),
+                    categories: Vec::new(),
+                    limit: None,
+                    offset: None,
+                };
+                (
+                    query,
+                    crate::services::indexers::fan_out_search(ctx.indexers, &search_query).await,
+                )
+            })
+            .buffer_unordered(nyaa::NYAA_BUFFER)
+            .collect()
+            .await;
+        let mut releases: Vec<crate::services::indexers::Release> = Vec::new();
+        for (query, outcomes) in outcome_streams {
+            for outcome in outcomes {
+                match outcome.result {
+                    Ok(rs) => releases.extend(rs),
+                    Err(e) => {
+                        tracing::debug!(
+                            "indexer fan-out failed for '{}' on indexer #{} ({}): {}",
+                            query,
+                            outcome.indexer_id,
+                            outcome.indexer_name,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        // Cross-indexer + cross-query dedup with priority attribution
+        // (decision #3): when two indexers report the same infohash,
+        // the lowest-priority-number indexer wins attribution and
+        // seeders aggregate via `max`. Without this the per-`run_queries`
+        // `seen` HashSet (further down) would attribute by HashMap
+        // iteration order — nondeterministic.
+        crate::services::indexers::dedup_for_auto_search(releases)
+    };
+    let indexer_responses: Vec<crate::services::nyaa::SearchResult> = indexer_releases
+        .into_iter()
+        .map(|r| r.into_search_result())
+        .collect();
+
     for resp in responses {
         let results = match resp {
             Ok(v) => v.results,
@@ -1015,6 +1098,40 @@ async fn run_queries(
             }
             candidates.push(result);
         }
+    }
+
+    // Indexer results go through the same dedup + match gate as
+    // Nyaa results so downstream scoring is uniform. The dedup
+    // key (info_hash | title) catches the case of an indexer
+    // surfacing a release Nyaa already returned via Prowlarr's
+    // Nyaa indexer — no double-counting.
+    for result in indexer_responses {
+        let dedupe_key = if !result.info_hash.is_empty() {
+            result.info_hash.clone()
+        } else {
+            result.title.to_lowercase()
+        };
+        if !seen.insert(dedupe_key) {
+            continue;
+        }
+        if !ctx.allow_batch && result.is_batch {
+            continue;
+        }
+        let is_seadex_best = is_seadex_match(&result.info_hash, ctx.seadex_hashes);
+        if !is_seadex_best
+            && !matches_target(
+                &result.title,
+                ctx.aliases,
+                ctx.sibling_precompute,
+                ctx.target,
+                ctx.expected_season,
+                ctx.batch_episode_match && result.is_batch,
+                ctx.absolute_offset,
+            )
+        {
+            continue;
+        }
+        candidates.push(result);
     }
 }
 

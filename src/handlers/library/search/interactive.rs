@@ -86,6 +86,7 @@ pub async fn search_batch_releases(
         &cfg,
         &auto_search::SearchTarget::Single,
         &cfs,
+        &state.indexers,
     )
     .await;
 
@@ -385,6 +386,7 @@ pub async fn interactive_search_batches(
         &cfg,
         &auto_search::SearchTarget::Single,
         &cfs,
+        &state.indexers,
     )
     .await;
 

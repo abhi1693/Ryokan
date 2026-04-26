@@ -182,6 +182,7 @@ pub fn total_cf_score_for_release(
         score: 0,
         score_breakdown: Vec::new(),
         upload_date: String::new(),
+        indexer_id: None,
     };
     let ctx = EvalContext {
         result: &result,

@@ -18,6 +18,7 @@ use crate::services::{
 };
 
 pub mod custom_formats;
+pub mod indexers;
 use custom_formats::ImportReviewView;
 
 /// View-model wrapper rendered on the Custom Formats tab. Surfaces
@@ -141,6 +142,18 @@ struct SettingsTemplate {
     /// browser snaps titles back to English even when the saved
     /// preference is Romaji or Native.
     title_language: String,
+    /// Issue #28 PR A — torznab/newznab indexer rows for the
+    /// Settings → Indexers tab placeholder. PR B replaces the
+    /// placeholder with add/edit/delete forms and uses the same
+    /// list. Empty on a fresh install since no indexers exist
+    /// until the user adds one.
+    indexers: Vec<crate::models::indexers::Indexer>,
+    /// PR #107 review fix #5: when the indexers tab is active
+    /// and `?edit_id=N` is set, populate this with the matching
+    /// row so the upsert form prefills from the existing values.
+    /// `None` renders the bare "Add Indexer" form; same prefill
+    /// pattern as the Custom Formats tab.
+    indexer_edit: Option<crate::models::indexers::Indexer>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -438,6 +451,10 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
         Some("custom_formats") => "custom_formats".to_string(),
         Some("groups") => "groups".to_string(),
         Some("general") => "general".to_string(),
+        // Issue #28 PR A — torznab/newznab indexer registry. Tab
+        // surface scaffolded; CRUD form lands in PR B alongside
+        // the TorznabIndexer impl that needs caps probing on save.
+        Some("indexers") => "indexers".to_string(),
         _ => "integrations".to_string(),
     }
 }
@@ -559,12 +576,13 @@ async fn build_settings_template(
     // account — in parallel. The old code issued them sequentially so
     // the wall time was the sum of N round trips even though none
     // depends on the others.
-    let (cfg_res, groups, suggestions, custom_formats, external_account_res) = tokio::join!(
+    let (cfg_res, groups, suggestions, custom_formats, external_account_res, indexers_res) = tokio::join!(
         config::get_config(&state.db),
         load_groups(&state.db),
         load_suggestions(&state.db),
         load_custom_formats_view(&state.db),
         crate::models::external_accounts::get_current(&state.db),
+        crate::models::indexers::list_all(&state.db),
     );
     let cfg = cfg_res.ok().flatten().unwrap_or_default();
     // A decrypt failure (tampered blob, key rotation without migration)
@@ -596,6 +614,16 @@ async fn build_settings_template(
 
     let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
     let title_language = cfg.title_language.clone();
+    // PR #107 review fix #5: resolve the indexer edit prefill the
+    // same way CF does. `edit_id` is shared across tabs — at most
+    // one tab consumes it at a time.
+    let indexer_edit = match edit_id {
+        Some(id) => crate::models::indexers::get_by_id(&state.db, id)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -611,6 +639,8 @@ async fn build_settings_template(
         version: env!("CARGO_PKG_VERSION"),
         external_account,
         title_language,
+        indexers: indexers_res.unwrap_or_default(),
+        indexer_edit,
     }
 }
 
@@ -871,6 +901,9 @@ pub async fn settings_submit(
             .map(ExternalAccountView::from_model);
         let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
         let title_language = cfg.title_language.clone();
+        let indexers = crate::models::indexers::list_all(&state.db)
+            .await
+            .unwrap_or_default();
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
@@ -883,9 +916,11 @@ pub async fn settings_submit(
             custom_format_import_review: None,
             message: None,
             error: Some(format!("Failed to save: {}", e)),
+            indexer_edit: None,
             version: env!("CARGO_PKG_VERSION"),
             external_account,
             title_language,
+            indexers,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1188,6 +1223,9 @@ pub async fn settings_submit(
         .map(ExternalAccountView::from_model);
     let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
     let title_language = cfg.title_language.clone();
+    let indexers = crate::models::indexers::list_all(&state.db)
+        .await
+        .unwrap_or_default();
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
@@ -1205,9 +1243,11 @@ pub async fn settings_submit(
         // the user changes integration settings).
         message: Some(notices.join(" ")),
         error: None,
+        indexer_edit: None,
         version: env!("CARGO_PKG_VERSION"),
         external_account,
         title_language,
+        indexers,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -1845,7 +1885,7 @@ mod tests {
 
     #[test]
     fn normalize_settings_tab_known_tabs_pass_through() {
-        for tab in ["quality", "custom_formats", "groups", "general"] {
+        for tab in ["quality", "custom_formats", "groups", "general", "indexers"] {
             assert_eq!(normalize_settings_tab(Some(tab.into())), tab);
         }
     }

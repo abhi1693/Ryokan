@@ -68,11 +68,13 @@ pub fn build_test_app_state(
     download_client: Option<Arc<dyn DownloadClient>>,
 ) -> AppState {
     let cf_cache: CompiledCfCache = Arc::new(RwLock::new(Arc::new(Vec::new())));
+    let indexers: crate::IndexerCache = Arc::new(RwLock::new(Arc::new(Vec::new())));
     AppState {
         db,
         download_client: Arc::new(RwLock::new(download_client)),
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
+        indexers,
         progress: ProgressRegistry::new(),
         users_exist: Arc::new(AtomicBool::new(true)),
         interactive_search_cache: crate::services::interactive_search_cache::new(),

@@ -2063,6 +2063,98 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // Issue #28 PR A — torznab/newznab indexer registry. Foundation
+    // for v1.5's multi-indexer support; PR B wires the actual
+    // TorznabIndexer impl. Schema mirrors the plan doc:
+    //   - `kind` is `'torznab' | 'newznab'`. Nyaa stays out-of-band
+    //     (decision #1) and never gets a row here.
+    //   - `priority` follows Sonarr's convention (lower = preferred,
+    //     range 1-50, default 25). Drives auto-search dedup
+    //     attribution + interactive search row tiebreaks + fan-out
+    //     order (decision #3 + plan §"Indexer priority semantics").
+    //   - `is_private_tracker` is explicit-with-smart-defaults
+    //     (decision #4). The settings form pre-fills via Prowlarr's
+    //     native `/api/v1/indexer` privacy field when the URL is
+    //     Prowlarr; Jackett / raw torznab pre-fill `private` as the
+    //     safe fallback. User confirms before save.
+    //   - `caps_json` / `caps_refreshed_at` cache the indexer's
+    //     `t=caps` response with a 7-day lazy TTL (decision #6).
+    //   - `request_timeout_secs` is per-indexer override over the
+    //     30s default (decision #7); NULL means use the default,
+    //     overridable via RYOKAN_INDEXER_DEFAULT_TIMEOUT_SECS env.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS indexers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            url TEXT NOT NULL,
+            api_key TEXT NOT NULL DEFAULT '',
+            priority INTEGER NOT NULL DEFAULT 25,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            is_private_tracker INTEGER NOT NULL DEFAULT 0,
+            seed_ratio REAL,
+            seed_time_minutes INTEGER,
+            min_seeders INTEGER NOT NULL DEFAULT 1,
+            request_timeout_secs INTEGER,
+            caps_json TEXT NOT NULL DEFAULT '',
+            caps_refreshed_at INTEGER,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    // Issue #28 PR A — `grabbed_torrents.indexer_id` records which
+    // indexer surfaced each grab. Nullable, no real FK: SQLite
+    // can't add a FOREIGN KEY constraint via ALTER TABLE, so the
+    // column is structurally unconstrained. The
+    // `settings_indexers_delete` handler (PR #107 round-2 fix #3)
+    // NULLs out matching rows explicitly to keep grab history
+    // readable post-delete. NULL means either "pre-#28 grab,
+    // assume Nyaa" or "indexer was deleted after this grab" —
+    // both shapes are equivalent for the upgrade sweep, which
+    // treats NULL as "no per-indexer rules apply."
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN indexer_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
+    // Issue #28 PR A — `grabbed_torrents.respect_seed_rules` flags
+    // grabs whose torrents have per-torrent seed-ratio / seed-time
+    // rules applied at add time (PR C). Delete paths (manual delete,
+    // upgrade-replacement) skip torrents with this flag so the
+    // client can finish seeding to the per-tracker target before
+    // teardown. Nyaa grabs default 0; PT grabs default 1.
+    sqlx::query(
+        "ALTER TABLE grabbed_torrents ADD COLUMN respect_seed_rules INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // Issue #28 PR A — per-series PT-upgrade opt-in (decision: PR E
+    // wires the UI + sweep filter; column lands here so PR B's
+    // search code can already filter on it without a chained
+    // migration in PR E). Default FALSE so a user upgrading from
+    // 1.4.x sees no change in behavior.
+    sqlx::query("ALTER TABLE series ADD COLUMN allow_pt_upgrades INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    // Issue #28 PR A — autobrr push endpoint API key. Empty string
+    // until the user generates one via Settings → Connections →
+    // autobrr (PR D). Empty disables the webhook entirely; PR D's
+    // `/api/webhook/autobrr` middleware rejects when the key is
+    // empty so a fresh install doesn't accept anonymous pushes.
+    sqlx::query("ALTER TABLE config ADD COLUMN autobrr_api_key TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

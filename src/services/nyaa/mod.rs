@@ -103,6 +103,17 @@ pub struct SearchResult {
     /// table matches Nyaa's own listing shape.
     #[serde(default)]
     pub upload_date: String,
+    /// Issue #28 PR B — FK to `indexers.id` of the indexer that
+    /// surfaced this release. `None` for Nyaa-direct results (the
+    /// existing behavior; Nyaa stays out-of-band per plan
+    /// decision #1). `Some(id)` for results from a torznab/newznab
+    /// indexer fan-out, set in [`crate::services::indexers::Release::into_search_result`].
+    /// Propagates to `grabbed_torrents.indexer_id` at grab time so
+    /// the upgrade sweep can apply per-indexer rules retroactively.
+    /// Default-skipped on serialize so existing JSON consumers don't
+    /// break and Nyaa-only flows don't add noise to API responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexer_id: Option<i64>,
 }
 
 #[derive(Clone)]

@@ -88,6 +88,9 @@ use services::{
         handlers::settings::custom_formats::settings_custom_formats_reset_defaults,
         handlers::settings::custom_formats::settings_custom_formats_export,
         handlers::settings::custom_formats::settings_custom_formats_test,
+        // Settings — Indexers (issue #28 PR B)
+        handlers::settings::indexers::settings_indexers_upsert,
+        handlers::settings::indexers::settings_indexers_delete,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
         handlers::system::api_logs_client,
@@ -429,12 +432,19 @@ async fn main() {
     let users_exist_initial = models::user::has_users(&db).await.unwrap_or(false);
     let users_exist = Arc::new(std::sync::atomic::AtomicBool::new(users_exist_initial));
 
+    // PR #107 review fix #4: build the indexer cache at startup.
+    // Failed instantiations (empty URL, reqwest build) are logged
+    // and dropped via `services::indexers::rebuild_cache` so the
+    // surviving rows still fan out.
+    let indexers = services::indexers::rebuild_cache(&db).await;
+
     // Build shared state.
     let state = AppState {
         db: db.clone(),
         download_client: Arc::new(RwLock::new(None)),
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
+        indexers,
         progress: ProgressRegistry::new(),
         users_exist,
         interactive_search_cache: services::interactive_search_cache::new(),
@@ -680,6 +690,14 @@ async fn main() {
         .route(
             "/settings/custom-formats/delete",
             post(handlers::settings::custom_formats::settings_custom_formats_delete),
+        )
+        .route(
+            "/settings/indexers/upsert",
+            post(handlers::settings::indexers::settings_indexers_upsert),
+        )
+        .route(
+            "/settings/indexers/delete",
+            post(handlers::settings::indexers::settings_indexers_delete),
         )
         .route(
             "/settings/custom-formats/minimum-score",
