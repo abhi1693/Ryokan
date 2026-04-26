@@ -148,6 +148,26 @@ pub async fn delete_episode_file(
                         if grab.hash.is_empty() {
                             continue;
                         }
+                        // Issue #28 PR C — skip the client-side
+                        // delete for grabs from a PT indexer with
+                        // seed rules in effect; the client owns
+                        // when seeding ends. The grab row still
+                        // gets `mark_removed` so the upgrade sweep
+                        // doesn't re-grab.
+                        if grabbed_torrents::respects_seed_rules(&state.db, &grab.hash).await {
+                            logger::info(
+                                &state.db,
+                                LogCategory::QBit,
+                                &format!(
+                                    "Skipping client delete for {} (respect_seed_rules); client will stop on its own ratio policy",
+                                    grab.torrent_name
+                                ),
+                                &grab.hash,
+                            )
+                            .await;
+                            let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
+                            continue;
+                        }
                         match client.delete(&grab.hash, true).await {
                             Ok(()) => {
                                 qbit_removed.push(grab.torrent_name.clone());

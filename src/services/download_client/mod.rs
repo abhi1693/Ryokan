@@ -219,6 +219,53 @@ impl SeedRules {
     }
 }
 
+/// Issue #28 PR C — apply per-indexer seed rules after a successful
+/// `add_torrent`. Looks up the indexer row by id, builds a
+/// [`SeedRules`], and calls the trait method.
+///
+/// Returns `true` when rules were attempted (regardless of wire
+/// success) so the caller can flip `grabbed_torrents.respect_seed_rules
+/// = 1`. The flag tracks "this grab carries indexer-specific seed
+/// rules" — even if the wire call failed, the user-configured intent
+/// stands and the delete-path skip should still respect it.
+///
+/// Returns `false` for Nyaa grabs (`indexer_id == None`), grabs from
+/// indexers without seed rules, or DB read failures. In all three
+/// cases the grab behaves the same as a v1.4 Nyaa grab.
+///
+/// Wire-call failures log at `warn` and DON'T propagate — a
+/// `setShareLimits` glitch shouldn't fail a successful grab. The
+/// upgrade sweep can re-apply rules on the next pass if the user
+/// observes the gap.
+pub async fn apply_indexer_seed_rules(
+    db: &sqlx::SqlitePool,
+    client: &dyn DownloadClient,
+    info_hash: &str,
+    indexer_id: Option<i64>,
+) -> bool {
+    let Some(id) = indexer_id else {
+        return false;
+    };
+    let row = match crate::models::indexers::get_by_id(db, id).await {
+        Ok(Some(r)) => r,
+        _ => return false,
+    };
+    let rules = SeedRules::from_indexer_row(&row);
+    if rules.is_empty() {
+        return false;
+    }
+    if let Err(e) = client.set_seed_rules(info_hash, rules).await {
+        tracing::warn!(
+            "indexer #{} ({}): set_seed_rules failed for {}: {}",
+            row.id,
+            row.name,
+            info_hash,
+            e
+        );
+    }
+    true
+}
+
 /// Outcome of an [`DownloadClient::add_torrent`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddOutcome {

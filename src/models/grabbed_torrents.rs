@@ -415,6 +415,62 @@ pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Issue #28 PR C — stamp the indexer attribution + the
+/// respect_seed_rules flag on a grab row after the grab has been
+/// added to the download client and any per-indexer
+/// `set_seed_rules` call has been made.
+///
+/// Called separately from `record_grab` (rather than added as
+/// extra params) so existing call sites don't break, and so the
+/// stamp can also fire from non-record_grab paths (e.g.,
+/// commit_grab_and_expand) without restructuring those flows.
+///
+/// `indexer_id` of `None` means the grab came from Nyaa (the v1.4
+/// default); the column stays NULL. `respect_seed_rules` flips
+/// to true only when the indexer had real seed rules and the
+/// client honored them — the delete-path skip in PR C and the
+/// upgrade sweep's per-indexer rules in later PRs both key off
+/// this flag.
+pub async fn set_indexer_attribution(
+    db: &SqlitePool,
+    grab_id: i64,
+    indexer_id: Option<i64>,
+    respect_seed_rules: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE grabbed_torrents SET indexer_id = ?, respect_seed_rules = ? WHERE id = ?")
+        .bind(indexer_id)
+        .bind(respect_seed_rules as i64)
+        .bind(grab_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Issue #28 PR C — read back the `respect_seed_rules` flag for
+/// a grab row by hash. Used by delete paths (manual delete,
+/// upgrade-replace) to decide whether to skip the underlying
+/// `client.delete()` call so the per-tracker seed-rule policy
+/// can play out. Returns false (don't skip) when the row is
+/// absent or has the flag clear; that matches the Nyaa-default
+/// behavior — pre-#28 grabs and Nyaa grabs delete normally.
+pub async fn respects_seed_rules(db: &SqlitePool, info_hash: &str) -> bool {
+    if info_hash.is_empty() {
+        return false;
+    }
+    sqlx::query_scalar::<_, i64>(
+        "SELECT respect_seed_rules FROM grabbed_torrents \
+         WHERE hash = ? AND respect_seed_rules = 1 \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(info_hash)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .map(|n| n != 0)
+    .unwrap_or(false)
+}
+
 /// Mark every `pending` grab row as `failed`. Used by the #63 Phase 2
 /// client-switch handler: when the user changes `active_client` in
 /// Settings, any grab that was in-flight against the old client is
@@ -1422,5 +1478,106 @@ mod tests {
             old_row.replaced_by_torrent_name,
             "[BetterGroup] Show - Batch [BD]"
         );
+    }
+
+    // ── Issue #28 PR C: indexer attribution + respect_seed_rules ────
+
+    async fn pr_c_seed_a_grab(db: &SqlitePool) -> (i64, String) {
+        let (series_id, _) = series::upsert(
+            db,
+            series::SeriesCore {
+                anilist_id: 1,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2024),
+                end_year: Some(2024),
+            },
+        )
+        .await
+        .expect("series upsert");
+        let hash = "abc123def456".to_string();
+        let id = record_grab(db, &hash, "[Group] Show - 01.mkv", series_id, &[1], false)
+            .await
+            .expect("record")
+            .expect("inserted");
+        (id, hash)
+    }
+
+    #[tokio::test]
+    async fn set_indexer_attribution_writes_indexer_id_and_flag() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let (grab_id, _) = pr_c_seed_a_grab(&db).await;
+
+        set_indexer_attribution(&db, grab_id, Some(42), true)
+            .await
+            .expect("attribution");
+
+        let row: (Option<i64>, i64) = sqlx::query_as(
+            "SELECT indexer_id, respect_seed_rules FROM grabbed_torrents WHERE id = ?",
+        )
+        .bind(grab_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row.0, Some(42));
+        assert_eq!(row.1, 1);
+    }
+
+    #[tokio::test]
+    async fn set_indexer_attribution_with_none_clears_indexer_id() {
+        // Nyaa grabs (None) leave indexer_id NULL. The flag also
+        // takes False since there are no per-indexer rules to
+        // respect. Pin both behaviors.
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let (grab_id, _) = pr_c_seed_a_grab(&db).await;
+
+        set_indexer_attribution(&db, grab_id, None, false)
+            .await
+            .expect("attribution");
+
+        let row: (Option<i64>, i64) = sqlx::query_as(
+            "SELECT indexer_id, respect_seed_rules FROM grabbed_torrents WHERE id = ?",
+        )
+        .bind(grab_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row.0, None);
+        assert_eq!(row.1, 0);
+    }
+
+    #[tokio::test]
+    async fn respects_seed_rules_returns_true_when_flag_set() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let (grab_id, hash) = pr_c_seed_a_grab(&db).await;
+
+        // Default: flag clear, no rules to respect.
+        assert!(!respects_seed_rules(&db, &hash).await);
+
+        // After stamping: flag set, delete-path skip should fire.
+        set_indexer_attribution(&db, grab_id, Some(7), true)
+            .await
+            .expect("attribution");
+        assert!(respects_seed_rules(&db, &hash).await);
+    }
+
+    #[tokio::test]
+    async fn respects_seed_rules_false_for_empty_hash_or_missing_row() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        // Empty hash short-circuits without a query.
+        assert!(!respects_seed_rules(&db, "").await);
+        // Hash that doesn't exist.
+        assert!(!respects_seed_rules(&db, "no-such-hash").await);
     }
 }
