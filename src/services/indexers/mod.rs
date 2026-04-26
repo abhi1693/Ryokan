@@ -826,9 +826,6 @@ mod tests {
         assert_eq!(super::format_publish_date(86_400), "1970-01-02 00:00");
         // 2000-01-01 00:00:00 UTC = 946684800. Y2K boundary; verifies
         // century-handling in the civil-from-days math.
-        assert_eq!(
-            super::format_publish_date(946_684_800),
-            "2000-01-01 00:00"
-        );
+        assert_eq!(super::format_publish_date(946_684_800), "2000-01-01 00:00");
     }
 }
