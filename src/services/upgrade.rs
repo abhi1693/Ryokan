@@ -99,6 +99,15 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             continue;
         }
 
+        // Issue #102 — the tracked snapshot was pulled at the top of
+        // the sweep; a series removed mid-iteration would still be
+        // checked (and any upgrade hit grabbed). Re-read the row each
+        // iteration so a removed series stops the cascade promptly.
+        if !crate::handlers::library::search::series_still_in_library(&state.db, Some(row.id)).await
+        {
+            continue;
+        }
+
         let disk_files = media::scan_series_folder(&cfg.media_root, &row.folder_name).await;
         if disk_files.is_empty() {
             continue;
