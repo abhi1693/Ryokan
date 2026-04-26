@@ -1,11 +1,5 @@
     <fieldset>
         <legend>Indexers</legend>
-        <p class="form-hint">
-            Torznab and newznab indexers (Prowlarr, Jackett, raw torznab). Nyaa stays directly
-            integrated and doesn't need a row here. Sharing a Prowlarr instance with an existing
-            Sonarr install is supported out of the box: Prowlarr's torznab endpoint is keyed by
-            apikey, so Sonarr's "Apps" sync isn't an authorization gate.
-        </p>
 
         {% if !indexers.is_empty() %}
         <div class="table-scroll-wrap">
@@ -32,12 +26,14 @@
                     <td>{% if idx.enabled %}Enabled{% else %}Disabled{% endif %}</td>
                     <td>
                         <a href="/settings?tab=indexers&edit_id={{ idx.id }}" class="btn btn-small">Edit</a>
-                        <form method="post" action="/settings/indexers/delete" style="display:inline">
+                        <form method="post" action="/settings/indexers/delete" style="display:inline"
+                              data-ryokan-confirm-title="Delete indexer?"
+                              data-ryokan-confirm-body="Remove '{{ idx.name }}' from Ryokan. Existing grab history is preserved with the indexer reference cleared. The deletion can't be undone; you'll need to re-add the row from scratch."
+                              data-ryokan-confirm-yes="Delete"
+                              data-ryokan-confirm-no="Cancel"
+                              data-ryokan-confirm-danger="1">
                             <input type="hidden" name="id" value="{{ idx.id }}">
-                            <button type="submit" class="btn btn-danger btn-small"
-                                    onclick="return confirm('Delete indexer {{ idx.name }}?');">
-                                Delete
-                            </button>
+                            <button type="submit" class="btn btn-danger btn-small">Delete</button>
                         </form>
                     </td>
                 </tr>
@@ -53,133 +49,285 @@
             Updating <strong>{{ edit.name }}</strong>.
             <a href="/settings?tab=indexers">Cancel and return to Add Indexer.</a>
         </p>
-        <form method="post" action="/settings/indexers/upsert" class="settings-subform">
+        <form method="post" action="/settings/indexers/upsert" class="settings-form settings-subform">
             <input type="hidden" name="id" value="{{ edit.id }}">
-            <label>
-                Name
-                <input type="text" name="name" required maxlength="100" value="{{ edit.name }}">
-            </label>
-            <label>
-                Kind
-                <select name="kind">
-                    <option value="torznab" {% if edit.kind == "torznab" %}selected{% endif %}>torznab</option>
-                    <option value="newznab" {% if edit.kind == "newznab" %}selected{% endif %}>newznab</option>
-                </select>
-            </label>
-            <label>
-                URL
-                <input type="url" name="url" required value="{{ edit.url }}">
-            </label>
-            <label>
-                API Key
-                <input type="text" name="api_key" autocomplete="off" value="{{ edit.api_key }}">
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="indexer-edit-name">Name</label>
+                    <input id="indexer-edit-name" type="text" name="name" required maxlength="100" value="{{ edit.name }}">
+                </div>
+                <div class="form-group">
+                    <label for="indexer-edit-kind">Kind</label>
+                    <select id="indexer-edit-kind" name="kind">
+                        <option value="torznab" {% if edit.kind == "torznab" %}selected{% endif %}>torznab</option>
+                        <option value="newznab" {% if edit.kind == "newznab" %}selected{% endif %}>newznab</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="indexer-edit-url">URL</label>
+                <input id="indexer-edit-url" type="url" name="url" required value="{{ edit.url }}">
+            </div>
+
+            <div class="form-group">
+                <label for="indexer-edit-key">API Key</label>
+                <input id="indexer-edit-key" type="text" name="api_key" autocomplete="off" value="{{ edit.api_key }}">
                 <span class="form-hint">Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
-            </label>
-            <label>
-                Priority
-                <input type="number" name="priority" value="{{ edit.priority }}" min="1" max="50">
-            </label>
-            <label>
-                Min Seeders
-                <input type="number" name="min_seeders" value="{{ edit.min_seeders }}" min="0">
-            </label>
-            <label>
-                Request Timeout (seconds)
-                <input type="number" name="request_timeout_secs"
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="indexer-edit-priority">Priority</label>
+                    <input id="indexer-edit-priority" type="number" name="priority" value="{{ edit.priority }}" min="1" max="50">
+                </div>
+                <div class="form-group">
+                    <label for="indexer-edit-min-seeders">Min Seeders</label>
+                    <input id="indexer-edit-min-seeders" type="number" name="min_seeders" value="{{ edit.min_seeders }}" min="0">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="indexer-edit-timeout">Request Timeout (seconds)</label>
+                <input id="indexer-edit-timeout" type="number" name="request_timeout_secs"
                        value="{% if let Some(secs) = edit.request_timeout_secs %}{{ secs }}{% endif %}"
                        min="1" max="600" placeholder="30">
                 <span class="form-hint">Per-indexer override. Blank uses the default (30s, or RYOKAN_INDEXER_DEFAULT_TIMEOUT_SECS env). Range 1–600.</span>
-            </label>
-            <label>
-                Seed Ratio
-                <input type="number" name="seed_ratio" step="0.1" min="0"
-                       value="{% if let Some(r) = edit.seed_ratio %}{{ r }}{% endif %}"
-                       placeholder="(client default)">
-                <span class="form-hint">Per-torrent seed ratio passed to the download client at add time (PR C). Blank inherits the client's global default.</span>
-            </label>
-            <label>
-                Seed Time (minutes)
-                <input type="number" name="seed_time_minutes" min="0"
-                       value="{% if let Some(m) = edit.seed_time_minutes %}{{ m }}{% endif %}"
-                       placeholder="(client default)">
-                <span class="form-hint">Per-torrent minimum seed time. Blank inherits the client's global default.</span>
-            </label>
-            <label class="checkbox-label">
-                <input type="checkbox" name="enabled" {% if edit.enabled %}checked{% endif %}>
-                Enabled
-            </label>
-            <label class="checkbox-label">
-                <input type="checkbox" name="is_private_tracker" {% if edit.is_private_tracker %}checked{% endif %}>
-                Private tracker
-            </label>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="indexer-edit-ratio">Seed Ratio</label>
+                    <input id="indexer-edit-ratio" type="number" name="seed_ratio" step="0.1" min="0"
+                           value="{% if let Some(r) = edit.seed_ratio %}{{ r }}{% endif %}"
+                           placeholder="(client default)">
+                    <span class="form-hint">Per-torrent seed ratio passed to the download client at add time. Blank inherits the client's global default.</span>
+                </div>
+                <div class="form-group">
+                    <label for="indexer-edit-seed-time">Seed Time (minutes)</label>
+                    <input id="indexer-edit-seed-time" type="number" name="seed_time_minutes" min="0"
+                           value="{% if let Some(m) = edit.seed_time_minutes %}{{ m }}{% endif %}"
+                           placeholder="(client default)">
+                    <span class="form-hint">Per-torrent minimum seed time. Blank inherits the client's global default.</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" {% if edit.enabled %}checked{% endif %}>
+                    Enabled
+                </label>
+            </div>
+
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_private_tracker" {% if edit.is_private_tracker %}checked{% endif %}>
+                    Private tracker
+                </label>
+            </div>
+
             <button type="submit" class="btn btn-primary">Save Changes</button>
+        </form>
+        {% else if let Some(seed) = indexer_seed %}
+        <a href="/settings?tab=indexers" class="btn-icon indexer-seed-close"
+           aria-label="Back to indexer picker" title="Back to indexer picker">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </a>
+        {% if !seed.notes.is_empty() %}
+        <div class="indexer-seed-notes">
+            <strong>{{ seed.display_name }}:</strong> {{ seed.notes }}
+        </div>
+        {% endif %}
+        <form method="post" action="/settings/indexers/upsert" class="settings-form settings-subform">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="indexer-add-name">Name</label>
+                    <input id="indexer-add-name" type="text" name="name" required maxlength="100"
+                           value="{{ seed.display_name }}">
+                </div>
+                <div class="form-group">
+                    <label for="indexer-add-kind">Kind</label>
+                    <select id="indexer-add-kind" name="kind">
+                        <option value="torznab" {% if seed.default_kind == "torznab" %}selected{% endif %}>torznab</option>
+                        <option value="newznab" {% if seed.default_kind == "newznab" %}selected{% endif %}>newznab</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="indexer-add-url">URL</label>
+                <input id="indexer-add-url" type="url" name="url" required
+                       placeholder="{{ seed.url_placeholder }}">
+            </div>
+
+            <div class="form-group">
+                <label for="indexer-add-key">API Key</label>
+                <input id="indexer-add-key" type="text" name="api_key" autocomplete="off"
+                       placeholder="from Prowlarr Settings &rarr; General">
+                <span class="form-hint">Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="indexer-add-priority">Priority</label>
+                    <input id="indexer-add-priority" type="number" name="priority" value="{{ seed.default_priority }}" min="1" max="50">
+                    <span class="form-hint">Lower = preferred. Range 1–50.</span>
+                </div>
+                <div class="form-group">
+                    <label for="indexer-add-min-seeders">Min Seeders</label>
+                    <input id="indexer-add-min-seeders" type="number" name="min_seeders" value="{{ seed.default_min_seeders }}" min="0">
+                    <span class="form-hint">Releases below this floor are dropped before scoring.</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="indexer-add-timeout">Request Timeout (seconds)</label>
+                <input id="indexer-add-timeout" type="number" name="request_timeout_secs" min="1" max="600" placeholder="30">
+                <span class="form-hint">Per-indexer override. Blank uses the default (30s).</span>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="indexer-add-ratio">Seed Ratio</label>
+                    <input id="indexer-add-ratio" type="number" name="seed_ratio" step="0.1" min="0"
+                           value="{% if let Some(r) = seed.default_seed_ratio %}{{ r }}{% endif %}"
+                           placeholder="(client default)">
+                    <span class="form-hint">Per-torrent seed ratio passed to the download client at add time.</span>
+                </div>
+                <div class="form-group">
+                    <label for="indexer-add-seed-time">Seed Time (minutes)</label>
+                    <input id="indexer-add-seed-time" type="number" name="seed_time_minutes" min="0"
+                           value="{% if let Some(m) = seed.default_seed_time_minutes %}{{ m }}{% endif %}"
+                           placeholder="(client default)">
+                    <span class="form-hint">Per-torrent minimum seed time.</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" checked>
+                    Enabled
+                </label>
+            </div>
+
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_private_tracker" {% if seed.is_private_tracker %}checked{% endif %}>
+                    Private tracker
+                </label>
+                <span class="form-hint">Marks this indexer as PT for the per-series upgrade opt-in.</span>
+            </div>
+
+            <button type="submit" class="btn btn-primary">Add Indexer</button>
         </form>
         {% else %}
         <h3 class="settings-subheading">Add Indexer</h3>
-        <p class="form-hint">
-            Paste the full torznab base URL from Prowlarr's "Copy Torznab URL" button (or
-            Jackett's per-indexer torznab URL). The URL ends in <code>/api</code>; do not
-            add query params yourself; Ryokan appends <code>?t=…&amp;apikey=…</code>.
-        </p>
-        <form method="post" action="/settings/indexers/upsert" class="settings-subform">
-            <label>
-                Name
-                <input type="text" name="name" required maxlength="100"
-                       placeholder="e.g. Prowlarr - Nyaa">
-            </label>
-            <label>
-                Kind
-                <select name="kind">
-                    <option value="torznab" selected>torznab</option>
-                    <option value="newznab">newznab</option>
-                </select>
-            </label>
-            <label>
-                URL
-                <input type="url" name="url" required
-                       placeholder="https://prowlarr.local/1/api">
-            </label>
-            <label>
-                API Key
-                <input type="text" name="api_key" autocomplete="off"
-                       placeholder="from Prowlarr Settings &rarr; General">
-                <span class="form-hint">Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
-            </label>
-            <label>
-                Priority
-                <input type="number" name="priority" value="25" min="1" max="50">
-                <span class="form-hint">Lower = preferred. Range 1–50, default 25.</span>
-            </label>
-            <label>
-                Min Seeders
-                <input type="number" name="min_seeders" value="1" min="0">
-                <span class="form-hint">Releases below this floor are dropped before scoring.</span>
-            </label>
-            <label>
-                Request Timeout (seconds)
-                <input type="number" name="request_timeout_secs" min="1" max="600" placeholder="30">
-                <span class="form-hint">Per-indexer override. Blank uses the default (30s).</span>
-            </label>
-            <label>
-                Seed Ratio
-                <input type="number" name="seed_ratio" step="0.1" min="0" placeholder="(client default)">
-                <span class="form-hint">Per-torrent seed ratio passed to the download client at add time (PR C).</span>
-            </label>
-            <label>
-                Seed Time (minutes)
-                <input type="number" name="seed_time_minutes" min="0" placeholder="(client default)">
-                <span class="form-hint">Per-torrent minimum seed time.</span>
-            </label>
-            <label class="checkbox-label">
-                <input type="checkbox" name="enabled" checked>
-                Enabled
-            </label>
-            <label class="checkbox-label">
-                <input type="checkbox" name="is_private_tracker">
-                Private tracker
-                <span class="form-hint">Marks this indexer as PT for the per-series upgrade opt-in.</span>
-            </label>
-            <button type="submit" class="btn btn-primary">Add Indexer</button>
-        </form>
+
+        <div class="indexer-catalog-grid">
+            {% for seed in indexer_catalog %}
+            <a class="indexer-catalog-card{% if seed.is_generic %} indexer-catalog-card-generic{% endif %}"
+               href="/settings?tab=indexers&amp;template={{ seed.slug }}">
+                <div class="indexer-catalog-card-header">
+                    <span class="indexer-catalog-card-name">{{ seed.display_name }}</span>
+                    {% if seed.is_private_tracker %}
+                    <span class="indexer-catalog-card-pill indexer-catalog-card-pill-private">PRIVATE</span>
+                    {% else if !seed.is_generic %}
+                    <span class="indexer-catalog-card-pill indexer-catalog-card-pill-public">PUBLIC</span>
+                    {% endif %}
+                </div>
+                <p class="indexer-catalog-card-blurb">{{ seed.blurb }}</p>
+            </a>
+            {% endfor %}
+        </div>
         {% endif %}
     </fieldset>
+
+    {# Push receivers — webhook-driven release sources. autobrr's
+       Webhook action POSTs releases at Ryokan's /api/webhook/autobrr
+       endpoint; the API key here gates that endpoint. Lives on the
+       Indexers tab (rather than Connections) because conceptually
+       it's just another way releases reach Ryokan, alongside the
+       torznab / newznab indexer rows above.
+
+       Hidden while the user is in the picker pre-fill or row-edit
+       flow (they're focused on adding/editing one indexer; the
+       autobrr panel is unrelated context). The default picker view
+       still shows it so the panel is reachable from the Indexers
+       tab. #}
+    {% if indexer_edit.is_none() && indexer_seed.is_none() %}
+    {# `class="settings-form"` on the fieldset (not the form, since
+       there's no form to wrap with — the regen-button binds to the
+       external `autobrr-regen-form` sibling) makes the
+       `.settings-form .form-group { margin-bottom: 16px }` rule
+       apply, giving the stacked form-groups the same vertical
+       rhythm as everywhere else. Without this hook the form-groups
+       sit flush against each other. #}
+    <fieldset class="settings-form">
+        <legend>autobrr push webhook</legend>
+        <p class="form-hint" style="margin: 0 0 16px;">
+            Receive IRC-announce pushes from
+            <a href="https://autobrr.com" target="_blank" rel="noopener">autobrr</a>'s
+            Webhook action. Per-indexer seed rules (configured above) apply
+            automatically when autobrr's <code>indexer</code> field matches a
+            configured Ryokan indexer.
+        </p>
+        <div class="form-group">
+            <label>API Key</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <input type="password" id="autobrr_api_key_display"
+                       value="{{ config.autobrr_api_key }}"
+                       placeholder="(no key generated yet, webhook is disabled)"
+                       readonly style="flex:1">
+                <button type="button" class="btn btn-secondary"
+                        onclick="toggleApiKeyVisibility('autobrr_api_key_display', this)"
+                        style="white-space:nowrap">Show</button>
+                <button type="button" class="btn btn-secondary"
+                        onclick="copyApiKey('autobrr_api_key_display', this)"
+                        style="white-space:nowrap">Copy</button>
+                {# The actual <form> element lives at page level in
+                   settings.html — see the autobrr-regen-form block.
+                   Bind the button to the external form via the
+                   `form` attribute. #}
+                <button type="submit" form="autobrr-regen-form"
+                        class="btn btn-secondary" style="white-space:nowrap">
+                    {% if config.autobrr_api_key.is_empty() %}Generate{% else %}Regenerate{% endif %}
+                </button>
+            </div>
+            <span class="form-hint">Empty = webhook disabled (returns 503). Paste this key into autobrr's Webhook action under <em>Authentication</em>.</span>
+        </div>
+        <div class="form-group">
+            <label>Webhook URL Path</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                {# Path only — Ryokan can't autofill the host because
+                   the host is whatever autobrr can resolve, and that
+                   depends entirely on how autobrr reaches Ryokan.
+                   The browser's origin is what *the user* uses (e.g.
+                   localhost:8978) and is wrong for autobrr-in-Docker
+                   (which can't resolve localhost to the host). The
+                   hint below names the common cases; the user fills
+                   the host themselves. #}
+                <input type="text" id="autobrr_webhook_url"
+                       value="/api/webhook/autobrr"
+                       readonly style="flex:1; font-family: monospace;">
+                <button type="button" class="btn btn-secondary"
+                        onclick="copyApiKey('autobrr_webhook_url', this)"
+                        style="white-space:nowrap">Copy</button>
+            </div>
+            <span class="form-hint">Prefix with the address autobrr can reach Ryokan at, not the address you use in your browser. Ryokan listens on port <strong><code>8978</code></strong> by default (override via <code>LISTEN_ADDR</code>). Common cases: <code>http://host.docker.internal:<strong>8978</strong></code> for autobrr-in-Docker against host-bound Ryokan, your LAN IP plus <code><strong>:8978</strong></code> for autobrr on a different host, or your reverse-proxy DNS name (no port suffix) for HTTPS deployments.</span>
+        </div>
+        <div class="form-group">
+            <label>autobrr Webhook Body Template</label>
+            <pre style="margin: 0; background: var(--bg-secondary, #1a1a1a); padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 0.85em;">{{ "{" }}
+  "torrent_name": "{{ "{{" }}.TorrentName{{ "}}" }}",
+  "info_hash": "{{ "{{" }}.InfoHash{{ "}}" }}",
+  "magnet_uri": "{{ "{{" }}.MagnetURI{{ "}}" }}",
+  "torrent_url": "{{ "{{" }}.DownloadURL{{ "}}" }}",
+  "indexer": "{{ "{{" }}.IndexerIdentifier{{ "}}" }}",
+  "filter": "{{ "{{" }}.FilterName{{ "}}" }}",
+  "size_bytes": {{ "{{" }}.Size{{ "}}" }}
+{{ "}" }}</pre>
+            <span class="form-hint">Paste this into autobrr's Webhook action <em>Data (JSON)</em> field. Set Content-Type to <code>application/json</code> and add an <code>X-Api-Key</code> header with the API key above.</span>
+        </div>
+    </fieldset>
+    {% endif %}

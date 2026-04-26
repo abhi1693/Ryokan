@@ -2,7 +2,9 @@
 //!
 //! `POST /settings/autobrr/regenerate-key` mints a fresh
 //! 32-byte URL-safe random key, writes it onto the singleton
-//! config row, and redirects back to the integrations tab.
+//! config row, and redirects back to the indexers tab (where
+//! the autobrr fieldset lives — co-located with the torznab /
+//! newznab indexer rows since both are release sources).
 //! Distinct from the regular settings save flow so an
 //! accidental tab POST can't silently rotate or wipe the key —
 //! the user has to click the dedicated button (with confirm
@@ -34,9 +36,9 @@ fn generate_key() -> String {
     path = "/settings/autobrr/regenerate-key",
     tag = "Settings",
     summary = "Regenerate the autobrr webhook API key",
-    description = "Mints a fresh 32-byte URL-safe random key and persists it on the config row. Existing autobrr deployments using the old key will start receiving 401 from `/api/webhook/autobrr` until reconfigured. Redirects back to the integrations tab.",
+    description = "Mints a fresh 32-byte URL-safe random key and persists it on the config row. Existing autobrr deployments using the old key will start receiving 401 from `/api/webhook/autobrr` until reconfigured. Redirects back to the indexers tab.",
     responses(
-        (status = 303, description = "Redirect back to the integrations tab"),
+        (status = 303, description = "Redirect back to the indexers tab"),
     ),
 )]
 pub async fn settings_autobrr_regenerate_key(State(state): State<AppState>) -> Redirect {
@@ -46,7 +48,7 @@ pub async fn settings_autobrr_regenerate_key(State(state): State<AppState>) -> R
         Ok(Some(c)) => c,
         _ => {
             // No config row yet (fresh install). Build a default
-            // and save with the new key. The integrations tab
+            // and save with the new key. The Connections tab
             // would normally have the user's other choices but
             // this branch only runs pre-first-save.
             config::Config::default()
@@ -61,7 +63,7 @@ pub async fn settings_autobrr_regenerate_key(State(state): State<AppState>) -> R
             &e.to_string(),
         )
         .await;
-        return Redirect::to("/settings?tab=integrations&err=autobrr+key+rotation+failed");
+        return Redirect::to("/settings?tab=indexers&err=autobrr+key+rotation+failed");
     }
     logger::info(
         &state.db,
@@ -70,7 +72,7 @@ pub async fn settings_autobrr_regenerate_key(State(state): State<AppState>) -> R
         "",
     )
     .await;
-    Redirect::to("/settings?tab=integrations&msg=autobrr+key+regenerated")
+    Redirect::to("/settings?tab=indexers&msg=autobrr+key+regenerated")
 }
 
 #[cfg(test)]

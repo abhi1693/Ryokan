@@ -75,9 +75,21 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
+    /* Match the per-form-group rhythm so vertical spacing is even
+       whether the next sibling is a row, a single form-group, or a
+       settings-subheading. Without this the row's children supply the
+       gap and adjacent-sibling margin collapse skips them, leaving
+       16+24=40px before a heading vs the 24px collapse after a plain
+       form-group. */
+    margin-bottom: 16px;
 }
 
 .settings-form .form-group { margin-bottom: 16px; }
+
+/* Inside a form-row, the row itself owns the bottom-margin. Zero
+   the children so the row's height is clean and consecutive rows
+   don't double-up. */
+.form-row > .form-group { margin-bottom: 0; }
 
 .btn {
     display: inline-block;

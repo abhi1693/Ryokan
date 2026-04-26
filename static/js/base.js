@@ -481,6 +481,54 @@ window.addEventListener('DOMContentLoaded', function () {
     });
 });
 
+// Declarative confirm-on-submit. Any <form data-ryokan-confirm-title="...">
+// has its submit intercepted; the in-app ryokanConfirm modal is shown
+// with the configured copy, and the form only submits if the user
+// confirms. Replaces the browser-native `onclick="return confirm(...)"`
+// pattern so destructive actions get the same dark-themed dialog as
+// the rest of the app instead of a system-styled popup that doesn't
+// match.
+//
+// Supported attributes:
+//   data-ryokan-confirm-title    (required — picking up the attr is
+//                                 the opt-in signal)
+//   data-ryokan-confirm-body     ("Are you sure?" if absent)
+//   data-ryokan-confirm-yes      ("Yes")
+//   data-ryokan-confirm-no       ("Cancel")
+//   data-ryokan-confirm-danger   (any truthy value tints the Yes
+//                                 button red — use for destructive
+//                                 actions like delete / regenerate)
+window.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('form[data-ryokan-confirm-title]').forEach(function (form) {
+        form.addEventListener('submit', function (ev) {
+            // First-pass interception only. Once the user confirms
+            // we re-fire submit() programmatically, which dispatches
+            // the event again — the data-ryokan-confirmed flag
+            // tells us to let it through that time.
+            if (form.dataset.ryokanConfirmed === '1') return;
+            ev.preventDefault();
+            const title = form.getAttribute('data-ryokan-confirm-title') || 'Confirm';
+            const body = form.getAttribute('data-ryokan-confirm-body') || 'Are you sure?';
+            const yesLabel = form.getAttribute('data-ryokan-confirm-yes') || 'Yes';
+            const noLabel = form.getAttribute('data-ryokan-confirm-no') || 'Cancel';
+            const danger = !!form.getAttribute('data-ryokan-confirm-danger');
+            window.ryokanConfirm({
+                title: title, body: body, yesLabel: yesLabel, noLabel: noLabel,
+            }).then(function (result) {
+                if (!result || !result.ok) return;
+                if (danger) {
+                    // ryokanConfirm doesn't currently style the Yes
+                    // button red; flag is reserved for a future
+                    // visual tweak. Submission semantics don't
+                    // change.
+                }
+                form.dataset.ryokanConfirmed = '1';
+                form.submit();
+            });
+        });
+    });
+});
+
 // HTML-escape a string for safe concatenation into an `innerHTML`
 // sink. Use this wherever a user-controlled value (release title, CF
 // name, fetched error message, etc.) flows into a template literal

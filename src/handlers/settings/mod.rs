@@ -155,6 +155,20 @@ struct SettingsTemplate {
     /// `None` renders the bare "Add Indexer" form; same prefill
     /// pattern as the Custom Formats tab.
     indexer_edit: Option<crate::models::indexers::Indexer>,
+    /// Curated picker grid for the Settings → Indexers tab.
+    /// Always populated from the static catalog so the grid
+    /// renders identically regardless of DB state. The user
+    /// can still skip the picker by clicking one of the
+    /// `is_generic` cards or scrolling past to the form.
+    indexer_catalog: &'static [crate::services::indexer_catalog::SeededIndexer],
+    /// When the user clicks a picker card, the link sends
+    /// `?tab=indexers&template=<slug>` and this gets
+    /// populated with the matched seed so the Add form pre-
+    /// fills name / kind / private-flag / priority / min-
+    /// seeders / suggested seed-ratio. `None` renders the
+    /// generic blank form (which is what the user sees if
+    /// they bypass the picker).
+    indexer_seed: Option<&'static crate::services::indexer_catalog::SeededIndexer>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -276,6 +290,11 @@ pub struct SettingsQuery {
     /// and re-render inline so the form state is preserved.
     msg: Option<String>,
     err: Option<String>,
+    /// Indexers tab — slug from the seeded catalog
+    /// (`services::indexer_catalog`). When set on the Add path,
+    /// the form pre-fills from the matched seed instead of
+    /// rendering blank.
+    template: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -571,6 +590,7 @@ async fn build_settings_template(
     msg: Option<String>,
     err: Option<String>,
     import_review: Option<ImportReviewView>,
+    template_slug: Option<String>,
 ) -> SettingsTemplate {
     // Fan out the five independent lookups — config row, release-group
     // table, suggestion panel, custom-format list, linked external
@@ -625,6 +645,18 @@ async fn build_settings_template(
             .flatten(),
         None => None,
     };
+    // Resolve the picker template only on the Add path — the
+    // Edit form is already row-driven, so the seed would just
+    // shadow real values. `template_slug` is also discarded if
+    // it doesn't match a known seed (stale or hand-typed
+    // links fall through to the blank Add form).
+    let indexer_seed = if indexer_edit.is_none() {
+        template_slug
+            .as_deref()
+            .and_then(crate::services::indexer_catalog::find_seed)
+    } else {
+        None
+    };
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -642,6 +674,8 @@ async fn build_settings_template(
         title_language,
         indexers: indexers_res.unwrap_or_default(),
         indexer_edit,
+        indexer_catalog: crate::services::indexer_catalog::SEEDED,
+        indexer_seed,
     }
 }
 
@@ -656,6 +690,7 @@ pub async fn settings_page(
         params.msg,
         params.err,
         None,
+        params.template,
     )
     .await;
     Html(template.render().unwrap_or_default())
@@ -930,6 +965,8 @@ pub async fn settings_submit(
             external_account,
             title_language,
             indexers,
+            indexer_catalog: crate::services::indexer_catalog::SEEDED,
+            indexer_seed: None,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1257,6 +1294,8 @@ pub async fn settings_submit(
         external_account,
         title_language,
         indexers,
+        indexer_catalog: crate::services::indexer_catalog::SEEDED,
+        indexer_seed: None,
     };
     Html(template.render().unwrap_or_default())
 }

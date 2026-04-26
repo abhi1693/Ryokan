@@ -107,19 +107,15 @@ pub async fn settings_indexers_upsert(
 
     match result {
         Ok(id) => {
+            let verb = if form.id.is_some() {
+                "updated"
+            } else {
+                "added"
+            };
             logger::info(
                 &state.db,
                 LogCategory::System,
-                &format!(
-                    "Indexer {}: {} ({})",
-                    if form.id.is_some() {
-                        "updated"
-                    } else {
-                        "created"
-                    },
-                    name,
-                    kind,
-                ),
+                &format!("Indexer {verb}: {name} ({kind})"),
                 &format!("id={id}, priority={priority}"),
             )
             .await;
@@ -127,7 +123,8 @@ pub async fn settings_indexers_upsert(
             // the next search picks up the new/edited row without
             // a process restart.
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
-            Redirect::to("/settings?tab=indexers&msg=Saved").into_response()
+            let msg = urlencoding::encode(&format!("Indexer '{name}' {verb}")).into_owned();
+            Redirect::to(&format!("/settings?tab=indexers&msg={msg}")).into_response()
         }
         Err(e) => {
             logger::error(
@@ -162,18 +159,29 @@ pub async fn settings_indexers_delete(
     // so all three statements succeed or fail atomically; previously
     // the handler ran them with `let _ = …` and a partial-NULL-out
     // could ride out a transient I/O error silently.
+    // Capture the name before delete so the success toast can name
+    // the row that was removed. A failed lookup falls back to the
+    // numeric id; the delete itself is the source of truth.
+    let display_name = crate::models::indexers::get_by_id(&state.db, form.id)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.name)
+        .unwrap_or_else(|| format!("id={}", form.id));
     match delete(&state.db, form.id).await {
         Ok(_) => {
             logger::info(
                 &state.db,
                 LogCategory::System,
-                &format!("Indexer deleted: id={}", form.id),
+                &format!("Indexer deleted: {display_name} (id={})", form.id),
                 "",
             )
             .await;
             // PR #107 review fix #4: same cache refresh as upsert.
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
-            Redirect::to("/settings?tab=indexers")
+            let msg =
+                urlencoding::encode(&format!("Indexer '{display_name}' deleted")).into_owned();
+            Redirect::to(&format!("/settings?tab=indexers&msg={msg}"))
         }
         Err(e) => {
             logger::error(

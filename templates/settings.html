@@ -48,6 +48,26 @@
 </form>
 {% endif %}
 
+{# Sibling form for the autobrr API key regenerate button. Lives at
+   page level (not nested inside any other form) because HTML5
+   forbids nested <form>s — the parser silently closes the outer
+   form on the inner </form>, which would drop fields after that
+   point. The button itself is rendered in
+   partials/settings/indexers.html and binds via the `form`
+   attribute. Empty body — the endpoint needs no payload, just a
+   POST. #}
+{% if tab == "indexers" && !config.autobrr_api_key.is_empty() %}
+<form id="autobrr-regen-form"
+      method="post" action="/settings/autobrr/regenerate-key"
+      data-ryokan-confirm-title="Regenerate API key?"
+      data-ryokan-confirm-body="A fresh 32-byte URL-safe key replaces the current one. Any autobrr instance using the old key will start receiving 401s on its next push and needs to be updated to the new key."
+      data-ryokan-confirm-yes="Regenerate"
+      data-ryokan-confirm-no="Cancel"
+      data-ryokan-confirm-danger="1"></form>
+{% else if tab == "indexers" %}
+<form id="autobrr-regen-form" method="post" action="/settings/autobrr/regenerate-key"></form>
+{% endif %}
+
 {% if tab == "groups" %}
 <div class="settings-tab-panel active">
 {%~ include "partials/settings/groups.html" ~%}
