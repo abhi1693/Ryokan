@@ -34,6 +34,14 @@ pub fn normalize_title(input: &str) -> String {
     cleaned
         .split_whitespace()
         .filter(|token| {
+            // Universal release-side noise tokens — same shape as
+            // resolution/codec markers. Container extensions (mkv /
+            // mp4 / mka) survive the bracket strip because a `.` is
+            // converted to whitespace, leaving the extension as a
+            // bare token. They're release metadata, not content;
+            // dropping them frees the 1-token-alias surplus budget
+            // (issue #103) for legitimate variants like `Episode`
+            // markers and `v2` revisions.
             !matches!(
                 *token,
                 "1080p"
@@ -49,6 +57,9 @@ pub fn normalize_title(input: &str) -> String {
                     | "dual"
                     | "audio"
                     | "multisub"
+                    | "mkv"
+                    | "mp4"
+                    | "mka"
             )
         })
         .collect::<Vec<_>>()
@@ -596,6 +607,75 @@ pub fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Issue #103: protect short-named series ("Nichijou", "Bocchi") from
+/// substring false positives. For an alias that boils down to a single
+/// content token, the substring-contains shortcut and the alias-anchored
+/// `token_overlap_ratio` both grant 1.0 to ANY release whose title
+/// contains that token — including unrelated shows whose names happen
+/// to share a Japanese word in common ("nichijou" = "everyday", a word
+/// that appears in many slice-of-life titles). Existing
+/// `sibling_match_rejects` only catches relatives in the AL graph; an
+/// unrelated show isn't reachable that way.
+///
+/// This helper requires that the release's content tokens (title minus
+/// pure-numeric metadata like episode numbers and years) don't
+/// substantially exceed the alias's content tokens. Tolerance scales
+/// with alias length so multi-token aliases stay permissive (a season
+/// subtitle adds expected surplus) while 1-2 token aliases get a tight
+/// budget. Returns `true` to keep the alias as a viable match;
+/// `false` to discard this alias-vs-release pairing.
+fn passes_content_surplus_check(
+    title_tokens: &HashSet<String>,
+    alias_tokens: &HashSet<String>,
+) -> bool {
+    let is_metadata_number = |t: &str| -> bool {
+        // Pure-digit tokens in the episode/year range. Mixed
+        // alphanumeric tokens (codecs like "h264", resolutions like
+        // "1280x720") can leak in if the bracket strip missed them
+        // and the filter list doesn't catch them — those count as
+        // surplus and the tolerance absorbs a couple. Keeping this
+        // narrow avoids over-stripping legitimate alias tokens like
+        // "0" in "Jujutsu Kaisen 0".
+        match t.parse::<i32>() {
+            Ok(n) => (1..=9999).contains(&n),
+            Err(_) => false,
+        }
+    };
+    let title_content: HashSet<&String> = title_tokens
+        .iter()
+        .filter(|t| !is_metadata_number(t))
+        .collect();
+    let alias_content: HashSet<&String> = alias_tokens
+        .iter()
+        .filter(|t| !is_metadata_number(t))
+        .collect();
+
+    if alias_content.is_empty() {
+        // Pure-numeric alias is degenerate; defer to caller's other
+        // matchers rather than reject here.
+        return true;
+    }
+
+    let surplus = title_content.difference(&alias_content).count();
+
+    // Tolerance scales with alias length:
+    //   1 alias token  → at most 1 surplus content token. "Nichijou"
+    //                    + episode + group = OK; "Otonari no
+    //                    Nichijou" = 2 surplus tokens, REJECT.
+    //   2 alias tokens → at most 3 surplus content tokens. "Sword
+    //                    Art Online: Alicization" adds "alicization"
+    //                    + minor metadata, still under 3.
+    //   3+ alias tokens → unlimited. Existing 0.6-ratio gate carries
+    //                     the load; multi-token aliases are
+    //                     specific enough to not hit the bug.
+    let tolerance = match alias_content.len() {
+        1 => 1,
+        2 => 3,
+        _ => usize::MAX,
+    };
+    surplus <= tolerance
+}
+
 pub fn matches_target(
     title: &str,
     aliases: &[String],
@@ -610,8 +690,14 @@ pub fn matches_target(
 
     let alias_match = aliases.iter().any(|alias| {
         let normalized_alias = normalize_title(alias);
-        normalized_title.contains(&normalized_alias)
-            || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.6
+        let alias_tokens = token_set(&normalized_alias);
+        let raw_match = normalized_title.contains(&normalized_alias)
+            || token_overlap_ratio(&title_tokens, &alias_tokens) >= 0.6;
+        // Issue #103 — short aliases substring-match unrelated shows
+        // sharing a token. Require the title's content tokens not to
+        // substantially exceed the alias's; see
+        // `passes_content_surplus_check` for the tolerance schedule.
+        raw_match && passes_content_surplus_check(&title_tokens, &alias_tokens)
     });
 
     if !alias_match {
@@ -715,6 +801,117 @@ mod tests {
             segments.iter().any(|s| s == "Main Title Two"),
             "multi-word leading portion should be kept, got {:?}",
             segments
+        );
+    }
+
+    #[test]
+    fn matches_target_rejects_unrelated_show_sharing_short_alias_token() {
+        // Issue #103 — the short-named series bug. A user tracking a
+        // 1-token alias (the canonical case is "Nichijou", a Japanese
+        // word meaning "everyday" that shows up in many slice-of-life
+        // title fragments) used to match every release whose title
+        // contained that token, including totally unrelated shows.
+        //
+        // Synthetic shapes here so the test isn't tied to any real
+        // title — `passes_content_surplus_check` rejects when the
+        // release has more than 1 surplus content token beyond a
+        // single-token alias.
+        let aliases = vec!["Shortname".to_string()];
+        let no_siblings = SiblingRejectPrecompute::build(&aliases, &[]);
+
+        // The legit release: alias is the only content token aside
+        // from the group + episode. Surplus = 1 (group), at tolerance.
+        let legit = "[Group] Shortname - 12 [BD 1080p].mkv";
+        assert!(
+            matches_target(
+                legit,
+                &aliases,
+                &no_siblings,
+                &SearchTarget::Episode(12),
+                0,
+                false,
+                0
+            ),
+            "real release should still match"
+        );
+
+        // The false-positive: an unrelated show whose title shares
+        // the short alias token but adds 2+ content words. Surplus
+        // exceeds the 1-tolerance for a 1-token alias.
+        let false_positive = "[Group] Some Other Show no Shortname - 12 [BD 1080p].mkv";
+        assert!(
+            !matches_target(
+                false_positive,
+                &aliases,
+                &no_siblings,
+                &SearchTarget::Episode(12),
+                0,
+                false,
+                0
+            ),
+            "unrelated show sharing the short alias token must be rejected"
+        );
+    }
+
+    #[test]
+    fn matches_target_short_alias_accepts_release_with_episode_marker() {
+        // PR #104 review: the 1-token alias tolerance is 1 surplus.
+        // `mkv` was eating the budget, so a release shape with one
+        // extra word like `Episode` would get rejected even though
+        // it's clearly the target's release. Add `mkv`/`mp4`/`mka`
+        // to normalize_title's filter list to free the slot. Pin
+        // the legit case here.
+        let aliases = vec!["Shortname".to_string()];
+        let no_siblings = SiblingRejectPrecompute::build(&aliases, &[]);
+        let with_episode_marker = "[Group] Shortname Episode 12 [BD 1080p].mkv";
+        assert!(
+            matches_target(
+                with_episode_marker,
+                &aliases,
+                &no_siblings,
+                &SearchTarget::Episode(12),
+                0,
+                false,
+                0
+            ),
+            "legit release with extra `Episode` marker must still match"
+        );
+        // The v2 / revision form is a similar shape.
+        let with_revision = "Shortname - 12 v2 [BD].mkv";
+        assert!(
+            matches_target(
+                with_revision,
+                &aliases,
+                &no_siblings,
+                &SearchTarget::Episode(12),
+                0,
+                false,
+                0
+            ),
+            "release with v2 revision must still match"
+        );
+    }
+
+    #[test]
+    fn matches_target_two_token_alias_keeps_legit_subtitle() {
+        // Symmetry guard: a 2-token alias must still accept a release
+        // whose title carries an extra subtitle word. Tolerance for
+        // 2-token aliases is 3 surplus, so a release with one
+        // additional subtitle word is well within budget.
+        let aliases = vec!["Sword Art".to_string()]; // synthetic 2-tok
+        let no_siblings = SiblingRejectPrecompute::build(&aliases, &[]);
+        let legit = "[Group] Sword Art Online - Alicization - 12 [BD 1080p].mkv";
+        assert!(
+            matches_target(
+                legit,
+                &aliases,
+                &no_siblings,
+                &SearchTarget::Episode(12),
+                0,
+                false,
+                0
+            ),
+            "2-token alias should accept a related release with extra subtitle words"
         );
     }
 

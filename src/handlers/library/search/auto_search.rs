@@ -30,6 +30,23 @@ use crate::services::{anilist, auto_search, logger, media, progress};
 
 use super::super::reconcile::{maybe_hydrate_cumulative_offset, resolve_series_context};
 
+/// Issue #102 — gate the per-target loop in
+/// `run_auto_search_targets_with_upgrades` (and the parallel
+/// per-series loop in `services::upgrade::run_once`) on whether the
+/// caller's `series_id` still refers to a row in the `series` table.
+/// Returns `true` when the loop should continue; `false` when the
+/// caller should break and terminate the cascade.
+///
+/// `None` means the caller didn't bind the search to a tracked
+/// series (typical for the search-before-add flow), so there's
+/// nothing to cancel — return `true` and let the loop run.
+pub(crate) async fn series_still_in_library(db: &SqlitePool, series_id: Option<i64>) -> bool {
+    let Some(sid) = series_id else {
+        return true;
+    };
+    series::get_by_id(db, sid).await.ok().flatten().is_some()
+}
+
 pub(super) fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32> {
     let mut ep_nums: Vec<i32> = auto_search::parse_release_numbers(title)
         .into_iter()
@@ -163,6 +180,15 @@ async fn emit_auto_search_terminal(
 ) {
     match result {
         Ok(report) => {
+            // PR #104 review: the cascade-stop path (issue #102 fix)
+            // emits its own terminal "Auto-search cancelled" toast
+            // before returning the partial report. Without this
+            // short-circuit, the wrapper would emit ANOTHER terminal
+            // event (`Nothing to search` / `Grabbed N`) that
+            // immediately overwrites the cancel message in the UI.
+            if report.cancelled {
+                return;
+            }
             let grabbed = report.grabbed.len();
             if grabbed > 0 {
                 // Show titles for ≤3 grabs, otherwise just the count —
@@ -288,6 +314,44 @@ async fn run_auto_search_targets_with_upgrades(
     let mut skipped = Vec::new();
     let total_targets = targets.len();
     for (idx, target) in targets.into_iter().enumerate() {
+        // Issue #102 — auto-search of a "monitor all" series queues a
+        // per-episode loop. If the user removes the series mid-loop
+        // (typical stress-test discovery: notice the wrong show was
+        // added, delete it from the library), the loop used to keep
+        // grabbing episodes anyway because the targets vec was already
+        // materialized. Re-check existence at the top of each iteration
+        // so a removal stops the cascade promptly. Only applies when
+        // the caller bound a series_id; the search-before-add flow
+        // (series_id == None) is unaffected.
+        if !series_still_in_library(&state.db, series_id).await {
+            logger::info(
+                &state.db,
+                LogCategory::AutoSearch,
+                &format!(
+                    "Auto search cancelled for {}: series removed from library",
+                    title
+                ),
+                &format!(
+                    "{} of {} target(s) processed before cancel",
+                    idx, total_targets
+                ),
+            )
+            .await;
+            progress::emit(
+                "done",
+                "warn",
+                "Auto-search cancelled",
+                Some("Series was removed from the library".to_string()),
+                true,
+            )
+            .await;
+            return Ok(auto_search::AutoSearchReport {
+                grabbed,
+                skipped,
+                quality_profile: cfg.quality_profile,
+                cancelled: true,
+            });
+        }
         let label = auto_search::target_label(&target);
         let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrade_classifications.contains_key(n));
         progress::emit(
@@ -640,6 +704,7 @@ async fn run_auto_search_targets_with_upgrades(
         grabbed,
         skipped,
         quality_profile: cfg.quality_profile,
+        cancelled: false,
     })
 }
 

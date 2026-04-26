@@ -903,3 +903,83 @@ mod pure_helpers {
         assert_eq!(display_title_for_progress(&detail), "");
     }
 }
+
+// ── series_still_in_library (issue #102) ──────────────────────────────
+//
+// The cascade-stop guard at the top of run_auto_search_targets_with_
+// upgrades' per-target loop. Tests pin the three states the guard
+// distinguishes: no-series-bound, present, and removed. Without the
+// guard, removing a series mid-loop kept queueing per-episode grabs.
+
+#[cfg(test)]
+mod cascade_stop_tests {
+    use sqlx::SqlitePool;
+
+    use super::super::auto_search::series_still_in_library;
+    use crate::models::series;
+
+    async fn seed_series(db: &SqlitePool, anilist_id: i64, title: &str) -> i64 {
+        let (id, _) = series::upsert(
+            db,
+            series::SeriesCore {
+                anilist_id,
+                mal_id: None,
+                title,
+                title_romaji: title,
+                title_english: title,
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2020),
+                end_year: Some(2020),
+            },
+        )
+        .await
+        .expect("upsert");
+        id
+    }
+
+    #[tokio::test]
+    async fn none_series_id_short_circuits_to_true() {
+        // The search-before-add flow doesn't bind a series_id; the
+        // guard must let it through unchanged. Otherwise every
+        // anonymous "preview search" call would terminate after the
+        // first target.
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        assert!(series_still_in_library(&db, None).await);
+    }
+
+    #[tokio::test]
+    async fn present_series_returns_true() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let id = seed_series(&db, 12345, "Test Show").await;
+        assert!(series_still_in_library(&db, Some(id)).await);
+    }
+
+    #[tokio::test]
+    async fn removed_series_returns_false_so_loop_breaks() {
+        // The load-bearing case: user removes the series mid-loop.
+        // The next iteration's guard call must return false so the
+        // outer loop stops queueing per-episode grabs.
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let id = seed_series(&db, 12345, "Removed Show").await;
+        series::remove(&db, id).await.expect("remove");
+        assert!(!series_still_in_library(&db, Some(id)).await);
+    }
+
+    #[tokio::test]
+    async fn nonexistent_series_id_returns_false() {
+        // Defensive: if the caller passes a bogus id (race between
+        // `series_id_for_grab` resolution and the loop entry), the
+        // guard should treat it as "not in library" rather than
+        // erroring out.
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        assert!(!series_still_in_library(&db, Some(999_999)).await);
+    }
+}

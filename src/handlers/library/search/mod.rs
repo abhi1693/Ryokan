@@ -37,6 +37,7 @@ mod interactive;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use auto_search::series_still_in_library;
 pub use auto_search::{
     __path_auto_search_episode, __path_auto_search_series, AutoSearchQuery, auto_search_episode,
     auto_search_series, run_auto_search_targets,
