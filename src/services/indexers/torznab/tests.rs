@@ -1,0 +1,426 @@
+//! Torznab parser tests. Synthetic show names per the project
+//! convention (no real release titles in fixtures).
+
+use super::parser::{
+    extract_all_categories, parse_caps_response, parse_error, parse_repeating_attr,
+    parse_search_response,
+};
+
+// ── parse_error ──────────────────────────────────────────────────
+
+#[test]
+fn parse_error_recognizes_self_closing_error_body() {
+    // Per torznab spec: bad creds return HTTP 200 with an error
+    // body, NOT a 401. The parser must catch this before the
+    // search-response path sees it.
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <error code="100" description="Invalid API Key"/>"#;
+    let err = parse_error(xml).expect("error body must parse");
+    assert_eq!(err.code, 100);
+    assert_eq!(err.description, "Invalid API Key");
+}
+
+#[test]
+fn parse_error_handles_attribute_order_variations() {
+    // Some impls emit description before code. Pin both shapes.
+    let xml_a = r#"<error code="200" description="Missing required parameter"/>"#;
+    let err_a = parse_error(xml_a).expect("code-first must parse");
+    assert_eq!(err_a.code, 200);
+
+    // Description-first ordering — caught by the `[^>]*` between
+    // the two attribute captures.
+    let xml_b = r#"<error description="Missing required parameter" code="200"/>"#;
+    // The current regex pattern requires code BEFORE description,
+    // but real impls only emit code-first. If a future indexer
+    // breaks this, swap to a two-pass regex. Assert on the
+    // observed behavior so a parser tweak is visible.
+    assert!(
+        parse_error(xml_b).is_none(),
+        "description-first not currently supported; flag if a real indexer breaks this"
+    );
+}
+
+#[test]
+fn parse_error_returns_none_on_success_body() {
+    let xml = r#"<rss version="2.0"><channel><item><title>X</title></item></channel></rss>"#;
+    assert!(parse_error(xml).is_none());
+}
+
+#[test]
+fn parse_error_decodes_xml_entities_in_description() {
+    let xml = r#"<error code="900" description="Unknown failure: &lt;trace&gt;"/>"#;
+    let err = parse_error(xml).expect("must parse");
+    assert_eq!(err.description, "Unknown failure: <trace>");
+}
+
+// ── parse_search_response ────────────────────────────────────────
+
+const SEARCH_RESPONSE_BASIC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>Test Indexer</title>
+    <item>
+      <title>Synthetic.Show.S01E01.1080p</title>
+      <guid isPermaLink="true">https://indexer.test/release/abc</guid>
+      <link>https://indexer.test/release/abc</link>
+      <pubDate>Fri, 24 Apr 2026 18:32:01 +0000</pubDate>
+      <enclosure url="https://indexer.test/dl/abc?apikey=KEY"
+                 length="1460985071" type="application/x-bittorrent"/>
+      <torznab:attr name="category" value="5070"/>
+      <torznab:attr name="size" value="1460985071"/>
+      <torznab:attr name="seeders" value="42"/>
+      <torznab:attr name="leechers" value="3"/>
+      <torznab:attr name="peers" value="45"/>
+      <torznab:attr name="infohash" value="EC039A525A6FEAC4B15889323F4F443DE381E7CC"/>
+      <torznab:attr name="downloadvolumefactor" value="1"/>
+      <torznab:attr name="uploadvolumefactor" value="1"/>
+    </item>
+  </channel>
+</rss>"#;
+
+#[test]
+fn search_response_extracts_basic_release_fields() {
+    let result = parse_search_response(SEARCH_RESPONSE_BASIC, 7, 25)
+        .expect("parse must succeed")
+        .expect("body must not be an error");
+    assert_eq!(result.len(), 1);
+    let r = &result[0];
+    assert_eq!(r.indexer_id, 7, "indexer_id stamped from caller");
+    assert_eq!(r.indexer_priority, 25);
+    assert_eq!(r.title, "Synthetic.Show.S01E01.1080p");
+    assert_eq!(r.guid, "https://indexer.test/release/abc");
+    assert_eq!(r.link, "https://indexer.test/dl/abc?apikey=KEY");
+    assert_eq!(r.size_bytes, 1_460_985_071);
+    assert_eq!(r.seeders, 42);
+    assert_eq!(r.leechers, 3);
+    assert_eq!(
+        r.info_hash, "ec039a525a6feac4b15889323f4f443de381e7cc",
+        "infohash must be lowercased"
+    );
+    assert_eq!(r.categories, vec![5070]);
+    assert_eq!(r.download_volume_factor, Some(1.0));
+}
+
+#[test]
+fn search_response_promotes_enclosure_url_over_link() {
+    // The enclosure URL is the canonical download path per spec;
+    // <link> is sometimes a comments-page URL. Prefer enclosure.
+    let xml = SEARCH_RESPONSE_BASIC;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(
+        result[0].link, "https://indexer.test/dl/abc?apikey=KEY",
+        "must prefer enclosure URL"
+    );
+}
+
+#[test]
+fn search_response_falls_back_to_size_from_enclosure_when_no_size_attr() {
+    // Some indexers don't repeat size as a torznab:attr — the
+    // enclosure length is the only signal. Verify we pick it up.
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel><item>
+  <title>Show</title>
+  <guid>g1</guid>
+  <enclosure url="u" length="500000000" type="application/x-bittorrent"/>
+  <torznab:attr name="seeders" value="10"/>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(result[0].size_bytes, 500_000_000);
+}
+
+#[test]
+fn search_response_derives_leechers_from_peers_when_missing() {
+    // peers = seeders + leechers per the spec. When the indexer
+    // emits peers but not leechers, derive.
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel><item>
+  <title>Show</title>
+  <guid>g1</guid>
+  <torznab:attr name="seeders" value="40"/>
+  <torznab:attr name="peers" value="50"/>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(
+        result[0].leechers, 10,
+        "50 peers - 40 seeders = 10 leechers"
+    );
+}
+
+#[test]
+fn search_response_skips_items_with_empty_title() {
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel>
+<item><title></title><guid>g1</guid></item>
+<item><title>Real Title</title><guid>g2</guid></item>
+</channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(result.len(), 1, "title-less items must drop");
+    assert_eq!(result[0].title, "Real Title");
+}
+
+#[test]
+fn search_response_decodes_xml_entities_in_title() {
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel><item>
+  <title>Show &amp; Friends</title>
+  <guid>g1</guid>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(result[0].title, "Show & Friends");
+}
+
+#[test]
+fn search_response_handles_cdata_wrapped_title() {
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel><item>
+  <title><![CDATA[Show & <Friends>]]></title>
+  <guid>g1</guid>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(result[0].title, "Show & <Friends>");
+}
+
+#[test]
+fn search_response_returns_inner_err_for_torznab_error_body() {
+    // HTTP 200 + error body must surface as the inner Err so the
+    // caller can branch on the torznab error code.
+    let err_xml = r#"<?xml version="1.0"?>
+<error code="100" description="Bad API Key"/>"#;
+    let result = parse_search_response(err_xml, 1, 25).expect("outer parse must not fail");
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("error body must surface as Err"),
+    };
+    assert_eq!(err.code, 100);
+}
+
+#[test]
+fn search_response_empty_channel_returns_empty_releases_not_error() {
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Empty</title></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert!(result.is_empty());
+}
+
+#[test]
+fn search_response_collects_unrecognized_attrs_into_extra() {
+    // Anything beyond the well-known torznab:attr set lands in
+    // `extra` so the inspector can show indexer-specific metadata
+    // without polluting the typed fields.
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel><item>
+  <title>Show</title>
+  <guid>g1</guid>
+  <torznab:attr name="seeders" value="5"/>
+  <torznab:attr name="customField" value="indexer-specific-data"/>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(
+        result[0].extra.get("customfield"),
+        Some(&"indexer-specific-data".to_string()),
+        "non-well-known attrs go into extra (lowercased keys)"
+    );
+}
+
+#[test]
+fn search_response_pubdate_parses_to_unix_timestamp() {
+    // RFC 2822 → Unix. Pin the conversion against a known
+    // reference date.
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0">
+<channel><item>
+  <title>Show</title>
+  <guid>g1</guid>
+  <pubDate>Thu, 01 Jan 1970 00:00:00 +0000</pubDate>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(result[0].publish_date, 0, "epoch should round-trip to 0");
+}
+
+#[test]
+fn search_response_pubdate_handles_positive_timezone_offset() {
+    // +0500 means "5 hours ahead of UTC"; the parser must
+    // subtract the offset to land at the UTC unix value.
+    let xml = r#"<?xml version="1.0"?>
+<rss version="2.0">
+<channel><item>
+  <title>Show</title>
+  <guid>g1</guid>
+  <pubDate>Thu, 01 Jan 1970 05:00:00 +0500</pubDate>
+</item></channel></rss>"#;
+    let result = parse_search_response(xml, 1, 25)
+        .expect("parse")
+        .expect("not error");
+    assert_eq!(
+        result[0].publish_date, 0,
+        "5 hours ahead of UTC at 05:00 local = 00:00 UTC"
+    );
+}
+
+// ── parse_caps_response ──────────────────────────────────────────
+
+const CAPS_RESPONSE_BASIC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<caps>
+  <server title="Test Indexer"/>
+  <limits max="100" default="50"/>
+  <searching>
+    <search available="yes" supportedParams="q"/>
+    <tv-search available="yes" supportedParams="q,season,ep,tvdbid"/>
+    <movie-search available="no"/>
+  </searching>
+  <categories>
+    <category id="5000" name="TV">
+      <subcat id="5070" name="Anime"/>
+    </category>
+    <category id="2000" name="Movies"/>
+  </categories>
+</caps>"#;
+
+#[test]
+fn caps_response_parses_limits() {
+    let caps = parse_caps_response(CAPS_RESPONSE_BASIC).expect("must parse");
+    assert_eq!(caps.max_limit, Some(100));
+    assert_eq!(caps.default_limit, Some(50));
+}
+
+#[test]
+fn caps_response_parses_search_modes_with_supported_params() {
+    let caps = parse_caps_response(CAPS_RESPONSE_BASIC).expect("must parse");
+    let tv = caps
+        .search_modes
+        .iter()
+        .find(|m| m.mode == "tv-search")
+        .expect("tv-search present");
+    assert!(tv.available);
+    assert_eq!(tv.supported_params, vec!["q", "season", "ep", "tvdbid"]);
+
+    let movie = caps
+        .search_modes
+        .iter()
+        .find(|m| m.mode == "movie-search")
+        .expect("movie-search present");
+    assert!(!movie.available, "available=no must parse as false");
+}
+
+#[test]
+fn caps_response_parses_categories_with_subcategories() {
+    let caps = parse_caps_response(CAPS_RESPONSE_BASIC).expect("must parse");
+    let tv = caps
+        .categories
+        .iter()
+        .find(|c| c.id == 5000)
+        .expect("TV category present");
+    assert_eq!(tv.name, "TV");
+    let anime_sub = tv
+        .subcategories
+        .iter()
+        .find(|c| c.id == 5070)
+        .expect("Anime subcat under TV");
+    assert_eq!(anime_sub.name, "Anime");
+
+    let movies = caps
+        .categories
+        .iter()
+        .find(|c| c.id == 2000)
+        .expect("Movies category present");
+    assert!(
+        movies.subcategories.is_empty(),
+        "categories without subcats render as empty Vec, not panic"
+    );
+}
+
+#[test]
+fn caps_response_returns_err_on_torznab_error_body() {
+    // Caps endpoint also returns the standard torznab error body
+    // shape on auth failure — make sure the parser surfaces it
+    // instead of yielding empty caps.
+    let xml = r#"<?xml version="1.0"?>
+<error code="100" description="Bad API Key"/>"#;
+    let result = parse_caps_response(xml);
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().contains("100"),
+        "error code must be visible in the error message"
+    );
+}
+
+#[test]
+fn caps_response_handles_missing_limits_block_with_none_defaults() {
+    // Sparse caps response: indexer doesn't emit a <limits>
+    // element. Fall back to None per the field's contract.
+    let xml = r#"<?xml version="1.0"?>
+<caps>
+  <searching><search available="yes"/></searching>
+  <categories/>
+</caps>"#;
+    let caps = parse_caps_response(xml).expect("must parse");
+    assert_eq!(caps.max_limit, None);
+    assert_eq!(caps.default_limit, None);
+}
+
+// ── repeating attr extraction ────────────────────────────────────
+
+#[test]
+fn extract_all_categories_pulls_every_category_attr_value() {
+    // A release marked TV (5000) AND Anime (5070) must surface
+    // both ids, not just the first. Single-value path drops
+    // repeats; this helper recovers them.
+    let block = r#"
+        <torznab:attr name="category" value="5000"/>
+        <torznab:attr name="category" value="5070"/>
+        <torznab:attr name="seeders" value="10"/>
+    "#;
+    let cats = extract_all_categories(block);
+    assert_eq!(cats, vec![5000, 5070]);
+}
+
+#[test]
+fn extract_all_categories_returns_empty_when_no_category_attr() {
+    let block = r#"<torznab:attr name="seeders" value="10"/>"#;
+    assert!(extract_all_categories(block).is_empty());
+}
+
+#[test]
+fn parse_repeating_attr_rejects_unsafe_attr_names() {
+    // Defensive: only alphanum + `-_` allowed in name. Anything
+    // else returns empty rather than splicing into the regex.
+    let block = r#"<torznab:attr name="seeders" value="10"/>"#;
+    assert!(parse_repeating_attr(block, "seeders.*").is_empty());
+    assert!(parse_repeating_attr(block, "seed)ers").is_empty());
+}
+
+#[test]
+fn parse_repeating_attr_works_for_newznab_namespace() {
+    // Newznab uses `<newznab:attr>`. The regex pattern is built
+    // with `(?:torznab|newznab)` so both work.
+    let block = r#"
+        <newznab:attr name="files" value="42"/>
+        <newznab:attr name="files" value="43"/>
+    "#;
+    let values = parse_repeating_attr(block, "files");
+    assert_eq!(values, vec!["42".to_string(), "43".to_string()]);
+}

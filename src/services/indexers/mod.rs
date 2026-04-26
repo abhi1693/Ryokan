@@ -48,6 +48,8 @@
 //!   path.** `season`/`ep` params don't translate cleanly because
 //!   anime trackers key on absolute episode numbers in titles.
 
+pub mod torznab;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;

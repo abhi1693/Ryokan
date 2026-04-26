@@ -1,0 +1,38 @@
+//! Shared wiremock fixture: a `MockServer` + a [`TorznabIndexer`]
+//! built against its base URL. Mirrors the
+//! `services/download_client/*/wiremock_tests/fixture.rs` pattern
+//! so the test files stay focused on the behavior under test.
+
+use wiremock::MockServer;
+
+use crate::models::indexers::{Indexer as IndexerRow, KIND_TORZNAB};
+use crate::services::indexers::torznab::TorznabIndexer;
+
+pub const TEST_API_KEY: &str = "wiremock-key-01234567";
+
+/// Spin up a fresh `MockServer` and return it paired with a
+/// `TorznabIndexer` configured to talk to it. The base URL points
+/// at `<server>/api` so tests register `Mock`s on `path("/api")`.
+pub async fn new_fixture() -> (MockServer, TorznabIndexer) {
+    let server = MockServer::start().await;
+    let row = IndexerRow {
+        id: 7,
+        name: "Wiremock".to_string(),
+        kind: KIND_TORZNAB.to_string(),
+        url: format!("{}/api", server.uri()),
+        api_key: TEST_API_KEY.to_string(),
+        priority: 25,
+        enabled: true,
+        is_private_tracker: false,
+        seed_ratio: None,
+        seed_time_minutes: None,
+        min_seeders: 0,
+        request_timeout_secs: Some(5),
+        caps_json: String::new(),
+        caps_refreshed_at: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let client = TorznabIndexer::from_row(&row).expect("client must build");
+    (server, client)
+}
