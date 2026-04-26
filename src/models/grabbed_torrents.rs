@@ -446,6 +446,28 @@ pub async fn set_indexer_attribution(
     Ok(())
 }
 
+/// Issue #28 PR D — true when `info_hash` is already in
+/// `grabbed_torrents` in any active state (`pending` or
+/// `imported`). Used by the autobrr webhook to dedup against
+/// already-handled releases — autobrr can race against torznab
+/// polling and the user's manual UI grab.
+pub async fn is_known_hash(db: &SqlitePool, info_hash: &str) -> bool {
+    if info_hash.is_empty() {
+        return false;
+    }
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM grabbed_torrents \
+         WHERE hash = ? AND state IN ('pending', 'imported') \
+         LIMIT 1",
+    )
+    .bind(info_hash)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
 /// Issue #28 PR C — read back the `respect_seed_rules` flag for
 /// a grab row by hash. Used by delete paths (manual delete,
 /// upgrade-replace) to decide whether to skip the underlying

@@ -91,6 +91,8 @@ use services::{
         // Settings — Indexers (issue #28 PR B)
         handlers::settings::indexers::settings_indexers_upsert,
         handlers::settings::indexers::settings_indexers_delete,
+        // Webhooks (issue #28 PR D)
+        handlers::webhook::autobrr::webhook_autobrr,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
         handlers::system::api_logs_client,
@@ -911,6 +913,20 @@ async fn main() {
             handlers::radarr_compat::require_api_key,
         ));
 
+    // Issue #28 PR D — autobrr push webhook. Lives outside the
+    // cookie-auth layer because autobrr authenticates via the
+    // Ryokan-issued API key in `X-Api-Key` (or `?apikey=`).
+    // Unlike the arr-compat shims, autobrr's check is inside the
+    // handler itself rather than a middleware layer — the handler
+    // also reads the body to make grab decisions, so the auth +
+    // grab dispatch live in the same function.
+    let webhook_routes = Router::new()
+        .route(
+            "/api/webhook/autobrr",
+            post(handlers::webhook::autobrr::webhook_autobrr),
+        )
+        .with_state(state.clone());
+
     // Brotli/gzip compression. The series detail template is ~80KB of HTML
     // and style.css is ~64KB — both highly compressible (lots of repeated
     // tokens, whitespace), and they ship on every page navigation. Axum
@@ -937,6 +953,7 @@ async fn main() {
         .merge(protected_routes)
         .merge(sonarr_routes)
         .merge(radarr_routes)
+        .merge(webhook_routes)
         .nest_service(
             "/static",
             tower::ServiceBuilder::new()

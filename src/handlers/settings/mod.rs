@@ -810,6 +810,14 @@ pub async fn settings_submit(
                 .map(|c| c.radarr_api_key.clone())
                 .unwrap_or_default()
         },
+        // Issue #28 PR D — autobrr API key. Carried forward from the
+        // existing row; rotated only via the dedicated
+        // /settings/autobrr/regenerate-key handler so a stray POST to
+        // the integrations tab can't silently wipe a working webhook.
+        autobrr_api_key: existing_cfg
+            .as_ref()
+            .map(|c| c.autobrr_api_key.clone())
+            .unwrap_or_default(),
         upgrade_search_enabled: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
             form.upgrade_search_enabled.is_some()
         } else {
