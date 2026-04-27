@@ -185,3 +185,13 @@ insta = { version = "1", features = ["json"] }
 # existing one-fn-per-case pattern in the classification pipeline
 # into tabular data. Equivalent to C#'s [TestCase].
 rstest = "0.26"
+
+# Test-runtime profile. opt-level = 1 on dependencies (not the test
+# crate itself, which stays unoptimized for fast incremental builds)
+# is the standard "make tests run fast" knob — the wiremock + sqlx +
+# regex hot paths run 2-3x faster optimized, and the dep build is paid
+# once and cached. The leading `*` glob matches every dependency; the
+# trailing `name = "ryokan"` block keeps Ryokan's own code at the
+# default test profile (opt-level = 0) so iteration cycles stay snappy.
+[profile.test.package."*"]
+opt-level = 1
