@@ -62,6 +62,13 @@ pub struct GrabPreviewForm {
     /// GET preview endpoint.
     #[serde(default)]
     pub release_metadata: serde_json::Value,
+    /// Multi-client routing — id of the indexer that surfaced this
+    /// release. `None` for Nyaa-direct (routes via Nyaa pin), `Some`
+    /// for torznab/newznab fan-out (routes via per-indexer pin). The
+    /// resolved `download_clients.id` is stamped on the pending row
+    /// so confirm/cancel hit the same client.
+    #[serde(default)]
+    pub indexer_id: Option<i64>,
 }
 
 /// POST `/api/grab/preview` response.
@@ -286,7 +293,28 @@ pub async fn grab_preview(
         }));
     }
 
-    let client = require_download_client(&state).await?;
+    // Multi-client routing — preview locks the dispatch client at
+    // add-time. Confirm + cancel read `download_client_id` back from
+    // the pending row so resume / set_file_wanted / delete hit the
+    // same client (a torrent paused on the seedbox can't be resumed
+    // via the local qBit). Pin chain: indexer_id (torznab/newznab
+    // fan-out hits) > Nyaa pin (Nyaa-direct) > default.
+    let resolved = if form.indexer_id.is_some() {
+        state.client_for_indexer_with_id(form.indexer_id).await
+    } else {
+        let cfg = crate::models::config::get_config(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        state
+            .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
+            .await
+    };
+    let (client, dispatch_client_id) = resolved.ok_or((
+        StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
     let client_kind = client.sonarr_impl_name().to_string();
     let metadata_json = form.release_metadata.to_string();
 
@@ -310,10 +338,11 @@ pub async fn grab_preview(
         &preview_id,
         &info_hash,
         &client_kind,
-        None,
+        form.indexer_id,
         form.series_id,
         &metadata_json,
         we_added,
+        Some(dispatch_client_id),
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -577,7 +606,29 @@ pub async fn grab_confirm(
     })?;
     let total = files.len();
 
-    let client = require_download_client(&state).await?;
+    // Multi-client routing — resume + set_file_wanted must hit the
+    // same client `add_torrent_paused` landed on at preview time.
+    // Falls back to default for legacy rows (NULL stamp).
+    let client = match row.download_client_id {
+        Some(id) => match state.client_by_id(id).await {
+            Some(c) => c,
+            None => {
+                // Client got deleted or disabled mid-modal. Pre-fix
+                // this would silently fall through to the wrong
+                // default; instead surface 503 so the modal shows the
+                // error and the user can re-grab. The pending row
+                // stays for the TTL sweep — manual cleanup via cancel
+                // is the user's escape hatch.
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "download client #{id} is no longer available; the torrent is still in your client but Ryokan can't manage it from this preview"
+                    ),
+                ));
+            }
+        },
+        None => require_download_client(&state).await?,
+    };
 
     // Compute the wanted / unwanted partitions. Any index outside
     // [0, total) in `wanted_indices` is silently ignored — the modal
@@ -693,7 +744,18 @@ pub async fn grab_cancel(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or((StatusCode::NOT_FOUND, "preview not found".to_string()))?;
 
-    let client = require_download_client(&state).await?;
+    // Same multi-client lookup as confirm — cancel must hit the same
+    // client the preview added the torrent to. Legacy NULL stamp →
+    // fall back to default. A vanished client (deleted/disabled mid-
+    // modal) skips the destructive delete but still drops the
+    // pending row so the modal state doesn't linger; the torrent
+    // either stays orphaned in the unreachable client (rare) or
+    // gets cleaned up on a subsequent rebuild_clients_cache.
+    let client_opt: Option<std::sync::Arc<dyn crate::services::download_client::DownloadClient>> =
+        match row.download_client_id {
+            Some(id) => state.client_by_id(id).await,
+            None => state.default_download_client().await,
+        };
 
     // Only delete the torrent if THIS preview added it fresh. If the
     // torrent was already in the client at add time (AlreadyPresent),
@@ -703,6 +765,7 @@ pub async fn grab_cancel(
     // The pending_grabs row is still dropped either way so the modal-
     // state doesn't linger.
     if row.we_added_torrent
+        && let Some(client) = client_opt
         && let Err(e) = client.delete(&row.info_hash, true).await
     {
         tracing::warn!(
@@ -813,6 +876,7 @@ mod tests {
             None,
             "{\"title\":\"t\"}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -844,9 +908,19 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_200_when_present_404_when_gone() {
         let db = in_memory_pool().await;
-        pending_grabs::create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        pending_grabs::create(
+            &db,
+            "pid-1",
+            "abc",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
 
         let state = build_test_app_state(db.clone(), None);
         let ok = grab_heartbeat(State(state.clone()), Path("pid-1".to_string())).await;
@@ -892,9 +966,19 @@ mod tests {
     #[tokio::test]
     async fn confirm_400_when_file_list_empty() {
         let db = in_memory_pool().await;
-        pending_grabs::create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        pending_grabs::create(
+            &db,
+            "pid-1",
+            "abc",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         let state = build_test_app_state(db, None);
         let res = grab_confirm(
             State(state),
@@ -919,6 +1003,7 @@ mod tests {
                 info_hash: "abc".into(),
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
+                indexer_id: None,
             }),
         )
         .await;
@@ -931,6 +1016,7 @@ mod tests {
                 info_hash: "".into(),
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
+                indexer_id: None,
             }),
         )
         .await;
@@ -948,6 +1034,7 @@ mod tests {
                 info_hash: VALID_HASH.into(),
                 series_id: Some(42),
                 release_metadata: serde_json::json!({"title": "test"}),
+                indexer_id: None,
             }),
         )
         .await;
@@ -975,6 +1062,7 @@ mod tests {
                 info_hash: too_long,
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
+                indexer_id: None,
             }),
         )
         .await;
@@ -989,6 +1077,7 @@ mod tests {
                 info_hash: bad_chars,
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
+                indexer_id: None,
             }),
         )
         .await;
@@ -1014,6 +1103,7 @@ mod tests {
             None,
             "{\"title\":\"tab-1 snapshot\"}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -1025,6 +1115,7 @@ mod tests {
                 info_hash: VALID_HASH.into(),
                 series_id: None,
                 release_metadata: serde_json::json!({"title": "tab-2 request"}),
+                indexer_id: None,
             }),
         )
         .await
@@ -1061,6 +1152,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -1075,6 +1167,7 @@ mod tests {
                 info_hash: VALID_HASH.into(),
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
+                indexer_id: None,
             }),
         )
         .await;
@@ -1179,6 +1272,7 @@ mod tests {
             Some(series_id),
             &release_metadata.to_string(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -1246,6 +1340,7 @@ mod tests {
             Some(series_id),
             "{\"title\":\"Test Release\"}",
             true,
+            None,
         )
         .await
         .unwrap();

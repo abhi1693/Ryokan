@@ -79,6 +79,11 @@ pub struct PendingGrab {
     /// the column existed take the conservative "yes, we added it"
     /// path on read without any Rust-side default needed.
     pub we_added_torrent: bool,
+    /// Multi-client refactor — the `download_clients.id` the preview's
+    /// `add_torrent_paused` landed on. Confirm reads this back to
+    /// resume the torrent against the same client. NULL on legacy
+    /// rows; the confirm handler then falls back to default.
+    pub download_client_id: Option<i64>,
 }
 
 /// Insert a new row. `preview_id` is a caller-supplied opaque string
@@ -103,14 +108,15 @@ pub async fn create(
     series_id: Option<i64>,
     release_metadata_json: &str,
     we_added_torrent: bool,
+    download_client_id: Option<i64>,
 ) -> Result<(), String> {
     let now = now_unix();
     sqlx::query(
         "INSERT INTO pending_grabs \
          (preview_id, info_hash, client_kind, indexer_id, series_id, \
           created_at, heartbeat_at, file_list_json, release_metadata_json, \
-          error_message, we_added_torrent) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, '', ?)",
+          error_message, we_added_torrent, download_client_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, '', ?, ?)",
     )
     .bind(preview_id)
     .bind(info_hash)
@@ -121,6 +127,7 @@ pub async fn create(
     .bind(now)
     .bind(release_metadata_json)
     .bind(if we_added_torrent { 1_i64 } else { 0_i64 })
+    .bind(download_client_id)
     .execute(db)
     .await
     .map_err(|e| format!("failed to create pending grab: {}", e))?;
@@ -129,7 +136,7 @@ pub async fn create(
 
 const SELECT_COLUMNS: &str = "preview_id, info_hash, client_kind, indexer_id, series_id, \
      created_at, heartbeat_at, file_list_json, release_metadata_json, \
-     error_message, we_added_torrent";
+     error_message, we_added_torrent, download_client_id";
 
 pub async fn get(db: &SqlitePool, preview_id: &str) -> Result<Option<PendingGrab>, String> {
     sqlx::query_as::<_, PendingGrab>(&format!(
@@ -285,6 +292,7 @@ mod tests {
             Some(42),
             "{\"title\":\"test\"}",
             true,
+            None,
         )
         .await
         .expect("create");
@@ -300,12 +308,72 @@ mod tests {
         assert_eq!(row.created_at, row.heartbeat_at);
     }
 
+    /// Pre-PR-F-followup regression: confirm/cancel used
+    /// `default_download_client` even when preview had landed on a
+    /// pinned client. The schema column `download_client_id` plus
+    /// `create()`'s 9th arg + the handler's read-back together cover
+    /// the fix; this test pins the round-trip so a future SELECT-list
+    /// refactor can't drop the column and silently regress.
+    #[tokio::test]
+    async fn download_client_id_round_trips() {
+        let db = in_memory_pool().await;
+        create(
+            &db,
+            "pid-pinned",
+            "ab",
+            "deluge",
+            Some(7),
+            Some(42),
+            "{}",
+            true,
+            Some(2),
+        )
+        .await
+        .expect("create");
+        let row = get(&db, "pid-pinned")
+            .await
+            .expect("get")
+            .expect("row present");
+        assert_eq!(row.download_client_id, Some(2));
+        assert_eq!(row.indexer_id, Some(7));
+
+        // Legacy (NULL) shape still works.
+        create(
+            &db,
+            "pid-legacy",
+            "cd",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .expect("create");
+        let row = get(&db, "pid-legacy")
+            .await
+            .expect("get")
+            .expect("row present");
+        assert_eq!(row.download_client_id, None);
+    }
+
     #[tokio::test]
     async fn we_added_false_roundtrips() {
         let db = in_memory_pool().await;
-        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", false)
-            .await
-            .unwrap();
+        create(
+            &db,
+            "pid-1",
+            "abc",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         let row = get(&db, "pid-1").await.unwrap().unwrap();
         assert!(!row.we_added_torrent);
     }
@@ -313,9 +381,19 @@ mod tests {
     #[tokio::test]
     async fn set_error_flips_column() {
         let db = in_memory_pool().await;
-        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        create(
+            &db,
+            "pid-1",
+            "abc",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             get(&db, "pid-1")
                 .await
@@ -336,9 +414,19 @@ mod tests {
     #[tokio::test]
     async fn bump_heartbeat_updates_heartbeat_at() {
         let db = in_memory_pool().await;
-        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        create(
+            &db,
+            "pid-1",
+            "abc",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         let before = get(&db, "pid-1").await.unwrap().unwrap().heartbeat_at;
         // Force a clock tick by sleeping 1s — the unix-seconds resolution
         // needs at least one second to move. Cheap enough for a single test.
@@ -373,6 +461,7 @@ mod tests {
             Some(7),
             "{\"title\":\"t\"}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -389,9 +478,19 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_the_row() {
         let db = in_memory_pool().await;
-        create(&db, "pid-1", "abc", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        create(
+            &db,
+            "pid-1",
+            "abc",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         delete(&db, "pid-1").await.unwrap();
         assert!(get(&db, "pid-1").await.unwrap().is_none());
     }
@@ -408,6 +507,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -421,6 +521,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -434,9 +535,19 @@ mod tests {
     #[tokio::test]
     async fn get_by_hash_ignores_empty_hash() {
         let db = in_memory_pool().await;
-        create(&db, "pid-1", "", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        create(
+            &db,
+            "pid-1",
+            "",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             get_by_hash(&db, "").await.unwrap().is_none(),
             "empty hash lookup should never return a row"
@@ -461,6 +572,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -489,6 +601,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -503,6 +616,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -517,13 +631,33 @@ mod tests {
     async fn list_expired_returns_stale_rows_only() {
         let db = in_memory_pool().await;
         // Fresh row — heartbeat just now.
-        create(&db, "fresh", "h1", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        create(
+            &db,
+            "fresh",
+            "h1",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         // Backdate a second row's heartbeat past the TTL.
-        create(&db, "stale", "h2", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        create(
+            &db,
+            "stale",
+            "h2",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         let stale_heartbeat = now_unix() - HEARTBEAT_TTL_SECS - 5;
         sqlx::query("UPDATE pending_grabs SET heartbeat_at = ? WHERE preview_id = 'stale'")
             .bind(stale_heartbeat)
@@ -539,12 +673,32 @@ mod tests {
     async fn count_reflects_creates_and_deletes() {
         let db = in_memory_pool().await;
         assert_eq!(count(&db).await.unwrap(), 0);
-        create(&db, "pid-1", "a", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
-        create(&db, "pid-2", "b", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        create(
+            &db,
+            "pid-1",
+            "a",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        create(
+            &db,
+            "pid-2",
+            "b",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(count(&db).await.unwrap(), 2);
         delete(&db, "pid-1").await.unwrap();
         assert_eq!(count(&db).await.unwrap(), 1);

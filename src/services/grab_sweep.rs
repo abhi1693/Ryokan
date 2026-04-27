@@ -277,12 +277,32 @@ mod tests {
     #[tokio::test]
     async fn sweep_drops_stale_rows_only() {
         let db = in_memory_pool().await;
-        pending_grabs::create(&db, "fresh", "h1", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
-        pending_grabs::create(&db, "stale", "h2", "qbittorrent", None, None, "{}", true)
-            .await
-            .unwrap();
+        pending_grabs::create(
+            &db,
+            "fresh",
+            "h1",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        pending_grabs::create(
+            &db,
+            "stale",
+            "h2",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         sqlx::query("UPDATE pending_grabs SET heartbeat_at = ? WHERE preview_id = 'stale'")
             .bind(now_unix() - HEARTBEAT_TTL_SECS - 5)
             .execute(&db)
@@ -316,7 +336,7 @@ mod tests {
         let db = in_memory_pool().await;
         for i in 0..3 {
             let id = format!("stale-{}", i);
-            pending_grabs::create(&db, &id, "h", "qbittorrent", None, None, "{}", true)
+            pending_grabs::create(&db, &id, "h", "qbittorrent", None, None, "{}", true, None)
                 .await
                 .unwrap();
         }
@@ -348,6 +368,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -387,6 +408,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -445,6 +467,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -493,6 +516,7 @@ mod tests {
             None,
             "{}",
             true,
+            None,
         )
         .await
         .unwrap();

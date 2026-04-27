@@ -813,6 +813,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Multi-client refactor follow-up — capture which `download_clients`
+    // row the preview's `add_torrent_paused` call landed on so the
+    // confirm path resumes against the same client. Pre-fix the
+    // confirm path used `default_download_client()`, which silently
+    // routed selective-narrow + resume to the wrong client when the
+    // preview had been pinned to a non-default. NULL on legacy rows
+    // and on previews where pin resolution returned the default.
+    sqlx::query("ALTER TABLE pending_grabs ADD COLUMN download_client_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
     // Issue #62 PR A — external AL/MAL account linkage. One row per
     // linked provider (decision #10 limits this to one row total at
     // any time; the "at most one" invariant is enforced in the

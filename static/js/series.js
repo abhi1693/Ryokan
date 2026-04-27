@@ -755,7 +755,8 @@ function grabInteractiveResult(epNum, idx, btn) {
             group: result.group,
             resolution: result.resolution,
             info_hash: result.info_hash,
-            size_bytes: result.size_bytes || 0
+            size_bytes: result.size_bytes || 0,
+            indexer_id: result.indexer_id ?? null
         })
     })
     .then(async r => {
@@ -892,7 +893,8 @@ function grabInteractiveBatchResult(idx, btn) {
             group: result.group,
             resolution: result.resolution,
             info_hash: result.info_hash,
-            size_bytes: result.size_bytes || 0
+            size_bytes: result.size_bytes || 0,
+            indexer_id: result.indexer_id ?? null
         })
     })
     .then(async r => {

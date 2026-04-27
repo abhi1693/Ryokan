@@ -123,6 +123,7 @@ function loadMore() {
                 tr.dataset.downloads = r.downloads;
                 tr.dataset.infoHash = r.info_hash || '';
                 tr.dataset.group = r.group || '';
+                if (r.indexer_id != null) tr.dataset.indexerId = r.indexer_id;
                 tr.innerHTML = `
                     <td class="col-score">
                         <details class="score-details" name="score-breakdown">
@@ -154,6 +155,7 @@ function loadMore() {
                     card.dataset.seeders = r.seeders;
                     card.dataset.infoHash = r.info_hash || '';
                     card.dataset.group = r.group || '';
+                    if (r.indexer_id != null) card.dataset.indexerId = r.indexer_id;
                     card.innerHTML = `
                         <div class="result-card-header">
                             <details class="score-details" name="score-breakdown">
@@ -239,6 +241,10 @@ function grabRelease(url, btn) {
         if (row.dataset.name) payload.title = row.dataset.name;
         if (row.dataset.infoHash) payload.info_hash = row.dataset.infoHash;
         payload.is_batch = isBatch;
+        // Multi-client routing — round-trip the result's indexer_id so
+        // the backend can dispatch through the per-indexer pin. Falls
+        // through to the Nyaa pin server-side when absent.
+        if (row.dataset.indexerId) payload.indexer_id = Number(row.dataset.indexerId);
     }
     fetch('/api/grab', {
         method: 'POST',

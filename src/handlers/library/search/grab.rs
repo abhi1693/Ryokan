@@ -56,6 +56,11 @@ pub async fn grab_batch_result(
     let resolution = body["resolution"].as_str().unwrap_or("").to_string();
     let info_hash = body["info_hash"].as_str().unwrap_or("").to_string();
     let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
+    // Multi-client routing — the search-result row carries `indexer_id`
+    // (None for Nyaa-direct, Some for torznab/newznab fan-out). The
+    // frontend round-trips it on grab so the dispatch routes through
+    // the indexer's pin (or Nyaa pin for Nyaa-direct).
+    let indexer_id: Option<i64> = body["indexer_id"].as_i64();
 
     if url.is_empty() {
         return Err((
@@ -64,7 +69,19 @@ pub async fn grab_batch_result(
         ));
     }
 
-    let (qbit, dispatch_client_id) = state.default_download_client_with_id().await.ok_or((
+    let resolved_client = if indexer_id.is_some() {
+        state.client_for_indexer_with_id(indexer_id).await
+    } else {
+        let cfg = crate::models::config::get_config(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        state
+            .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
+            .await
+    };
+    let (qbit, dispatch_client_id) = resolved_client.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "Download client not configured".to_string(),
     ))?;
@@ -267,6 +284,11 @@ pub async fn grab_interactive_result(
     let resolution = body["resolution"].as_str().unwrap_or("").to_string();
     let info_hash = body["info_hash"].as_str().unwrap_or("").to_string();
     let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
+    // Multi-client routing — the search-result row carries `indexer_id`
+    // (None for Nyaa-direct, Some for torznab/newznab fan-out). The
+    // frontend round-trips it on grab so the dispatch routes through
+    // the indexer's pin (or Nyaa pin for Nyaa-direct).
+    let indexer_id: Option<i64> = body["indexer_id"].as_i64();
 
     if url.is_empty() {
         return Err((
@@ -275,7 +297,19 @@ pub async fn grab_interactive_result(
         ));
     }
 
-    let (qbit, dispatch_client_id) = state.default_download_client_with_id().await.ok_or((
+    let resolved_client = if indexer_id.is_some() {
+        state.client_for_indexer_with_id(indexer_id).await
+    } else {
+        let cfg = crate::models::config::get_config(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        state
+            .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
+            .await
+    };
+    let (qbit, dispatch_client_id) = resolved_client.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "Download client not configured".to_string(),
     ))?;
