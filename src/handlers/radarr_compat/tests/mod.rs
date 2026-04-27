@@ -4,4 +4,5 @@
 
 mod auth;
 mod helpers;
+mod movie;
 mod system;

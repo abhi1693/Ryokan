@@ -1110,4 +1110,346 @@ mod tests {
         ));
         assert!(hits.is_empty());
     }
+
+    // ── normalize_system_tab ─────────────────────────────────────────
+    //
+    // The /system page lives behind a `?tab=` query param. The
+    // normalizer pins which strings are recognized; everything else
+    // collapses to "logs" so a stale bookmark doesn't render an empty
+    // page. Pinning every accepted value guards against a future
+    // refactor that drops a tab silently.
+
+    #[test]
+    fn normalize_system_tab_recognized_values_pass_through() {
+        for tab in ["scoring", "debug", "rss", "tasks", "review", "credits"] {
+            assert_eq!(normalize_system_tab(Some(tab.to_string())), tab);
+        }
+    }
+
+    #[test]
+    fn normalize_system_tab_legacy_help_alias_maps_to_scoring() {
+        // The "scoring" tab used to be called "help" — the alias
+        // covers stale bookmarks from before the rename.
+        assert_eq!(normalize_system_tab(Some("help".to_string())), "scoring");
+    }
+
+    #[test]
+    fn normalize_system_tab_unknown_or_missing_falls_back_to_logs() {
+        assert_eq!(normalize_system_tab(None), "logs");
+        assert_eq!(normalize_system_tab(Some("".to_string())), "logs");
+        assert_eq!(normalize_system_tab(Some("garbage".to_string())), "logs");
+    }
+}
+
+// ── Endpoint coverage ──────────────────────────────────────────────
+//
+// Direct-call coverage for the smaller `/api/*` system endpoints —
+// no router needed because each handler takes `State<AppState>` and
+// returns its own response. Targets the mostly-DB-only paths
+// (logs, cleanup, library-classify, upgrade-search dispatch) and
+// the rate-limited client-log ingest.
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use crate::test_support::{build_test_app_state, in_memory_pool};
+
+    // ── api_logs_poll ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn api_logs_poll_returns_only_entries_strictly_after_cursor() {
+        let db = in_memory_pool().await;
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::System,
+            "first",
+            "",
+        )
+        .await
+        .unwrap();
+        let cursor = log::latest_id(&db).await.unwrap();
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::System,
+            "second",
+            "",
+        )
+        .await
+        .unwrap();
+
+        let state = build_test_app_state(db, None);
+        let resp = api_logs_poll(
+            axum::extract::State(state),
+            axum::extract::Query(LogPollQuery {
+                after: Some(cursor),
+                level: None,
+                category: None,
+            }),
+        )
+        .await;
+        let entries = resp.0;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "second");
+    }
+
+    #[tokio::test]
+    async fn api_logs_poll_filters_by_level_and_category_at_sql_layer() {
+        let db = in_memory_pool().await;
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::Search,
+            "info-search",
+            "",
+        )
+        .await
+        .unwrap();
+        log::insert(
+            &db,
+            log::LogLevel::Warn,
+            log::LogCategory::Grab,
+            "warn-grab",
+            "",
+        )
+        .await
+        .unwrap();
+        log::insert(
+            &db,
+            log::LogLevel::Error,
+            log::LogCategory::Grab,
+            "error-grab",
+            "",
+        )
+        .await
+        .unwrap();
+
+        let state = build_test_app_state(db, None);
+        let resp = api_logs_poll(
+            axum::extract::State(state),
+            axum::extract::Query(LogPollQuery {
+                after: Some(0),
+                level: Some("warn".to_string()),
+                category: Some("grab".to_string()),
+            }),
+        )
+        .await;
+        // level=warn → warn+error pass; category=grab keeps both.
+        let entries = resp.0;
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.category == "grab"));
+        assert!(
+            entries
+                .iter()
+                .all(|e| matches!(e.level.as_str(), "warn" | "error"))
+        );
+    }
+
+    // ── api_logs_clear ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn api_logs_clear_drops_all_rows_and_logs_a_replacement_marker() {
+        let db = in_memory_pool().await;
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::System,
+            "before",
+            "",
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db.clone(), None);
+        let resp = api_logs_clear(axum::extract::State(state))
+            .await
+            .expect("ok");
+        assert_eq!(resp.0["ok"], true);
+
+        // The handler logs "Logs cleared by user" *before* the
+        // DELETE, but that row is part of what gets cleared (the
+        // DELETE has no WHERE clause). Net effect: the table is
+        // empty after a successful clear.
+        let count = log::count(&db).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    // ── api_logs_client ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn api_logs_client_persists_toast_with_mapped_level_and_category() {
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db.clone(), None);
+
+        let resp = api_logs_client(
+            axum::extract::State(state),
+            axum::extract::Json(ClientLogForm {
+                kind: "warn".to_string(),
+                category: Some("grab".to_string()),
+                title: "Toast title".to_string(),
+                body: Some("body text".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rows = log::query(&db, &log::LogQuery::default()).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].level, "warn");
+        assert_eq!(rows[0].category, "grab");
+        assert_eq!(rows[0].message, "Toast title");
+        assert_eq!(rows[0].detail, "body text");
+    }
+
+    #[tokio::test]
+    async fn api_logs_client_unknown_category_falls_back_to_system() {
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db.clone(), None);
+        let _ = api_logs_client(
+            axum::extract::State(state),
+            axum::extract::Json(ClientLogForm {
+                kind: "info".to_string(),
+                category: Some("not-a-category".to_string()),
+                title: "x".to_string(),
+                body: None,
+            }),
+        )
+        .await;
+        let rows = log::query(&db, &log::LogQuery::default()).await.unwrap();
+        assert_eq!(rows[0].category, "system");
+    }
+
+    #[tokio::test]
+    async fn api_logs_client_rejects_oversized_title_and_body() {
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db.clone(), None);
+        let big_title = "x".repeat(CLIENT_LOG_TITLE_MAX + 1);
+        let resp = api_logs_client(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(ClientLogForm {
+                kind: "info".to_string(),
+                category: None,
+                title: big_title,
+                body: None,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let big_body = "y".repeat(CLIENT_LOG_BODY_MAX + 1);
+        let resp = api_logs_client(
+            axum::extract::State(state),
+            axum::extract::Json(ClientLogForm {
+                kind: "info".to_string(),
+                category: None,
+                title: "ok".to_string(),
+                body: Some(big_body),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Nothing should have been persisted on either oversize.
+        assert_eq!(log::count(&db).await.unwrap(), 0);
+    }
+
+    // ── api_force_cleanup ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn api_force_cleanup_deletes_aged_logs_and_rss_decisions() {
+        let db = in_memory_pool().await;
+        // Seed a 60-day-old log + a 60-day-old RSS decision; both
+        // should be gone after cleanup.
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::System,
+            "old",
+            "",
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE logs SET timestamp = datetime('now', '-60 days')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        rss::record_decision(
+            &db,
+            rss::DecisionRecord {
+                item_key: "k:60d",
+                title: "old item",
+                link: "",
+                series_id: None,
+                series_title: "",
+                group_name: "",
+                is_batch: false,
+                decision: "skipped",
+                reason: "",
+                source: "",
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE rss_seen SET created_at = datetime('now', '-60 days')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db.clone(), None);
+        let resp = api_force_cleanup(axum::extract::State(state))
+            .await
+            .expect("ok");
+        assert_eq!(resp.0["ok"], true);
+
+        assert_eq!(log::count(&db).await.unwrap(), 0);
+        assert!(rss::recent_decisions(&db, 10).await.unwrap().is_empty());
+    }
+
+    // ── api_force_library_classify ──────────────────────────────────
+
+    #[tokio::test]
+    async fn api_force_library_classify_returns_zero_report_for_empty_library() {
+        // Empty config (no media_root) → scan_library_for_unclassified
+        // early-returns and the report is all zeros. Verifies the
+        // handler wraps the report into the expected JSON shape.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let resp = api_force_library_classify(axum::extract::State(state)).await;
+        assert_eq!(resp.0["ok"], true);
+        assert_eq!(resp.0["series_scanned"], 0);
+        assert_eq!(resp.0["files_scanned"], 0);
+        assert_eq!(resp.0["files_classified"], 0);
+        assert_eq!(resp.0["files_needing_review"], 0);
+    }
+
+    // ── api_force_upgrade_search ────────────────────────────────────
+
+    #[tokio::test]
+    async fn api_force_upgrade_search_translates_summary_into_response() {
+        // Default config = no quality cutoff configured (after
+        // Config::default() resets to "" / ""), so upgrade::run_once
+        // returns the "No quality cutoff" branch as Ok summary. The
+        // handler wraps the summary fields into the JSON envelope.
+        let db = in_memory_pool().await;
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode, cutoff_source, cutoff_resolution) \
+             VALUES (1, '/tmp', 'hardlink', '', '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+        let resp = api_force_upgrade_search(axum::extract::State(state))
+            .await
+            .expect("ok summary");
+        assert_eq!(resp.0["ok"], true);
+        assert_eq!(resp.0["series_checked"], 0);
+        assert_eq!(resp.0["upgrades_grabbed"], 0);
+        assert!(
+            resp.0["message"]
+                .as_str()
+                .unwrap()
+                .contains("No quality cutoff")
+        );
+    }
 }
