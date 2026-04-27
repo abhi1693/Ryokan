@@ -1386,6 +1386,7 @@ mod endpoint_tests {
                 decision: "skipped",
                 reason: "",
                 source: "",
+                source_id: None,
             },
         )
         .await

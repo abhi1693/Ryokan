@@ -17,6 +17,58 @@ use crate::{
 pub mod feed;
 use feed::{build_item_key, detect_batch, extract_group, extract_resolution, fetch_feeds};
 
+/// multi-rss commit F — flatten an `RssSource` to the
+/// `(source_str, source_id_opt)` pair `rss_seen.source` +
+/// `rss_seen.source_id` actually store. Used at every record_decision
+/// callsite + the dedup-key check below.
+fn source_dedup_key(s: &RssSource) -> (&'static str, Option<i64>) {
+    match s {
+        RssSource::Nyaa => ("nyaa", None),
+        RssSource::Indexer { id, .. } => ("indexer", Some(*id)),
+        RssSource::UserFeed { id, .. } => ("direct", Some(*id)),
+    }
+}
+
+/// multi-rss commit F — resolve the per-item dispatch client based
+/// on the item's source. Each source has its own pin column:
+///   * Nyaa → `config.nyaa_download_client_id`
+///   * Indexer → `indexers.download_client_id`
+///   * UserFeed → `direct_rss_feeds.download_client_id`
+///
+/// Returns `None` when no client is configured at all (pool empty).
+/// The caller treats this as a per-item reject; other items in the
+/// same sync tick may still resolve to a client (e.g. if a single
+/// indexer's pin points at a deleted client, that indexer's items
+/// reject but everything else still flows).
+async fn resolve_dispatch_for_item(
+    state: &AppState,
+    cfg: &config::Config,
+    item: &RssItem,
+) -> Option<(
+    std::sync::Arc<dyn crate::services::download_client::DownloadClient>,
+    i64,
+)> {
+    match &item.source {
+        RssSource::Nyaa => {
+            state
+                .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
+                .await
+        }
+        RssSource::Indexer { id, .. } => state.client_for_indexer_with_id(Some(*id)).await,
+        RssSource::UserFeed { id, .. } => {
+            // Direct-feed pin lookup. Read the row each time —
+            // the read is cached at the SQLite layer + this is
+            // fewer queries than the per-item match path that
+            // surrounds it.
+            let pin = match crate::models::direct_rss_feeds::get_by_id(&state.db, *id).await {
+                Ok(Some(row)) => row.download_client_id,
+                _ => None,
+            };
+            state.client_for_nyaa_with_id(pin).await
+        }
+    }
+}
+
 static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -361,28 +413,182 @@ pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, S
     result
 }
 
+/// multi-rss commit F — fan out across every enabled source and
+/// return the merged `Vec<RssItem>`. Each item carries its own
+/// `RssSource` attribution (set by the per-source fetch helper)
+/// so the rest of `sync_once_inner` is feed-source-blind on the
+/// hot path.
+///
+/// Per-source error isolation: a failing source logs + writes its
+/// `last_poll_error` row but doesn't poison the rest of the
+/// fan-out. The success path writes `last_polled_at` +
+/// `last_item_count` so the Settings UI's status chips reflect
+/// the most recent run.
+///
+/// Sources fetched (in the order their items land in the merged
+/// vec — relevant for the cross-source dedup tiebreak: first
+/// occurrence wins):
+///   1. Nyaa (when `cfg.rss_enabled` is on),
+///   2. each `indexers` row with `enabled=1 AND rss_enabled=1`,
+///   3. each `direct_rss_feeds` row with `enabled=1`.
+///
+/// The order matches the plan's "Nyaa is the protected hot path"
+/// invariant — Nyaa's items go in first so a release surfaced on
+/// both Nyaa and an indexer attributes to Nyaa for grab routing,
+/// matching the v1 behavior.
+async fn fetch_all_sources(
+    state: &AppState,
+    cfg: &config::Config,
+    has_music_series: bool,
+) -> Vec<RssItem> {
+    let mut items: Vec<RssItem> = Vec::new();
+
+    // 1. Nyaa — gate on `cfg.rss_enabled` (legacy v1 flag, plan
+    //    decision #8 keeps its semantics). The master flag has
+    //    already been honored at the sync_once_inner top.
+    if cfg.rss_enabled {
+        match fetch_feeds(cfg.allow_non_english, has_music_series).await {
+            Ok(nyaa_items) => items.extend(nyaa_items),
+            Err(err) => {
+                logger::warn(
+                    &state.db,
+                    LogCategory::System,
+                    "Nyaa RSS fetch failed; skipping",
+                    &err,
+                )
+                .await;
+            }
+        }
+    }
+
+    // 2. Indexer-RSS — every torznab/newznab indexer with
+    //    `rss_enabled = 1`. Each fetch runs `Indexer::search()`
+    //    with empty `q` against `?t=tvsearch&cat=5070`, which
+    //    short-circuits on the existing rate-limit cooldown
+    //    state machine in `services/indexers/torznab/client.rs`.
+    let indexer_rows = crate::models::indexers::list_rss_enabled(&state.db)
+        .await
+        .unwrap_or_default();
+    let indexer_snapshot = state.indexers.read().await.clone();
+    for row in &indexer_rows {
+        // Look up the live `Arc<dyn Indexer>` from the in-memory
+        // cache so we don't re-instantiate the reqwest client per
+        // tick. The cache is rebuilt on every indexer upsert (see
+        // commit G's cache-invalidation hook), so a freshly-flipped
+        // `rss_enabled` row is reachable on the next tick.
+        let live = indexer_snapshot.iter().find(|i| i.id() == row.id).cloned();
+        let Some(indexer) = live else {
+            // DB has the row but cache is stale — log + skip.
+            logger::debug(
+                &state.db,
+                LogCategory::System,
+                "Indexer-RSS poll: live indexer cache missing row; will pick up after next rebuild",
+                &format!("indexer_id={}", row.id),
+            )
+            .await;
+            continue;
+        };
+        match crate::services::indexers::fetch_indexer_rss(&*indexer).await {
+            Ok(fetched) => {
+                let count = fetched.len() as i32;
+                items.extend(fetched);
+                let _ =
+                    crate::models::indexers::record_rss_poll_metrics(&state.db, row.id, count, "")
+                        .await;
+            }
+            Err(err) => {
+                let _ =
+                    crate::models::indexers::record_rss_poll_metrics(&state.db, row.id, 0, &err)
+                        .await;
+                logger::warn(
+                    &state.db,
+                    LogCategory::System,
+                    &format!("Indexer-RSS poll failed: {}", row.name),
+                    &err,
+                )
+                .await;
+            }
+        }
+    }
+
+    // 3. Direct feeds — every `direct_rss_feeds` row with
+    //    `enabled = 1`. `feed::fetch_user_feed` already stamps
+    //    `RssSource::UserFeed { id, name }` per the source we
+    //    pass in. Each feed gets its own poll-metrics row write
+    //    so the Settings UI's chip is accurate per-feed.
+    let direct_rows = crate::models::direct_rss_feeds::list_enabled(&state.db)
+        .await
+        .unwrap_or_default();
+    for row in &direct_rows {
+        let source = RssSource::UserFeed {
+            id: row.id,
+            name: row.name.clone(),
+        };
+        match feed::fetch_user_feed(&row.url, source).await {
+            Ok(fetched) => {
+                let count = fetched.len() as i32;
+                items.extend(fetched);
+                let _ = crate::models::direct_rss_feeds::record_poll_metrics(
+                    &state.db, row.id, count, "",
+                )
+                .await;
+            }
+            Err(err) => {
+                let _ = crate::models::direct_rss_feeds::record_poll_metrics(
+                    &state.db, row.id, 0, &err,
+                )
+                .await;
+                logger::warn(
+                    &state.db,
+                    LogCategory::System,
+                    &format!("Direct-RSS poll failed: {}", row.name),
+                    &err,
+                )
+                .await;
+            }
+        }
+    }
+
+    items
+}
+
 async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary, String> {
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
 
+    // multi-rss commit F — master kill switch. Off short-circuits
+    // before any fetch fires; the supervised-task loop stays alive
+    // so flipping the master back on takes effect within one tick
+    // (no restart needed). Per the plan's truth table, the master
+    // overrides every per-source flag.
+    if !cfg.rss_master_enabled {
+        return Ok(SyncSummary {
+            items_seen: 0,
+            matched: 0,
+            grabbed: 0,
+            skipped: 0,
+            detail: "RSS master switch is off; no sources polled".to_string(),
+        });
+    }
+
     let tracked = series::get_all(&state.db)
         .await
         .map_err(|e| e.to_string())?;
     let has_music_series = tracked.iter().any(|s| s.format == "MUSIC");
-    let items = fetch_feeds(cfg.allow_non_english, has_music_series).await?;
+    let items = fetch_all_sources(state, &cfg, has_music_series).await;
     for row in &tracked {
         let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
     }
-    // RSS sync is Nyaa-only today (fetch_feeds hits the Nyaa
-    // categories), so the per-Nyaa client pin is the right routing
-    // dimension. Falls through to the default client when the user
-    // hasn't pinned Nyaa to anything specific. The id is captured
-    // alongside the client so each grab's `download_client_id` is
-    // stamped — post-processing routes per-grab back to the right
-    // client without needing to re-resolve the pin at import time.
-    let (client, dispatch_client_id) = match state
+    // multi-rss commit F — `nyaa_client` is used only for the
+    // Nyaa-specific `load_canonical_history` lookup (description-
+    // body fetches against nyaa.si). The per-item grab dispatch
+    // resolves a per-source client via `resolve_dispatch_for_item`
+    // inside the grab loop below — Nyaa items route through the
+    // Nyaa pin, indexer-RSS items through the indexer's pin,
+    // direct-feed items through the feed's own pin.
+    let (nyaa_client, _nyaa_client_id) = match state
         .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
         .await
     {
@@ -407,7 +613,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let blacklist = quality::parse_group_list(&cfg.blocked_groups);
     let all_meta: Vec<SeriesMeta> = tracked.iter().map(SeriesMeta::from_series).collect();
     let mut canonical_history =
-        load_canonical_history(&state.db, client.as_deref(), &all_meta).await;
+        load_canonical_history(&state.db, nyaa_client.as_deref(), &all_meta).await;
 
     // Cache on-disk episode scans per folder to avoid repeated filesystem walks.
     let mut disk_cache: HashMap<String, Vec<media::EpisodeFile>> = HashMap::new();
@@ -440,19 +646,22 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     )
     .await;
 
-    // One SELECT instead of N: pre-load every previously-grabbed item_key
-    // so the per-item dedup check is an in-memory HashSet lookup rather
-    // than a round-trip per feed item. Nyaa typically returns ~100 items
-    // per feed × multiple categories per sync, so this collapses 100+
-    // sequential SELECTs into one.
-    let already_grabbed = rss::grabbed_item_keys(&state.db)
+    // One SELECT instead of N: pre-load every previously-grabbed
+    // (item_key, source, source_id) triple so the per-item dedup
+    // check is an in-memory HashSet lookup rather than a round-
+    // trip per feed item. Multi-rss commit F: scoped variant pins
+    // per-source so a SubsPlease item with `guid=12345` doesn't
+    // collide with an unrelated Nyaa item that happens to share
+    // the GUID.
+    let already_grabbed = rss::grabbed_item_keys_scoped(&state.db)
         .await
         .map_err(|e| e.to_string())?;
 
     for item in items {
         items_seen += 1;
         let item_key = build_item_key(&item);
-        if already_grabbed.contains(&item_key) {
+        let (src_str, src_id) = source_dedup_key(&item.source);
+        if already_grabbed.contains(&(item_key.clone(), src_str.to_string(), src_id)) {
             skipped += 1;
             let _ = rss::record_decision(
                 &state.db,
@@ -466,7 +675,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     is_batch: item.is_batch,
                     decision: "skipped",
                     reason: "Already grabbed earlier; skipping duplicate RSS item",
-                    source: "rss",
+                    source: src_str,
+                    source_id: src_id,
                 },
             )
             .await;
@@ -489,7 +699,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     is_batch: item.is_batch,
                     decision: "skipped",
                     reason: &reason,
-                    source: "rss",
+                    source: src_str,
+                    source_id: src_id,
                 },
             )
             .await;
@@ -517,7 +728,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     is_batch: item.is_batch,
                     decision: "rejected",
                     reason: &reason,
-                    source: "rss",
+                    source: src_str,
+                    source_id: src_id,
                 },
             )
             .await;
@@ -550,7 +762,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     is_batch: item.is_batch,
                     decision: "rejected",
                     reason: &reason,
-                    source: "rss",
+                    source: src_str,
+                    source_id: src_id,
                 },
             )
             .await;
@@ -644,7 +857,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     is_batch: item.is_batch,
                     decision: "rejected",
                     reason: &reason,
-                    source: "rss",
+                    source: src_str,
+                    source_id: src_id,
                 },
             )
             .await;
@@ -670,7 +884,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     is_batch: item.is_batch,
                     decision: "rejected",
                     reason: &reason,
-                    source: "rss",
+                    source: src_str,
+                    source_id: src_id,
                 },
             )
             .await;
@@ -715,13 +930,17 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         }
     }
 
-    let Some(client) = client.as_ref() else {
+    // multi-rss commit F — top-level guard is now "any client at
+    // all configured" (default exists). Per-item dispatch routing
+    // happens inside the grab loop via `resolve_dispatch_for_item`.
+    if state.default_download_client().await.is_none() {
         for cand in pending {
             skipped += 1;
             let reason = format!(
                 "Download client is not configured | {}",
                 build_match_diag(&cand.item, Some(&cand.found), cand.score)
             );
+            let (src_str, src_id) = source_dedup_key(&cand.item.source);
             let _ = rss::record_decision(
                 &state.db,
                 rss::DecisionRecord {
@@ -734,7 +953,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     is_batch: cand.item.is_batch,
                     decision: "rejected",
                     reason: &reason,
-                    source: "rss",
+                    source: src_str,
+                    source_id: src_id,
                 },
             )
             .await;
@@ -751,9 +971,10 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             skipped,
             detail,
         });
-    };
+    }
 
     for (idx, cand) in pending.into_iter().enumerate() {
+        let (cand_src_str, cand_src_id) = source_dedup_key(&cand.item.source);
         let bucket = logical_bucket_key(&cand);
         if bucket_best.get(&bucket).copied() != Some(idx) {
             skipped += 1;
@@ -773,7 +994,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     is_batch: cand.item.is_batch,
                     decision: "rejected",
                     reason: &reason,
-                    source: "rss",
+                    source: cand_src_str,
+                    source_id: cand_src_id,
                 },
             )
             .await;
@@ -789,6 +1011,41 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         };
 
         let info_hash = crate::services::nyaa::extract_hash(&grab_url);
+        // multi-rss commit F — resolve the dispatch client per-item
+        // based on the source's pin (Nyaa pin / indexer pin /
+        // direct-feed pin). A pin pointing at a deleted client
+        // returns None — record the per-item rejection without
+        // shutting down the whole sync (other items in this tick
+        // may have valid pins).
+        let Some((client, dispatch_client_id)) =
+            resolve_dispatch_for_item(state, &cfg, &cand.item).await
+        else {
+            skipped += 1;
+            let reason = format!(
+                "No download client resolves for source {} | {}",
+                cand.item.source.label(),
+                build_match_diag(&cand.item, Some(&cand.found), cand.score)
+            );
+            let (src_str, src_id) = source_dedup_key(&cand.item.source);
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &cand.item_key,
+                    title: &cand.item.title,
+                    link: &cand.item.link,
+                    series_id: Some(cand.found.series.id),
+                    series_title: &cand.found.series.title,
+                    group_name: &cand.item.group,
+                    is_batch: cand.item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: src_str,
+                    source_id: src_id,
+                },
+            )
+            .await;
+            continue;
+        };
         // PR G — use the returning-id variant so SAB grabs persist
         // their `nzo_id` instead of the pre-computed BT-style hash.
         // For BT clients the returned id equals `info_hash` (default
@@ -825,7 +1082,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                         is_batch: cand.item.is_batch,
                         decision: "grabbed",
                         reason: &reason,
-                        source: "rss",
+                        source: cand_src_str,
+                        source_id: cand_src_id,
                     },
                 )
                 .await;
@@ -849,7 +1107,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     let _ = crate::models::grabbed_torrents::set_download_client(
                         &state.db,
                         gid,
-                        dispatch_client_id,
+                        Some(dispatch_client_id),
                     )
                     .await;
                 }
@@ -978,7 +1236,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                         is_batch: cand.item.is_batch,
                         decision: "error",
                         reason: &reason,
-                        source: "rss",
+                        source: cand_src_str,
+                        source_id: cand_src_id,
                     },
                 )
                 .await;

@@ -2483,12 +2483,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     //   (source = 'indexer', source_id = N)   → indexer N's RSS
     //   (source = 'direct',  source_id = N)   → direct_rss_feeds N
     //
-    // Default 'nyaa' on existing rows preserves their meaning under
-    // the new shape — they were Nyaa entries before the migration,
-    // the column just makes that explicit. SQLite treats NULL as
-    // distinct in the index, so `source = 'nyaa' AND source_id IS
-    // NULL AND key = ?` uses the index correctly.
-    sqlx::query("ALTER TABLE rss_seen ADD COLUMN source TEXT NOT NULL DEFAULT 'nyaa'")
+    // The `source` column already exists on `rss_seen` (added
+    // pre-multi-rss with DEFAULT 'rss'); we repurpose its
+    // vocabulary rather than colliding on a duplicate ADD COLUMN.
+    // Backfill legacy `'rss'` values to `'nyaa'` so the dedup
+    // query keys consistently. `source_id` is the new column.
+    sqlx::query("UPDATE rss_seen SET source = 'nyaa' WHERE source = 'rss'")
         .execute(db)
         .await
         .ok();
@@ -2496,6 +2496,9 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+    // SQLite treats NULL as distinct in the index, so
+    // `source = 'nyaa' AND source_id IS NULL AND item_key = ?`
+    // uses the index correctly without a COALESCE fallback.
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_rss_seen_source_key \
          ON rss_seen (source, source_id, item_key)",

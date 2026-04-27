@@ -117,6 +117,10 @@ pub async fn finish_run(
 /// feed item — Nyaa returns ~100 items per feed × multiple categories,
 /// so a single sync was ~100+ sequential round-trips against the same
 /// table before any other work happened.
+///
+/// **Source-blind**: returns just the item_key, ignoring source +
+/// source_id. Use [`grabbed_item_keys_scoped`] when the per-source
+/// dedup scoping (multi-rss commit E) matters.
 pub async fn grabbed_item_keys(
     db: &SqlitePool,
 ) -> Result<std::collections::HashSet<String>, sqlx::Error> {
@@ -127,10 +131,38 @@ pub async fn grabbed_item_keys(
     Ok(rows.into_iter().map(|(k,)| k).collect())
 }
 
+/// multi-rss commit F — source-scoped variant of
+/// [`grabbed_item_keys`]. Returns a set of `(item_key, source,
+/// source_id)` triples so the sync loop's dedup check honors the
+/// per-source scoping introduced in commit E.
+///
+/// Without this, three sources can produce identical numeric GUIDs
+/// (different sites' internal IDs) and a SubsPlease item silently
+/// dedups against an unrelated Nyaa item that happens to share the
+/// GUID. The composite index `idx_rss_seen_source_key` covers this
+/// query shape.
+pub async fn grabbed_item_keys_scoped(
+    db: &SqlitePool,
+) -> Result<std::collections::HashSet<(String, String, Option<i64>)>, sqlx::Error> {
+    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT item_key, source, source_id FROM rss_seen WHERE decision = 'grabbed'",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Payload for `record_decision`. Named fields instead of six `&str`s
 /// in a row — swapping `title`/`link` or `decision`/`reason` at a
 /// callsite was a silent-corruption risk the compiler couldn't catch,
 /// and Clippy was already complaining about the arg count.
+///
+/// `source` + `source_id` (multi-rss commit F) carry the per-source
+/// dedup scope: `('nyaa', None)` for the Nyaa-direct path,
+/// `('indexer', Some(indexer_id))` for indexer-RSS,
+/// `('direct', Some(feed_id))` for direct feeds. Without the
+/// scoping, three sources can produce identical numeric GUIDs and
+/// silently dedup against each other.
 pub struct DecisionRecord<'a> {
     pub item_key: &'a str,
     pub title: &'a str,
@@ -142,6 +174,7 @@ pub struct DecisionRecord<'a> {
     pub decision: &'a str,
     pub reason: &'a str,
     pub source: &'a str,
+    pub source_id: Option<i64>,
 }
 
 pub async fn record_decision(
@@ -150,8 +183,8 @@ pub async fn record_decision(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO rss_seen
-           (item_key, title, link, series_id, series_title, group_name, is_batch, decision, reason, source, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           (item_key, title, link, series_id, series_title, group_name, is_batch, decision, reason, source, source_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
            ON CONFLICT(item_key) DO UPDATE SET
                title = excluded.title,
                link = excluded.link,
@@ -162,6 +195,7 @@ pub async fn record_decision(
                decision = excluded.decision,
                reason = excluded.reason,
                source = excluded.source,
+               source_id = excluded.source_id,
                created_at = CURRENT_TIMESTAMP"#,
     )
     .bind(record.item_key)
@@ -174,6 +208,7 @@ pub async fn record_decision(
     .bind(record.decision)
     .bind(record.reason)
     .bind(record.source)
+    .bind(record.source_id)
     .execute(db)
     .await?;
     Ok(())
@@ -311,7 +346,8 @@ mod tests {
             is_batch: false,
             decision,
             reason: "test",
-            source: "rss",
+            source: "nyaa",
+            source_id: None,
         }
     }
 
