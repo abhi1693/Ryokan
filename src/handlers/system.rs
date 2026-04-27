@@ -203,6 +203,7 @@ pub async fn system_page(
         ("grab", LogCategory::Grab.label()),
         ("auto_search", LogCategory::AutoSearch.label()),
         ("nyaa", LogCategory::Nyaa.label()),
+        ("rss", LogCategory::Rss.label()),
         ("anilist", LogCategory::AniList.label()),
         ("jikan", LogCategory::Jikan.label()),
         ("qbit", LogCategory::QBit.label()),

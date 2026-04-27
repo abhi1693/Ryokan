@@ -7,7 +7,7 @@
 //! be useful.
 
 use axum::{
-    Form,
+    Form, Json,
     extract::State,
     response::{IntoResponse, Redirect, Response},
 };
@@ -232,6 +232,81 @@ pub async fn settings_indexers_delete(
             // upsert handler's "Save failed" pattern.
             Redirect::to("/settings?tab=indexers&err=Delete+failed")
         }
+    }
+}
+
+// ── multi-rss commit G — Test RSS feed endpoint for indexers ────────
+
+/// Body of the indexer-RSS Test request. Mirrors the direct-feed
+/// shape — caller passes the indexer row id, handler runs a
+/// single empty-`q` `?t=tvsearch` against it and returns the
+/// item count + first title.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct IndexerRssTestForm {
+    pub id: i64,
+}
+
+/// JSON envelope for the indexer-RSS Test response. Same shape
+/// as the direct-feed Test response so the frontend toast can
+/// share the rendering helper.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct IndexerRssTestResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_title: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/settings/indexers/test-rss",
+    tag = "Settings",
+    summary = "Test-fetch an indexer's RSS endpoint",
+    description = "Fires a single `?t=tvsearch&cat=5070` (with empty `q`) request against the indexer identified by id and returns a JSON envelope describing the result: item count and first item's title. Used by the Settings → Indexers form's per-row Test RSS button. Indexer protocol kind is already known from the row (torznab/newznab → torrent/usenet) so no protocol detection step is needed here, unlike the direct-feed Test.",
+    responses(
+        (status = 200, description = "Test result envelope", body = IndexerRssTestResponse),
+    ),
+)]
+pub async fn settings_indexers_test_rss(
+    State(state): State<AppState>,
+    Json(form): Json<IndexerRssTestForm>,
+) -> Json<IndexerRssTestResponse> {
+    // Look up the live `Arc<dyn Indexer>` from the in-memory
+    // cache so the test fetch reuses the same reqwest client +
+    // cooldown state the sync path uses.
+    let snapshot = state.indexers.read().await.clone();
+    let Some(indexer) = snapshot.iter().find(|i| i.id() == form.id).cloned() else {
+        return Json(IndexerRssTestResponse {
+            ok: false,
+            error: Some(format!(
+                "Indexer id={} not in cache (try Save before Test, or check Enabled)",
+                form.id
+            )),
+            item_count: None,
+            first_title: None,
+        });
+    };
+
+    match crate::services::indexers::fetch_indexer_rss(&*indexer).await {
+        Ok(items) => {
+            let count = items.len() as i32;
+            let first_title = items.first().map(|i| i.title.clone());
+            Json(IndexerRssTestResponse {
+                ok: true,
+                error: None,
+                item_count: Some(count),
+                first_title,
+            })
+        }
+        Err(err) => Json(IndexerRssTestResponse {
+            ok: false,
+            error: Some(err),
+            item_count: None,
+            first_title: None,
+        }),
     }
 }
 

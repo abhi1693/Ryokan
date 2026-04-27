@@ -81,6 +81,13 @@ pub enum LogCategory {
     /// System → Logs page to diagnose "my AL sync stopped working"
     /// or "a MAL entry didn't import."
     ExternalSync,
+    /// multi-rss commit H — RSS sync telemetry across Nyaa,
+    /// indexer-RSS, and direct feeds. Replaces the old
+    /// `LogCategory::System` rows that legacy RSS code wrote, so
+    /// users diagnosing "is my SubsPlease feed actually polling"
+    /// filter on `Rss` rather than wading through general System
+    /// chatter. Plan decisions #10 and #11.
+    Rss,
 }
 
 impl LogCategory {
@@ -102,6 +109,7 @@ impl LogCategory {
             LogCategory::Quality => "quality",
             LogCategory::Scoring => "scoring",
             LogCategory::ExternalSync => "external_sync",
+            LogCategory::Rss => "rss",
         }
     }
 
@@ -124,6 +132,7 @@ impl LogCategory {
             "quality" => Some(LogCategory::Quality),
             "scoring" => Some(LogCategory::Scoring),
             "external_sync" => Some(LogCategory::ExternalSync),
+            "rss" => Some(LogCategory::Rss),
             _ => None,
         }
     }
@@ -146,6 +155,7 @@ impl LogCategory {
             LogCategory::Quality => "Quality",
             LogCategory::Scoring => "Scoring",
             LogCategory::ExternalSync => "External Sync",
+            LogCategory::Rss => "RSS",
         }
     }
 }
@@ -466,6 +476,7 @@ mod tests {
             LogCategory::Quality,
             LogCategory::Scoring,
             LogCategory::ExternalSync,
+            LogCategory::Rss,
         ]
     }
 

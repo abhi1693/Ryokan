@@ -753,6 +753,22 @@ async fn main() {
             post(handlers::settings::download_clients::settings_indexers_nyaa_pin),
         )
         .route(
+            "/settings/indexers/test-rss",
+            post(handlers::settings::indexers::settings_indexers_test_rss),
+        )
+        .route(
+            "/settings/direct-rss-feeds/upsert",
+            post(handlers::settings::direct_rss_feeds::settings_direct_rss_feeds_upsert),
+        )
+        .route(
+            "/settings/direct-rss-feeds/delete",
+            post(handlers::settings::direct_rss_feeds::settings_direct_rss_feeds_delete),
+        )
+        .route(
+            "/settings/direct-rss-feeds/test",
+            post(handlers::settings::direct_rss_feeds::settings_direct_rss_feeds_test),
+        )
+        .route(
             "/settings/download-clients/upsert",
             post(handlers::settings::download_clients::settings_download_clients_upsert),
         )

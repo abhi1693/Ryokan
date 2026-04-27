@@ -19,6 +19,7 @@ use crate::services::{
 
 pub mod autobrr_key;
 pub mod custom_formats;
+pub mod direct_rss_feeds;
 pub mod download_clients;
 pub mod indexers;
 use custom_formats::ImportReviewView;

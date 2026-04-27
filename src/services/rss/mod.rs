@@ -452,7 +452,7 @@ async fn fetch_all_sources(
             Err(err) => {
                 logger::warn(
                     &state.db,
-                    LogCategory::System,
+                    LogCategory::Rss,
                     "Nyaa RSS fetch failed; skipping",
                     &err,
                 )
@@ -481,7 +481,7 @@ async fn fetch_all_sources(
             // DB has the row but cache is stale — log + skip.
             logger::debug(
                 &state.db,
-                LogCategory::System,
+                LogCategory::Rss,
                 "Indexer-RSS poll: live indexer cache missing row; will pick up after next rebuild",
                 &format!("indexer_id={}", row.id),
             )
@@ -502,7 +502,7 @@ async fn fetch_all_sources(
                         .await;
                 logger::warn(
                     &state.db,
-                    LogCategory::System,
+                    LogCategory::Rss,
                     &format!("Indexer-RSS poll failed: {}", row.name),
                     &err,
                 )
@@ -540,7 +540,7 @@ async fn fetch_all_sources(
                 .await;
                 logger::warn(
                     &state.db,
-                    LogCategory::System,
+                    LogCategory::Rss,
                     &format!("Direct-RSS poll failed: {}", row.name),
                     &err,
                 )
@@ -640,7 +640,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
 
     logger::info(
         &state.db,
-        LogCategory::System,
+        LogCategory::Rss,
         "RSS sync started",
         &format!("trigger={} items={}", trigger, items.len()),
     )
@@ -963,7 +963,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             "Processed {} items • matched {} • grabbed {} • skipped {}",
             items_seen, matched, grabbed, skipped
         );
-        logger::info(&state.db, LogCategory::System, "RSS sync finished", &detail).await;
+        logger::info(&state.db, LogCategory::Rss, "RSS sync finished", &detail).await;
         return Ok(SyncSummary {
             items_seen,
             matched,
@@ -1249,7 +1249,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         "Processed {} items • matched {} • grabbed {} • skipped {}",
         items_seen, matched, grabbed, skipped
     );
-    logger::info(&state.db, LogCategory::System, "RSS sync finished", &detail).await;
+    logger::info(&state.db, LogCategory::Rss, "RSS sync finished", &detail).await;
     Ok(SyncSummary {
         items_seen,
         matched,
