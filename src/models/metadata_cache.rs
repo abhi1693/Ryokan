@@ -4,24 +4,6 @@ use crate::services::anilist::AnimeDetail;
 
 pub const METADATA_REFRESH_INTERVAL_HOURS: i64 = 12;
 
-/// True when the SQLite-format timestamp string (`YYYY-MM-DD HH:MM:SS`,
-/// UTC, as produced by `CURRENT_TIMESTAMP`) is older than the refresh
-/// TTL. Used by the series-detail page to surface a "Metadata may be
-/// out of date" banner when the background refresh hasn't landed within
-/// the expected window — usually a sign the upstream provider chain
-/// (AniList → Jikan → Kitsu) is unavailable. Issue #106.
-///
-/// Returns `false` for empty / unparseable timestamps so that a
-/// transient row-not-found case doesn't false-positive into the warning.
-pub fn is_timestamp_stale(sqlite_timestamp: &str) -> bool {
-    let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(sqlite_timestamp, "%Y-%m-%d %H:%M:%S")
-    else {
-        return false;
-    };
-    let now = chrono::Utc::now().naive_utc();
-    (now - parsed) > chrono::Duration::hours(METADATA_REFRESH_INTERVAL_HOURS)
-}
-
 #[derive(Debug, Clone)]
 pub struct CachedSeriesMetadata {
     pub provider_id: i64,
@@ -159,63 +141,4 @@ pub async fn upsert_provider(
     .await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn is_timestamp_stale_empty_string_returns_false() {
-        // Empty cached_at means "no row exists" — don't false-positive
-        // a missing-cache case into a stale-warning render.
-        assert!(!is_timestamp_stale(""));
-    }
-
-    #[test]
-    fn is_timestamp_stale_unparseable_returns_false() {
-        // Defensive: a malformed timestamp shouldn't trip the warning.
-        // The CURRENT_TIMESTAMP path always produces parseable values;
-        // anything else is unexpected garbage and should be quiet.
-        assert!(!is_timestamp_stale("not a date"));
-        assert!(!is_timestamp_stale("2026-04-27"));
-    }
-
-    #[test]
-    fn is_timestamp_stale_just_now_returns_false() {
-        let now = chrono::Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        assert!(!is_timestamp_stale(&now));
-    }
-
-    #[test]
-    fn is_timestamp_stale_within_ttl_returns_false() {
-        let recent = (chrono::Utc::now().naive_utc()
-            - chrono::Duration::hours(METADATA_REFRESH_INTERVAL_HOURS - 1))
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
-        assert!(!is_timestamp_stale(&recent));
-    }
-
-    #[test]
-    fn is_timestamp_stale_past_ttl_returns_true() {
-        // One second past the TTL boundary — deliberately tight to lock
-        // in the boundary semantics.
-        let stale = (chrono::Utc::now().naive_utc()
-            - chrono::Duration::hours(METADATA_REFRESH_INTERVAL_HOURS)
-            - chrono::Duration::seconds(1))
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
-        assert!(is_timestamp_stale(&stale));
-    }
-
-    #[test]
-    fn is_timestamp_stale_days_old_returns_true() {
-        let very_stale = (chrono::Utc::now().naive_utc() - chrono::Duration::days(7))
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        assert!(is_timestamp_stale(&very_stale));
-    }
 }

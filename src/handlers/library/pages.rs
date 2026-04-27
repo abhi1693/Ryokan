@@ -464,34 +464,36 @@ pub async fn series_detail(
         }
     };
 
-    // #15b — last metadata refresh, folded into the existing concurrent
-    // fan-out so it doesn't add a sequential round-trip on top. Cheap
-    // (indexed provider_id lookup, WAL-cached) but the pattern of the
-    // surrounding handler is "every independent read goes in the join!"
-    // so stick with that.
+    // #15b — last metadata refresh + the SQL-derived `is_fresh` flag,
+    // folded into the existing concurrent fan-out so it doesn't add a
+    // sequential round-trip on top. Cheap (indexed provider_id lookup,
+    // WAL-cached) but the pattern of the surrounding handler is "every
+    // independent read goes in the join!" so stick with that.
+    //
+    // Issue #106 — `is_fresh` (computed by SQLite at fetch time using
+    // the same TTL constant as the periodic refresh task) is the
+    // canonical staleness signal. Re-deriving it client-side from
+    // `cached_at` would duplicate the SQL `CASE WHEN cached_at >=
+    // datetime('now', '-12 hours')` calculation; reuse the value that
+    // already came back from the query.
     let db_for_refresh = state.db.clone();
     let refresh_fut = async move {
         crate::models::metadata_cache::get_by_provider_id(&db_for_refresh, provider_id)
             .await
             .ok()
             .flatten()
-            .map(|row| row.cached_at)
+            .map(|row| (row.cached_at, !row.is_fresh))
             .unwrap_or_default()
     };
 
-    let (relation_groups, episodes_out, cover_url, banner_url, metadata_refreshed_at) = tokio::join!(
+    let (relation_groups, episodes_out, cover_url, banner_url, refresh_meta) = tokio::join!(
         relation_groups_fut,
         episodes_fut,
         cover_fut,
         banner_fut,
         refresh_fut,
     );
-    // Issue #106 — surface stale-cache fallback to the user. The read
-    // path silently serves cached rows regardless of staleness; this
-    // flag drives a warning banner so a multi-day-old refresh isn't
-    // hidden behind an otherwise-normal-looking page.
-    let metadata_is_stale = !metadata_refreshed_at.is_empty()
-        && crate::models::metadata_cache::is_timestamp_stale(&metadata_refreshed_at);
+    let (metadata_refreshed_at, metadata_is_stale) = refresh_meta;
     let ((episodes, on_disk_count, downloaded_count, size_display, monitored_count), media_root) =
         episodes_out;
     detail.cover_url = cover_url;
