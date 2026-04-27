@@ -16,7 +16,7 @@ use std::{collections::HashMap, sync::LazyLock, time::Duration};
 
 use regex_lite::Regex;
 
-use super::RssItem;
+use super::{RssItem, RssSource};
 
 /// Process-global `reqwest::Client` for RSS fetches. See the same pattern
 /// in `source_description.rs`/`nyaa.rs`: a fresh client per call throws
@@ -153,7 +153,7 @@ async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
         .await
         .map_err(|e| format!("Failed to read RSS response: {}", e))?;
 
-    Ok(parse_feed(&xml))
+    Ok(parse_feed(&xml, RssSource::Nyaa))
 }
 
 /// Fetch RSS items from all relevant Nyaa categories.
@@ -195,7 +195,18 @@ pub(super) async fn fetch_feeds(
     Ok(all_items)
 }
 
-fn parse_feed(xml: &str) -> Vec<RssItem> {
+/// Parse an RSS XML body into `RssItem`s. The Nyaa-direct path
+/// passes `RssSource::Nyaa`; user-configured feeds (PR 3) and
+/// torznab/newznab indexer RSS (PR 4) pass their own source so
+/// downstream dedup + grab routing knows which feed produced each
+/// release.
+///
+/// The `nyaa:*` namespaced tags (downloadurl / magneturi / infohash)
+/// are Nyaa-specific extensions; non-Nyaa feeds will read them as
+/// empty strings, and the `link` tag carries the .torrent URL
+/// instead. The torznab path in PR 4 augments this further with
+/// `<torznab:attr name="...">` extraction.
+pub(super) fn parse_feed(xml: &str, source: RssSource) -> Vec<RssItem> {
     let mut items = Vec::new();
 
     for caps in RE_ITEM.captures_iter(xml) {
@@ -230,6 +241,7 @@ fn parse_feed(xml: &str) -> Vec<RssItem> {
             group,
             resolution,
             is_batch,
+            source: source.clone(),
         });
     }
 
@@ -741,6 +753,7 @@ mod parser_tests {
             group: String::new(),
             resolution: String::new(),
             is_batch: false,
+            source: RssSource::Nyaa,
         }
     }
 
@@ -798,7 +811,7 @@ mod parser_tests {
                 <nyaa:infohash>ABC</nyaa:infohash>
             </item>"#,
         );
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(
@@ -830,7 +843,7 @@ mod parser_tests {
                 <title>Real Title</title>
             </item>"#,
         );
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "Real Title");
     }
@@ -844,7 +857,7 @@ mod parser_tests {
                 <title>[Group] Show &amp; Tell &lt;Vol 1&gt;</title>
             </item>"#,
         );
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items[0].title, "[Group] Show & Tell <Vol 1>");
     }
 
@@ -855,7 +868,7 @@ mod parser_tests {
                <item><title>Two</title></item>
                <item><title>Three</title></item>"#,
         );
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
         assert_eq!(titles, vec!["One", "Two", "Three"]);
     }
@@ -868,12 +881,12 @@ mod parser_tests {
 
     #[test]
     fn parse_feed_empty_returns_empty() {
-        assert!(parse_feed("").is_empty());
+        assert!(parse_feed("", RssSource::Nyaa).is_empty());
     }
 
     #[test]
     fn parse_feed_no_items_returns_empty() {
-        assert!(parse_feed("<rss><channel></channel></rss>").is_empty());
+        assert!(parse_feed("<rss><channel></channel></rss>", RssSource::Nyaa).is_empty());
     }
 
     #[test]
@@ -882,13 +895,13 @@ mod parser_tests {
         // match doesn't span back to the next `<item>`, so the block
         // captures nothing. No panic on slicing.
         let xml = "<rss><channel><item><title>Show";
-        let _ = parse_feed(xml); // contract: no panic; emptiness depends on regex match
+        let _ = parse_feed(xml, RssSource::Nyaa); // contract: no panic; emptiness depends on regex match
     }
 
     #[test]
     fn parse_feed_garbage_input_returns_empty() {
-        assert!(parse_feed("not xml at all").is_empty());
-        assert!(parse_feed("\u{0000}\u{0001}\u{0002}").is_empty());
+        assert!(parse_feed("not xml at all", RssSource::Nyaa).is_empty());
+        assert!(parse_feed("\u{0000}\u{0001}\u{0002}", RssSource::Nyaa).is_empty());
     }
 
     #[test]
@@ -898,7 +911,7 @@ mod parser_tests {
         // no quadratic-blowup or slicing panic.
         let huge = "X".repeat(100_000);
         let xml = format!("<rss><channel><item><title>{huge}</title></item></channel></rss>");
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title.len(), 100_000);
     }
@@ -909,7 +922,7 @@ mod parser_tests {
         // accepts attributes on the open tag (some RSS variants emit
         // `<title type="text">…</title>`).
         let xml = make_feed(r#"<item><title type="text">With attrs</title></item>"#);
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "With attrs");
     }

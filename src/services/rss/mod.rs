@@ -138,6 +138,46 @@ static RE_ABSOLUTE: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
     ]
 });
 
+/// multi-rss PR 2 — provenance attribution for each item the sync
+/// loop sees. Carried alongside the item through dedup, scoring, and
+/// grab so logs / grab-row routing can answer "which feed produced
+/// this release". Also drives per-source download-client pin
+/// resolution: a Nyaa-direct item routes through `config
+/// .nyaa_download_client_id`; a `UserFeed` item through the feed's
+/// own `download_client_id`; an `Indexer` item through the
+/// indexer's `download_client_id`. Cross-feed dedup (PR 5) keeps
+/// the highest-priority source when the same release shows up in
+/// multiple places.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RssSource {
+    /// The historical Nyaa-direct path. Stays out-of-band per
+    /// the codebase's "Nyaa is the protected hot path" rule —
+    /// never gets a row in `rss_feeds` or `indexers`.
+    Nyaa,
+    /// User-configured RSS URL from the `rss_feeds` table
+    /// (multi-rss Option A). Carries the row id so the grab
+    /// path can re-read the row's `download_client_id` if
+    /// needed without holding a borrow across the sync.
+    UserFeed { id: i64, name: String },
+    /// torznab/newznab indexer with `rss_enabled = 1` (multi-rss
+    /// Option B). `kind` distinguishes torrent-vs-NZB at grab
+    /// time so the protocol guard can route to the right
+    /// download client; `id` is the `indexers` row id.
+    Indexer { id: i64, name: String, kind: String },
+}
+
+impl RssSource {
+    /// Short slug for log lines / `rss_seen.source` column. Stable
+    /// strings so log-grep / DB queries don't break across releases.
+    pub fn label(&self) -> String {
+        match self {
+            RssSource::Nyaa => "nyaa".to_string(),
+            RssSource::UserFeed { name, .. } => format!("feed:{name}"),
+            RssSource::Indexer { kind, name, .. } => format!("{kind}:{name}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RssItem {
     pub title: String,
@@ -149,6 +189,11 @@ pub struct RssItem {
     pub group: String,
     pub resolution: String,
     pub is_batch: bool,
+    /// multi-rss PR 2 — which feed produced this item. The legacy
+    /// Nyaa-only sync writes `RssSource::Nyaa` everywhere; the
+    /// multi-source fan-out (PR 5) populates this distinctly per
+    /// feed.
+    pub source: RssSource,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1004,6 +1049,9 @@ pub async fn match_library_title(
         return None;
     }
     let all_meta: Vec<SeriesMeta> = all_series.iter().map(SeriesMeta::from_series).collect();
+    // Synthetic RssItem for the matcher — `source` doesn't matter
+    // here because this path is title-only matching for the
+    // post-grab attribution helper, not a sync-time fetch.
     let pseudo = RssItem {
         title: title.to_string(),
         link: String::new(),
@@ -1014,6 +1062,7 @@ pub async fn match_library_title(
         group: extract_group(title),
         resolution: extract_resolution(title),
         is_batch,
+        source: RssSource::Nyaa,
     };
     let found = best_series_match(&pseudo, &all_meta)?;
     let eps: Vec<i32> = found.resolved_eps.iter().copied().collect();
@@ -1021,6 +1070,8 @@ pub async fn match_library_title(
 }
 
 fn canonical_key_for_title(title: &str, all_meta: &[SeriesMeta]) -> Option<String> {
+    // Same synthetic-item pattern as `find_series_for_title` —
+    // matcher inputs only, no real grab.
     let pseudo = RssItem {
         title: title.to_string(),
         link: String::new(),
@@ -1031,6 +1082,7 @@ fn canonical_key_for_title(title: &str, all_meta: &[SeriesMeta]) -> Option<Strin
         group: extract_group(title),
         resolution: extract_resolution(title),
         is_batch: detect_batch(title),
+        source: RssSource::Nyaa,
     };
     let found = best_series_match(&pseudo, all_meta)?;
     let key = canonical_episode_key(&found, pseudo.is_batch);
@@ -1951,3 +2003,40 @@ fn group_matches_blacklist(group: &str, blacklist: &[String]) -> bool {
 mod evaluate_candidate_tests;
 #[cfg(test)]
 mod parse_release_tests;
+
+#[cfg(test)]
+mod source_tests {
+    use super::RssSource;
+
+    #[test]
+    fn nyaa_source_labels_as_nyaa() {
+        assert_eq!(RssSource::Nyaa.label(), "nyaa");
+    }
+
+    #[test]
+    fn user_feed_label_uses_feed_prefix() {
+        let s = RssSource::UserFeed {
+            id: 7,
+            name: "SubsPlease 1080p".into(),
+        };
+        assert_eq!(s.label(), "feed:SubsPlease 1080p");
+    }
+
+    #[test]
+    fn indexer_label_uses_kind_prefix() {
+        // Pin so log-grep `^torznab:` / `^newznab:` filters work
+        // for filtering RSS decisions by indexer protocol.
+        let t = RssSource::Indexer {
+            id: 1,
+            name: "Animebytes".into(),
+            kind: "torznab".into(),
+        };
+        let n = RssSource::Indexer {
+            id: 2,
+            name: "NZBgeek".into(),
+            kind: "newznab".into(),
+        };
+        assert_eq!(t.label(), "torznab:Animebytes");
+        assert_eq!(n.label(), "newznab:NZBgeek");
+    }
+}
