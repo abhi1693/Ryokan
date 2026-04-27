@@ -72,7 +72,7 @@ pub struct DownloadClientIdForm {
     path = "/settings/download-clients/upsert",
     tag = "Settings",
     summary = "Create or update a download client",
-    description = "Form-driven upsert for the Connections → Downloads list. Creates a new row when `id` is omitted; updates the row identified by `id` otherwise. Validates kind ∈ {qbittorrent, deluge, transmission, rtorrent}. Refreshes the in-process pool so the new/edited client is usable on the next grab without a process restart.",
+    description = "Form-driven upsert for the Connections → Downloads list. Creates a new row when `id` is omitted; updates the row identified by `id` otherwise. Validates kind ∈ {qbittorrent, deluge, transmission, rtorrent, sabnzbd}. Refreshes the in-process pool so the new/edited client is usable on the next grab without a process restart.",
     responses(
         (status = 303, description = "Redirect back to the Connections tab"),
     ),

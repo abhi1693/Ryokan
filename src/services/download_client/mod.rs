@@ -167,10 +167,21 @@ pub trait DownloadClient: Send + Sync {
 
     /// Sonarr-canonical implementation name for the
     /// `/api/v3/downloadclient` shim response. Values:
-    /// `"QBittorrent" | "Deluge" | "Transmission" | "RTorrent"`.
-    /// Distinct from the `active_client` discriminator
-    /// (lowercase-snake: `"qbittorrent"` etc.).
+    /// `"QBittorrent" | "Deluge" | "Transmission" | "RTorrent"
+    /// | "Sabnzbd"`. Distinct from the `active_client`
+    /// discriminator (lowercase-snake: `"qbittorrent"` etc.).
     fn sonarr_impl_name(&self) -> &'static str;
+
+    /// PR 112 review #2 — protocol of the client. `"torrent"` for
+    /// BT impls (default), `"usenet"` for SAB. The Sonarr/Radarr
+    /// `/api/v3/downloadclient` shim emits this verbatim so a
+    /// SAB-as-default install reports `"usenet"` correctly
+    /// instead of the previously hardcoded `"torrent"`. Mirror
+    /// of the `protocol_for_client_kind` helper at the row-kind
+    /// layer.
+    fn protocol(&self) -> &'static str {
+        "torrent"
+    }
 
     /// Issue #28 PR C — apply per-torrent seed-rule overrides
     /// after [`add_torrent`]. Caller invokes this immediately after

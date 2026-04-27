@@ -255,6 +255,17 @@ pub async fn webhook_autobrr(
         return skipped("hash is blocklisted");
     }
 
+    // PR 112 review #4 — `info_hash_lc` is the autobrr-supplied
+    // BT-style infohash. For SAB grabs, `grabbed_torrents.hash`
+    // stores the `nzo_id` (per the PR 112 trait extension), so
+    // this lookup misses for previously-grabbed-via-SAB releases
+    // and the second push proceeds to `add_torrent_returning_id`.
+    // SAB's own pre-queue dedup catches it via the
+    // `AlreadyPresent` fallback, so behavior isn't broken — but
+    // the dedup-before-wire-call intent is silently bypassed for
+    // SAB. Acceptable for v1; a follow-up could record the BT-
+    // style hash on a separate column for SAB rows so the lookup
+    // matches either id.
     if !info_hash_lc.is_empty() && grabbed_torrents::is_known_hash(&state.db, &info_hash_lc).await {
         logger::info(
             &state.db,

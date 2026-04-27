@@ -82,7 +82,13 @@ pub async fn list_download_clients(
         id: 1,
         name: "Ryokan".to_string(),
         enable: true,
-        protocol: "torrent".to_string(),
+        // PR 112 review #2 — derive the protocol from the live
+        // client (`"torrent"` for BT, `"usenet"` for SAB) instead
+        // of hardcoding `"torrent"`. Sonarr's own shim emits
+        // `"usenet"` for a SAB default-client install; matching
+        // here keeps Seerr's "show me the user's clients" view
+        // accurate.
+        protocol: client.protocol().to_string(),
         implementation: impl_name.to_string(),
         config_contract: format!("{impl_name}Settings"),
         priority: 1,

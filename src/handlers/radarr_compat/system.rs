@@ -84,7 +84,9 @@ pub async fn list_download_clients(
         id: 1,
         name: "Ryokan".to_string(),
         enable: true,
-        protocol: "torrent".to_string(),
+        // PR 112 review #2 — derive from live client; see Sonarr
+        // counterpart in `sonarr_compat/system.rs`.
+        protocol: client.protocol().to_string(),
         implementation: impl_name.to_string(),
         config_contract: format!("{impl_name}Settings"),
         priority: 1,

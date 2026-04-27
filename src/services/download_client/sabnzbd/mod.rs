@@ -469,7 +469,24 @@ impl DownloadClient for SabClient {
     }
 
     fn sonarr_impl_name(&self) -> &'static str {
-        "sabnzbd"
+        // PR 112 review #1 — Sonarr's canonical name for the SABnzbd
+        // download client is `"Sabnzbd"` (PascalCase), matching the
+        // BT impls' `"QBittorrent"` / `"Deluge"` / `"Transmission"` /
+        // `"RTorrent"`. Lowercase here leaks into the Sonarr/Radarr
+        // shim's `/api/v3/downloadclient` `implementation` +
+        // `config_contract` payloads, the Settings → API health
+        // badge ("sabnzbd 4.5.5"), and `grabbed_torrents.client_kind`
+        // — all of which Sonarr would emit in PascalCase.
+        "Sabnzbd"
+    }
+
+    fn protocol(&self) -> &'static str {
+        // PR 112 review #2 — SAB is the only usenet impl; BT
+        // impls inherit the `"torrent"` default from the trait.
+        // Drives the Sonarr/Radarr shim's `/api/v3/downloadclient`
+        // protocol field so a SAB-as-default install reports
+        // `"usenet"` correctly.
+        "usenet"
     }
 }
 
@@ -822,6 +839,18 @@ mod tests {
             SabClient::map_state("Failed", true),
             DownloadItemState::Errored
         );
+    }
+
+    #[test]
+    fn sonarr_impl_name_is_sabnzbd() {
+        // PR 112 review #1 — Sonarr's canonical name for the
+        // SABnzbd download client is `"Sabnzbd"` (PascalCase),
+        // matching the BT impls' PascalCase pattern. Pin so a
+        // regression doesn't revert to lowercase and silently
+        // change the Settings badge / shim payload / grab
+        // `client_kind` rendering.
+        let c = SabClient::new("http://localhost:8080", "", "key", "");
+        assert_eq!(c.sonarr_impl_name(), "Sabnzbd");
     }
 
     #[test]

@@ -6,9 +6,9 @@
 //! login-pre-seed shape.
 //!
 //! Tests SHOULD use `query_param` matchers on the wiremock builder
-//! — every SAB call is `GET /sabnzbd/api?mode=…&apikey=…`, and
-//! matching on `mode` lets the same path serve different mocked
-//! responses per call type (queue vs history vs addurl etc).
+//! — every SAB call is `GET /api?mode=…&apikey=…`, and matching on
+//! `mode` lets the same path serve different mocked responses per
+//! call type (queue vs history vs addurl etc).
 
 use wiremock::MockServer;
 
@@ -25,7 +25,9 @@ pub(super) async fn new_fixture() -> (MockServer, SabClient) {
 pub(super) async fn new_with_category(category: &str) -> (MockServer, SabClient) {
     let server = MockServer::start().await;
     // Pass server.uri() verbatim — `SabClient::endpoint()` appends
-    // `/sabnzbd/api` since the URI doesn't already end in `/sabnzbd`.
+    // `/api` to the configured base URL (corrected in `c46f42b`
+    // after live-probing linuxserver/sabnzbd, which serves at /api
+    // not /sabnzbd/api).
     let client = SabClient::new(&server.uri(), "", TEST_API_KEY, category);
     (server, client)
 }
