@@ -8,14 +8,21 @@
 //!      before a user hits a missing-script 404 in production.
 //!   2. `templates/base.html` references both script tags so any
 //!      page extending it picks up htmx automatically.
-//!   3. `<body hx-boost="true">` is present so all same-origin nav
-//!      links become fragment swaps without per-link wiring.
-//!   4. The logout link explicitly opts out of boost via
-//!      `hx-boost="false"` so a full reload clears state.
+//!   3. Script-tag load order: htmx must come before `base.js` so any
+//!      custom JS that references the `htmx.*` global sees it on
+//!      first paint.
 //!
 //! Phase 1+ tests (per-handler `HxRequest` branching, fragment-vs-page
 //! response shape) live alongside the handlers they cover; this file
 //! only proves the foundation is wired correctly.
+//!
+//! NOTE: an earlier draft of Phase 0 also added `hx-boost="true"` to
+//! the body. That was reverted because boost only swaps body content
+//! and leaves the head's per-page `{% block page_css %}` stale, so
+//! navigating between pages with different CSS rendered them unstyled.
+//! Re-introducing boost is its own scoped phase; this file deliberately
+//! does NOT assert hx-boost presence so the foundation tests pass with
+//! the boost-free Phase 0 shipped in `50777b2` + revert.
 //!
 //! Asserts against on-disk artifacts directly rather than going through
 //! the test router (`handler_router` is a minimal test surface that
@@ -72,11 +79,13 @@ fn htmx_sse_vendored_with_expected_shape() {
     );
 }
 
-/// `templates/base.html` declares the htmx + SSE script tags + the
-/// `hx-boost="true"` body attribute + the logout opt-out. One test
-/// asserts all four because they're load-bearing together: scripts
-/// without boost don't enable nav swaps; boost without the logout
-/// opt-out leaves logged-out state lingering across the boundary.
+/// `templates/base.html` declares the htmx + SSE script tags in the
+/// correct order (htmx before `base.js` so the global is available to
+/// any custom JS that runs on DOMContentLoaded).
+///
+/// Deliberately does NOT assert `hx-boost` — see the file-level note.
+/// Phase 1+ will add behavior-driving `hx-*` attributes per-feature
+/// with their own assertions adjacent to the feature's tests.
 #[test]
 fn base_template_wires_htmx_correctly() {
     let body =
@@ -95,24 +104,7 @@ fn base_template_wires_htmx_correctly() {
         "base.html must include the vendored htmx SSE extension script tag (/{HTMX_SSE_PATH})"
     );
 
-    // 3. body opens with hx-boost="true" — the cascade that makes
-    //    same-origin nav links swap fragments instead of full-reloading
-    assert!(
-        body.contains(r#"<body hx-boost="true">"#),
-        "base.html body must declare hx-boost=\"true\" for nav swap behavior"
-    );
-
-    // 4. Logout link explicitly opts out of boost so a full reload
-    //    clears auth + session state cleanly. Without this opt-out,
-    //    the boosted nav would AJAX through the logout endpoint and
-    //    leave the prior page's JS state mounted on top of the
-    //    swapped-in login content.
-    assert!(
-        body.contains(r#"hx-boost="false""#),
-        "logout link must opt out of boost via hx-boost=\"false\""
-    );
-
-    // 5. Script tag order matters: htmx must load before base.js so
+    // 3. Script tag order matters: htmx must load before base.js so
     //    custom JS can reference the `htmx.*` global. Verify by
     //    finding both lines and asserting the htmx one comes first.
     let htmx_pos = body
