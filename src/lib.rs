@@ -64,13 +64,43 @@ use services::{
 /// instances on every per-target search.
 pub type IndexerCache = Arc<RwLock<Arc<Vec<Arc<dyn Indexer>>>>>;
 
+/// Multi-client routing — pair of (id-keyed map of live trait
+/// impls, default client id). Both swap atomically when the
+/// cache is rebuilt by [`services::download_client::rebuild_clients_cache`]
+/// on Settings → Connections → Downloads edits. Lookup at grab
+/// time is a `HashMap::get` against the inner `Arc` — read lock
+/// releases before the dispatch.
+///
+/// `default_id` is the row id of the `is_default = 1` row at
+/// build time. `None` when no client is configured (fresh
+/// install) or when every row was disabled. The pin-resolution
+/// helpers ([`AppState::client_for_indexer`] etc.) fall back to
+/// `default_id` when no pin matches.
+#[derive(Default)]
+pub struct DownloadClientPool {
+    pub clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>>,
+    pub default_id: Option<i64>,
+}
+
+/// Same swap-on-write shape as `IndexerCache` / `CompiledCfCache`
+/// — outer `RwLock` owns the swap; inner `Arc<DownloadClientPool>`
+/// is cheap-cloned out on the grab-dispatch path so the read
+/// lock releases before any HTTP calls.
+pub type DownloadClientsCache = Arc<RwLock<Arc<DownloadClientPool>>>;
+
 /// Shared application state available to all handlers. Lives in the
 /// library crate (rather than `main.rs`) so integration tests can
 /// build instances of it without depending on the binary.
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
-    pub download_client: Arc<RwLock<Option<Arc<dyn DownloadClient>>>>,
+    /// Multi-client routing pool. Replaced the single-slot
+    /// `download_client` field — see [`DownloadClientPool`].
+    /// Rebuilt on Settings → Downloads add/edit/delete via
+    /// `services::download_client::rebuild_clients_cache`. Pin
+    /// resolution at grab time goes through
+    /// [`AppState::client_for_indexer`].
+    pub download_clients: DownloadClientsCache,
     pub jellyfin: Arc<RwLock<Option<JellyfinClient>>>,
     /// Compiled Custom Formats, loaded once at startup and rebuilt on
     /// CF create/update/delete via `custom_formats::rebuild_cf_cache`.
@@ -119,6 +149,111 @@ pub struct AppState {
     /// Ryokan was last restarted, which made the pill useless as a
     /// liveness signal.
     pub start_time: chrono::DateTime<chrono::Utc>,
+}
+
+impl AppState {
+    /// Resolve a download client for a grab attributable to
+    /// `indexer_id`. Pin chain:
+    ///
+    /// 1. The indexer row's `download_client_id`, if set.
+    /// 2. The pool's default client id.
+    /// 3. None — caller surfaces "no download client configured."
+    ///
+    /// Reads the indexer's pin from the `IndexerCache` snapshot
+    /// (no DB roundtrip on the grab path). Falls through to
+    /// the default when the pinned client id no longer exists
+    /// (e.g. user deleted the client without re-pinning the
+    /// indexer somehow — shouldn't happen because `delete()`
+    /// NULLs the pin, but the fall-through keeps grabs flowing
+    /// rather than 500ing).
+    pub async fn client_for_indexer(
+        &self,
+        indexer_id: Option<i64>,
+    ) -> Option<Arc<dyn DownloadClient>> {
+        self.client_for_indexer_with_id(indexer_id)
+            .await
+            .map(|(c, _)| c)
+    }
+
+    /// Same resolution as [`Self::client_for_indexer`] but also
+    /// returns the resolved `download_clients.id` so callers can
+    /// stamp it on `grabbed_torrents.download_client_id`.
+    /// Post-processing routes per-grab through that id back to the
+    /// owning client.
+    pub async fn client_for_indexer_with_id(
+        &self,
+        indexer_id: Option<i64>,
+    ) -> Option<(Arc<dyn DownloadClient>, i64)> {
+        let pool = self.download_clients.read().await.clone();
+        if let Some(id) = indexer_id {
+            let indexers = self.indexers.read().await.clone();
+            if let Some(idx) = indexers.iter().find(|i| i.id() == id)
+                && let Some(pinned) = idx.download_client_id()
+                && let Some(client) = pool.clients.get(&pinned)
+            {
+                return Some((client.clone(), pinned));
+            }
+        }
+        let default_id = pool.default_id?;
+        let client = pool.clients.get(&default_id)?.clone();
+        Some((client, default_id))
+    }
+
+    /// Resolve a download client for the built-in Nyaa search
+    /// (no `indexers` row). Reads
+    /// `config.nyaa_download_client_id` and falls back to the
+    /// default. Caller must pass the current config so the
+    /// helper doesn't fire a DB query per grab.
+    pub async fn client_for_nyaa(&self, nyaa_pin: Option<i64>) -> Option<Arc<dyn DownloadClient>> {
+        self.client_for_nyaa_with_id(nyaa_pin).await.map(|(c, _)| c)
+    }
+
+    /// Same resolution as [`Self::client_for_nyaa`] but also returns
+    /// the resolved `download_clients.id` for grab-row stamping.
+    pub async fn client_for_nyaa_with_id(
+        &self,
+        nyaa_pin: Option<i64>,
+    ) -> Option<(Arc<dyn DownloadClient>, i64)> {
+        let pool = self.download_clients.read().await.clone();
+        if let Some(pinned) = nyaa_pin
+            && let Some(client) = pool.clients.get(&pinned)
+        {
+            return Some((client.clone(), pinned));
+        }
+        let default_id = pool.default_id?;
+        let client = pool.clients.get(&default_id)?.clone();
+        Some((client, default_id))
+    }
+
+    /// Default client — used by paths that don't have an
+    /// indexer / Nyaa pin context (post-processing on a grab
+    /// whose indexer was deleted, manual grabs, etc.). Same
+    /// resolution as the helpers above with a None pin: just
+    /// the default.
+    pub async fn default_download_client(&self) -> Option<Arc<dyn DownloadClient>> {
+        self.default_download_client_with_id().await.map(|(c, _)| c)
+    }
+
+    /// Same resolution as [`Self::default_download_client`] but also
+    /// returns the resolved id for grab-row stamping. Mirror of the
+    /// `_with_id` helpers above.
+    pub async fn default_download_client_with_id(&self) -> Option<(Arc<dyn DownloadClient>, i64)> {
+        let pool = self.download_clients.read().await.clone();
+        let default_id = pool.default_id?;
+        let client = pool.clients.get(&default_id)?.clone();
+        Some((client, default_id))
+    }
+
+    /// Look up a specific client by `download_clients.id`. Used by
+    /// post-processing's per-grab routing — `grabbed_torrents.download_client_id`
+    /// stamps the row, and this helper resolves it back to the live
+    /// client. Returns None when the row referenced was deleted from
+    /// the pool (e.g. user removed the client mid-import); caller
+    /// should fall back to default.
+    pub async fn client_by_id(&self, id: i64) -> Option<Arc<dyn DownloadClient>> {
+        let pool = self.download_clients.read().await.clone();
+        pool.clients.get(&id).cloned()
+    }
 }
 
 impl FromRef<AppState> for SqlitePool {

@@ -37,6 +37,10 @@ pub struct TorznabIndexer {
     /// are dropped before the search pipeline scores them.
     /// `0` disables the filter.
     min_seeders: i32,
+    /// Multi-client routing pin — id of the row in
+    /// `download_clients` this indexer is bound to. `None` =
+    /// fall through to the default client at grab time.
+    download_client_id: Option<i64>,
     http: Client,
 }
 
@@ -67,6 +71,7 @@ impl TorznabIndexer {
             priority: row.priority,
             is_private_tracker: row.is_private_tracker,
             min_seeders: row.min_seeders,
+            download_client_id: row.download_client_id,
             http,
         })
     }
@@ -169,6 +174,9 @@ impl Indexer for TorznabIndexer {
     }
     fn is_private_tracker(&self) -> bool {
         self.is_private_tracker
+    }
+    fn download_client_id(&self) -> Option<i64> {
+        self.download_client_id
     }
 
     async fn caps(&self) -> Result<IndexerCaps, String> {
@@ -284,6 +292,7 @@ mod tests {
             seed_time_minutes: None,
             min_seeders: 1,
             request_timeout_secs: None,
+            download_client_id: None,
             caps_json: String::new(),
             caps_refreshed_at: None,
             created_at: 0,

@@ -510,6 +510,21 @@ pub async fn series_detail(
 
     let all_monitored = ep_total > 0 && monitored_count >= ep_total;
     let allow_upgrades = db_series.as_ref().map(|s| s.allow_upgrades).unwrap_or(true);
+    // PR E — default off (untracked series have no upgrade sweep
+    // anyway, so the default is moot for the .unwrap_or() branch).
+    let allow_pt_upgrades = db_series
+        .as_ref()
+        .map(|s| s.allow_pt_upgrades)
+        .unwrap_or(false);
+    // Surface a hint when the user has zero PT indexers configured —
+    // the toggle would do nothing in that case so the UI reads "no
+    // PT indexers configured" instead of dangling enabled.
+    let any_private_indexer = state
+        .indexers
+        .read()
+        .await
+        .iter()
+        .any(|i| i.is_private_tracker());
     let custom_query_tokens = db_series
         .as_ref()
         .map(|s| s.custom_query_tokens.clone())
@@ -563,6 +578,8 @@ pub async fn series_detail(
         monitored_count,
         all_monitored,
         allow_upgrades,
+        allow_pt_upgrades,
+        any_private_indexer,
         custom_query_tokens,
         restrict_to_uploader,
         default_custom_query_tokens,

@@ -19,6 +19,7 @@ use crate::services::{
 
 pub mod autobrr_key;
 pub mod custom_formats;
+pub mod download_clients;
 pub mod indexers;
 use custom_formats::ImportReviewView;
 
@@ -169,6 +170,14 @@ struct SettingsTemplate {
     /// generic blank form (which is what the user sees if
     /// they bypass the picker).
     indexer_seed: Option<&'static crate::services::indexer_catalog::SeededIndexer>,
+    /// Multi-client refactor — every configured download client
+    /// for the Connections tab list. Sorted default-first then
+    /// case-insensitive by name (see `models::download_clients::list_all`).
+    download_clients: Vec<crate::models::download_clients::DownloadClientRow>,
+    /// Prefill for the Edit Download Client form when
+    /// `?tab=integrations&edit_id=N` is set. Mirrors the
+    /// `indexer_edit` pattern. `None` renders the bare Add form.
+    download_client_edit: Option<crate::models::download_clients::DownloadClientRow>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -597,13 +606,22 @@ async fn build_settings_template(
     // account — in parallel. The old code issued them sequentially so
     // the wall time was the sum of N round trips even though none
     // depends on the others.
-    let (cfg_res, groups, suggestions, custom_formats, external_account_res, indexers_res) = tokio::join!(
+    let (
+        cfg_res,
+        groups,
+        suggestions,
+        custom_formats,
+        external_account_res,
+        indexers_res,
+        download_clients_res,
+    ) = tokio::join!(
         config::get_config(&state.db),
         load_groups(&state.db),
         load_suggestions(&state.db),
         load_custom_formats_view(&state.db),
         crate::models::external_accounts::get_current(&state.db),
         crate::models::indexers::list_all(&state.db),
+        crate::models::download_clients::list_all(&state.db),
     );
     let cfg = cfg_res.ok().flatten().unwrap_or_default();
     // A decrypt failure (tampered blob, key rotation without migration)
@@ -657,6 +675,11 @@ async fn build_settings_template(
     } else {
         None
     };
+    let download_clients = download_clients_res.unwrap_or_default();
+    let download_client_edit = match edit_id {
+        Some(id) => download_clients.iter().find(|r| r.id == id).cloned(),
+        None => None,
+    };
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -676,6 +699,8 @@ async fn build_settings_template(
         indexer_edit,
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
         indexer_seed,
+        download_clients,
+        download_client_edit,
     }
 }
 
@@ -923,6 +948,12 @@ pub async fn settings_submit(
                 .as_ref()
                 .map(|c| c.external_sync_interval_minutes),
         ),
+        // The Nyaa pin is owned by the dedicated `/settings/indexers/nyaa-pin`
+        // endpoint, not the bulk save form. Preserve whatever the existing
+        // row holds so a Settings save on any tab doesn't clobber it.
+        nyaa_download_client_id: existing_cfg
+            .as_ref()
+            .and_then(|c| c.nyaa_download_client_id),
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());
@@ -948,6 +979,9 @@ pub async fn settings_submit(
         let indexers = crate::models::indexers::list_all(&state.db)
             .await
             .unwrap_or_default();
+        let download_clients = crate::models::download_clients::list_all(&state.db)
+            .await
+            .unwrap_or_default();
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
@@ -967,6 +1001,8 @@ pub async fn settings_submit(
             indexers,
             indexer_catalog: crate::services::indexer_catalog::SEEDED,
             indexer_seed: None,
+            download_clients,
+            download_client_edit: None,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -974,250 +1010,25 @@ pub async fn settings_submit(
     logger::info(&state.db, LogCategory::System, "Settings saved", "").await;
     let mut notices: Vec<String> = vec!["Settings saved.".to_string()];
 
-    // #63 Phase 2 — client-switch handling. If the user changed
-    // `active_client` on this save, any `grabbed_torrents` rows still
-    // in `state='pending'` point at the OLD client (Ryokan is about
-    // to stop talking to it). Three things need to happen, in order:
-    //
-    //   1. **Delete only the in-flight torrents from the OLD client.**
-    //      An `state='pending'` row at this point is either
-    //      mid-download OR complete-but-not-yet-imported. Deleting
-    //      the mid-download ones is the user's intent ("cancel my
-    //      in-flight grabs"). Deleting the completed-but-not-yet-
-    //      imported ones would wipe finished files the user almost
-    //      certainly wants to keep — they're identical to an already-
-    //      imported torrent from the user's perspective; the only
-    //      difference is post-processing didn't happen to run yet.
-    //      So we gate the delete on `!is_complete()` from the old
-    //      client's view.
-    //
-    //   2. **Mark ALL pending rows as `failed` regardless of delete
-    //      outcome.** The old client is about to disappear from
-    //      AppState; Ryokan can't track these grabs anymore. They
-    //      need to drop out of the partial UNIQUE index on `(hash)
-    //      WHERE state IN ('pending','imported')` so a re-grab in
-    //      the new client can't dedupe against them. Completed
-    //      torrents the user wants to keep stay on the old client's
-    //      disk; Ryokan just forgets about them. The user can still
-    //      see the files manually.
-    //
-    //   3. **Swap the AppState Arc** (further down in the
-    //      `active_tab == "integrations"` block).
-    //
-    // Delete happens BEFORE the Arc swap because the read lock still
-    // holds the OLD client's Arc at this point.
-    if active_tab == "integrations"
-        && let Some(old) = existing_cfg.as_ref()
-        && old.active_client != cfg.active_client
-    {
-        let pending = crate::models::grabbed_torrents::get_all_pending(&state.db)
-            .await
-            .unwrap_or_default();
-
-        if !pending.is_empty()
-            && let Some(old_client) = state.download_client.read().await.clone()
-        {
-            // Build a hash → state_kind map from the old client's
-            // current view. `list_scoped` returns only Ryokan-owned
-            // torrents, which is a superset of our pending grabs in
-            // the steady state. Failure to fetch == treat as empty
-            // map (can't determine completion); we'll skip deletion
-            // to be safe and let the user clean up manually, and
-            // surface that in the UI notice so they know to look.
-            let list_scoped_result = old_client.list_scoped().await;
-            let list_scoped_failed = list_scoped_result.is_err();
-            let states: std::collections::HashMap<
-                String,
-                crate::services::download_client::DownloadItemState,
-            > = list_scoped_result
-                .unwrap_or_default()
-                .into_iter()
-                .map(|t| (t.hash.to_lowercase(), t.state_kind))
-                .collect();
-
-            if list_scoped_failed {
-                notices.push(format!(
-                    "Couldn't reach {} to cancel in-flight torrents — verify and clean up manually if any were still downloading.",
-                    old.active_client,
-                ));
-            }
-
-            let mut deleted = 0usize;
-            let mut skipped_complete = 0usize;
-            let mut delete_failures: Vec<String> = Vec::new();
-            for grab in &pending {
-                if grab.hash.is_empty() {
-                    continue;
-                }
-                let hash_lc = grab.hash.to_lowercase();
-                // Only delete the torrent if the old client reports
-                // it's NOT complete. Missing from the map (e.g. user
-                // already deleted it manually in the old client, or
-                // `list_scoped` failed) also skips deletion — we'd
-                // rather leave a dangling download-client row than
-                // delete a completed file the user wanted to keep.
-                match states.get(&hash_lc) {
-                    Some(state) if !state.is_complete() => {
-                        match old_client.delete(&hash_lc, true).await {
-                            Ok(()) => deleted += 1,
-                            Err(e) => delete_failures.push(format!("{}: {}", grab.torrent_name, e)),
-                        }
-                    }
-                    Some(_) => skipped_complete += 1,
-                    None => {
-                        // Not in the old client's list. Could be
-                        // already manually removed, could be that
-                        // list_scoped failed. Either way, skip
-                        // deletion — no action we can take that's
-                        // safer than leaving it alone.
-                    }
-                }
-            }
-            if deleted > 0 {
-                logger::info(
-                    &state.db,
-                    LogCategory::System,
-                    &format!(
-                        "Cancelled {deleted} in-flight grab(s) from {} during client switch",
-                        old.active_client
-                    ),
-                    "",
-                )
-                .await;
-            }
-            if skipped_complete > 0 {
-                logger::info(
-                    &state.db,
-                    LogCategory::System,
-                    &format!(
-                        "Left {skipped_complete} completed grab(s) on {} intact during client switch — files preserved",
-                        old.active_client
-                    ),
-                    "",
-                )
-                .await;
-            }
-            if !delete_failures.is_empty() {
-                logger::warn(
-                    &state.db,
-                    LogCategory::System,
-                    &format!(
-                        "{} in-flight grab(s) could not be deleted from {} — DB state still flipped",
-                        delete_failures.len(),
-                        old.active_client
-                    ),
-                    &delete_failures.join("; "),
-                )
-                .await;
-            }
-        }
-
-        let n = crate::models::grabbed_torrents::mark_all_pending_failed(&state.db)
-            .await
-            .unwrap_or(0);
-
-        // Clear the per-episode "grabbed" UI state for every canceled
-        // grab. `grabbed_torrents.state='failed'` alone isn't enough —
-        // the series page reads `episode_quality_tags.state` for the
-        // UI checkmark / badge, and the existing manual-cancel paths
-        // (`handlers::library::episodes::cancel_pending_episode`,
-        // `services::post_processing::run_once_inner` on stale-torrent
-        // reconciliation) both call `episode_tags::clear_tags_for_removal`
-        // alongside their mark-removed calls. The client-switch path
-        // has to mirror that: without this, episodes sit forever in
-        // "grabbed" state with no backing torrent.
-        for grab in &pending {
-            let _ = crate::models::episode_tags::clear_tags_for_removal(
-                &state.db,
-                grab.series_id,
-                &grab.episode_numbers,
-            )
-            .await;
-        }
-
-        if n > 0 {
-            logger::info(
-                &state.db,
-                LogCategory::System,
-                &format!("Marked {n} pending grabs as failed after client switch"),
-                &format!("old={}, new={}", old.active_client, cfg.active_client),
-            )
-            .await;
-            notices.push(format!(
-                "Client changed from {} to {}; {n} pending grab{} released (in-flight downloads cancelled on {}; any completed files preserved).",
-                old.active_client,
-                cfg.active_client,
-                if n == 1 { "" } else { "s" },
-                old.active_client,
-            ));
-        }
-    }
+    // Multi-client routing — client switching now happens through
+    // the dedicated `/settings/download-clients/*` CRUD endpoints,
+    // not through the bulk Settings save. Pending-grab cancellation
+    // on row delete / disable lives in those handlers instead.
+    // The legacy single-slot switch detection that used to live
+    // here is gone — `cfg.active_client` is no longer the source
+    // of truth, and the bulk POST doesn't change download-client
+    // routing as a side effect.
+    let _ = &existing_cfg; // legacy compat: still read elsewhere
 
     if active_tab == "integrations" {
-        let (client_label, configured, client_url) = match cfg.active_client.as_str() {
-            "deluge" => (
-                "Deluge",
-                !cfg.deluge_url.is_empty(),
-                cfg.deluge_url.as_str(),
-            ),
-            "transmission" => (
-                "Transmission",
-                !cfg.transmission_url.is_empty(),
-                cfg.transmission_url.as_str(),
-            ),
-            "rtorrent" => (
-                "rTorrent",
-                !cfg.rtorrent_url.is_empty(),
-                cfg.rtorrent_url.as_str(),
-            ),
-            _ => (
-                "qBittorrent",
-                !cfg.qbit_url.is_empty(),
-                cfg.qbit_url.as_str(),
-            ),
-        };
-        if configured {
-            let client = crate::services::download_client::build_download_client(&cfg);
-            if let Some(client) = client {
-                match client.test().await {
-                    Ok(version) => {
-                        // `LogCategory::QBit` is reused here for
-                        // every download client for now — log
-                        // message body carries the real client name
-                        // in "Connected to X Y.Z", so filtering by
-                        // category still surfaces the events. A
-                        // dedicated `LogCategory::DownloadClient`
-                        // would be cleaner but churns every existing
-                        // qBit log entry's category too; Phase 3
-                        // cleanup.
-                        logger::info(
-                            &state.db,
-                            LogCategory::QBit,
-                            &format!("Connected to {client_label} {version}"),
-                            client_url,
-                        )
-                        .await;
-                        notices.push(format!("{client_label} connected ({version})."));
-                        *state.download_client.write().await = Some(client);
-                    }
-                    Err(e) => {
-                        logger::error(
-                            &state.db,
-                            LogCategory::QBit,
-                            &format!("{client_label} connection failed"),
-                            &e,
-                        )
-                        .await;
-                        *state.download_client.write().await = None;
-                        notices.push(format!("{client_label} connection failed: {e}."));
-                    }
-                }
-            } else {
-                *state.download_client.write().await = None;
-            }
-        } else {
-            *state.download_client.write().await = None;
-        }
+        // Multi-client routing: download-client edits go through
+        // dedicated `/settings/download-clients/*` CRUD endpoints
+        // (which call `rebuild_clients_cache` themselves). The
+        // legacy single-slot test-on-save logic is gone — the
+        // bulk settings POST no longer touches client state. We
+        // keep the legacy `qbit_url` etc. form fields wired so a
+        // user with a stale browser tab doesn't blank them out
+        // on save, but they don't drive runtime behavior.
 
         if !cfg.jellyfin_url.is_empty() && !cfg.jellyfin_api_key.is_empty() {
             let client = JellyfinClient::new(&cfg.jellyfin_url, &cfg.jellyfin_api_key);
@@ -1272,6 +1083,9 @@ pub async fn settings_submit(
     let indexers = crate::models::indexers::list_all(&state.db)
         .await
         .unwrap_or_default();
+    let download_clients = crate::models::download_clients::list_all(&state.db)
+        .await
+        .unwrap_or_default();
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
@@ -1296,6 +1110,8 @@ pub async fn settings_submit(
         indexers,
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
         indexer_seed: None,
+        download_clients,
+        download_client_edit: None,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -1472,7 +1288,7 @@ pub async fn jellyfin_test(
 )]
 pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let download_client_status = {
-        let client = state.download_client.read().await.clone();
+        let client = state.default_download_client().await;
         match client {
             Some(c) => {
                 // Emit `type` on both Ok and Err so the template JS
@@ -2169,6 +1985,7 @@ mod tests {
                     seed_time_minutes: None,
                     min_seeders: 1,
                     request_timeout_secs: None,
+                    download_client_id: None,
                 },
             )
             .await

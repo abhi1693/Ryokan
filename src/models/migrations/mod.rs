@@ -1274,6 +1274,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Issue #28 PR E — per-series PT upgrade opt-in. Default 0 (off).
+    // The upgrade sweep skips a candidate when the source indexer is
+    // a private tracker (`indexers.is_private_tracker = 1`) and this
+    // flag is 0. Initial / manual / interactive grabs aren't gated —
+    // the user explicitly chose those. The flag only affects the
+    // background upgrade sweep, which can re-grab existing episodes
+    // from PTs without the user's knowledge if left default-on.
+    sqlx::query("ALTER TABLE series ADD COLUMN allow_pt_upgrades INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     // Radarr API compatibility layer for Seerr integration (anime movies).
     sqlx::query("ALTER TABLE config ADD COLUMN radarr_enabled INTEGER NOT NULL DEFAULT 0")
         .execute(db)
@@ -2122,6 +2134,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Multi-client refactor — track which `download_clients` row the grab
+    // was dispatched to. Drives post-processing's `list_scoped` /
+    // `get_files` routing so a torrent landed on the seedbox isn't
+    // hunted for on the local qBit. NULL on legacy rows (pre-multi-client)
+    // and on grabs whose pin resolution returned None (pool empty
+    // before user added a client). Post-processing falls back to the
+    // current default on NULL.
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN download_client_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
     // Issue #28 PR A — `grabbed_torrents.respect_seed_rules` flags
     // grabs whose torrents have per-torrent seed-ratio / seed-time
     // rules applied at add time (PR C). Delete paths (manual delete,
@@ -2154,6 +2178,198 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+
+    // Multi-client routing — one row per *configured* client, not
+    // one per kind. A user can run "Local qBit" + "Seedbox Deluge"
+    // simultaneously, with per-indexer pinning so AnimeBytes grabs
+    // route to the seedbox while Nyaa stays on the local box. The
+    // legacy `config.active_client + qbit_url etc.` columns stay
+    // for one release as rollback safety; runtime reads from this
+    // table exclusively after the schema_migrations-gated backfill
+    // below seeds the first row.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS download_clients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            url TEXT NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            password TEXT NOT NULL DEFAULT '',
+            label TEXT NOT NULL DEFAULT '',
+            download_path TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        )",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // Per-indexer client pinning. NULL means "use the row marked
+    // is_default=1 in download_clients." `ON DELETE SET NULL`
+    // can't be added via ALTER on SQLite, so the
+    // `settings_download_clients_delete` handler NULLs matching
+    // `indexers.download_client_id` rows in the same transaction
+    // (mirrors how the indexer-delete handler NULLs
+    // `grabbed_torrents.indexer_id`).
+    sqlx::query("ALTER TABLE indexers ADD COLUMN download_client_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
+    // Nyaa is out-of-band (no `indexers` row), so its pin lives on
+    // the singleton config row. Same NULL-means-default semantics.
+    sqlx::query("ALTER TABLE config ADD COLUMN nyaa_download_client_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
+    // Backfill — read the legacy `config.active_client` discriminator
+    // + the per-kind URL/credentials columns and seed one
+    // `download_clients` row marked is_default=1. Idempotent via
+    // `schema_migrations` so a user who later adds more clients
+    // doesn't get the legacy row re-created on every boot.
+    crate::models::group_source_map::ensure_schema_migrations_table(db)
+        .await
+        .ok();
+    if !crate::models::group_source_map::migration_already_applied(
+        db,
+        "multi_client_seed_default_v1",
+    )
+    .await
+    .unwrap_or(false)
+    {
+        // Read the legacy fields per-kind. Each block falls back to
+        // empty defaults on any failure (column missing from a
+        // partially-applied earlier migration, hand-edited schema,
+        // transient I/O). Pre-fix this whole block was gated on a
+        // 4-arm `if let (Some, Some, Some, Some, Some)` — any one
+        // failure skipped the entire backfill **and** didn't mark
+        // the migration applied, so it retried every boot. Now each
+        // arm degrades independently and the marker fires once
+        // we've gotten this far, regardless of which legacy slots
+        // were readable. Per the code-review correction.
+        let legacy_qbit = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+            "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path \
+             FROM config WHERE id = 1",
+        )
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        let legacy_deluge = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT deluge_url, deluge_password, deluge_label, deluge_download_path \
+             FROM config WHERE id = 1",
+        )
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        let legacy_tx = sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT transmission_url, transmission_user, transmission_password, \
+                    transmission_label, transmission_download_path \
+             FROM config WHERE id = 1",
+        )
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        let legacy_rt = sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, \
+                    rtorrent_download_path \
+             FROM config WHERE id = 1",
+        )
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+        let (active, q_url, q_user, q_pass, q_cat, q_dp) = legacy_qbit;
+        let (d_url, d_pass, d_label, d_dp) = legacy_deluge;
+        let (t_url, t_user, t_pass, t_label, t_dp) = legacy_tx;
+        let (r_url, r_user, r_pass, r_label, r_dp) = legacy_rt;
+
+        let (name, kind, url, username, password, label, download_path) = match active.as_str() {
+            "deluge" => (
+                "Deluge",
+                "deluge",
+                d_url,
+                String::new(),
+                d_pass,
+                d_label,
+                d_dp,
+            ),
+            "transmission" => (
+                "Transmission",
+                "transmission",
+                t_url,
+                t_user,
+                t_pass,
+                t_label,
+                t_dp,
+            ),
+            "rtorrent" => ("rTorrent", "rtorrent", r_url, r_user, r_pass, r_label, r_dp),
+            _ => (
+                "qBittorrent",
+                "qbittorrent",
+                q_url,
+                q_user,
+                q_pass,
+                q_cat,
+                q_dp,
+            ),
+        };
+        // Mark the migration applied in its own transaction, separate
+        // from the seed insert below, so a failure of the seed tx
+        // doesn't trap us in a boot-loop where the read fires every
+        // restart. The marker tx itself is still best-effort
+        // (`if let Ok(mut tx) = db.begin().await`) — `db.begin` doesn't
+        // typically transient-fail in a way the next attempt would
+        // succeed at, so unwrapping wouldn't change behavior in
+        // practice; we leave it gated to keep the migration path
+        // panic-free under any startup contention. The seed itself is
+        // also best-effort — a missed legacy URL re-creates the
+        // pre-multi-client gap, but the user can fix that from
+        // Settings → Connections; trapping startup behind the seed
+        // transaction would be worse.
+        if let Ok(mut tx) = db.begin().await {
+            let _ = crate::models::group_source_map::mark_migration_applied(
+                &mut tx,
+                "multi_client_seed_default_v1",
+            )
+            .await;
+            let _ = tx.commit().await;
+        }
+        // Only seed when the legacy slot was actually configured
+        // (URL non-empty). A fresh-install user who never picked a
+        // client gets no auto-seeded row; they'll add one via the
+        // new Settings UI.
+        if !url.is_empty()
+            && let Ok(mut tx) = db.begin().await
+        {
+            let _ = sqlx::query(
+                "INSERT INTO download_clients
+                 (name, kind, url, username, password, label, download_path, enabled, is_default)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)",
+            )
+            .bind(name)
+            .bind(kind)
+            .bind(url)
+            .bind(username)
+            .bind(password)
+            .bind(label)
+            .bind(download_path)
+            .execute(&mut *tx)
+            .await;
+            let _ = tx.commit().await;
+        }
+    }
 
     Ok(())
 }

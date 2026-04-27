@@ -39,6 +39,10 @@ pub struct IndexerUpsertForm {
     pub seed_time_minutes: Option<String>,
     pub min_seeders: Option<String>,
     pub request_timeout_secs: Option<String>,
+    /// Multi-client routing pin — id of the row in
+    /// `download_clients` this indexer routes to. Empty
+    /// string = NULL (use the default client at grab time).
+    pub download_client_id: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -98,6 +102,7 @@ pub async fn settings_indexers_upsert(
         seed_time_minutes: parse_optional_i64(&form.seed_time_minutes),
         min_seeders,
         request_timeout_secs,
+        download_client_id: parse_optional_i64(&form.download_client_id),
     };
 
     let result = match form.id {
@@ -333,6 +338,7 @@ mod tests {
                 seed_time_minutes: None,
                 min_seeders: Some("1".to_string()),
                 request_timeout_secs: None,
+                download_client_id: None,
             }
         }
 
@@ -370,6 +376,7 @@ mod tests {
                     seed_time_minutes: None,
                     min_seeders: 1,
                     request_timeout_secs: None,
+                    download_client_id: None,
                 },
             )
             .await
@@ -403,6 +410,7 @@ mod tests {
                     seed_time_minutes: None,
                     min_seeders: 1,
                     request_timeout_secs: None,
+                    download_client_id: None,
                 },
             )
             .await

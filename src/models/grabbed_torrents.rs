@@ -16,6 +16,12 @@ pub struct GrabbedTorrent {
     /// pre-download pass used — otherwise the "finished 1+ year ago +
     /// batch → BluRay" rule never fires on library-sweep reclassifies.
     pub is_batch: bool,
+    /// Multi-client refactor — id of the `download_clients` row this
+    /// grab was dispatched to. NULL on legacy rows (pre-multi-client
+    /// upgrade) and on grabs whose pin resolution returned None.
+    /// Post-processing routes `list_scoped` / `get_files` against the
+    /// recorded client; falls back to the current default when NULL.
+    pub download_client_id: Option<i64>,
 }
 
 /// Record a torrent grab for post-processing.
@@ -329,7 +335,9 @@ pub async fn get_is_batch_by_name(
 /// Get all grabs that have not yet been processed.
 pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, COALESCE(is_batch, 0) AS is_batch FROM grabbed_torrents WHERE state = 'pending' ORDER BY grabbed_at ASC",
+        "SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, \
+                COALESCE(is_batch, 0) AS is_batch, download_client_id \
+         FROM grabbed_torrents WHERE state = 'pending' ORDER BY grabbed_at ASC",
     )
     .fetch_all(db)
     .await?;
@@ -349,6 +357,10 @@ pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sql
                 state: "pending".to_string(),
                 grabbed_at: row.get("grabbed_at"),
                 is_batch: is_batch_i != 0,
+                download_client_id: row
+                    .try_get::<Option<i64>, _>("download_client_id")
+                    .ok()
+                    .flatten(),
             }
         })
         .collect())
@@ -440,6 +452,24 @@ pub async fn set_indexer_attribution(
     sqlx::query("UPDATE grabbed_torrents SET indexer_id = ?, respect_seed_rules = ? WHERE id = ?")
         .bind(indexer_id)
         .bind(respect_seed_rules as i64)
+        .bind(grab_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Multi-client refactor — stamp the `download_clients.id` that
+/// received the grab. NULL means "no pool entry at grab time" and
+/// post-processing falls back to the current default. Called from
+/// every dispatch site (autobrr, RSS, manual, auto-search) right
+/// after `record_grab`.
+pub async fn set_download_client(
+    db: &SqlitePool,
+    grab_id: i64,
+    download_client_id: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE grabbed_torrents SET download_client_id = ? WHERE id = ?")
+        .bind(download_client_id)
         .bind(grab_id)
         .execute(db)
         .await?;
@@ -787,6 +817,9 @@ pub async fn find_imported_for_episode(
                 state: "imported".to_string(),
                 grabbed_at: row.get("grabbed_at"),
                 is_batch: is_batch_i != 0,
+                // Not selected by this query — callers don't use the
+                // client routing here. Default None.
+                download_client_id: None,
             }
         })
         .collect())
@@ -850,6 +883,7 @@ pub async fn find_pending_for_episode(
                 state: "pending".to_string(),
                 grabbed_at: row.get("grabbed_at"),
                 is_batch: is_batch_i != 0,
+                download_client_id: None,
             }
         })
         .collect())
@@ -1602,5 +1636,43 @@ mod tests {
         assert!(!respects_seed_rules(&db, "").await);
         // Hash that doesn't exist.
         assert!(!respects_seed_rules(&db, "no-such-hash").await);
+    }
+
+    // ── Multi-client refactor: download_client_id round-trip ────────
+    //
+    // Pre-PR-F regression: post_processing fanning `list_scoped` over
+    // a single (default) client meant pinned grabs got marked stale.
+    // The fan-out fix depends on `get_all_pending` faithfully reading
+    // back the stamped `download_client_id`. These tests pin that
+    // round-trip so a future SELECT-list refactor can't silently drop
+    // the column and re-introduce the bug.
+
+    #[tokio::test]
+    async fn set_download_client_round_trips_through_get_all_pending() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let (grab_id, _) = pr_c_seed_a_grab(&db).await;
+
+        // Pre-stamp: a fresh row reads back as None.
+        let pending = get_all_pending(&db).await.expect("pending");
+        let row = pending.iter().find(|g| g.id == grab_id).expect("present");
+        assert_eq!(row.download_client_id, None);
+
+        // After stamp: round-trip yields the stored id.
+        set_download_client(&db, grab_id, Some(42))
+            .await
+            .expect("stamp");
+        let pending = get_all_pending(&db).await.expect("pending");
+        let row = pending.iter().find(|g| g.id == grab_id).expect("present");
+        assert_eq!(row.download_client_id, Some(42));
+
+        // Clearing back to NULL works too — a deleted/disabled client
+        // unlinking would NULL the column via `download_clients::delete`.
+        set_download_client(&db, grab_id, None)
+            .await
+            .expect("clear");
+        let pending = get_all_pending(&db).await.expect("pending");
+        let row = pending.iter().find(|g| g.id == grab_id).expect("present");
+        assert_eq!(row.download_client_id, None);
     }
 }

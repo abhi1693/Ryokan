@@ -330,7 +330,20 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     for row in &tracked {
         let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
     }
-    let client = state.download_client.read().await.clone();
+    // RSS sync is Nyaa-only today (fetch_feeds hits the Nyaa
+    // categories), so the per-Nyaa client pin is the right routing
+    // dimension. Falls through to the default client when the user
+    // hasn't pinned Nyaa to anything specific. The id is captured
+    // alongside the client so each grab's `download_client_id` is
+    // stamped — post-processing routes per-grab back to the right
+    // client without needing to re-resolve the pin at import time.
+    let (client, dispatch_client_id) = match state
+        .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
+        .await
+    {
+        Some((c, id)) => (Some(c), Some(id)),
+        None => (None, None),
+    };
 
     // One compiled-CF snapshot for the whole RSS pass so each item's
     // score reflects the user's CF profile. Without this thread-through
@@ -780,6 +793,14 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 .await
                 .ok()
                 .flatten();
+                if let Some(gid) = grab_id {
+                    let _ = crate::models::grabbed_torrents::set_download_client(
+                        &state.db,
+                        gid,
+                        dispatch_client_id,
+                    )
+                    .await;
+                }
                 // Reuse the pre-disk classification computed earlier
                 // during the upgrade gate (stashed on the pending
                 // candidate). Saves a second DB + potential HTTP round

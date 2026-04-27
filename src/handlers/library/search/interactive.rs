@@ -90,33 +90,27 @@ pub async fn search_batch_releases(
     )
     .await;
 
-    let qbit = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or({
-                if let Some(h) = &progress_handle {
-                    // Fire-and-forget: we're about to Err-return, so the
-                    // toast is the only surface that tells the user why.
-                    let h = h.clone();
-                    tokio::spawn(async move {
-                        h.emit(
-                            "error",
-                            "error",
-                            "Download client not configured",
-                            None,
-                            true,
-                        )
-                        .await;
-                    });
-                }
-                (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "Download client not configured".to_string(),
+    let qbit = state.default_download_client().await.ok_or({
+        if let Some(h) = &progress_handle {
+            // Fire-and-forget: we're about to Err-return, so the
+            // toast is the only surface that tells the user why.
+            let h = h.clone();
+            tokio::spawn(async move {
+                h.emit(
+                    "error",
+                    "error",
+                    "Download client not configured",
+                    None,
+                    true,
                 )
-            })?
-            .clone()
-    };
+                .await;
+            });
+        }
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Download client not configured".to_string(),
+        )
+    })?;
 
     match best {
         None => {

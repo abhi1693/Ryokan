@@ -59,7 +59,12 @@ pub struct SeededIndexer {
     /// Suggested seed time floor in minutes. Same `None`-by-
     /// default reasoning as `default_seed_ratio`.
     pub default_seed_time_minutes: Option<i64>,
-    /// Default `kind` for the indexer (`torznab` or `newznab`).
+    /// Default protocol kind for the indexer (`torznab` or
+    /// `newznab`). The Add Indexer form defaults its Kind
+    /// dropdown to this value when the user picks the seed,
+    /// since most curated entries are torznab-shaped (private
+    /// and public anime trackers) and the Generic Newznab
+    /// seed is the only entry that defaults to newznab.
     pub default_kind: &'static str,
     /// Hint shown in the URL field when the user picks this
     /// card. Should look like a real Prowlarr / Jackett URL so
@@ -134,7 +139,7 @@ pub const SEEDED: &[SeededIndexer] = &[
     },
     SeededIndexer {
         slug: "animetosho",
-        display_name: "AnimeTosho (Torznab)",
+        display_name: "AnimeTosho",
         blurb: "Public anime indexer",
         notes: "",
         is_private_tracker: false,
@@ -144,20 +149,6 @@ pub const SEEDED: &[SeededIndexer] = &[
         default_seed_time_minutes: None,
         default_kind: "torznab",
         url_placeholder: "https://prowlarr.local/{N}/api",
-        is_generic: false,
-    },
-    SeededIndexer {
-        slug: "animetosho-newznab",
-        display_name: "AnimeTosho (Newznab)",
-        blurb: "Public anime indexer (Usenet mirror)",
-        notes: "",
-        is_private_tracker: false,
-        default_priority: 35,
-        default_min_seeders: 0,
-        default_seed_ratio: None,
-        default_seed_time_minutes: None,
-        default_kind: "newznab",
-        url_placeholder: "https://feed.animetosho.org/api",
         is_generic: false,
     },
     SeededIndexer {
@@ -202,6 +193,12 @@ pub const SEEDED: &[SeededIndexer] = &[
         url_placeholder: "https://prowlarr.local/{N}/api",
         is_generic: true,
     },
+    // Newznab seed kept for general-purpose Usenet indexers
+    // (NzbGeek, NZB.cat, NZBPlanet, etc.). AnimeTosho's
+    // newznab mirror was dropped from the catalog because the
+    // site's shutting down in May 2026; the remaining newznab
+    // sources carry anime as a side effect of being
+    // general-purpose, not as a curated focus.
     SeededIndexer {
         slug: "generic-newznab",
         display_name: "Generic Newznab",
@@ -365,6 +362,10 @@ mod tests {
         let generic = find_seed("generic-torznab").expect("generic torznab seed exists");
         assert!(generic.is_generic);
         assert_eq!(generic.default_kind, "torznab");
+
+        let generic_nzb = find_seed("generic-newznab").expect("generic newznab seed exists");
+        assert!(generic_nzb.is_generic);
+        assert_eq!(generic_nzb.default_kind, "newznab");
     }
 
     #[test]

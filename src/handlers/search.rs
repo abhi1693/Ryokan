@@ -279,16 +279,10 @@ pub async fn grab_release(
     State(state): State<AppState>,
     Json(form): Json<GrabForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let (client, dispatch_client_id) = state.default_download_client_with_id().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
 
     let form_hash = form.info_hash.clone().unwrap_or_default();
     let info_hash = if !form_hash.is_empty() {
@@ -355,6 +349,14 @@ pub async fn grab_release(
             .await
             .ok()
             .flatten();
+            if let Some(gid) = grab_id {
+                let _ = crate::models::grabbed_torrents::set_download_client(
+                    &state_task.db,
+                    gid,
+                    Some(dispatch_client_id),
+                )
+                .await;
+            }
 
             // Populate episode_quality_tags so the series page shows
             // each grabbed episode in 'grabbed' state right away.
@@ -479,16 +481,10 @@ pub async fn get_torrents(
     Json<Vec<crate::services::download_client::DownloadItem>>,
     (axum::http::StatusCode, String),
 > {
-    let client = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let client = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
 
     let torrents = client
         .list_scoped()

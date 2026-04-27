@@ -29,6 +29,16 @@ pub struct Series {
     /// skips this series entirely, even if a higher-quality release is
     /// available. Defaults to true to preserve historical behavior.
     pub allow_upgrades: bool,
+    /// Issue #28 PR E — per-series PT upgrade opt-in. When false (the
+    /// default), the upgrade sweep won't grab a private-tracker release
+    /// for this series even if it's the top-scoring candidate. The
+    /// initial-grab and manual-search paths aren't affected (those are
+    /// user-driven). The flag exists so a user can have torznab PT
+    /// indexers configured (for manual searches and initial grabs) but
+    /// not have the background upgrade sweep silently re-grab existing
+    /// episodes from a PT and rack up Hit-and-Runs / ratio liability
+    /// without their knowledge.
+    pub allow_pt_upgrades: bool,
     /// #23 — Per-series custom Nyaa query tokens appended after the
     /// title aliases. Overrides the global
     /// `config.default_custom_query_tokens` when non-empty.
@@ -117,6 +127,14 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
             .try_get::<i64, _>("allow_upgrades")
             .map(|v| v != 0)
             .unwrap_or(true),
+        // Default to false (opt-in). Pre-#28 grabs were all Nyaa-direct,
+        // which is non-PT, so this flag changing default-off doesn't
+        // affect any existing behavior — it only gates new PT-sourced
+        // upgrades against existing libraries.
+        allow_pt_upgrades: row
+            .try_get::<i64, _>("allow_pt_upgrades")
+            .map(|v| v != 0)
+            .unwrap_or(false),
         custom_query_tokens: row.try_get("custom_query_tokens").unwrap_or_default(),
         restrict_to_uploader: row.try_get("restrict_to_uploader").unwrap_or_default(),
         cumulative_prior_episodes: row
@@ -134,7 +152,7 @@ fn map_series_row(row: sqlx::sqlite::SqliteRow) -> Series {
 /// Get all tracked series, ordered by most recently added.
 pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -144,7 +162,7 @@ pub async fn get_all(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
@@ -158,7 +176,7 @@ pub async fn get_by_anilist_id(
     anilist_id: i64,
 ) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE anilist_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE anilist_id = ?",
     )
     .bind(anilist_id)
     .fetch_optional(db)
@@ -181,7 +199,7 @@ pub async fn get_by_anilist_ids(
     }
     let placeholders = vec!["?"; anilist_ids.len()].join(",");
     let sql = format!(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE anilist_id IN ({placeholders})"
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE anilist_id IN ({placeholders})"
     );
     let mut q = sqlx::query(&sql);
     for id in anilist_ids {
@@ -197,7 +215,7 @@ pub async fn get_by_anilist_ids(
 
 pub async fn get_by_mal_id(db: &SqlitePool, mal_id: i64) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE mal_id = ?",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE mal_id = ?",
     )
     .bind(mal_id)
     .fetch_optional(db)
@@ -457,7 +475,7 @@ pub async fn refresh_core_metadata(
 
 pub async fn get_unreconciled_fallbacks(db: &SqlitePool) -> Result<Vec<Series>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
+        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE mal_id IS NOT NULL AND anilist_id < 0 ORDER BY added_at DESC",
     )
     .fetch_all(db)
     .await?;
@@ -604,6 +622,23 @@ pub async fn update_allow_upgrades(
     allow: bool,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE series SET allow_upgrades = ? WHERE id = ?")
+        .bind(if allow { 1_i64 } else { 0_i64 })
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Issue #28 PR E — toggle the per-series PT upgrade opt-in. When
+/// false (the default), the upgrade sweep won't accept a private-
+/// tracker release as the chosen upgrade for this series. Initial
+/// grabs and manual-search grabs aren't gated.
+pub async fn update_allow_pt_upgrades(
+    db: &SqlitePool,
+    id: i64,
+    allow: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE series SET allow_pt_upgrades = ? WHERE id = ?")
         .bind(if allow { 1_i64 } else { 0_i64 })
         .bind(id)
         .execute(db)

@@ -148,7 +148,7 @@ pub async fn downloads_page(
         .unwrap_or_else(|| "english".to_string());
 
     let (queue, queue_error) = if tab == "queue" {
-        let client = state.download_client.read().await.clone();
+        let client = state.default_download_client().await;
         match client {
             Some(c) => match c.list_scoped().await {
                 Ok(mut torrents) => {
@@ -243,16 +243,10 @@ pub async fn api_pause_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentActionForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let client = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
     client
         .pause(&form.hash)
         .await
@@ -276,16 +270,10 @@ pub async fn api_resume_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentActionForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let client = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
     client
         .resume(&form.hash)
         .await
@@ -309,16 +297,10 @@ pub async fn api_delete_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentDeleteForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let client = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
     client
         .delete(&form.hash, form.delete_files)
         .await

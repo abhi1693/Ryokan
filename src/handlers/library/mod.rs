@@ -124,6 +124,18 @@ struct SeriesTemplate {
     /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the
     /// series detail page; toggled via POST /api/library/allow-upgrades.
     allow_upgrades: bool,
+    /// Issue #28 PR E — per-series PT upgrade opt-in. Default off. The
+    /// upgrade sweep skips a candidate when its source indexer is private
+    /// and this is false. Toggled via POST /api/library/allow-pt-upgrades.
+    /// Rendered inside an "Advanced" collapsible since most users won't
+    /// flip it.
+    allow_pt_upgrades: bool,
+    /// Issue #28 PR E — `true` when at least one configured indexer
+    /// has `is_private_tracker = 1`. Drives a UI hint: when the user
+    /// has zero PT indexers, the PT-upgrade toggle reads "no private
+    /// trackers configured" instead of being a dangling enabled
+    /// control that affects nothing.
+    any_private_indexer: bool,
     /// #23 — Per-series custom Nyaa query tokens. Empty string means
     /// "use the global default in config." Rendered in the Advanced
     /// search panel on the series detail page.
@@ -278,6 +290,17 @@ pub struct SetEpisodeMonitoringForm {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetAllowUpgradesForm {
+    series_id: i64,
+    allow: bool,
+}
+
+/// Issue #28 PR E — per-series PT upgrade opt-in form. Same shape
+/// as [`SetAllowUpgradesForm`] but toggles the second-axis flag
+/// (`series.allow_pt_upgrades`) that gates whether the upgrade
+/// sweep is allowed to grab a private-tracker release for this
+/// series. Default off; user opts in per series.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SetAllowPtUpgradesForm {
     series_id: i64,
     allow: bool,
 }

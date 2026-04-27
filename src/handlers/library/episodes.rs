@@ -139,7 +139,7 @@ pub async fn delete_episode_file(
                     .unwrap_or_default();
             let mut qbit_removed: Vec<String> = Vec::new();
             if !imported_grabs.is_empty() {
-                let client = state.download_client.read().await.as_ref().cloned();
+                let client = state.default_download_client().await;
                 if let Some(client) = client {
                     for grab in &imported_grabs {
                         if grab.is_batch {
@@ -347,7 +347,7 @@ pub async fn cancel_pending_episode(
         "cancel_pending_episode: matching grabs"
     );
 
-    let client = state.download_client.read().await.as_ref().cloned();
+    let client = state.default_download_client().await;
 
     let mut removed_count = 0;
     let mut torrent_failures: Vec<String> = Vec::new();
@@ -491,7 +491,7 @@ pub async fn mark_episode_failed(
         grabbed_torrents::find_imported_for_episode(&state.db, series_id, episode_number).await
         && !old_grabs.is_empty()
     {
-        let client = { state.download_client.read().await.as_ref().cloned() };
+        let client = { state.default_download_client().await };
         if let Some(client) = client {
             for old in &old_grabs {
                 if old.hash.is_empty() {
@@ -595,8 +595,8 @@ pub async fn episode_download_progress(
             .unwrap_or_default();
 
     let client = {
-        let guard = state.download_client.read().await;
-        match guard.as_ref() {
+        let client = state.default_download_client().await;
+        match client.as_ref() {
             Some(c) => c.clone(),
             None => return Ok(Json(Vec::new())),
         }

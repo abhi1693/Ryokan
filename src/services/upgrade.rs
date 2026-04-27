@@ -42,15 +42,21 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let client_opt = state.download_client.read().await.clone();
-    let Some(client) = client_opt.as_ref() else {
+    // Multi-client routing — resolved per-result inside the loop via
+    // `client_for_indexer_with_id(result.indexer_id)`. We bail early
+    // here only when the pool is empty (no clients configured at all);
+    // an individual indexer's pin can still resolve later. Pre-1.5.x
+    // a single global client was checked once at top — that's now
+    // wrong because a per-indexer pin can route grabs to a different
+    // client than the default.
+    if state.default_download_client().await.is_none() {
         return Ok(UpgradeSummary {
             series_checked: 0,
             episodes_checked: 0,
             upgrades_grabbed: 0,
             detail: "Download client not configured; skipping upgrade search".to_string(),
         });
-    };
+    }
 
     let mut total_series_checked: usize = 0;
     let mut total_episodes_checked: usize = 0;
@@ -60,6 +66,22 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     // scheduler can't race a CF edit during this run — if the user edits
     // a CF mid-sweep, the next scheduled run picks it up.
     let cfs = state.custom_formats.read().await.clone();
+
+    // Issue #28 PR E — snapshot the set of PT indexer IDs once per
+    // sweep so the per-series PT-upgrade gate doesn't re-read the
+    // IndexerCache (or hit the DB) on every result. The set is used
+    // to skip an upgrade candidate when the source indexer is private
+    // and the series hasn't opted in via `allow_pt_upgrades`. Empty
+    // when the user has zero PT indexers configured — the gate then
+    // never fires.
+    let pt_indexer_ids: HashSet<i64> = {
+        let snapshot = state.indexers.read().await.clone();
+        snapshot
+            .iter()
+            .filter(|i| i.is_private_tracker())
+            .map(|i| i.id())
+            .collect()
+    };
 
     logger::info(
         &state.db,
@@ -213,6 +235,41 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 continue;
             };
 
+            // Issue #28 PR E — PT upgrade gate. When a user hasn't
+            // opted this series in to PT-sourced upgrades and the
+            // chosen candidate came from a private tracker, skip
+            // the upgrade. The user can still grab from PT manually
+            // (initial grab + manual search aren't gated) — this
+            // only stops the background sweep from silently
+            // re-grabbing existing episodes from a PT and racking
+            // up Hit-and-Run liability.
+            //
+            // Trade-off: skipping here means we might miss a
+            // legitimate non-PT upgrade that was ranked second
+            // behind the PT pick. Acceptable for v1.5 — the next
+            // sweep tick (24h cadence) re-runs and the non-PT
+            // candidate would then be the top pick if the PT one
+            // dropped off. If users hit this in practice, we can
+            // upgrade to candidate-pool filtering inside
+            // `find_best_for_target` later.
+            if !row.allow_pt_upgrades
+                && let Some(idx_id) = result.indexer_id
+                && pt_indexer_ids.contains(&idx_id)
+            {
+                logger::debug(
+                    &state.db,
+                    LogCategory::AutoSearch,
+                    &format!(
+                        "Upgrade: {} {} skipped — PT-sourced and series.allow_pt_upgrades = 0",
+                        title,
+                        auto_search::target_label(&target),
+                    ),
+                    &format!("indexer_id={idx_id}"),
+                )
+                .await;
+                continue;
+            }
+
             // Classify the incoming release once; reused for upgrade verification,
             // grab logging, and episode tag persistence below.
             let incoming_classification = source::classify_release(
@@ -266,6 +323,26 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 continue;
             }
 
+            // Resolve the right client per-result so a PT indexer
+            // pinned to the seedbox (and a public indexer landing on
+            // local qBit) both work in the same sweep. Skip the
+            // result if pin resolution finds no client at all
+            // (pool empty or all-disabled mid-sweep).
+            let (client, dispatch_client_id) =
+                match state.client_for_indexer_with_id(result.indexer_id).await {
+                    Some(t) => t,
+                    None => {
+                        logger::warn(
+                            &state.db,
+                            LogCategory::QBit,
+                            &format!("Upgrade skip: no download client for {}", result.title),
+                            "indexer pin resolution returned None",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
             match client.add_torrent(&url, &result.info_hash).await {
                 Ok(_) => {
                     total_upgrades_grabbed += 1;
@@ -299,7 +376,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         // doesn't re-find / re-grab the same pack.
                         covered_by_batch.extend(&ep_nums);
                     }
-                    let _ = crate::models::grabbed_torrents::record_grab(
+                    let grab_id = crate::models::grabbed_torrents::record_grab(
                         &state.db,
                         &result.info_hash,
                         &result.title,
@@ -307,7 +384,17 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         &ep_nums,
                         result.is_batch,
                     )
-                    .await;
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(gid) = grab_id {
+                        let _ = crate::models::grabbed_torrents::set_download_client(
+                            &state.db,
+                            gid,
+                            Some(dispatch_client_id),
+                        )
+                        .await;
+                    }
                     for ep_num in &ep_nums {
                         let _ = episode_tags::record_grab(
                             &state.db,

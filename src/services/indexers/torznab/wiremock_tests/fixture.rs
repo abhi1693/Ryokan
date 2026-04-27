@@ -28,6 +28,7 @@ pub async fn new_fixture() -> (MockServer, TorznabIndexer) {
         seed_time_minutes: None,
         min_seeders: 0,
         request_timeout_secs: Some(5),
+        download_client_id: None,
         caps_json: String::new(),
         caps_refreshed_at: None,
         created_at: 0,

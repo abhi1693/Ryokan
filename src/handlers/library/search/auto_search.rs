@@ -261,16 +261,10 @@ async fn run_auto_search_targets_with_upgrades(
         crate::services::source::ClassificationResult,
     >,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
-    let qbit = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let qbit = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
 
     let cfg = config::get_config(&state.db)
         .await

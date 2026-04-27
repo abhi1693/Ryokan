@@ -1670,6 +1670,7 @@ mod tests {
             folder_name: String::new(),
             monitor_mode: "future".to_string(),
             allow_upgrades: true,
+            allow_pt_upgrades: false,
             custom_query_tokens: tokens.to_string(),
             restrict_to_uploader: user.to_string(),
             cumulative_prior_episodes: 0,

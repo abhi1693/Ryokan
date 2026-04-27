@@ -211,6 +211,14 @@ pub trait Indexer: Send + Sync {
     /// and the fan-out concurrency order.
     fn priority(&self) -> i32;
     fn is_private_tracker(&self) -> bool;
+    /// Multi-client routing — id of the row in
+    /// `download_clients` this indexer is pinned to. `None` means
+    /// "use the default client." Read by
+    /// [`crate::AppState::client_for_indexer`] at grab time so
+    /// the cache lookup avoids hitting the DB on the hot path.
+    fn download_client_id(&self) -> Option<i64> {
+        None
+    }
 
     /// Fetch capabilities from `t=caps`. Impls should respect the
     /// 7-day TTL on the row's [`caps_json`] cache; the search-path
@@ -851,6 +859,7 @@ mod tests {
             seed_time_minutes: None,
             min_seeders: 0,
             request_timeout_secs: None,
+            download_client_id: None,
         };
         let a_id = insert(&db, mk("A", "https://a.example/api", 5))
             .await
