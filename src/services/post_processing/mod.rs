@@ -1309,11 +1309,27 @@ pub async fn run_once(state: &AppState) {
         i64,
         HashMap<String, crate::services::download_client::DownloadItem>,
     > = HashMap::new();
+    // Per-pass cache of `download_clients.download_path` keyed by
+    // client id. Hoisted out of the per-grab loop so a pass with N
+    // pending grabs sharing M clients does M queries instead of N.
+    // Empty string means "row missing or path not configured" — the
+    // import path falls back to legacy `cfg.<active_client>_download_path`.
+    let mut download_path_per_client: HashMap<i64, String> = HashMap::new();
     for id in needed_ids {
         let Some(client) = state.client_by_id(id).await else {
             tracing::debug!("post_processing: skipping client id {id} — no longer in pool");
             continue;
         };
+        // Fetch the row's download_path once. Resolves to "" when the
+        // row vanished between needed_ids collection and now (rare
+        // race) — the per-grab path then falls back to legacy.
+        let path = crate::models::download_clients::get_by_id(&state.db, id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.download_path)
+            .unwrap_or_default();
+        download_path_per_client.insert(id, path);
         match client.list_scoped().await {
             Ok(torrents) => {
                 let by_hash: HashMap<String, _> = torrents
@@ -1356,10 +1372,30 @@ pub async fn run_once(state: &AppState) {
         };
         let Some(client) = clients.get(&grab_client_id).cloned() else {
             // The client this grab routed to wasn't reachable on this
-            // pass (list_scoped failed, or row deleted). Leave the
-            // grab pending so the next pass retries; don't mark stale
-            // because the absence isn't evidence the user removed the
-            // torrent.
+            // pass. Two reasons:
+            //   1. `list_scoped` failed for this client this round —
+            //      transient; leave the grab alone, retry next pass.
+            //   2. The client row was disabled (or deleted post-grab
+            //      via a path that didn't NULL our stamp). Without
+            //      the NULL-out below, a stamped-but-orphaned grab
+            //      sits `pending` forever because this `continue`
+            //      runs *before* the 60s stale check — the grab
+            //      never reaches `mark_removed`.
+            //
+            // Distinguish the two by checking whether the client is
+            // in the pool *at all* (not just in our per-pass `clients`
+            // map, which is filtered by successful `list_scoped`).
+            // A client that's not even in the pool can only mean
+            // disabled-or-deleted, so NULL the stamp; the next pass
+            // falls through to default and the stale path takes over.
+            // A client that *is* in the pool but missing from
+            // `clients` means `list_scoped` failed transiently —
+            // leave the stamp alone.
+            if grab.download_client_id.is_some()
+                && state.client_by_id(grab_client_id).await.is_none()
+            {
+                let _ = grabbed_torrents::set_download_client(&state.db, grab.id, None).await;
+            }
             continue;
         };
         let all_by_hash = match by_hash_per_client.get(&grab_client_id) {
@@ -1435,19 +1471,20 @@ pub async fn run_once(state: &AppState) {
         // client, no rewrite needed. Pre-PR-F this read from
         // `cfg.<active_client>_download_path` — wrong in multi-client
         // because pinned grabs land on a non-default client.
-        let local_download_path_owned =
-            crate::models::download_clients::get_by_id(&state.db, grab_client_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.download_path)
-                .unwrap_or_else(|| {
-                    // Row was deleted between grab and import. Fall back to
-                    // the legacy active_client download path so we don't lose
-                    // the user's pre-multi-client config on rollover.
-                    crate::services::download_client::per_client_download_path(&cfg).to_string()
-                });
-        let local_download_path = local_download_path_owned.as_str();
+        let cached_path = download_path_per_client
+            .get(&grab_client_id)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let local_download_path = if cached_path.is_empty() {
+            // Row was missing from the pre-loop fetch (rare race) or
+            // legitimately had an empty download_path (same-host
+            // client). Fall back to the legacy `active_client`
+            // download path so a pre-multi-client install on rollover
+            // doesn't lose its configured rewrite.
+            crate::services::download_client::per_client_download_path(&cfg)
+        } else {
+            cached_path
+        };
         let client_path = {
             let raw = if !torrent.content_path.is_empty() {
                 torrent.content_path.clone()

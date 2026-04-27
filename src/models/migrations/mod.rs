@@ -2325,11 +2325,16 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
                 q_dp,
             ),
         };
-        // Mark the migration applied unconditionally before
-        // attempting the seed insert, so a transient `db.begin()`
-        // failure on the seed transaction doesn't trap us in a
-        // boot-loop where the read fires every restart. The seed
-        // itself is best-effort — a missed legacy URL re-creates the
+        // Mark the migration applied in its own transaction, separate
+        // from the seed insert below, so a failure of the seed tx
+        // doesn't trap us in a boot-loop where the read fires every
+        // restart. The marker tx itself is still best-effort
+        // (`if let Ok(mut tx) = db.begin().await`) — `db.begin` doesn't
+        // typically transient-fail in a way the next attempt would
+        // succeed at, so unwrapping wouldn't change behavior in
+        // practice; we leave it gated to keep the migration path
+        // panic-free under any startup contention. The seed itself is
+        // also best-effort — a missed legacy URL re-creates the
         // pre-multi-client gap, but the user can fix that from
         // Settings → Connections; trapping startup behind the seed
         // transaction would be worse.

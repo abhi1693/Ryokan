@@ -192,11 +192,20 @@ pub async fn update(
 }
 
 /// Delete the row and NULL out every dangling pin in one
-/// transaction. Pins live on `indexers.download_client_id` and
-/// `config.nyaa_download_client_id`. Without the NULL-out, FK-less
-/// SQLite would leave dangling ids that resolve to None at routing
-/// time (silent fall-through to default; surprising) and the row
-/// would still appear in queries that join on the pin.
+/// transaction. Pins live on `indexers.download_client_id`,
+/// `config.nyaa_download_client_id`, and
+/// `grabbed_torrents.download_client_id`. Without the NULL-out,
+/// FK-less SQLite would leave dangling ids that resolve to None
+/// at routing time (silent fall-through to default; surprising)
+/// and the row would still appear in queries that join on the
+/// pin. The `grabbed_torrents` NULL-out specifically prevents
+/// pending grabs from getting orphaned forever — `run_once`
+/// short-circuits when it can't resolve the stamped id, so a
+/// stale stamp would skip both the import path AND the 60s
+/// stale-mark grace window. NULLing the stamp lets the next
+/// post-processing pass either match the grab against the
+/// current default's `list_scoped` (unlikely — wrong client) or
+/// fall through to the stale path and mark it `removed`.
 ///
 /// If the deleted row was the default, the caller is responsible
 /// for picking a new default (or accepting "no default until the
@@ -210,6 +219,12 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         .await?;
     sqlx::query(
         "UPDATE config SET nyaa_download_client_id = NULL WHERE nyaa_download_client_id = ?",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE grabbed_torrents SET download_client_id = NULL WHERE download_client_id = ?",
     )
     .bind(id)
     .execute(&mut *tx)
@@ -374,6 +389,86 @@ mod tests {
 
         // Row itself is gone.
         assert!(get_by_id(&db, id).await.unwrap().is_none());
+    }
+
+    /// Pre-PR-109-review-2 regression: pending grabs stamped to a
+    /// soon-to-be-deleted client used to keep their stamp after
+    /// `delete()`, which orphaned the grab forever in
+    /// `post_processing::run_once` (the loop's `clients.get(&id)`
+    /// returned None, the `continue` skipped past the 60s stale
+    /// check, and the grab stayed `pending` indefinitely). Lock the
+    /// fix by inserting a pending grab + deleting its client + asserting
+    /// the column is NULL afterward. A null stamp lets the next
+    /// post-processing pass fall through to default and reach the
+    /// stale path.
+    #[tokio::test]
+    async fn delete_nulls_out_grabbed_torrents_stamp() {
+        use crate::models::series::{self, SeriesCore};
+
+        let db = in_memory_pool().await;
+        let id = insert(&db, form("X", "qbittorrent", "http://x"))
+            .await
+            .unwrap();
+
+        // Seed a series + a pending grab stamped to this client.
+        let (series_id, _) = series::upsert(
+            &db,
+            SeriesCore {
+                anilist_id: 1,
+                mal_id: None,
+                title: "Show",
+                title_romaji: "Show",
+                title_english: "Show",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2024),
+                end_year: Some(2024),
+            },
+        )
+        .await
+        .expect("series upsert");
+        let grab_id = crate::models::grabbed_torrents::record_grab(
+            &db,
+            "deadbeef",
+            "[Group] Show - 01.mkv",
+            series_id,
+            &[1],
+            false,
+        )
+        .await
+        .expect("record")
+        .expect("inserted");
+        crate::models::grabbed_torrents::set_download_client(&db, grab_id, Some(id))
+            .await
+            .expect("stamp");
+
+        // Pre-condition.
+        let stamped: Option<i64> =
+            sqlx::query_scalar("SELECT download_client_id FROM grabbed_torrents WHERE id = ?")
+                .bind(grab_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(stamped, Some(id));
+
+        // Delete the client — the cascade should NULL the stamp.
+        delete(&db, id).await.unwrap();
+
+        let stamp_after: Option<i64> =
+            sqlx::query_scalar("SELECT download_client_id FROM grabbed_torrents WHERE id = ?")
+                .bind(grab_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(
+            stamp_after.is_none(),
+            "grabbed_torrents.download_client_id must be NULLed on delete \
+             so post_processing falls through to default and reaches the \
+             stale-mark path; otherwise pending grabs orphan forever"
+        );
     }
 
     #[tokio::test]
