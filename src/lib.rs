@@ -53,7 +53,7 @@ use tokio::sync::RwLock;
 use services::{
     custom_formats::CompiledCfCache, download_client::DownloadClient, indexers::Indexer,
     interactive_search_cache::InteractiveSearchCache, jellyfin::JellyfinClient,
-    oauth_state::OAuthStateStore, progress::ProgressRegistry,
+    oauth_state::OAuthStateStore, progress::ProgressRegistry, task_registry::TaskRegistry,
 };
 
 /// PR #107 review fix #4: cached `Vec<Arc<dyn Indexer>>` swapped on
@@ -149,6 +149,13 @@ pub struct AppState {
     /// Ryokan was last restarted, which made the pill useless as a
     /// liveness signal.
     pub start_time: chrono::DateTime<chrono::Utc>,
+    /// Lifecycle metadata for every supervised background task.
+    /// Each `supervise()` loop registers itself here and updates
+    /// status atomically on every iteration; `/api/system/tasks`
+    /// reads the snapshot for the System page. See
+    /// [`services::task_registry`] for the registry's threading
+    /// model (lock-free hot path, snapshot-on-read).
+    pub tasks: TaskRegistry,
 }
 
 impl AppState {
