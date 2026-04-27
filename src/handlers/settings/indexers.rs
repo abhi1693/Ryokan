@@ -89,6 +89,32 @@ pub async fn settings_indexers_upsert(
     let min_seeders = parse_optional_i32(&form.min_seeders, 1).max(0);
     let request_timeout_secs = parse_optional_secs(&form.request_timeout_secs);
     let api_key = form.api_key.trim();
+    let download_client_id = parse_optional_i64(&form.download_client_id);
+
+    // Protocol guard — torznab indexers route torrent magnets /
+    // .torrent URLs; newznab indexers route NZB URLs. Pinning a
+    // newznab indexer to a BT client (or vice versa, torznab → SAB)
+    // surfaces at grab time as "client rejected URL" with no upfront
+    // signal — better to refuse the save with a clear toast. Mirrors
+    // Sonarr's per-indexer Protocol enum check.
+    if let Some(client_id) = download_client_id
+        && let Ok(Some(row)) =
+            crate::models::download_clients::get_by_id(&state.db, client_id).await
+    {
+        let indexer_proto = crate::services::download_client::protocol_for_indexer_kind(kind);
+        let client_proto = crate::services::download_client::protocol_for_client_kind(&row.kind);
+        if let (Some(ip), Some(cp)) = (indexer_proto, client_proto)
+            && ip != cp
+        {
+            let msg = urlencoding::encode(&format!(
+                "Can't pin a {kind} indexer to a {} client (protocol mismatch — \
+                 {kind} returns {ip} URLs, {} accepts {cp})",
+                row.kind, row.kind
+            ))
+            .into_owned();
+            return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+        }
+    }
 
     let payload = IndexerForm {
         name,
@@ -102,7 +128,7 @@ pub async fn settings_indexers_upsert(
         seed_time_minutes: parse_optional_i64(&form.seed_time_minutes),
         min_seeders,
         request_timeout_secs,
-        download_client_id: parse_optional_i64(&form.download_client_id),
+        download_client_id,
     };
 
     let result = match form.id {
@@ -301,6 +327,181 @@ mod tests {
     fn parse_optional_f64_treats_empty_string_as_none() {
         assert_eq!(parse_optional_f64(&Some(String::new())), None);
         assert_eq!(parse_optional_f64(&Some("2.5".into())), Some(2.5));
+    }
+
+    /// PR G follow-up: protocol-mismatch validation on the indexer
+    /// upsert path. Pinning a torznab indexer to a SAB client (or a
+    /// newznab indexer to a BT client) used to silently save the row
+    /// and only fail at grab time when the client rejected the URL.
+    /// These tests pin the upfront-rejection shape so a future
+    /// refactor can't drop the guard and re-introduce the silent-
+    /// fail surface.
+    mod protocol_guard {
+        use super::super::*;
+        use crate::models::download_clients::{DownloadClientForm, insert as insert_dc};
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+        use axum::extract::{Form, State};
+
+        fn extract_location(resp: axum::response::Response) -> String {
+            resp.headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        }
+
+        fn upsert_form(kind: &str, dc_id: i64) -> IndexerUpsertForm {
+            IndexerUpsertForm {
+                id: None,
+                name: "Test".into(),
+                kind: kind.to_string(),
+                url: "https://prowlarr.local/1/api".into(),
+                api_key: "k".into(),
+                priority: Some("25".into()),
+                enabled: Some("on".into()),
+                is_private_tracker: None,
+                seed_ratio: None,
+                seed_time_minutes: None,
+                min_seeders: Some("1".into()),
+                request_timeout_secs: None,
+                download_client_id: Some(dc_id.to_string()),
+            }
+        }
+
+        async fn seed_clients(db: &sqlx::SqlitePool) -> (i64 /* qbit */, i64 /* sab */) {
+            let qbit = insert_dc(
+                db,
+                DownloadClientForm {
+                    name: "qBit",
+                    kind: "qbittorrent",
+                    url: "http://qbit.local",
+                    username: "",
+                    password: "",
+                    label: "",
+                    download_path: "",
+                    enabled: true,
+                    is_default: true,
+                },
+            )
+            .await
+            .expect("seed qbit");
+            let sab = insert_dc(
+                db,
+                DownloadClientForm {
+                    name: "SAB",
+                    kind: "sabnzbd",
+                    url: "http://sab.local",
+                    username: "",
+                    password: "key",
+                    label: "tv",
+                    download_path: "",
+                    enabled: true,
+                    is_default: false,
+                },
+            )
+            .await
+            .expect("seed sab");
+            (qbit, sab)
+        }
+
+        #[tokio::test]
+        async fn torznab_pinned_to_sab_is_rejected() {
+            let db = in_memory_pool().await;
+            let (_qbit, sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("torznab", sab)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("err=") && location.contains("protocol"),
+                "expected protocol-mismatch err redirect, got: {location}"
+            );
+            // Row must NOT have been inserted.
+            let rows = crate::models::indexers::list_all(&state.db).await.unwrap();
+            assert!(
+                rows.is_empty(),
+                "torznab→SAB save must be rejected, not silently persisted: {rows:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn newznab_pinned_to_qbit_is_rejected() {
+            let db = in_memory_pool().await;
+            let (qbit, _sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("newznab", qbit)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("err=") && location.contains("protocol"),
+                "expected protocol-mismatch err redirect, got: {location}"
+            );
+            assert!(
+                crate::models::indexers::list_all(&state.db)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "newznab→qBit save must be rejected"
+            );
+        }
+
+        #[tokio::test]
+        async fn torznab_pinned_to_qbit_succeeds() {
+            // Positive test — same-protocol pair must save through.
+            let db = in_memory_pool().await;
+            let (qbit, _sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("torznab", qbit)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("msg=") && !location.contains("err="),
+                "expected success redirect, got: {location}"
+            );
+            let rows = crate::models::indexers::list_all(&state.db).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].download_client_id, Some(qbit));
+        }
+
+        #[tokio::test]
+        async fn newznab_pinned_to_sab_succeeds() {
+            let db = in_memory_pool().await;
+            let (_qbit, sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("newznab", sab)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("msg=") && !location.contains("err="),
+                "expected success redirect, got: {location}"
+            );
+            let rows = crate::models::indexers::list_all(&state.db).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].download_client_id, Some(sab));
+        }
+
+        #[tokio::test]
+        async fn no_pin_skips_validation() {
+            // The "(use default)" path — empty download_client_id —
+            // bypasses the protocol guard since there's no client
+            // to validate against. Default-routing happens at grab
+            // time per the existing pin-resolution chain.
+            let db = in_memory_pool().await;
+            let _ = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let mut form = upsert_form("torznab", 0);
+            form.download_client_id = None;
+            let resp = settings_indexers_upsert(State(state.clone()), Form(form)).await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("msg=") && !location.contains("err="),
+                "expected success redirect, got: {location}"
+            );
+        }
     }
 
     /// Toast wording is user-facing — `?msg=Saved` was the

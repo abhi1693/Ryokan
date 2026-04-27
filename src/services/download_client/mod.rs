@@ -501,6 +501,36 @@ pub fn translate_client_path(
 /// "which impl do we pick" logic lives in one place and the arm for
 /// each client ships alongside its `mod deluge` / `mod qbittorrent`
 /// etc. as Phase 3+ clients land.
+/// Wire-protocol family a download-client kind handles. Lets the
+/// indexer-pin save path enforce "torznab → torrent client; newznab
+/// → usenet client" without scattering the kind→protocol mapping
+/// across Settings handlers + UI templates. Mirrors the `Protocol`
+/// discriminator Sonarr exposes on `IDownloadClient`.
+///
+/// Returns `None` for an unknown kind — callers treat that as
+/// "permissive" since `rebuild_clients_cache` already rejects
+/// unknown kinds at instantiation time, so an unrecognized kind
+/// here just means the indexer-pin save path won't second-guess.
+pub fn protocol_for_client_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "qbittorrent" | "deluge" | "transmission" | "rtorrent" => Some("torrent"),
+        "sabnzbd" => Some("usenet"),
+        _ => None,
+    }
+}
+
+/// Mirror for `indexers.kind`. Torznab indexers surface torrent
+/// magnets / `.torrent` URLs; newznab indexers surface NZB URLs.
+/// Invalid combos (newznab → BT client, torznab → SAB) are rejected
+/// at the indexer upsert / Nyaa-pin save path with a clear toast.
+pub fn protocol_for_indexer_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "torznab" => Some("torrent"),
+        "newznab" => Some("usenet"),
+        _ => None,
+    }
+}
+
 /// Multi-client routing — materialize every enabled row in
 /// `download_clients` into a live `Arc<dyn DownloadClient>`,
 /// keyed by row id. Used at startup and on Settings → Downloads

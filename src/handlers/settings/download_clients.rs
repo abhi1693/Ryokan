@@ -373,6 +373,24 @@ pub async fn settings_indexers_nyaa_pin(
             trimmed.parse::<i64>().ok()
         }
     });
+    // Protocol guard — Nyaa surfaces torrent magnets / .torrent URLs.
+    // A SAB pin would resolve at grab time and immediately fail at
+    // SAB's `mode=addurl` ("invalid NZB"). Refuse the save with a
+    // clear toast instead.
+    if let Some(client_id) = pin
+        && let Ok(Some(row)) =
+            crate::models::download_clients::get_by_id(&state.db, client_id).await
+        && let Some(client_proto) =
+            crate::services::download_client::protocol_for_client_kind(&row.kind)
+        && client_proto != "torrent"
+    {
+        let msg = urlencoding::encode(&format!(
+            "Can't pin Nyaa to a {} client (Nyaa returns torrents; {} accepts {client_proto})",
+            row.kind, row.kind
+        ))
+        .into_owned();
+        return Redirect::to(&format!("/settings?tab=indexers&err={msg}"));
+    }
     let result = sqlx::query("UPDATE config SET nyaa_download_client_id = ? WHERE id = 1")
         .bind(pin)
         .execute(&state.db)
@@ -667,5 +685,60 @@ mod tests {
                 .await
                 .unwrap();
         assert!(pinned.is_none());
+    }
+
+    /// PR G follow-up — Nyaa surfaces torrent magnets, so pinning to
+    /// a SAB client would resolve at grab time and immediately fail
+    /// at SAB's `mode=addurl`. Reject the save with a clear toast.
+    #[tokio::test]
+    async fn nyaa_pin_to_sab_client_is_rejected() {
+        let db = in_memory_pool().await;
+        let sab = crate::models::download_clients::insert(
+            &db,
+            DownloadClientForm {
+                name: "SAB",
+                kind: "sabnzbd",
+                url: "http://sab.local",
+                username: "",
+                password: "key",
+                label: "tv",
+                download_path: "",
+                enabled: true,
+                is_default: false,
+            },
+        )
+        .await
+        .unwrap();
+        let _ = sqlx::query("INSERT OR IGNORE INTO config (id) VALUES (1)")
+            .execute(&db)
+            .await;
+        let state = build_test_app_state(db, None);
+        let resp = settings_indexers_nyaa_pin(
+            State(state.clone()),
+            Form(NyaaPinForm {
+                download_client_id: Some(sab.to_string()),
+            }),
+        )
+        .await
+        .into_response();
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("err=") && location.contains("Nyaa"),
+            "expected protocol-mismatch err redirect, got: {location}"
+        );
+        // The pin must NOT have been persisted.
+        let pinned: Option<i64> =
+            sqlx::query_scalar("SELECT nyaa_download_client_id FROM config WHERE id = 1")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert!(
+            pinned.is_none(),
+            "Nyaa→SAB save must be rejected, not silently persisted"
+        );
     }
 }
