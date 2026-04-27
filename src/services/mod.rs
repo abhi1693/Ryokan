@@ -23,6 +23,7 @@ pub mod interactive_search_cache;
 pub mod logger;
 pub mod progress;
 pub mod quality;
+pub mod task_registry;
 
 pub mod rss;
 

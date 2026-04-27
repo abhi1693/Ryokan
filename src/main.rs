@@ -115,6 +115,7 @@ use services::{
         handlers::system::api_force_upgrade_search,
         handlers::system::api_rebuild_cached_metadata,
         handlers::system::api_anibridge_reload,
+        handlers::system::api_system_tasks,
         // Grab (issue #83 interactive file picker)
         handlers::grab::grab_preview,
         handlers::grab::grab_preview_status,
@@ -134,6 +135,7 @@ use services::{
         services::auto_search::AutoSearchHit,
         services::progress::ProgressEvent,
         services::progress::ProgressPoll,
+        services::task_registry::TaskSnapshot,
         models::log::LogEntry,
         models::episode_tags::GrabHistoryEntry,
         handlers::system::ClientLogForm,
@@ -208,7 +210,11 @@ fn aliased(paths: &[&str], handler: axum::routing::MethodRouter<AppState>) -> Ro
     router
 }
 
-async fn supervise<F, Fut>(name: &'static str, mut make_fut: F) -> !
+async fn supervise<F, Fut>(
+    registry: &services::task_registry::TaskRegistry,
+    name: &'static str,
+    mut make_fut: F,
+) -> !
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -223,21 +229,31 @@ where
     const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
     const HEALTHY_RUNTIME: Duration = Duration::from_secs(60);
 
+    // Register once and hold the per-task `Arc<TaskState>` for the
+    // life of the loop. Status mutations are atomics on the shared
+    // state — `/api/system/tasks` snapshot reads don't contend.
+    let task_state = registry.register(name).await;
+
     let mut backoff = MIN_BACKOFF;
     loop {
         let started = Instant::now();
+        task_state.mark_started(unix_now());
         let handle = tokio::spawn(make_fut());
-        match handle.await {
+        let exit_kind = match handle.await {
             Err(e) if e.is_panic() => {
                 tracing::error!("Background task '{}' panicked: {:?}", name, e);
+                services::task_registry::ExitKind::Panic
             }
             Err(e) => {
                 tracing::error!("Background task '{}' join error: {:?}", name, e);
+                services::task_registry::ExitKind::JoinError
             }
             Ok(()) => {
                 tracing::warn!("Background task '{}' exited normally", name);
+                services::task_registry::ExitKind::Normal
             }
-        }
+        };
+        task_state.mark_exited(unix_now(), exit_kind);
 
         if started.elapsed() >= HEALTHY_RUNTIME {
             backoff = MIN_BACKOFF;
@@ -245,8 +261,18 @@ where
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
         tracing::warn!("supervise '{}': restarting in {:?}", name, backoff);
+        task_state.mark_backoff(backoff.as_millis() as u64);
         tokio::time::sleep(backoff).await;
     }
+}
+
+/// Wall-clock unix-seconds reader. Cheap; called once per supervise
+/// transition (start / exit).
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// `--sanitize-db-for-debug` entrypoint. Copies the live DB to a
@@ -467,6 +493,7 @@ async fn main() {
         interactive_search_cache: services::interactive_search_cache::new(),
         oauth_state: services::oauth_state::new(),
         start_time: chrono::Utc::now(),
+        tasks: services::task_registry::TaskRegistry::new(),
     };
 
     // Initialize the multi-client pool from `download_clients` rows.
@@ -826,6 +853,7 @@ async fn main() {
             "/api/system/reload-anibridge",
             post(handlers::system::api_anibridge_reload),
         )
+        .route("/api/system/tasks", get(handlers::system::api_system_tasks))
         .route("/help", get(handlers::help::help_page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
@@ -1103,8 +1131,9 @@ async fn main() {
     // silent for the rest of the process lifetime.
     {
         let rss_state = state.clone();
+        let task_registry_rss_sync = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("rss_sync", move || {
+            supervise(&task_registry_rss_sync, "rss_sync", move || {
                 let inner_state = rss_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -1210,40 +1239,45 @@ async fn main() {
     // fresh sweep on every `cargo run`.
     {
         let metadata_db = db.clone();
+        let task_registry_metadata_refresh = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("metadata_refresh", move || {
-                let db = metadata_db.clone();
-                async move {
-                    let period = std::time::Duration::from_secs(12 * 60 * 60);
-                    let delay = models::scheduled_tasks::duration_until_next_run(
-                        &db,
-                        "metadata_refresh",
-                        period,
-                    )
-                    .await;
-                    tokio::time::sleep(delay).await;
-                    loop {
-                        let _ = models::scheduled_tasks::mark_started(
+            supervise(
+                &task_registry_metadata_refresh,
+                "metadata_refresh",
+                move || {
+                    let db = metadata_db.clone();
+                    async move {
+                        let period = std::time::Duration::from_secs(12 * 60 * 60);
+                        let delay = models::scheduled_tasks::duration_until_next_run(
                             &db,
                             "metadata_refresh",
-                            "Refreshing tracked series metadata",
+                            period,
                         )
                         .await;
-                        let (refreshed, failed) =
-                            services::metadata_sync::refresh_all_series_metadata(&db).await;
-                        let status = if failed > 0 { "warn" } else { "ok" };
-                        let detail = format!("refreshed={}, failed={}", refreshed, failed);
-                        let _ = models::scheduled_tasks::mark_finished(
-                            &db,
-                            "metadata_refresh",
-                            status,
-                            &detail,
-                        )
-                        .await;
-                        tokio::time::sleep(period).await;
+                        tokio::time::sleep(delay).await;
+                        loop {
+                            let _ = models::scheduled_tasks::mark_started(
+                                &db,
+                                "metadata_refresh",
+                                "Refreshing tracked series metadata",
+                            )
+                            .await;
+                            let (refreshed, failed) =
+                                services::metadata_sync::refresh_all_series_metadata(&db).await;
+                            let status = if failed > 0 { "warn" } else { "ok" };
+                            let detail = format!("refreshed={}, failed={}", refreshed, failed);
+                            let _ = models::scheduled_tasks::mark_finished(
+                                &db,
+                                "metadata_refresh",
+                                status,
+                                &detail,
+                            )
+                            .await;
+                            tokio::time::sleep(period).await;
+                        }
                     }
-                }
-            })
+                },
+            )
             .await;
         });
     }
@@ -1251,8 +1285,9 @@ async fn main() {
     // Background task: clean up logs and old RSS decisions older than 30 days every hour.
     {
         let cleanup_db = db.clone();
+        let task_registry_cleanup = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("cleanup", move || {
+            supervise(&task_registry_cleanup, "cleanup", move || {
                 let cleanup_db = cleanup_db.clone();
                 async move {
                     let period = std::time::Duration::from_secs(3600);
@@ -1400,50 +1435,56 @@ async fn main() {
     // Background task: post-processing — move/rename completed downloads every minute.
     {
         let pp_state = state.clone();
+        let task_registry_post_processing = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("post_processing", move || {
-                let pp_state = pp_state.clone();
-                async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                    loop {
-                        interval.tick().await;
-                        let enabled = models::config::get_config(&pp_state.db)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|c| c.post_processing_enabled)
-                            .unwrap_or(false);
-                        let _ = models::scheduled_tasks::touch_definition(
-                            &pp_state.db,
-                            "post_processing",
-                            "Post-processing",
-                            "Every 1 minute (when enabled)",
-                            enabled,
-                        )
-                        .await;
-                        // Call run_once unconditionally so the #14 lightweight
-                        // `advance_state_without_import` sweep can fire when
-                        // post-processing is disabled. run_once internally
-                        // branches on cfg.post_processing_enabled to choose
-                        // between the full import flow and the state-only
-                        // advance.
-                        let _ = models::scheduled_tasks::mark_started(
-                            &pp_state.db,
-                            "post_processing",
-                            "Checking for completed downloads",
-                        )
-                        .await;
-                        services::post_processing::run_once(&pp_state).await;
-                        let _ = models::scheduled_tasks::mark_finished(
-                            &pp_state.db,
-                            "post_processing",
-                            "ok",
-                            "",
-                        )
-                        .await;
+            supervise(
+                &task_registry_post_processing,
+                "post_processing",
+                move || {
+                    let pp_state = pp_state.clone();
+                    async move {
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(60));
+                        loop {
+                            interval.tick().await;
+                            let enabled = models::config::get_config(&pp_state.db)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|c| c.post_processing_enabled)
+                                .unwrap_or(false);
+                            let _ = models::scheduled_tasks::touch_definition(
+                                &pp_state.db,
+                                "post_processing",
+                                "Post-processing",
+                                "Every 1 minute (when enabled)",
+                                enabled,
+                            )
+                            .await;
+                            // Call run_once unconditionally so the #14 lightweight
+                            // `advance_state_without_import` sweep can fire when
+                            // post-processing is disabled. run_once internally
+                            // branches on cfg.post_processing_enabled to choose
+                            // between the full import flow and the state-only
+                            // advance.
+                            let _ = models::scheduled_tasks::mark_started(
+                                &pp_state.db,
+                                "post_processing",
+                                "Checking for completed downloads",
+                            )
+                            .await;
+                            services::post_processing::run_once(&pp_state).await;
+                            let _ = models::scheduled_tasks::mark_finished(
+                                &pp_state.db,
+                                "post_processing",
+                                "ok",
+                                "",
+                            )
+                            .await;
+                        }
                     }
-                }
-            })
+                },
+            )
             .await;
         });
     }
@@ -1462,64 +1503,69 @@ async fn main() {
     // classify anything.
     {
         let classify_state = state.clone();
+        let task_registry_library_classify = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("library_classify", move || {
-                let classify_state = classify_state.clone();
-                async move {
-                    let period = std::time::Duration::from_secs(6 * 60 * 60);
-                    // Even when the persisted timer says we're overdue,
-                    // nudge a minimum startup delay so a big ffprobe sweep
-                    // doesn't race the rest of initialization on a cold
-                    // boot. Five minutes gives the rest of main.rs time
-                    // to settle and the user time to see the library
-                    // index render before we start hammering the disk.
-                    const MIN_STARTUP_DELAY: std::time::Duration =
-                        std::time::Duration::from_secs(5 * 60);
-                    let delay = models::scheduled_tasks::duration_until_next_run(
-                        &classify_state.db,
-                        "library_classify",
-                        period,
-                    )
-                    .await
-                    .max(MIN_STARTUP_DELAY);
-                    tokio::time::sleep(delay).await;
-                    loop {
-                        let _ = models::scheduled_tasks::touch_definition(
+            supervise(
+                &task_registry_library_classify,
+                "library_classify",
+                move || {
+                    let classify_state = classify_state.clone();
+                    async move {
+                        let period = std::time::Duration::from_secs(6 * 60 * 60);
+                        // Even when the persisted timer says we're overdue,
+                        // nudge a minimum startup delay so a big ffprobe sweep
+                        // doesn't race the rest of initialization on a cold
+                        // boot. Five minutes gives the rest of main.rs time
+                        // to settle and the user time to see the library
+                        // index render before we start hammering the disk.
+                        const MIN_STARTUP_DELAY: std::time::Duration =
+                            std::time::Duration::from_secs(5 * 60);
+                        let delay = models::scheduled_tasks::duration_until_next_run(
                             &classify_state.db,
                             "library_classify",
-                            "Library classify sweep",
-                            "Every 6 hours",
-                            true,
+                            period,
                         )
-                        .await;
-                        let _ = models::scheduled_tasks::mark_started(
-                            &classify_state.db,
-                            "library_classify",
-                            "Re-classifying unknown / unclassified files",
-                        )
-                        .await;
-                        let report = services::post_processing::scan_library_for_unclassified(
-                            &classify_state,
-                        )
-                        .await;
-                        let detail = format!(
-                            "series={}, files_scanned={}, classified={}, needs_review={}",
-                            report.series_scanned,
-                            report.files_scanned,
-                            report.files_classified,
-                            report.files_needing_review,
-                        );
-                        let _ = models::scheduled_tasks::mark_finished(
-                            &classify_state.db,
-                            "library_classify",
-                            "ok",
-                            &detail,
-                        )
-                        .await;
-                        tokio::time::sleep(period).await;
+                        .await
+                        .max(MIN_STARTUP_DELAY);
+                        tokio::time::sleep(delay).await;
+                        loop {
+                            let _ = models::scheduled_tasks::touch_definition(
+                                &classify_state.db,
+                                "library_classify",
+                                "Library classify sweep",
+                                "Every 6 hours",
+                                true,
+                            )
+                            .await;
+                            let _ = models::scheduled_tasks::mark_started(
+                                &classify_state.db,
+                                "library_classify",
+                                "Re-classifying unknown / unclassified files",
+                            )
+                            .await;
+                            let report = services::post_processing::scan_library_for_unclassified(
+                                &classify_state,
+                            )
+                            .await;
+                            let detail = format!(
+                                "series={}, files_scanned={}, classified={}, needs_review={}",
+                                report.series_scanned,
+                                report.files_scanned,
+                                report.files_classified,
+                                report.files_needing_review,
+                            );
+                            let _ = models::scheduled_tasks::mark_finished(
+                                &classify_state.db,
+                                "library_classify",
+                                "ok",
+                                &detail,
+                            )
+                            .await;
+                            tokio::time::sleep(period).await;
+                        }
                     }
-                }
-            })
+                },
+            )
             .await;
         });
     }
@@ -1529,8 +1575,9 @@ async fn main() {
     // potentially-30-minute sweep that just finished an hour ago.
     {
         let upgrade_state = state.clone();
+        let task_registry_upgrade_search = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("upgrade_search", move || {
+            supervise(&task_registry_upgrade_search, "upgrade_search", move || {
                 let upgrade_state = upgrade_state.clone();
                 async move {
                     let period = std::time::Duration::from_secs(24 * 60 * 60);
@@ -1632,49 +1679,54 @@ async fn main() {
     // GitHub when a recent copy exists.
     {
         let anibridge_db = db.clone();
+        let task_registry_anibridge_refresh = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("anibridge_refresh", move || {
-                let anibridge_db = anibridge_db.clone();
-                async move {
-                    // Share the interval with the on-disk cache TTL in
-                    // `services::anibridge` so the bg task cadence and
-                    // startup freshness check can't drift apart.
-                    let period = services::anibridge::REFRESH_INTERVAL;
-                    let delay = models::scheduled_tasks::duration_until_next_run(
-                        &anibridge_db,
-                        "anibridge_refresh",
-                        period,
-                    )
-                    .await;
-                    tokio::time::sleep(delay).await;
-                    loop {
-                        let _ = models::scheduled_tasks::mark_started(
+            supervise(
+                &task_registry_anibridge_refresh,
+                "anibridge_refresh",
+                move || {
+                    let anibridge_db = anibridge_db.clone();
+                    async move {
+                        // Share the interval with the on-disk cache TTL in
+                        // `services::anibridge` so the bg task cadence and
+                        // startup freshness check can't drift apart.
+                        let period = services::anibridge::REFRESH_INTERVAL;
+                        let delay = models::scheduled_tasks::duration_until_next_run(
                             &anibridge_db,
                             "anibridge_refresh",
-                            "Refreshing anibridge mappings",
+                            period,
                         )
                         .await;
-                        if services::anibridge::reload().await {
-                            let _ = models::scheduled_tasks::mark_finished(
+                        tokio::time::sleep(delay).await;
+                        loop {
+                            let _ = models::scheduled_tasks::mark_started(
                                 &anibridge_db,
                                 "anibridge_refresh",
-                                "ok",
-                                "Mappings refreshed",
+                                "Refreshing anibridge mappings",
                             )
                             .await;
-                        } else {
-                            let _ = models::scheduled_tasks::mark_finished(
-                                &anibridge_db,
-                                "anibridge_refresh",
-                                "error",
-                                "Failed to download mappings",
-                            )
-                            .await;
+                            if services::anibridge::reload().await {
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &anibridge_db,
+                                    "anibridge_refresh",
+                                    "ok",
+                                    "Mappings refreshed",
+                                )
+                                .await;
+                            } else {
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &anibridge_db,
+                                    "anibridge_refresh",
+                                    "error",
+                                    "Failed to download mappings",
+                                )
+                                .await;
+                            }
+                            tokio::time::sleep(period).await;
                         }
-                        tokio::time::sleep(period).await;
                     }
-                }
-            })
+                },
+            )
             .await;
         });
     }
@@ -1686,8 +1738,9 @@ async fn main() {
     // a HashMap retain) so a 30s tick is fine.
     {
         let progress_state = state.clone();
+        let task_registry_progress_sweep = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("progress_sweep", move || {
+            supervise(&task_registry_progress_sweep, "progress_sweep", move || {
                 let progress = progress_state.progress.clone();
                 async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -1710,8 +1763,9 @@ async fn main() {
     // branches that skip auto-commit but still delete the row.
     {
         let grab_sweep_state = state.clone();
+        let task_registry_grab_sweep = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("grab_sweep", move || {
+            supervise(&task_registry_grab_sweep, "grab_sweep", move || {
                 let state = grab_sweep_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(services::grab_sweep::SWEEP_INTERVAL);
@@ -1744,8 +1798,9 @@ async fn main() {
     // MAL animelist + token-refresh, and the staging-table merge.
     {
         let ext_sync_state = state.clone();
+        let task_registry_external_sync = state.tasks.clone();
         tokio::spawn(async move {
-            supervise("external_sync", move || {
+            supervise(&task_registry_external_sync, "external_sync", move || {
                 let state = ext_sync_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));

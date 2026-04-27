@@ -101,6 +101,7 @@ pub fn build_test_app_state(
         // `chrono::Utc::now()` at process boot.
         start_time: chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_067_200, 0)
             .expect("epoch is valid"),
+        tasks: crate::services::task_registry::TaskRegistry::new(),
     }
 }
 
