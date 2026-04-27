@@ -486,6 +486,12 @@ pub async fn series_detail(
         banner_fut,
         refresh_fut,
     );
+    // Issue #106 — surface stale-cache fallback to the user. The read
+    // path silently serves cached rows regardless of staleness; this
+    // flag drives a warning banner so a multi-day-old refresh isn't
+    // hidden behind an otherwise-normal-looking page.
+    let metadata_is_stale = !metadata_refreshed_at.is_empty()
+        && crate::models::metadata_cache::is_timestamp_stale(&metadata_refreshed_at);
     let ((episodes, on_disk_count, downloaded_count, size_display, monitored_count), media_root) =
         episodes_out;
     detail.cover_url = cover_url;
@@ -567,6 +573,7 @@ pub async fn series_detail(
         anilist_url,
         mal_url,
         metadata_refreshed_at,
+        metadata_is_stale,
         monitor_mode,
         monitor_mode_label,
         monitor_mode_manual_override,
