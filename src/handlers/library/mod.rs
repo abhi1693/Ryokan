@@ -81,6 +81,14 @@ struct SeriesTemplate {
     /// Empty when we've never cached metadata (shouldn't normally
     /// happen for a series reaching this page — be defensive).
     metadata_refreshed_at: String,
+    /// Issue #106 — true when `metadata_refreshed_at` is older than
+    /// `METADATA_REFRESH_INTERVAL_HOURS`. Drives a "Metadata may be
+    /// out of date" warning banner on the page; usually a sign the
+    /// upstream provider chain (AniList → Jikan → Kitsu) has been
+    /// unavailable longer than the refresh window. Existing read
+    /// path already serves the cached row regardless of staleness;
+    /// this flag just makes the situation visible to the user.
+    metadata_is_stale: bool,
     /// Raw `monitor_mode` (`all` / `future` / `missing` / `existing` /
     /// `none`). Distinct from `monitor_mode_select_value` which encodes
     /// the dropdown's display state (the latter says `"sync"` when the
