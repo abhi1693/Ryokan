@@ -381,3 +381,395 @@ async fn build_dynamic_query(
     }
     q.fetch_all(db).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::in_memory_pool;
+
+    // ── LogLevel taxonomy ────────────────────────────────────────────
+
+    #[test]
+    fn log_level_round_trips_through_as_str_and_from_str() {
+        // The taxonomy is the canonical wire format on the `logs.level`
+        // column, so as_str ↔ from_str must be a true round-trip for
+        // every variant — a renamed variant that only updated one side
+        // would silently turn writes into the from_str default of Info.
+        for lvl in [
+            LogLevel::Trace,
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ] {
+            assert_eq!(LogLevel::from_str(lvl.as_str()), lvl);
+        }
+    }
+
+    #[test]
+    fn log_level_from_str_is_case_insensitive() {
+        assert_eq!(LogLevel::from_str("WARN"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("Error"), LogLevel::Error);
+        assert_eq!(LogLevel::from_str("DeBuG"), LogLevel::Debug);
+    }
+
+    #[test]
+    fn log_level_from_str_unknown_value_coerces_to_info() {
+        // Per CLAUDE.md: `RYOKAN_DB_LOG_LEVEL` defaults to Info on an
+        // unknown value, and from_str is the read-side helper. Any
+        // future variant addition that updates `as_str` but forgets
+        // `from_str` would silently regress to this default — pinned
+        // here so the diff is loud.
+        assert_eq!(LogLevel::from_str(""), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("verbose"), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("info"), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_severity_is_strictly_increasing() {
+        // The write-side floor compares severities, so a non-monotonic
+        // ordering would let `Trace` writes through past a `Warn` floor.
+        let chain = [
+            LogLevel::Trace,
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ];
+        for w in chain.windows(2) {
+            assert!(
+                w[0].severity() < w[1].severity(),
+                "{:?} severity must precede {:?}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    // ── LogCategory taxonomy ─────────────────────────────────────────
+
+    fn all_categories() -> Vec<LogCategory> {
+        vec![
+            LogCategory::Search,
+            LogCategory::Grab,
+            LogCategory::AutoSearch,
+            LogCategory::Nyaa,
+            LogCategory::AniList,
+            LogCategory::Jikan,
+            LogCategory::QBit,
+            LogCategory::Jellyfin,
+            LogCategory::Media,
+            LogCategory::Library,
+            LogCategory::Auth,
+            LogCategory::System,
+            LogCategory::PostProcess,
+            LogCategory::Quality,
+            LogCategory::Scoring,
+            LogCategory::ExternalSync,
+        ]
+    }
+
+    #[test]
+    fn log_category_round_trips_through_as_str_and_from_str() {
+        // Same invariant as LogLevel: every variant's wire string
+        // must parse back to itself. Adding a new variant requires
+        // updating both arms or this test fails — pinned per
+        // CLAUDE.md "Adding a new variant requires updating all
+        // three of the as_str / from_str / display-name match arms."
+        for cat in all_categories() {
+            assert_eq!(LogCategory::from_str(cat.as_str()), Some(cat));
+        }
+    }
+
+    #[test]
+    fn log_category_from_str_unknown_returns_none() {
+        // Distinct from LogLevel — a bad category isn't coerced to a
+        // default, it's rejected. The handler-side filter then no-ops
+        // rather than silently filtering on the wrong column value.
+        assert!(LogCategory::from_str("not_a_category").is_none());
+        assert!(LogCategory::from_str("").is_none());
+    }
+
+    #[test]
+    fn log_category_from_str_is_case_insensitive() {
+        assert_eq!(LogCategory::from_str("ANILIST"), Some(LogCategory::AniList));
+        assert_eq!(
+            LogCategory::from_str("Auto_Search"),
+            Some(LogCategory::AutoSearch)
+        );
+    }
+
+    #[test]
+    fn log_category_qbit_label_renders_as_qbittorrent() {
+        // CLAUDE.md: "UI label is 'qBittorrent' — kept as the enum
+        // name even after multi-client work because renaming it
+        // would be a data migration on the existing logs table; the
+        // label function is where the display name lives."
+        assert_eq!(LogCategory::QBit.label(), "qBittorrent");
+        // Wire string stays as `"qbit"` so the on-disk rows keep
+        // their column value.
+        assert_eq!(LogCategory::QBit.as_str(), "qbit");
+    }
+
+    #[test]
+    fn log_category_labels_are_human_readable_for_each_variant() {
+        // Every variant must have a non-empty UI label — a missing
+        // arm in `label()` would cause a Rust compile-time
+        // exhaustiveness error on the match, but a regression where
+        // someone renames a label to "" wouldn't. Pin every label.
+        for cat in all_categories() {
+            let label = cat.label();
+            assert!(!label.is_empty(), "{:?} label must be non-empty", cat);
+        }
+    }
+
+    // ── insert / count / latest_id ───────────────────────────────────
+
+    #[tokio::test]
+    async fn insert_then_count_round_trips_through_logs_table() {
+        let db = in_memory_pool().await;
+        assert_eq!(count(&db).await.unwrap(), 0);
+
+        insert(&db, LogLevel::Info, LogCategory::System, "boot", "ok")
+            .await
+            .unwrap();
+        insert(
+            &db,
+            LogLevel::Warn,
+            LogCategory::AutoSearch,
+            "throttled",
+            "AL 429",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(count(&db).await.unwrap(), 2);
+        assert!(latest_id(&db).await.unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn latest_id_returns_zero_on_empty_table() {
+        let db = in_memory_pool().await;
+        assert_eq!(latest_id(&db).await.unwrap(), 0);
+    }
+
+    // ── query / entries_after with filters ───────────────────────────
+
+    async fn seed_three_levels(db: &SqlitePool) {
+        insert(db, LogLevel::Debug, LogCategory::Search, "d", "")
+            .await
+            .unwrap();
+        insert(db, LogLevel::Info, LogCategory::Grab, "i", "")
+            .await
+            .unwrap();
+        insert(db, LogLevel::Error, LogCategory::Nyaa, "e", "")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_returns_newest_first_with_no_filters() {
+        let db = in_memory_pool().await;
+        seed_three_levels(&db).await;
+        let rows = query(&db, &LogQuery::default()).await.unwrap();
+        // ORDER BY id DESC — last insert (Error) wins.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].level, "error");
+        assert_eq!(rows[2].level, "debug");
+    }
+
+    #[tokio::test]
+    async fn query_level_filter_uses_at_or_above_semantics() {
+        // level=warn ⇒ warn + error pass through, info/debug/trace are dropped.
+        let db = in_memory_pool().await;
+        seed_three_levels(&db).await;
+        let q = LogQuery {
+            level: Some("warn".into()),
+            ..Default::default()
+        };
+        let rows = query(&db, &q).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].level, "error");
+    }
+
+    #[tokio::test]
+    async fn query_category_filter_is_exact_match() {
+        let db = in_memory_pool().await;
+        seed_three_levels(&db).await;
+        let q = LogQuery {
+            category: Some("grab".into()),
+            ..Default::default()
+        };
+        let rows = query(&db, &q).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].category, "grab");
+    }
+
+    #[tokio::test]
+    async fn query_search_filter_matches_message_or_detail() {
+        let db = in_memory_pool().await;
+        insert(&db, LogLevel::Info, LogCategory::Grab, "fizz", "qux")
+            .await
+            .unwrap();
+        insert(&db, LogLevel::Info, LogCategory::Grab, "wibble", "fizz-bar")
+            .await
+            .unwrap();
+        insert(&db, LogLevel::Info, LogCategory::Grab, "no", "match")
+            .await
+            .unwrap();
+
+        let q = LogQuery {
+            search: Some("fizz".into()),
+            ..Default::default()
+        };
+        let rows = query(&db, &q).await.unwrap();
+        assert_eq!(rows.len(), 2, "both rows containing 'fizz' must match");
+    }
+
+    #[tokio::test]
+    async fn query_before_id_paginates_descending() {
+        let db = in_memory_pool().await;
+        for i in 0..5 {
+            insert(
+                &db,
+                LogLevel::Info,
+                LogCategory::Search,
+                &format!("m{i}"),
+                "",
+            )
+            .await
+            .unwrap();
+        }
+        let head = query(
+            &db,
+            &LogQuery {
+                limit: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(head.len(), 2);
+        let cursor = head.last().unwrap().id;
+        let next = query(
+            &db,
+            &LogQuery {
+                limit: 2,
+                before_id: Some(cursor),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // All `next` ids must be strictly less than the cursor.
+        assert!(next.iter().all(|r| r.id < cursor));
+    }
+
+    #[tokio::test]
+    async fn entries_after_id_returns_only_newer_rows() {
+        let db = in_memory_pool().await;
+        insert(&db, LogLevel::Info, LogCategory::Search, "first", "")
+            .await
+            .unwrap();
+        let after = latest_id(&db).await.unwrap();
+        insert(&db, LogLevel::Info, LogCategory::Search, "second", "")
+            .await
+            .unwrap();
+        insert(&db, LogLevel::Info, LogCategory::Search, "third", "")
+            .await
+            .unwrap();
+
+        let rows = entries_after(&db, after, 100, None, None).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.id > after));
+    }
+
+    #[tokio::test]
+    async fn entries_after_respects_level_and_category_filters() {
+        let db = in_memory_pool().await;
+        insert(&db, LogLevel::Info, LogCategory::Grab, "i-grab", "")
+            .await
+            .unwrap();
+        insert(&db, LogLevel::Warn, LogCategory::Grab, "w-grab", "")
+            .await
+            .unwrap();
+        insert(&db, LogLevel::Warn, LogCategory::Search, "w-search", "")
+            .await
+            .unwrap();
+
+        // level=warn + category=grab ⇒ only the second row.
+        let rows = entries_after(&db, 0, 100, Some("warn"), Some("grab"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message, "w-grab");
+    }
+
+    #[tokio::test]
+    async fn entries_after_treats_empty_category_as_unfiltered() {
+        // The `filter(|c| !c.is_empty())` arm makes an empty-string
+        // category equivalent to None — the handler passes "" when
+        // the user clears the dropdown rather than re-stringifying
+        // `Option<String>` into None at every layer.
+        let db = in_memory_pool().await;
+        insert(&db, LogLevel::Info, LogCategory::Search, "s", "")
+            .await
+            .unwrap();
+        insert(&db, LogLevel::Info, LogCategory::Grab, "g", "")
+            .await
+            .unwrap();
+        let rows = entries_after(&db, 0, 100, None, Some("")).await.unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    // ── cleanup ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cleanup_removes_only_aged_rows() {
+        let db = in_memory_pool().await;
+        insert(&db, LogLevel::Info, LogCategory::Search, "fresh", "")
+            .await
+            .unwrap();
+        insert(&db, LogLevel::Info, LogCategory::Search, "old", "")
+            .await
+            .unwrap();
+        // Roll the second row's timestamp 60 days into the past.
+        sqlx::query(
+            "UPDATE logs SET timestamp = datetime('now', '-60 days') WHERE message = 'old'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let removed = cleanup(&db, 30).await.unwrap();
+        assert_eq!(removed, 1);
+
+        let remaining = query(&db, &LogQuery::default()).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].message, "fresh");
+    }
+
+    // ── levels_at_or_above ──────────────────────────────────────────
+
+    #[test]
+    fn levels_at_or_above_includes_self_and_higher() {
+        assert_eq!(levels_at_or_above("warn"), vec!["warn", "error"]);
+        assert_eq!(levels_at_or_above("ERROR"), vec!["error"]);
+        assert_eq!(
+            levels_at_or_above("trace"),
+            vec!["trace", "debug", "info", "warn", "error"]
+        );
+    }
+
+    #[test]
+    fn levels_at_or_above_unknown_falls_back_to_all_levels() {
+        // `position()` returning None ⇒ idx = 0 ⇒ all five levels.
+        // Pinned so a future change to "drop everything on unknown
+        // input" doesn't slip through silently and silently drop
+        // every log row past the filter.
+        assert_eq!(
+            levels_at_or_above("garbage"),
+            vec!["trace", "debug", "info", "warn", "error"]
+        );
+    }
+}
