@@ -129,16 +129,25 @@
 
             <div class="form-group">
                 <label for="indexer-edit-dc">Download Client</label>
+                {# kind→protocol mapping below mirrors
+                   `services::download_client::protocol_for_client_kind`.
+                   Keep them in sync — adding a future client kind
+                   (e.g. NZBGet → usenet) means editing both. The JS
+                   in static/js/settings.js gates the picker by
+                   data-protocol; a missing/wrong value would leak
+                   protocol-mismatch saves through to the server-side
+                   guard. #}
                 <select id="indexer-edit-dc" name="download_client_id">
                     <option value="">(use default)</option>
                     {% for dc in download_clients %}
                     <option value="{{ dc.id }}"
+                        data-protocol="{% if dc.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %}"
                         {% if let Some(pin) = edit.download_client_id %}{% if *pin == dc.id %}selected{% endif %}{% endif %}>
                         {{ dc.name }}{% if dc.is_default %} (default){% endif %}
                     </option>
                     {% endfor %}
                 </select>
-                <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag.</span>
+                <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag. Torznab indexers can only be pinned to torrent clients; newznab indexers to usenet clients (SABnzbd).</span>
             </div>
 
             <button type="submit" class="btn btn-primary">Save Changes</button>
@@ -238,10 +247,13 @@
                 <select id="indexer-add-dc" name="download_client_id">
                     <option value="">(use default)</option>
                     {% for dc in download_clients %}
-                    <option value="{{ dc.id }}">{{ dc.name }}{% if dc.is_default %} (default){% endif %}</option>
+                    <option value="{{ dc.id }}"
+                        data-protocol="{% if dc.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %}">
+                        {{ dc.name }}{% if dc.is_default %} (default){% endif %}
+                    </option>
                     {% endfor %}
                 </select>
-                <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag.</span>
+                <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag. Torznab indexers can only be pinned to torrent clients; newznab indexers to usenet clients (SABnzbd).</span>
             </div>
 
             <button type="submit" class="btn btn-primary">Add Indexer</button>
@@ -277,18 +289,24 @@
     <fieldset class="settings-form">
         <legend>Nyaa search</legend>
         <p class="form-hint" style="margin: 0 0 12px;">
-            Ryokan's built-in Nyaa search (the public-tracker hot path) isn't a torznab indexer row — pin it to a download client here.
+            Ryokan's built-in Nyaa search (the public-tracker hot path) isn't a torznab indexer row — pin it to a download client here. Only torrent clients are eligible since Nyaa returns magnets / .torrent URLs.
         </p>
         <form method="post" action="/settings/indexers/nyaa-pin" class="settings-form settings-subform">
             <div class="form-group">
                 <label for="nyaa-dc">Download Client</label>
                 <select id="nyaa-dc" name="download_client_id">
                     <option value="">(use default)</option>
+                    {# Filter to torrent-shaped clients only (skip SAB).
+                       Nyaa items are torrents; pinning to a usenet
+                       client would resolve at grab time and fail at
+                       the client's add path. #}
                     {% for dc in download_clients %}
+                    {% if dc.kind != "sabnzbd" %}
                     <option value="{{ dc.id }}"
                         {% if let Some(pin) = config.nyaa_download_client_id %}{% if *pin == dc.id %}selected{% endif %}{% endif %}>
                         {{ dc.name }}{% if dc.is_default %} (default){% endif %}
                     </option>
+                    {% endif %}
                     {% endfor %}
                 </select>
             </div>

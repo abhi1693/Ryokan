@@ -1280,7 +1280,50 @@ pub async fn run_once(state: &AppState) {
         let pool = state.download_clients.read().await.clone();
         pool.default_id
     };
+
+    // Pre-pass: NULL the `download_client_id` stamp on any pending
+    // grab whose stamped client is no longer in the pool (deleted
+    // by the user, disabled, or referenced via a never-existed id
+    // due to an earlier crash mid-write). Runs unconditionally
+    // before fan-out so the cleanup fires even in the corner case
+    // where every pending grab points at a gone client and the
+    // fan-out itself would early-return at `clients.is_empty()`.
+    //
+    // PR 110's in-loop cleanup also handled this but only when at
+    // least one valid client made it into the per-pass `clients`
+    // map — the all-orphans case fell through the `is_empty()`
+    // guard. The pre-pass is sufficient because the pool can't
+    // change mid-run; checking once up front catches every orphan
+    // and lets the loop body stay focused on matching.
+    //
+    // The next post-processing tick re-loads `pending` and finds
+    // the now-NULLed grab, falls through to default, and either
+    // matches against the default's `list_scoped` or hits the 60s
+    // stale-mark grace window.
+    for grab in &pending {
+        if let Some(id) = grab.download_client_id
+            && state.client_by_id(id).await.is_none()
+        {
+            let _ = grabbed_torrents::set_download_client(&state.db, grab.id, None).await;
+        }
+    }
+
     let mut needed_ids: HashSet<i64> = HashSet::new();
+    // Re-read pending after the cleanup so post-cleanup NULL stamps
+    // contribute to needed_ids via the `or(default_id_opt)` branch.
+    let pending = match grabbed_torrents::get_all_pending(&state.db).await {
+        Ok(p) => p,
+        Err(e) => {
+            logger::error(
+                &state.db,
+                LogCategory::PostProcess,
+                "Failed to re-query pending grabs after orphan cleanup",
+                &e.to_string(),
+            )
+            .await;
+            return;
+        }
+    };
     for grab in &pending {
         if let Some(id) = grab.download_client_id {
             needed_ids.insert(id);
@@ -1289,8 +1332,10 @@ pub async fn run_once(state: &AppState) {
         }
     }
     if needed_ids.is_empty() {
-        // No clients in pool — same posture as the pre-PR-F early
-        // return when default_download_client returned None.
+        // No clients in pool at all — neither default nor any
+        // pinned grab has somewhere to go. Same posture as the
+        // pre-PR-F early return when default_download_client
+        // returned None.
         return;
     }
 
@@ -1371,31 +1416,13 @@ pub async fn run_once(state: &AppState) {
             continue;
         };
         let Some(client) = clients.get(&grab_client_id).cloned() else {
-            // The client this grab routed to wasn't reachable on this
-            // pass. Two reasons:
-            //   1. `list_scoped` failed for this client this round —
-            //      transient; leave the grab alone, retry next pass.
-            //   2. The client row was disabled (or deleted post-grab
-            //      via a path that didn't NULL our stamp). Without
-            //      the NULL-out below, a stamped-but-orphaned grab
-            //      sits `pending` forever because this `continue`
-            //      runs *before* the 60s stale check — the grab
-            //      never reaches `mark_removed`.
-            //
-            // Distinguish the two by checking whether the client is
-            // in the pool *at all* (not just in our per-pass `clients`
-            // map, which is filtered by successful `list_scoped`).
-            // A client that's not even in the pool can only mean
-            // disabled-or-deleted, so NULL the stamp; the next pass
-            // falls through to default and the stale path takes over.
-            // A client that *is* in the pool but missing from
-            // `clients` means `list_scoped` failed transiently —
-            // leave the stamp alone.
-            if grab.download_client_id.is_some()
-                && state.client_by_id(grab_client_id).await.is_none()
-            {
-                let _ = grabbed_torrents::set_download_client(&state.db, grab.id, None).await;
-            }
+            // The client this grab routed to wasn't reachable on
+            // this pass — `list_scoped` failed transiently. Leave
+            // the grab pending so the next pass retries against
+            // the same client. The disabled / deleted case is
+            // already handled by the orphan-stamp pre-pass at the
+            // top of `run_once`, which NULLs the stamp before we
+            // even reach this loop.
             continue;
         };
         let all_by_hash = match by_hash_per_client.get(&grab_client_id) {

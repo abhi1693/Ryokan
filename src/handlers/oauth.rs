@@ -1006,6 +1006,252 @@ mod tests {
         );
     }
 
+    // ── current_unix_ts ──────────────────────────────────────────────
+
+    #[test]
+    fn current_unix_ts_returns_a_recent_timestamp() {
+        // Smoke-check: returns "now in seconds since epoch" — at least
+        // some plausible-looking value (not 0, not in the past). Pin
+        // a sane lower bound so a clock regression past the epoch
+        // (e.g. accidental Duration::ZERO fallback) surfaces here.
+        let t = current_unix_ts();
+        // 2024-01-01 ≈ 1704067200 — anything before that is broken.
+        assert!(t > 1_700_000_000, "ts looks broken: {t}");
+    }
+
+    // ── anilist_submit / mal_submit reject paths ─────────────────────
+
+    #[tokio::test]
+    async fn anilist_submit_rejects_empty_token_or_state() {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        for (token, state) in [("", "abc"), ("abc", ""), ("   ", "abc"), ("abc", "   ")] {
+            let result = anilist_submit(
+                State(app_state.clone()),
+                Json(TokenSubmitForm {
+                    access_token: token.into(),
+                    state: state.into(),
+                }),
+            )
+            .await;
+            match result {
+                Err((status, _)) => assert_eq!(status, axum::http::StatusCode::BAD_REQUEST),
+                Ok(_) => panic!("must reject empty token={token:?} state={state:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn anilist_submit_rejects_when_no_pending_authorization() {
+        // No /start was called, so nothing is stashed. The /submit
+        // path must reject with a clean 400 + "no pending" message.
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        let result = anilist_submit(
+            State(app_state),
+            Json(TokenSubmitForm {
+                access_token: "tok".into(),
+                state: "any".into(),
+            }),
+        )
+        .await;
+        let (status, msg) = match result {
+            Err(e) => e,
+            Ok(_) => panic!("must reject"),
+        };
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(msg.to_lowercase().contains("no pending"));
+    }
+
+    #[tokio::test]
+    async fn mal_submit_rejects_empty_inputs() {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        let result = mal_submit(
+            State(app_state),
+            Json(CodeSubmitForm {
+                code: "".into(),
+                state: "abc".into(),
+            }),
+        )
+        .await;
+        match result {
+            Err((status, _)) => assert_eq!(status, axum::http::StatusCode::BAD_REQUEST),
+            Ok(_) => panic!("must reject empty code"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mal_submit_rejects_state_mismatch_before_token_exchange() {
+        // PKCE verifier + state stashed by /start; pasted state nonce
+        // doesn't match. Reject with 400 — never call MAL's token
+        // endpoint. Without this guard a cross-window CSRF could
+        // exchange a victim's auth code on the attacker's behalf.
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        oauth_state::stash(
+            &app_state.oauth_state,
+            PROVIDER_MAL,
+            "verifier-x".into(),
+            "stashed-mal".into(),
+        );
+
+        let result = mal_submit(
+            State(app_state),
+            Json(CodeSubmitForm {
+                code: "any-code".into(),
+                state: "tampered".into(),
+            }),
+        )
+        .await;
+        let (status, msg) = match result {
+            Err(e) => e,
+            Ok(_) => panic!("must reject mismatched state"),
+        };
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(msg.to_lowercase().contains("state nonce mismatch"));
+    }
+
+    // ── unlink ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unlink_drops_linked_row_and_emits_provider_in_response() {
+        // Happy path: with a linked account, unlink removes it and
+        // returns ok:true plus the provider name so the frontend can
+        // render "Unlinked AniList" in the toast.
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db.clone(), None);
+
+        external_accounts::link(
+            &db,
+            LinkRequest {
+                provider: PROVIDER_ANILIST.to_string(),
+                provider_user_id: "1".to_string(),
+                username: "u".to_string(),
+                access_token: "tok".to_string(),
+                refresh_token: String::new(),
+                access_token_expires_at: None,
+                score_format: "POINT_10".to_string(),
+            },
+        )
+        .await
+        .expect("link should succeed");
+
+        let resp = unlink(State(app_state.clone())).await.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["provider"], "anilist");
+
+        // Row gone — a follow-up get_current returns None.
+        let after = external_accounts::get_current(&db).await.unwrap();
+        assert!(after.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_preferences_persists_to_db_for_linked_account() {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db.clone(), None);
+        external_accounts::link(
+            &db,
+            LinkRequest {
+                provider: PROVIDER_ANILIST.to_string(),
+                provider_user_id: "1".to_string(),
+                username: "u".to_string(),
+                access_token: "tok".to_string(),
+                refresh_token: String::new(),
+                access_token_expires_at: None,
+                score_format: "POINT_10".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let resp = update_preferences(
+            State(app_state),
+            Json(PreferencesForm {
+                import_watching: true,
+                import_planning: false,
+                import_paused: true,
+                import_dropped: false,
+                import_completed: true,
+                skip_already_watched: true,
+            }),
+        )
+        .await
+        .expect("ok");
+        assert_eq!(resp.0["ok"], true);
+
+        let acct = external_accounts::get_current(&db)
+            .await
+            .unwrap()
+            .expect("account");
+        assert!(acct.import_watching);
+        assert!(!acct.import_planning);
+        assert!(acct.import_paused);
+        assert!(!acct.import_dropped);
+        assert!(acct.import_completed);
+        assert!(acct.skip_already_watched);
+    }
+
+    #[tokio::test]
+    async fn unlink_returns_already_unlinked_when_no_account() {
+        // Idempotent endpoint: a click when nothing is linked must not
+        // 500. The toast renders the success state without trying to
+        // surface a stale username.
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+        let resp = unlink(State(app_state)).await.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["already"], "unlinked");
+    }
+
+    // ── update_preferences ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_preferences_returns_400_when_no_account_is_linked() {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let app_state = crate::test_support::build_test_app_state(db, None);
+
+        let result = update_preferences(
+            State(app_state),
+            Json(PreferencesForm {
+                import_watching: true,
+                import_planning: true,
+                import_paused: false,
+                import_dropped: false,
+                import_completed: false,
+                skip_already_watched: false,
+            }),
+        )
+        .await;
+        let (status, _) = match result {
+            Err(e) => e,
+            Ok(_) => panic!("must reject without a linked account"),
+        };
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn sync_now_returns_json_body_when_no_account_linked() {
         // Regression for the PR #94 r2 finding: this path used to

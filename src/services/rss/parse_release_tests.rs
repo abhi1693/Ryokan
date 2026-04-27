@@ -11,6 +11,7 @@ fn item(title: &str) -> RssItem {
         group: extract_group(title),
         resolution: extract_resolution(title),
         is_batch: detect_batch(title),
+        source: RssSource::Nyaa,
     }
 }
 

@@ -25,6 +25,12 @@ use crate::models::indexers as model;
 pub struct TorznabIndexer {
     id: i64,
     name: String,
+    /// multi-rss PR 4 — protocol kind of the source row
+    /// ("torznab" / "newznab"). Surfaced via the trait's `kind()`
+    /// method so the RSS fan-out can stamp the right
+    /// `RssSource::Indexer { kind }` on each item for the
+    /// download-client protocol guard at grab time.
+    kind: String,
     /// Opaque base URL — the user pastes Prowlarr's "Copy
     /// Torznab Url" verbatim, ending in `/api`. Ryokan
     /// appends `?t=...&apikey=...&...` and never tries to
@@ -66,6 +72,7 @@ impl TorznabIndexer {
         Ok(Self {
             id: row.id,
             name: row.name.clone(),
+            kind: row.kind.clone(),
             base_url: row.url.trim_end_matches('/').to_string(),
             api_key: row.api_key.trim().to_string(),
             priority: row.priority,
@@ -134,16 +141,21 @@ impl TorznabIndexer {
             // torznab layer sees the request. Surface the status
             // so the caller's error message tells the operator
             // whether the indexer URL is reachable at all.
-            let body = resp.text().await.unwrap_or_default();
+            let body = crate::services::rss::feed::read_capped_body(resp)
+                .await
+                .unwrap_or_default();
             return Err(format!(
                 "Indexer returned HTTP {}: {}",
                 status,
                 truncate_body(&body)
             ));
         }
-        resp.text()
-            .await
-            .map_err(|e| format!("indexer response read failed: {e}"))
+        // PR 112 review #A — share the same 10 MB body cap with
+        // the RSS path. Prowlarr is local-trust but a misconfigured
+        // upstream indexer behind it can still return the full
+        // historical archive on `t=tvsearch&q=`; the cap turns OOM
+        // into a clean Err the caller logs + skips.
+        crate::services::rss::feed::read_capped_body(resp).await
     }
 
     /// Apply pre-score filtering to a release set. Currently:
@@ -168,6 +180,9 @@ impl Indexer for TorznabIndexer {
     }
     fn name(&self) -> &str {
         &self.name
+    }
+    fn kind(&self) -> &str {
+        &self.kind
     }
     fn priority(&self) -> i32 {
         self.priority
@@ -293,6 +308,10 @@ mod tests {
             min_seeders: 1,
             request_timeout_secs: None,
             download_client_id: None,
+            rss_enabled: false,
+            rss_last_polled_at: None,
+            rss_last_poll_error: String::new(),
+            rss_last_item_count: 0,
             caps_json: String::new(),
             caps_refreshed_at: None,
             created_at: 0,

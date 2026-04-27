@@ -46,6 +46,7 @@ fn item_with(title: &str, is_batch: bool) -> RssItem {
         group: String::new(),
         resolution: "1080".to_string(),
         is_batch,
+        source: RssSource::Nyaa,
     }
 }
 

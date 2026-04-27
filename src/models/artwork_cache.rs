@@ -242,3 +242,251 @@ pub async fn cleanup_orphans(
 
     Ok((refs_deleted, blobs_deleted))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{in_memory_pool, seed_series};
+
+    fn ref_for<'a>(
+        cache_key: &'a str,
+        parent_id: Option<i64>,
+        blob_hash: &'a str,
+    ) -> RefUpsert<'a> {
+        RefUpsert {
+            cache_key,
+            parent_kind: "series",
+            parent_id,
+            image_kind: "cover",
+            source_url: "https://example/cover.jpg",
+            blob_hash,
+            last_write: 1234567890,
+        }
+    }
+
+    // ── upsert_blob / get_blob_path ─────────────────────────────────
+
+    #[tokio::test]
+    async fn upsert_blob_then_get_path_round_trips() {
+        let db = in_memory_pool().await;
+        upsert_blob(&db, "hash-a", "/data/cache/a.jpg", "image/jpeg", 1024)
+            .await
+            .unwrap();
+        let path = get_blob_path(&db, "hash-a").await.unwrap();
+        assert_eq!(path.as_deref(), Some("/data/cache/a.jpg"));
+    }
+
+    #[tokio::test]
+    async fn get_blob_path_returns_none_on_miss() {
+        let db = in_memory_pool().await;
+        assert!(get_blob_path(&db, "nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_blob_overwrites_path_on_conflict() {
+        // Self-heal path — a blob row written by an older build with a
+        // relative `local_path` gets corrected on the next cache_image
+        // call. Pin the ON CONFLICT branch so a future refactor can't
+        // silently drop it.
+        let db = in_memory_pool().await;
+        upsert_blob(&db, "hash-x", "old/relative.jpg", "image/jpeg", 1)
+            .await
+            .unwrap();
+        upsert_blob(&db, "hash-x", "/data/cache/x.jpg", "image/png", 2048)
+            .await
+            .unwrap();
+        let path = get_blob_path(&db, "hash-x").await.unwrap();
+        assert_eq!(path.as_deref(), Some("/data/cache/x.jpg"));
+    }
+
+    // ── upsert_ref / get / get_local_url ────────────────────────────
+
+    #[tokio::test]
+    async fn upsert_ref_then_get_joins_through_image_blobs() {
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 1, "Show").await;
+        upsert_blob(&db, "h1", "/data/blob.jpg", "image/jpeg", 100)
+            .await
+            .unwrap();
+        upsert_ref(&db, ref_for("series-1-cover", Some(series_id), "h1"))
+            .await
+            .unwrap();
+
+        let entry = get(&db, "series-1-cover").await.unwrap().expect("hit");
+        assert_eq!(entry.cache_key, "series-1-cover");
+        assert_eq!(entry.local_path, "/data/blob.jpg");
+        assert_eq!(entry.content_type, "image/jpeg");
+        assert_eq!(entry.last_write, 1234567890);
+    }
+
+    #[tokio::test]
+    async fn upsert_ref_with_null_parent_id_round_trips() {
+        // parent_id can be NULL — refs that aren't series-keyed (e.g.
+        // arbitrary cache_keys not tied to a tracked series id) skip
+        // the FK constraint and live in the table on their own.
+        let db = in_memory_pool().await;
+        upsert_blob(&db, "h-orphan", "/data/o.jpg", "image/jpeg", 1)
+            .await
+            .unwrap();
+        upsert_ref(&db, ref_for("misc:cover", None, "h-orphan"))
+            .await
+            .unwrap();
+        assert!(get(&db, "misc:cover").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn get_local_url_includes_cache_busting_version_query() {
+        // Format `/media/art/<key>?v=<last_write>` lets the browser
+        // cache aggressively while still picking up new versions when
+        // the upstream cover changes (last_write bumps). Pin the shape.
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 42, "Show").await;
+        upsert_blob(&db, "h2", "/data/x.jpg", "image/jpeg", 1)
+            .await
+            .unwrap();
+        upsert_ref(&db, ref_for("series-42-cover", Some(series_id), "h2"))
+            .await
+            .unwrap();
+
+        let url = get_local_url(&db, "series-42-cover")
+            .await
+            .unwrap()
+            .expect("hit");
+        assert_eq!(url, "/media/art/series-42-cover?v=1234567890");
+    }
+
+    #[tokio::test]
+    async fn get_local_url_returns_none_for_missing_key() {
+        let db = in_memory_pool().await;
+        assert!(get_local_url(&db, "nope").await.unwrap().is_none());
+    }
+
+    // ── get_local_urls_batch ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_local_urls_batch_handles_empty_input_without_db_round_trip() {
+        let db = in_memory_pool().await;
+        let result = get_local_urls_batch(&db, &[]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_local_urls_batch_returns_one_url_per_known_key() {
+        let db = in_memory_pool().await;
+        let s1 = seed_series(&db, 1, "Show A").await;
+        let s2 = seed_series(&db, 2, "Show B").await;
+        upsert_blob(&db, "h1", "/data/a.jpg", "image/jpeg", 1)
+            .await
+            .unwrap();
+        upsert_blob(&db, "h2", "/data/b.jpg", "image/jpeg", 1)
+            .await
+            .unwrap();
+        let mut r1 = ref_for("series-1-cover", Some(s1), "h1");
+        r1.last_write = 1000;
+        let mut r2 = ref_for("series-2-cover", Some(s2), "h2");
+        r2.last_write = 2000;
+        upsert_ref(&db, r1).await.unwrap();
+        upsert_ref(&db, r2).await.unwrap();
+
+        let result = get_local_urls_batch(
+            &db,
+            &[
+                "series-1-cover".into(),
+                "series-2-cover".into(),
+                "missing".into(),
+            ],
+        )
+        .await
+        .unwrap();
+        // Missing keys are dropped — caller falls back to source URL.
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get("series-1-cover").unwrap(),
+            "/media/art/series-1-cover?v=1000"
+        );
+        assert_eq!(
+            result.get("series-2-cover").unwrap(),
+            "/media/art/series-2-cover?v=2000"
+        );
+    }
+
+    // ── cleanup_orphans ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cleanup_orphans_is_a_noop_under_steady_state_fk_enforcement() {
+        // Step-1 prune (orphan refs whose parent series_id no longer
+        // exists) is a defensive cleanup against historical pre-FK
+        // orphan rows; with `PRAGMA foreign_keys = ON` (sqlx's
+        // default) `image_refs.parent_id` is FK'd to `series.id` ON
+        // DELETE CASCADE, so a series remove already drops its refs
+        // in the same statement. There's no in-band way to produce
+        // an orphan ref against an active pool — the WHERE NOT IN
+        // (SELECT id FROM series) clause matches zero rows.
+        //
+        // What we *can* pin: the prune runs cleanly against a live
+        // ref/blob pair without false-positively dropping it.
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 100, "Show").await;
+        upsert_blob(&db, "h-live", "/x.jpg", "image/jpeg", 1)
+            .await
+            .unwrap();
+        upsert_ref(&db, ref_for("live", Some(series_id), "h-live"))
+            .await
+            .unwrap();
+
+        let (refs_deleted, _blobs) = cleanup_orphans(&db, 30).await.unwrap();
+        assert_eq!(refs_deleted, 0);
+        assert!(get(&db, "live").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_orphans_drops_aged_blobs_without_refs() {
+        // Step 2: a blob with no ref AND created > min_age_days ago is
+        // pruned. Use a real on-disk file in a tempdir so we can
+        // verify the file is also removed.
+        let db = in_memory_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orphan.jpg");
+        tokio::fs::write(&path, b"data").await.unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+        upsert_blob(&db, "h-aged", &path_str, "image/jpeg", 4)
+            .await
+            .unwrap();
+        // Backdate created_at past the cutoff.
+        sqlx::query("UPDATE image_blobs SET created_at = datetime('now', '-60 days')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let (_refs, blobs_deleted) = cleanup_orphans(&db, 30).await.unwrap();
+        assert_eq!(blobs_deleted, 1);
+        assert!(!path.exists(), "on-disk file must be removed");
+        // Blob row gone too.
+        assert!(get_blob_path(&db, "h-aged").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cleanup_orphans_keeps_recent_orphan_blobs_via_age_gate() {
+        // The age gate covers the cache_image race: upsert_blob lands
+        // first, upsert_ref follows. A concurrent prune in that window
+        // would delete the just-written blob. Pin the gate so a
+        // refactor that drops the age check doesn't reintroduce the
+        // race.
+        let db = in_memory_pool().await;
+        upsert_blob(&db, "h-fresh", "/tmp/x.jpg", "image/jpeg", 1)
+            .await
+            .unwrap();
+        // Don't backdate — created_at is now.
+        let (_refs, blobs_deleted) = cleanup_orphans(&db, 1).await.unwrap();
+        assert_eq!(blobs_deleted, 0);
+        assert!(get_blob_path(&db, "h-fresh").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_orphans_returns_zero_zero_on_empty_tables() {
+        let db = in_memory_pool().await;
+        let (refs, blobs) = cleanup_orphans(&db, 30).await.unwrap();
+        assert_eq!(refs, 0);
+        assert_eq!(blobs, 0);
+    }
+}

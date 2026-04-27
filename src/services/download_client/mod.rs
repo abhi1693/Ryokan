@@ -41,6 +41,8 @@ pub mod rtorrent;
 
 pub mod transmission;
 
+pub mod sabnzbd;
+
 #[async_trait]
 pub trait DownloadClient: Send + Sync {
     /// Test connection and return the client's version string.
@@ -50,6 +52,30 @@ pub trait DownloadClient: Send + Sync {
     /// the v1 infohash Ryokan pre-computed from the magnet; impls may
     /// use it for idempotency checks and addressing.
     async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String>;
+
+    /// Adopt-style add that returns the canonical client-side id
+    /// alongside the outcome. Mirrors Sonarr's `Download(...) -> string`:
+    /// the caller doesn't have to know whether the id is a v1 infohash
+    /// or a SAB `nzo_id` — the client tells it. Returned id is what
+    /// Ryokan persists on `grabbed_torrents.hash` and what every
+    /// subsequent op (`list_scoped`, `get_files`, `delete`, etc.)
+    /// receives.
+    ///
+    /// Default impl: forwards to [`add_torrent`] and returns the
+    /// caller's pre-computed `info_hash`. BT impls (qBit, Deluge,
+    /// Transmission, rtorrent) all use this default — the v1 infohash
+    /// IS the canonical id at the wire level. Only impls whose wire
+    /// id can't be derived from the URL alone need to override —
+    /// SAB returns the `nzo_id` from the queue add response;
+    /// hypothetical NZBGet would return its `NzbId`.
+    async fn add_torrent_returning_id(
+        &self,
+        url: &str,
+        info_hash: &str,
+    ) -> Result<(AddOutcome, String), String> {
+        let outcome = self.add_torrent(url, info_hash).await?;
+        Ok((outcome, info_hash.to_string()))
+    }
 
     /// Add a torrent in a state where **file data does not actively
     /// download until the caller resumes**. Entry point for the
@@ -141,10 +167,21 @@ pub trait DownloadClient: Send + Sync {
 
     /// Sonarr-canonical implementation name for the
     /// `/api/v3/downloadclient` shim response. Values:
-    /// `"QBittorrent" | "Deluge" | "Transmission" | "RTorrent"`.
-    /// Distinct from the `active_client` discriminator
-    /// (lowercase-snake: `"qbittorrent"` etc.).
+    /// `"QBittorrent" | "Deluge" | "Transmission" | "RTorrent"
+    /// | "Sabnzbd"`. Distinct from the `active_client`
+    /// discriminator (lowercase-snake: `"qbittorrent"` etc.).
     fn sonarr_impl_name(&self) -> &'static str;
+
+    /// PR 112 review #2 — protocol of the client. `"torrent"` for
+    /// BT impls (default), `"usenet"` for SAB. The Sonarr/Radarr
+    /// `/api/v3/downloadclient` shim emits this verbatim so a
+    /// SAB-as-default install reports `"usenet"` correctly
+    /// instead of the previously hardcoded `"torrent"`. Mirror
+    /// of the `protocol_for_client_kind` helper at the row-kind
+    /// layer.
+    fn protocol(&self) -> &'static str {
+        "torrent"
+    }
 
     /// Issue #28 PR C — apply per-torrent seed-rule overrides
     /// after [`add_torrent`]. Caller invokes this immediately after
@@ -475,6 +512,36 @@ pub fn translate_client_path(
 /// "which impl do we pick" logic lives in one place and the arm for
 /// each client ships alongside its `mod deluge` / `mod qbittorrent`
 /// etc. as Phase 3+ clients land.
+/// Wire-protocol family a download-client kind handles. Lets the
+/// indexer-pin save path enforce "torznab → torrent client; newznab
+/// → usenet client" without scattering the kind→protocol mapping
+/// across Settings handlers + UI templates. Mirrors the `Protocol`
+/// discriminator Sonarr exposes on `IDownloadClient`.
+///
+/// Returns `None` for an unknown kind — callers treat that as
+/// "permissive" since `rebuild_clients_cache` already rejects
+/// unknown kinds at instantiation time, so an unrecognized kind
+/// here just means the indexer-pin save path won't second-guess.
+pub fn protocol_for_client_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "qbittorrent" | "deluge" | "transmission" | "rtorrent" => Some("torrent"),
+        "sabnzbd" => Some("usenet"),
+        _ => None,
+    }
+}
+
+/// Mirror for `indexers.kind`. Torznab indexers surface torrent
+/// magnets / `.torrent` URLs; newznab indexers surface NZB URLs.
+/// Invalid combos (newznab → BT client, torznab → SAB) are rejected
+/// at the indexer upsert / Nyaa-pin save path with a clear toast.
+pub fn protocol_for_indexer_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "torznab" => Some("torrent"),
+        "newznab" => Some("usenet"),
+        _ => None,
+    }
+}
+
 /// Multi-client routing — materialize every enabled row in
 /// `download_clients` into a live `Arc<dyn DownloadClient>`,
 /// keyed by row id. Used at startup and on Settings → Downloads
@@ -520,6 +587,19 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
                 &row.label,
             ))),
             "qbittorrent" if !row.url.is_empty() => Some(Arc::new(qbittorrent::QbitClient::new(
+                &row.url,
+                &row.username,
+                &row.password,
+                &row.label,
+            ))),
+            // PR G — SAB takes (url, username, api_key, category).
+            // The `download_clients.password` column carries the SAB
+            // API key for usenet rows (SAB has no per-user auth at
+            // the API layer; the API key is the only credential).
+            // Naming is awkward but reusing the column avoids a
+            // schema change and the form already labels it "API key"
+            // for the Usenet kind.
+            "sabnzbd" if !row.url.is_empty() => Some(Arc::new(sabnzbd::SabClient::new(
                 &row.url,
                 &row.username,
                 &row.password,

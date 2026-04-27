@@ -1,6 +1,6 @@
 # Ryokan
 
-A self-hosted anime PVR written in Rust. Searches Nyaa for releases, scores them by quality, and sends them to your download client from a single web UI. Supports qBittorrent, Deluge, Transmission, and rTorrent/ruTorrent.
+A self-hosted anime PVR written in Rust. Searches Nyaa for releases, scores them by quality, and sends them to your download client from a single web UI. Supports qBittorrent, Deluge, Transmission, rTorrent/ruTorrent, and SABnzbd.
 
 I built this because Sonarr doesn't always work well for anime. The RSS sync for currently airing shows works just fine, but downloading season batches of shows that've finished airing almost always hangs the interactive search. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named.
 
@@ -20,13 +20,14 @@ This project's being actively developed. Expect some occasional bugs. See [Relea
 - Searches Nyaa and scores releases by source, resolution, and release group using a multi-layer classification pipeline (filename, Nyaa description, ffprobe, temporal heuristics, group reputation, directory layout)
 - Supports Sonarr-v4-compatible [Custom Formats](https://trash-guides.info/Sonarr/sonarr-collection-of-custom-formats/) for release scoring, including a one-click install of the TRaSH Guides anime defaults. Ships a Ryokan-only `SeaDexBestSpecification` spec that matches [SeaDex](https://releases.moe) best-release curation, plus a Settings toggle to apply the SeaDex boost without writing a Custom Format
 - Automatically grabs new episodes via RSS and scans the existing library for quality upgrades on a schedule, with separate **preferred** and **cutoff** source/resolution targets so upgrade churn stops once an episode is "good enough"
+- **Multi-source RSS sync** — Nyaa-direct, per-indexer RSS polling for any torznab/newznab indexer (Prowlarr, Jackett), and user-configured "direct" RSS feeds for sources that don't go through an indexer (SubsPlease per-quality feeds, custom site RSS). All sources flow through the same match/score/grab pipeline with per-source dedup scoping
 - Tunable scoring inputs: preferred & blocked release groups, preferred source/resolution, finished-series quality mode (`Same as airing` / `Prefer BD` / `BD only`), and a prefer-subs vs prefer-dubs audio toggle
 - Monitors series with Sonarr-style modes (all / future / missing / existing / none) and also supports per-episode monitoring toggles
 - **Interactive search** per episode or for batches, on top of the automatic grab flow, so you can pick a specific release yourself when you want to
 - **Manual classification override** and a **Needs Review** queue (`/library/review`) for episodes where the classifier wasn't confident. Pins propagate into a "suggested group→source mapping" panel so repeat overrides can teach the release-group identity map
 - **Blocklist** completed/bad releases from the Downloads page or from an episode's grab history, so the upgrade sweep and RSS sync won't re-grab them
 - Per-series **Allow Upgrades** toggle to opt specific titles out of the upgrade sweep without disabling it globally
-- Integrates with qBittorrent, Deluge, Transmission, and rTorrent for downloads (one active client at a time) and Jellyfin for library refresh; writes Jellyfin-compatible NFO sidecars during post-processing
+- Integrates with qBittorrent, Deluge, Transmission, rTorrent, and SABnzbd for downloads. **Multi-client routing** lets you run several download clients in parallel and pin each indexer (or each direct RSS feed, or each Nyaa grab) to a specific client — torrent indexers route to a torrent client, newznab indexers route to SAB, Jellyfin handles library refresh; writes Jellyfin-compatible NFO sidecars during post-processing
 - Post-processes completed downloads in **hardlink** (default, seed-safe), **copy**, or **move** mode. Hardlink automatically falls back to copy when the download and media root are on different filesystems
 - Caches all metadata and artwork locally (content-addressed blob store) so pages load instantly after initial setup
 - Cookie-based auth with first-run admin setup, a **System** page for live logs, scheduled-task inspection/force-run, RSS grab history, a scoring inspector, and a debug tab, plus an OpenAPI/Swagger UI at `/api-docs` for everything the web UI calls
@@ -46,7 +47,7 @@ Ryokan's post-processor reads completed torrents from your download client and i
 1. Uncomment the two optional volume lines in `docker-compose.yml`:
    - `/srv/downloads:/downloads` (host path where your download client writes completed torrents)
    - `/srv/media/anime:/media/anime` (host path to your anime library root)
-2. In **Settings → Connections**, open the field for your active download client (qBittorrent / Deluge / Transmission / rTorrent) and set *Download Path (as seen by Ryokan)* to the right-hand side (e.g. `/downloads`). Note that some clients write to a subdirectory: the `linuxserver/transmission` image defaults to `/downloads/complete`, and many `rtorrent.rc` setups move finished torrents into a per-label subdirectory like `/downloads/completed/ryokan/`.
+2. In **Settings → Connections**, open the field for your active download client (qBittorrent / Deluge / Transmission / rTorrent / SABnzbd) and set *Download Path (as seen by Ryokan)* to the right-hand side (e.g. `/downloads`). Note that some clients write to a subdirectory: the `linuxserver/transmission` image defaults to `/downloads/complete`, the `linuxserver/sabnzbd` image defaults to `/downloads/complete`, and many `rtorrent.rc` setups move finished torrents into a per-label subdirectory like `/downloads/completed/ryokan/`.
 3. In **Settings → Media**, set *Media root* to the right-hand side (e.g. `/media/anime`).
 4. For Docker: set `PUID` / `PGID` in `docker-compose.yml` to the UID/GID that owns those host directories (run `id -u` / `id -g` on the host to find them). Ryokan drops privileges to that user at startup so imported files end up with the right ownership for Jellyfin and the rest of your *arr stack to read.
 
@@ -82,7 +83,7 @@ The local build path is primarily tested on Linux (CI gate). macOS should work w
 
 ## Configuration
 
-All runtime settings are managed through the web UI under **Settings**: download client (qBittorrent, Deluge, Transmission, or rTorrent) and Jellyfin connections, quality profiles and cutoffs, preferred/blocked release groups, media root path, and title language preference.
+All runtime settings are managed through the web UI under **Settings**: download clients (qBittorrent, Deluge, Transmission, rTorrent, SABnzbd — one or more, with per-indexer pinning), torznab/newznab indexers, custom RSS feeds, and Jellyfin connections, quality profiles and cutoffs, preferred/blocked release groups, media root path, and title language preference.
 
 ## Seerr integration
 

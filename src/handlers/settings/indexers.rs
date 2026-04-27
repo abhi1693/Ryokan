@@ -7,7 +7,7 @@
 //! be useful.
 
 use axum::{
-    Form,
+    Form, Json,
     extract::State,
     response::{IntoResponse, Redirect, Response},
 };
@@ -43,6 +43,9 @@ pub struct IndexerUpsertForm {
     /// `download_clients` this indexer routes to. Empty
     /// string = NULL (use the default client at grab time).
     pub download_client_id: Option<String>,
+    /// multi-rss PR 1 — opt this indexer into the RSS sync
+    /// fan-out. Checkbox; presence-equivalent to true.
+    pub rss_enabled: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -89,6 +92,51 @@ pub async fn settings_indexers_upsert(
     let min_seeders = parse_optional_i32(&form.min_seeders, 1).max(0);
     let request_timeout_secs = parse_optional_secs(&form.request_timeout_secs);
     let api_key = form.api_key.trim();
+    let download_client_id = parse_optional_i64(&form.download_client_id);
+
+    // Protocol guard — torznab indexers route torrent magnets /
+    // .torrent URLs; newznab indexers route NZB URLs. Pinning a
+    // newznab indexer to a BT client (or vice versa, torznab → SAB)
+    // surfaces at grab time as "client rejected URL" with no upfront
+    // signal — better to refuse the save with a clear toast. Mirrors
+    // Sonarr's per-indexer Protocol enum check.
+    //
+    // PR 112 review #1 (4th pass) — fail closed on transient DB
+    // error. The earlier `if let Ok(Some(row))` shape silently
+    // skipped the gate when get_by_id returned Err, which would
+    // let a torznab→SAB pin slip through under a hiccup at save
+    // time. Match Err explicitly with a "DB error: ...; please
+    // retry" toast. Ok(None) still permits (row deleted between
+    // page-load and submit is intentional).
+    if let Some(client_id) = download_client_id {
+        let row = match crate::models::download_clients::get_by_id(&state.db, client_id).await {
+            Ok(Some(row)) => Some(row),
+            Ok(None) => None, // intentional: client deleted between page-load and submit
+            Err(e) => {
+                let msg = urlencoding::encode(&format!(
+                    "Couldn't verify protocol pin (DB error: {e}); please retry."
+                ))
+                .into_owned();
+                return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+            }
+        };
+        if let Some(row) = row {
+            let indexer_proto = crate::services::download_client::protocol_for_indexer_kind(kind);
+            let client_proto =
+                crate::services::download_client::protocol_for_client_kind(&row.kind);
+            if let (Some(ip), Some(cp)) = (indexer_proto, client_proto)
+                && ip != cp
+            {
+                let msg = urlencoding::encode(&format!(
+                    "Can't pin a {kind} indexer to a {} client (protocol mismatch — \
+                     {kind} returns {ip} URLs, {} accepts {cp})",
+                    row.kind, row.kind
+                ))
+                .into_owned();
+                return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+            }
+        }
+    }
 
     let payload = IndexerForm {
         name,
@@ -102,7 +150,8 @@ pub async fn settings_indexers_upsert(
         seed_time_minutes: parse_optional_i64(&form.seed_time_minutes),
         min_seeders,
         request_timeout_secs,
-        download_client_id: parse_optional_i64(&form.download_client_id),
+        download_client_id,
+        rss_enabled: form.rss_enabled.is_some(),
     };
 
     let result = match form.id {
@@ -205,6 +254,81 @@ pub async fn settings_indexers_delete(
     }
 }
 
+// ── multi-rss commit G — Test RSS feed endpoint for indexers ────────
+
+/// Body of the indexer-RSS Test request. Mirrors the direct-feed
+/// shape — caller passes the indexer row id, handler runs a
+/// single empty-`q` `?t=tvsearch` against it and returns the
+/// item count + first title.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct IndexerRssTestForm {
+    pub id: i64,
+}
+
+/// JSON envelope for the indexer-RSS Test response. Same shape
+/// as the direct-feed Test response so the frontend toast can
+/// share the rendering helper.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct IndexerRssTestResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_title: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/settings/indexers/test-rss",
+    tag = "Settings",
+    summary = "Test-fetch an indexer's RSS endpoint",
+    description = "Fires a single `?t=tvsearch&cat=5070` (with empty `q`) request against the indexer identified by id and returns a JSON envelope describing the result: item count and first item's title. Used by the Settings → Indexers form's per-row Test RSS button. Indexer protocol kind is already known from the row (torznab/newznab → torrent/usenet) so no protocol detection step is needed here, unlike the direct-feed Test.",
+    responses(
+        (status = 200, description = "Test result envelope", body = IndexerRssTestResponse),
+    ),
+)]
+pub async fn settings_indexers_test_rss(
+    State(state): State<AppState>,
+    Json(form): Json<IndexerRssTestForm>,
+) -> Json<IndexerRssTestResponse> {
+    // Look up the live `Arc<dyn Indexer>` from the in-memory
+    // cache so the test fetch reuses the same reqwest client +
+    // cooldown state the sync path uses.
+    let snapshot = state.indexers.read().await.clone();
+    let Some(indexer) = snapshot.iter().find(|i| i.id() == form.id).cloned() else {
+        return Json(IndexerRssTestResponse {
+            ok: false,
+            error: Some(format!(
+                "Indexer id={} not in cache (try Save before Test, or check Enabled)",
+                form.id
+            )),
+            item_count: None,
+            first_title: None,
+        });
+    };
+
+    match crate::services::indexers::fetch_indexer_rss(&*indexer).await {
+        Ok(items) => {
+            let count = items.len() as i32;
+            let first_title = items.first().map(|i| i.title.clone());
+            Json(IndexerRssTestResponse {
+                ok: true,
+                error: None,
+                item_count: Some(count),
+                first_title,
+            })
+        }
+        Err(err) => Json(IndexerRssTestResponse {
+            ok: false,
+            error: Some(err),
+            item_count: None,
+            first_title: None,
+        }),
+    }
+}
+
 /// Coerce the priority form field into the Sonarr-convention
 /// range. Anything out of [1, 50] (or unparseable) lands at 25 —
 /// the default — rather than rejecting the submission. Matches
@@ -303,6 +427,204 @@ mod tests {
         assert_eq!(parse_optional_f64(&Some("2.5".into())), Some(2.5));
     }
 
+    /// PR G follow-up: protocol-mismatch validation on the indexer
+    /// upsert path. Pinning a torznab indexer to a SAB client (or a
+    /// newznab indexer to a BT client) used to silently save the row
+    /// and only fail at grab time when the client rejected the URL.
+    /// These tests pin the upfront-rejection shape so a future
+    /// refactor can't drop the guard and re-introduce the silent-
+    /// fail surface.
+    mod protocol_guard {
+        use super::super::*;
+        use crate::models::download_clients::{DownloadClientForm, insert as insert_dc};
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+        use axum::extract::{Form, State};
+
+        fn extract_location(resp: axum::response::Response) -> String {
+            resp.headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        }
+
+        fn upsert_form(kind: &str, dc_id: i64) -> IndexerUpsertForm {
+            IndexerUpsertForm {
+                id: None,
+                name: "Test".into(),
+                kind: kind.to_string(),
+                url: "https://prowlarr.local/1/api".into(),
+                api_key: "k".into(),
+                priority: Some("25".into()),
+                enabled: Some("on".into()),
+                is_private_tracker: None,
+                seed_ratio: None,
+                seed_time_minutes: None,
+                min_seeders: Some("1".into()),
+                request_timeout_secs: None,
+                download_client_id: Some(dc_id.to_string()),
+                rss_enabled: None,
+            }
+        }
+
+        async fn seed_clients(db: &sqlx::SqlitePool) -> (i64 /* qbit */, i64 /* sab */) {
+            let qbit = insert_dc(
+                db,
+                DownloadClientForm {
+                    name: "qBit",
+                    kind: "qbittorrent",
+                    url: "http://qbit.local",
+                    username: "",
+                    password: "",
+                    label: "",
+                    download_path: "",
+                    enabled: true,
+                    is_default: true,
+                },
+            )
+            .await
+            .expect("seed qbit");
+            let sab = insert_dc(
+                db,
+                DownloadClientForm {
+                    name: "SAB",
+                    kind: "sabnzbd",
+                    url: "http://sab.local",
+                    username: "",
+                    password: "key",
+                    label: "tv",
+                    download_path: "",
+                    enabled: true,
+                    is_default: false,
+                },
+            )
+            .await
+            .expect("seed sab");
+            (qbit, sab)
+        }
+
+        #[tokio::test]
+        async fn torznab_pinned_to_sab_is_rejected() {
+            let db = in_memory_pool().await;
+            let (_qbit, sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("torznab", sab)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("err=") && location.contains("protocol"),
+                "expected protocol-mismatch err redirect, got: {location}"
+            );
+            // Row must NOT have been inserted.
+            let rows = crate::models::indexers::list_all(&state.db).await.unwrap();
+            assert!(
+                rows.is_empty(),
+                "torznab→SAB save must be rejected, not silently persisted: {rows:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn newznab_pinned_to_qbit_is_rejected() {
+            let db = in_memory_pool().await;
+            let (qbit, _sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("newznab", qbit)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("err=") && location.contains("protocol"),
+                "expected protocol-mismatch err redirect, got: {location}"
+            );
+            assert!(
+                crate::models::indexers::list_all(&state.db)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "newznab→qBit save must be rejected"
+            );
+        }
+
+        #[tokio::test]
+        async fn torznab_pinned_to_qbit_succeeds() {
+            // Positive test — same-protocol pair must save through.
+            let db = in_memory_pool().await;
+            let (qbit, _sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("torznab", qbit)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("msg=") && !location.contains("err="),
+                "expected success redirect, got: {location}"
+            );
+            let rows = crate::models::indexers::list_all(&state.db).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].download_client_id, Some(qbit));
+        }
+
+        #[tokio::test]
+        async fn newznab_pinned_to_sab_succeeds() {
+            let db = in_memory_pool().await;
+            let (_qbit, sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("newznab", sab)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("msg=") && !location.contains("err="),
+                "expected success redirect, got: {location}"
+            );
+            let rows = crate::models::indexers::list_all(&state.db).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].download_client_id, Some(sab));
+        }
+
+        #[tokio::test]
+        async fn no_pin_skips_validation() {
+            // The "(use default)" path — empty download_client_id —
+            // bypasses the protocol guard since there's no client
+            // to validate against. Default-routing happens at grab
+            // time per the existing pin-resolution chain.
+            let db = in_memory_pool().await;
+            let _ = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let mut form = upsert_form("torznab", 0);
+            form.download_client_id = None;
+            let resp = settings_indexers_upsert(State(state.clone()), Form(form)).await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("msg=") && !location.contains("err="),
+                "expected success redirect, got: {location}"
+            );
+        }
+
+        #[tokio::test]
+        async fn db_error_during_pin_lookup_fails_closed() {
+            // PR 112 review #1 (4th pass) — a transient DB error on
+            // the protocol-pin lookup must NOT silently skip the
+            // gate (the prior `if let Ok(Some(row))` shape did this).
+            // Provoke the error by closing the pool, then confirm
+            // upsert returns a "DB error" toast and refuses the save.
+            let db = in_memory_pool().await;
+            let (_qbit, sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            db.close().await;
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("torznab", sab)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("err=")
+                    && (location.contains("DB%20error") || location.contains("DB+error")),
+                "expected fail-closed err redirect mentioning DB error, got: {location}"
+            );
+        }
+    }
+
     /// Toast wording is user-facing — `?msg=Saved` was the
     /// pre-PR-108 default and didn't tell the user what
     /// happened. The current handler emits
@@ -339,6 +661,7 @@ mod tests {
                 min_seeders: Some("1".to_string()),
                 request_timeout_secs: None,
                 download_client_id: None,
+                rss_enabled: None,
             }
         }
 
@@ -377,6 +700,7 @@ mod tests {
                     min_seeders: 1,
                     request_timeout_secs: None,
                     download_client_id: None,
+                    rss_enabled: false,
                 },
             )
             .await
@@ -411,6 +735,7 @@ mod tests {
                     min_seeders: 1,
                     request_timeout_secs: None,
                     download_client_id: None,
+                    rss_enabled: false,
                 },
             )
             .await

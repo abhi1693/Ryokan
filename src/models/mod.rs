@@ -1,6 +1,7 @@
 pub mod artwork_cache;
 pub mod config;
 pub mod custom_formats;
+pub mod direct_rss_feeds;
 pub mod download_clients;
 pub mod episode_tags;
 pub mod external_accounts;

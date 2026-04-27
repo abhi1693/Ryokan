@@ -19,6 +19,7 @@ use crate::services::{
 
 pub mod autobrr_key;
 pub mod custom_formats;
+pub mod direct_rss_feeds;
 pub mod download_clients;
 pub mod indexers;
 use custom_formats::ImportReviewView;
@@ -823,6 +824,16 @@ pub async fn settings_submit(
         force_mal_fallback: current_force_mal_fallback,
         rss_enabled: form.rss_enabled.is_some(),
         rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
+        // multi-rss commit E — preserve the existing master flag
+        // through the Settings save. The toggle UI for this flag
+        // is deferred to 1.5.1; until then it can be flipped
+        // directly via SQL on the `config.rss_master_enabled`
+        // column. The save-on-the-main-form path here just keeps
+        // the existing value intact rather than clobbering it.
+        rss_master_enabled: existing_cfg
+            .as_ref()
+            .map(|cfg| cfg.rss_master_enabled)
+            .unwrap_or(true),
         force_kitsu_fallback: current_force_kitsu_fallback,
         post_processing_enabled: form.post_processing_enabled.is_some(),
         post_processing_mode: match form.post_processing_mode.as_str() {
@@ -1986,6 +1997,7 @@ mod tests {
                     min_seeders: 1,
                     request_timeout_secs: None,
                     download_client_id: None,
+                    rss_enabled: false,
                 },
             )
             .await

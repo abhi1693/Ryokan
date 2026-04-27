@@ -219,6 +219,14 @@ pub trait Indexer: Send + Sync {
     fn download_client_id(&self) -> Option<i64> {
         None
     }
+    /// Indexer protocol kind ("torznab" / "newznab"). Default
+    /// "torznab" matches the v1 wire — only impl that returns
+    /// "newznab" is the future Usenet variant; the kind drives
+    /// download-client protocol routing at grab time and the
+    /// per-feed `RssSource::Indexer { kind }` attribution.
+    fn kind(&self) -> &str {
+        "torznab"
+    }
 
     /// Fetch capabilities from `t=caps`. Impls should respect the
     /// 7-day TTL on the row's [`caps_json`] cache; the search-path
@@ -457,6 +465,55 @@ impl Release {
     /// Nyaa-description-body layer is unavailable for indexer
     /// results, but the other four are load-bearing).
     ///
+    /// multi-rss PR 4 — convert this indexer-sourced release into
+    /// an `RssItem` for the RSS sync fan-out (Option B). Carries
+    /// `RssSource::Indexer { id, name, kind }` so the grab path
+    /// can route through the indexer's `download_client_id`
+    /// pin and the protocol-aware download-client guard
+    /// (torrent vs NZB).
+    ///
+    /// `kind` should be the indexer's `kind` column ("torznab" /
+    /// "newznab"). The indexer `name` is supplied separately so
+    /// the row's display name flows through to log lines via
+    /// `RssSource::label()`.
+    pub fn to_rss_item(
+        &self,
+        indexer_name: &str,
+        indexer_kind: &str,
+    ) -> crate::services::rss::RssItem {
+        let group = extract_group_from_title(&self.title);
+        let resolution = extract_resolution_from_title(&self.title);
+        let is_batch = detect_batch_from_title(&self.title);
+        crate::services::rss::RssItem {
+            title: self.title.clone(),
+            link: self.link.clone(),
+            guid: self.guid.clone(),
+            // `link` IS the .torrent URL on torznab indexers (the
+            // enclosure URL). The Nyaa-direct path uses
+            // `nyaa:downloadurl` for the same role; here we map
+            // straight from `link`.
+            torrent: self.link.clone(),
+            magnet: self.magnet.clone(),
+            // PR 112 review #7 — torznab releases carry an
+            // info_hash via `<torznab:attr name="infohash">`;
+            // newznab releases never do (it's an NZB pointer,
+            // not a torrent), so this stays empty for newznab
+            // items. `build_item_key` falls through to GUID →
+            // link → title for the dedup key when info_hash is
+            // absent, so newznab items dedup by GUID just fine —
+            // the info_hash dedup path is torznab-only by design.
+            info_hash: self.info_hash.clone(),
+            group,
+            resolution,
+            is_batch,
+            source: crate::services::rss::RssSource::Indexer {
+                id: self.indexer_id,
+                name: indexer_name.to_string(),
+                kind: indexer_kind.to_string(),
+            },
+        }
+    }
+
     /// Group + resolution are extracted via the same simple
     /// patterns the Nyaa scraper uses on raw release titles —
     /// good enough for scoring, not as accurate as the full
@@ -610,6 +667,49 @@ fn format_publish_date(unix_ts: i64) -> String {
     let y = if m <= 2 { y + 1 } else { y };
 
     format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, hour, minute)
+}
+
+/// multi-rss PR 4 — fetch the indexer's "recent items" feed for
+/// the RSS sync fan-out (Option B). Issues an empty-`q` torznab
+/// search, which Prowlarr / Jackett / native indexers all treat
+/// as "return the most recent N items" — the same shape an RSS
+/// feed delivers, just over the same XML transport the search
+/// pipeline already speaks.
+///
+/// Per-source attribution is stamped via `Release::to_rss_item`
+/// so each item carries `RssSource::Indexer { id, name, kind }`
+/// for the grab-time client routing in PR 5. The indexer's own
+/// `min_seeders` filter runs inside `search()` before we see
+/// the releases, so a low-seeder release leaking into the
+/// fan-out is wasted work (matches the search-path behavior).
+///
+/// `limit` defaults to None — the indexer's caps-reported
+/// default applies (typically 50 items, well over what a 60s
+/// sync tick actually needs but consistent with existing search
+/// behavior).
+///
+/// `categories` is empty — both `torznab/client.rs` and the
+/// newznab path fall through to `[TORZNAB_CAT_ANIME]` (5070) on
+/// an empty list. The 5070 category id is shared between the two
+/// protocols (newznab's anime category is also 5070 in mainline
+/// schemas); no protocol-aware branching needed here.
+pub async fn fetch_indexer_rss(
+    indexer: &dyn Indexer,
+) -> Result<Vec<crate::services::rss::RssItem>, String> {
+    let releases = indexer
+        .search(&SearchQuery {
+            q: String::new(),
+            categories: Vec::new(),
+            limit: None,
+            offset: None,
+        })
+        .await?;
+    let name = indexer.name().to_string();
+    let kind = indexer.kind().to_string();
+    Ok(releases
+        .iter()
+        .map(|r| r.to_rss_item(&name, &kind))
+        .collect())
 }
 
 #[cfg(test)]
@@ -860,6 +960,7 @@ mod tests {
             min_seeders: 0,
             request_timeout_secs: None,
             download_client_id: None,
+            rss_enabled: false,
         };
         let a_id = insert(&db, mk("A", "https://a.example/api", 5))
             .await

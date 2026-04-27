@@ -14,4 +14,5 @@
 
 mod auth;
 mod helpers;
+mod series;
 mod system;

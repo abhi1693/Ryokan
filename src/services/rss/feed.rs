@@ -16,7 +16,7 @@ use std::{collections::HashMap, sync::LazyLock, time::Duration};
 
 use regex_lite::Regex;
 
-use super::RssItem;
+use super::{RssItem, RssSource};
 
 /// Process-global `reqwest::Client` for RSS fetches. See the same pattern
 /// in `source_description.rs`/`nyaa.rs`: a fresh client per call throws
@@ -144,16 +144,93 @@ pub(super) fn build_item_key(item: &RssItem) -> String {
 
 async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
     let url = format!("{}&c={}", NYAA_RSS_BASE, category);
-    let xml = RSS_HTTP_CLIENT
+    let resp = RSS_HTTP_CLIENT
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("RSS request failed: {}", e))?
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read RSS response: {}", e))?;
+        .map_err(|e| format!("RSS request failed: {}", e))?;
+    // PR 112 review #A — cap Nyaa-direct fetch at the same 10 MB
+    // ceiling as `fetch_user_feed`. Nyaa is "trusted" but a
+    // reverse-proxy redirect / CF challenge / hijacked domain
+    // can still serve gigabytes; the asymmetry was a smell.
+    let xml = read_capped_body(resp).await?;
+    Ok(parse_feed(&xml, RssSource::Nyaa))
+}
 
-    Ok(parse_feed(&xml))
+/// 10 MB streaming-body cap shared between every RSS fetch path
+/// (Nyaa-direct, user-supplied direct feeds, torznab indexer
+/// polls). PR 112 review #A — user-supplied URLs were already
+/// capped via `fetch_user_feed`, but the Nyaa + indexer paths
+/// shared the same OOM-on-hostile-source threat shape. Extracted
+/// here so all three sites use one cap.
+///
+/// Streams via `Response::chunk()` (default-enabled in reqwest;
+/// avoids the `stream` feature flag) and bails with a clear error
+/// once the total crosses the cap. Returns the concatenated body
+/// as a String via `from_utf8_lossy` — RSS bodies are XML, which
+/// is conventionally UTF-8; replacement chars on malformed input
+/// are preferable to a parse refusal.
+pub(crate) async fn read_capped_body(resp: reqwest::Response) -> Result<String, String> {
+    /// 10 MB — far above any real feed (SubsPlease 1080p ~80 KB,
+    /// largest Nyaa category response ~1.5 MB), far below a
+    /// memory-pressure problem on the smallest deployments.
+    const RSS_BODY_CAP_BYTES: usize = 10 * 1024 * 1024;
+
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("RSS body read failed: {}", e))?
+    {
+        if buf.len() + chunk.len() > RSS_BODY_CAP_BYTES {
+            return Err(format!(
+                "RSS feed body exceeded {} MB cap",
+                RSS_BODY_CAP_BYTES / (1024 * 1024)
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// multi-rss PR 3 — generic RSS fetch for user-configured feeds
+/// from `models::rss_feeds`. Reuses the same XML parser the
+/// Nyaa-direct path uses, but feeds it the caller's `source` so
+/// every item carries the right `RssSource::UserFeed { id, name
+/// }` attribution.
+///
+/// User-supplied URLs are arbitrary, so we don't trust them: the
+/// 30s `RSS_HTTP_CLIENT` timeout caps a hung connection from
+/// blocking the sync, and a non-2xx response surfaces as an Err
+/// the caller can log + skip without aborting the rest of the
+/// fan-out (a single broken feed shouldn't take down RSS sync
+/// for every other source).
+///
+/// PR 112 review #6 — body-size cap. Read the response in chunks
+/// and bail with a clear error once we cross 10 MB. Real anime
+/// RSS feeds are tiny (SubsPlease's 1080p index is ~80 KB; the
+/// largest Nyaa category response is ~1.5 MB); the cap exists so
+/// a hostile / misconfigured source can't OOM the sync by serving
+/// gigabytes. Streaming-with-cap rather than a Content-Length
+/// check because some servers omit the header.
+pub async fn fetch_user_feed(url: &str, source: RssSource) -> Result<Vec<RssItem>, String> {
+    let resp = RSS_HTTP_CLIENT
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("RSS request failed: {}", e))?;
+    let status = resp.status();
+    let xml = read_capped_body(resp).await?;
+    if !status.is_success() {
+        // Truncate the body for the error string so a Cloudflare
+        // HTML error page doesn't render multi-KB inline in the
+        // Settings UI / log line. Same shape as `services::mal`'s
+        // `excerpt` helper — keep it self-contained here.
+        let preview: String = xml.chars().take(120).collect();
+        return Err(format!("RSS feed returned {status}: {preview}"));
+    }
+    Ok(parse_feed(&xml, source))
 }
 
 /// Fetch RSS items from all relevant Nyaa categories.
@@ -195,7 +272,18 @@ pub(super) async fn fetch_feeds(
     Ok(all_items)
 }
 
-fn parse_feed(xml: &str) -> Vec<RssItem> {
+/// Parse an RSS XML body into `RssItem`s. The Nyaa-direct path
+/// passes `RssSource::Nyaa`; user-configured feeds (PR 3) and
+/// torznab/newznab indexer RSS (PR 4) pass their own source so
+/// downstream dedup + grab routing knows which feed produced each
+/// release.
+///
+/// The `nyaa:*` namespaced tags (downloadurl / magneturi / infohash)
+/// are Nyaa-specific extensions; non-Nyaa feeds will read them as
+/// empty strings, and the `link` tag carries the .torrent URL
+/// instead. The torznab path in PR 4 augments this further with
+/// `<torznab:attr name="...">` extraction.
+pub(super) fn parse_feed(xml: &str, source: RssSource) -> Vec<RssItem> {
     let mut items = Vec::new();
 
     for caps in RE_ITEM.captures_iter(xml) {
@@ -230,6 +318,7 @@ fn parse_feed(xml: &str) -> Vec<RssItem> {
             group,
             resolution,
             is_batch,
+            source: source.clone(),
         });
     }
 
@@ -741,6 +830,7 @@ mod parser_tests {
             group: String::new(),
             resolution: String::new(),
             is_batch: false,
+            source: RssSource::Nyaa,
         }
     }
 
@@ -798,7 +888,7 @@ mod parser_tests {
                 <nyaa:infohash>ABC</nyaa:infohash>
             </item>"#,
         );
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(
@@ -830,7 +920,7 @@ mod parser_tests {
                 <title>Real Title</title>
             </item>"#,
         );
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "Real Title");
     }
@@ -844,7 +934,7 @@ mod parser_tests {
                 <title>[Group] Show &amp; Tell &lt;Vol 1&gt;</title>
             </item>"#,
         );
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items[0].title, "[Group] Show & Tell <Vol 1>");
     }
 
@@ -855,7 +945,7 @@ mod parser_tests {
                <item><title>Two</title></item>
                <item><title>Three</title></item>"#,
         );
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
         assert_eq!(titles, vec!["One", "Two", "Three"]);
     }
@@ -868,12 +958,12 @@ mod parser_tests {
 
     #[test]
     fn parse_feed_empty_returns_empty() {
-        assert!(parse_feed("").is_empty());
+        assert!(parse_feed("", RssSource::Nyaa).is_empty());
     }
 
     #[test]
     fn parse_feed_no_items_returns_empty() {
-        assert!(parse_feed("<rss><channel></channel></rss>").is_empty());
+        assert!(parse_feed("<rss><channel></channel></rss>", RssSource::Nyaa).is_empty());
     }
 
     #[test]
@@ -882,13 +972,13 @@ mod parser_tests {
         // match doesn't span back to the next `<item>`, so the block
         // captures nothing. No panic on slicing.
         let xml = "<rss><channel><item><title>Show";
-        let _ = parse_feed(xml); // contract: no panic; emptiness depends on regex match
+        let _ = parse_feed(xml, RssSource::Nyaa); // contract: no panic; emptiness depends on regex match
     }
 
     #[test]
     fn parse_feed_garbage_input_returns_empty() {
-        assert!(parse_feed("not xml at all").is_empty());
-        assert!(parse_feed("\u{0000}\u{0001}\u{0002}").is_empty());
+        assert!(parse_feed("not xml at all", RssSource::Nyaa).is_empty());
+        assert!(parse_feed("\u{0000}\u{0001}\u{0002}", RssSource::Nyaa).is_empty());
     }
 
     #[test]
@@ -898,7 +988,7 @@ mod parser_tests {
         // no quadratic-blowup or slicing panic.
         let huge = "X".repeat(100_000);
         let xml = format!("<rss><channel><item><title>{huge}</title></item></channel></rss>");
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title.len(), 100_000);
     }
@@ -909,7 +999,7 @@ mod parser_tests {
         // accepts attributes on the open tag (some RSS variants emit
         // `<title type="text">…</title>`).
         let xml = make_feed(r#"<item><title type="text">With attrs</title></item>"#);
-        let items = parse_feed(&xml);
+        let items = parse_feed(&xml, RssSource::Nyaa);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "With attrs");
     }

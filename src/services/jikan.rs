@@ -547,6 +547,22 @@ pub async fn clear_detail_cache_entry_for_tests(mal_id: i64) {
     cache.remove(&mal_id);
 }
 
+/// Test-only: clear the entire detail cache + the rate-limit cooldown
+/// guard. Both are process-wide statics that survive across tests; a
+/// stray cooldown left over from one test (e.g. a wiremock that
+/// returned 429) would short-circuit every subsequent call with
+/// "Jikan rate-limited" before the wiremock even gets a request.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn reset_state_for_tests() {
+    {
+        let mut cache = DETAIL_CACHE.write().await;
+        cache.clear();
+    }
+    if let Ok(mut g) = JIKAN_COOLDOWN_UNTIL.lock() {
+        *g = None;
+    }
+}
+
 pub async fn get_anime_detail_cached(mal_id: i64) -> Result<AnimeDetail, String> {
     {
         let cache = DETAIL_CACHE.read().await;

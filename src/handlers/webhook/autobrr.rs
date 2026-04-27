@@ -255,6 +255,17 @@ pub async fn webhook_autobrr(
         return skipped("hash is blocklisted");
     }
 
+    // PR 112 review #4 — `info_hash_lc` is the autobrr-supplied
+    // BT-style infohash. For SAB grabs, `grabbed_torrents.hash`
+    // stores the `nzo_id` (per the PR 112 trait extension), so
+    // this lookup misses for previously-grabbed-via-SAB releases
+    // and the second push proceeds to `add_torrent_returning_id`.
+    // SAB's own pre-queue dedup catches it via the
+    // `AlreadyPresent` fallback, so behavior isn't broken — but
+    // the dedup-before-wire-call intent is silently bypassed for
+    // SAB. Acceptable for v1; a follow-up could record the BT-
+    // style hash on a separate column for SAB rows so the lookup
+    // matches either id.
     if !info_hash_lc.is_empty() && grabbed_torrents::is_known_hash(&state.db, &info_hash_lc).await {
         logger::info(
             &state.db,
@@ -343,8 +354,17 @@ pub async fn webhook_autobrr(
             );
         }
     };
-    let add_outcome = match client.add_torrent(&download_url, &info_hash_lc).await {
-        Ok(o) => o,
+    // PR G — `add_torrent_returning_id` returns the canonical client-
+    // side id alongside the outcome. For BT clients the returned id
+    // equals the input info_hash; for SAB it's the `nzo_id` SAB
+    // hands back from `mode=addurl`. Either way, persist the
+    // returned value so post-processing's `list_scoped` matching
+    // works for both protocols.
+    let (add_outcome, canonical_id) = match client
+        .add_torrent_returning_id(&download_url, &info_hash_lc)
+        .await
+    {
+        Ok(t) => t,
         Err(e) => {
             logger::error(
                 &state.db,
@@ -370,7 +390,7 @@ pub async fn webhook_autobrr(
     // grab row gets caught by the next reconcile pass.
     let grab_id = grabbed_torrents::record_grab(
         &state.db,
-        &info_hash_lc,
+        &canonical_id,
         &payload.torrent_name,
         series.id,
         &ep_nums,
@@ -383,7 +403,7 @@ pub async fn webhook_autobrr(
         let respected = download_client::apply_indexer_seed_rules(
             &state.db,
             &*client,
-            &info_hash_lc,
+            &canonical_id,
             indexer_id,
         )
         .await;

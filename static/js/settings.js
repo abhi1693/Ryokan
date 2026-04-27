@@ -964,3 +964,62 @@ function saveExternalAccountPrefs() {
     }
     setInterval(tick, 30 * 1000);
 })();
+
+// Per-indexer Download Client dropdown: filter options by protocol so
+// torznab indexers can't pin to SAB and newznab can't pin to BT
+// clients. Server-side validation in the upsert handler is the
+// authority — this is just UX so the user doesn't pick a doomed
+// option and bounce off an error toast on save. Each option carries
+// `data-protocol` ("torrent" or "usenet") set by the Askama template.
+(function () {
+    function applyProtocolFilter(form) {
+        const kindSel = form.querySelector('select[name="kind"]');
+        const dcSel = form.querySelector('select[name="download_client_id"]');
+        if (!kindSel || !dcSel) return;
+        const wantedProto = kindSel.value === 'newznab' ? 'usenet' : 'torrent';
+        let activeStillValid = false;
+        for (const opt of dcSel.options) {
+            if (!opt.value) {
+                // The "(use default)" sentinel — always allowed.
+                continue;
+            }
+            const proto = opt.dataset.protocol;
+            // Missing data-protocol means an unknown client kind that
+            // `protocol_for_client_kind` rejected. Leave such options
+            // visible — server-side validation will catch them.
+            const ok = !proto || proto === wantedProto;
+            opt.hidden = !ok;
+            opt.disabled = !ok;
+            if (ok && opt.selected) activeStillValid = true;
+        }
+        if (!activeStillValid && dcSel.value) {
+            // Currently-selected option got hidden (user flipped kind
+            // after picking a now-mismatched client). Fall back to
+            // "(use default)" so the form's about-to-be-submitted
+            // state matches what the user can see.
+            dcSel.value = '';
+        }
+    }
+
+    function wireForm(form) {
+        const kindSel = form.querySelector('select[name="kind"]');
+        if (!kindSel) return;
+        applyProtocolFilter(form);
+        kindSel.addEventListener('change', () => applyProtocolFilter(form));
+    }
+
+    function init() {
+        // Both the Add Indexer form and the Edit Indexer form sit
+        // under the indexers tab and share the kind+download_client
+        // shape. `[action$="/settings/indexers/upsert"]` matches both.
+        document
+            .querySelectorAll('form[action$="/settings/indexers/upsert"]')
+            .forEach(wireForm);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();

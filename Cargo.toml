@@ -1,6 +1,6 @@
 [package]
 name = "ryokan"
-version = "1.4.6"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.95"
 
@@ -27,6 +27,26 @@ required-features = ["test-support"]
 [[test]]
 name = "external_sync_e2e"
 path = "tests/external_sync_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "metadata_sync_e2e"
+path = "tests/metadata_sync_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "arr_compat_e2e"
+path = "tests/arr_compat_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "jikan_e2e"
+path = "tests/jikan_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "rss_user_feed_e2e"
+path = "tests/rss_user_feed_e2e.rs"
 required-features = ["test-support"]
 
 [dependencies]
@@ -165,3 +185,13 @@ insta = { version = "1", features = ["json"] }
 # existing one-fn-per-case pattern in the classification pipeline
 # into tabular data. Equivalent to C#'s [TestCase].
 rstest = "0.26"
+
+# Test-runtime profile. opt-level = 1 on dependencies (not the test
+# crate itself, which stays unoptimized for fast incremental builds)
+# is the standard "make tests run fast" knob — the wiremock + sqlx +
+# regex hot paths run 2-3x faster optimized, and the dep build is paid
+# once and cached. The leading `*` glob matches every dependency; the
+# trailing `name = "ryokan"` block keeps Ryokan's own code at the
+# default test profile (opt-level = 0) so iteration cycles stay snappy.
+[profile.test.package."*"]
+opt-level = 1

@@ -862,3 +862,187 @@ pub async fn rebuild_cached_metadata_for_all(db: &SqlitePool) -> (usize, usize, 
 pub async fn refresh_all_series_metadata(db: &SqlitePool) -> (usize, usize) {
     run_metadata_sweep(db, false).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn series_fixture(anilist_id: i64) -> series::Series {
+        series::Series {
+            id: 1,
+            anilist_id,
+            mal_id: None,
+            title: String::new(),
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            format: "TV".into(),
+            status: String::new(),
+            episodes: None,
+            season_year: None,
+            end_year: None,
+            folder_name: String::new(),
+            monitor_mode: "all".into(),
+            allow_upgrades: true,
+            allow_pt_upgrades: false,
+            custom_query_tokens: String::new(),
+            restrict_to_uploader: String::new(),
+            cumulative_prior_episodes: 0,
+            monitor_mode_manual_override: false,
+            user_score: None,
+            added_at: String::new(),
+        }
+    }
+
+    fn detail_fixture(id: i64) -> anilist::AnimeDetail {
+        anilist::AnimeDetail {
+            id,
+            id_mal: None,
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            banner_url: String::new(),
+            format: String::new(),
+            status: String::new(),
+            status_display: String::new(),
+            episodes: None,
+            duration: None,
+            season: String::new(),
+            season_year: None,
+            end_year: None,
+            description: String::new(),
+            genres: Vec::new(),
+            average_score: None,
+            average_score_display: None,
+            score_is_ten_point: false,
+            score_class: String::new(),
+            next_airing_episode: None,
+            next_airing_at: None,
+            synonyms: Vec::new(),
+            streaming_episodes: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+
+    // ── is_authoritative_detail ──────────────────────────────────────
+
+    #[test]
+    fn jikan_fallback_negative_id_is_always_authoritative() {
+        // Negative-AL-id sentinel (`series.anilist_id = -mal_id` for
+        // MAL-fallback series): no AL-id round-trip is even possible
+        // for these, so we treat the response as authoritative
+        // unconditionally rather than rejecting it for an id-mismatch
+        // that isn't physically meaningful.
+        let mut tracked = series_fixture(-12345);
+        // Zero is also covered: any non-positive id means "no AL id."
+        let detail = detail_fixture(0);
+        assert!(is_authoritative_detail(&tracked, &detail));
+
+        tracked.anilist_id = 0;
+        assert!(is_authoritative_detail(&tracked, &detail));
+    }
+
+    #[test]
+    fn detail_with_matching_id_is_authoritative() {
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(1234);
+        assert!(is_authoritative_detail(&tracked, &detail));
+    }
+
+    #[test]
+    fn detail_with_mismatched_id_is_not_authoritative() {
+        // Title-fuzz fallback path (Kitsu by titles) can return a
+        // sequel — same name, different id. Reject it so the caller
+        // doesn't overwrite the canonical row's metadata.
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(9999);
+        assert!(!is_authoritative_detail(&tracked, &detail));
+    }
+
+    #[test]
+    fn detail_with_zero_id_is_not_authoritative_for_real_al_series() {
+        // Some upstreams return an empty result with id=0 — explicitly
+        // rejected even when tracked is a real positive-id AL series.
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(0);
+        assert!(!is_authoritative_detail(&tracked, &detail));
+    }
+
+    // ── title_candidates_for_series ──────────────────────────────────
+
+    #[test]
+    fn title_candidates_drop_empty_and_whitespace_entries() {
+        let mut s = series_fixture(1);
+        s.title = "Show".into();
+        s.title_romaji = "".into();
+        s.title_english = "   ".into(); // whitespace-only → dropped
+        s.title_native = "ショウ".into();
+        let candidates = title_candidates_for_series(&s);
+        assert_eq!(candidates, vec!["Show".to_string(), "ショウ".to_string()]);
+    }
+
+    #[test]
+    fn title_candidates_returns_empty_when_all_titles_blank() {
+        // No fuzz-match seed available — caller is expected to skip
+        // the title-fuzz path entirely on an empty list.
+        let s = series_fixture(1);
+        assert!(title_candidates_for_series(&s).is_empty());
+    }
+
+    // ── episode_needs_kitsu_backfill ─────────────────────────────────
+
+    #[test]
+    fn episode_needs_kitsu_backfill_short_circuits_for_single_episode() {
+        // ep_count <= 1 → never need Kitsu (movies, OVAs, etc. don't
+        // need per-episode title backfill). The closure is never even
+        // consulted; we mark it `unreachable!` to prove that.
+        assert!(!episode_needs_kitsu_backfill(0, |_| unreachable!()));
+        assert!(!episode_needs_kitsu_backfill(1, |_| unreachable!()));
+    }
+
+    #[test]
+    fn episode_needs_kitsu_backfill_false_when_jikan_has_all_titles() {
+        let result = episode_needs_kitsu_backfill(12, |_n| true);
+        assert!(!result);
+    }
+
+    #[test]
+    fn episode_needs_kitsu_backfill_true_when_any_title_missing() {
+        // Episode 7 missing a title → fall back to Kitsu.
+        let result = episode_needs_kitsu_backfill(12, |n| n != 7);
+        assert!(result);
+    }
+
+    #[test]
+    fn episode_needs_kitsu_backfill_true_when_all_titles_missing() {
+        let result = episode_needs_kitsu_backfill(5, |_| false);
+        assert!(result);
+    }
+
+    // ── run_metadata_sweep / refresh_all_series_metadata ─────────────
+
+    #[tokio::test]
+    async fn refresh_all_series_metadata_returns_zero_zero_on_empty_db() {
+        // No series rows → run_metadata_sweep iterates an empty list
+        // and returns (0 refreshed, 0 failed). The shape of the tuple
+        // is part of the handler contract for `system::api_metadata_refresh`.
+        let db = crate::test_support::in_memory_pool().await;
+        let (refreshed, failed) = refresh_all_series_metadata(&db).await;
+        assert_eq!(refreshed, 0);
+        assert_eq!(failed, 0);
+    }
+
+    #[tokio::test]
+    async fn rebuild_cached_metadata_for_all_returns_triple_zero_on_empty_db() {
+        // Three-tuple shape (rebuilt, skipped, failed) — kept for
+        // handler contract even though the middle slot has been
+        // hard-coded zero since the sweep refactor.
+        let db = crate::test_support::in_memory_pool().await;
+        let (rebuilt, skipped, failed) = rebuild_cached_metadata_for_all(&db).await;
+        assert_eq!(rebuilt, 0);
+        assert_eq!(skipped, 0);
+        assert_eq!(failed, 0);
+    }
+}

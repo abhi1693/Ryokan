@@ -1,0 +1,27 @@
+# Cargo workspace config. Applies to every cargo invocation run from
+# this repo (overrides ~/.cargo/config.toml in the standard cargo
+# precedence order).
+
+# Use mold (https://github.com/rui314/mold) as the linker on Linux.
+# Cuts incremental link time 3-5x vs. ld/lld, which dominates the edit-
+# build-test loop once the dep graph is warm. Install: pacman -S mold
+# (Arch) / apt install mold (Ubuntu 22.04+).
+#
+# CI note: GitHub's ubuntu-latest runners ship with binutils ld and
+# don't have mold preinstalled — the `rust.yml` workflow installs it
+# via apt before the build steps so this config doesn't break CI.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Cargo aliases. `cargo t` becomes the canonical "run the test suite"
+# command and routes through nextest with the test-support feature
+# (which `cargo test` requires anyway because all tests/ targets list
+# it under required-features). Falls back to `cargo test` only if
+# nextest isn't installed.
+[alias]
+t = ["nextest", "run", "--features", "test-support"]

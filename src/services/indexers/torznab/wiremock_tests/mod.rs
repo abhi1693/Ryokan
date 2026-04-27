@@ -9,4 +9,5 @@ mod auth_failures;
 mod caps;
 mod fixture;
 mod rate_limit;
+mod rss;
 mod search;

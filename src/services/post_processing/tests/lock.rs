@@ -13,8 +13,18 @@
 
 use crate::services::post_processing::POST_PROC_LOCK;
 
+use super::POST_PROC_TEST_SERIALIZER;
+
 #[tokio::test]
 async fn post_proc_lock_serializes_via_try_lock_contention() {
+    // Acquire the test-suite serializer first — `run_once.rs` tests
+    // also touch `POST_PROC_LOCK` (indirectly, via the production
+    // `try_lock`), and we don't want this assertion-heavy test to
+    // race a peer that's mid-`list_scoped`. The serializer sits at
+    // a higher tier than `POST_PROC_LOCK`; it must be acquired
+    // first and dropped last (Rust's reverse-declaration drop
+    // order handles this automatically when both are local lets).
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
     // 1. Acquire — must succeed from a fresh process state. If a
     //    prior test left the lock held this would panic, but
     //    `POST_PROC_LOCK` is a production-global that no other

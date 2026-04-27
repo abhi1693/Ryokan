@@ -1,0 +1,30 @@
+# cargo-nextest configuration. nextest reads this automatically when
+# invoked from the workspace root. Install: `cargo install cargo-nextest --locked`.
+#
+# Run the suite with `cargo nextest run --features test-support`.
+
+[profile.default]
+# Default `cargo test` retries failures once; nextest doesn't. Match
+# the more forgiving behavior so a flaky wiremock port-bind doesn't
+# fail the whole run.
+retries = 1
+
+# Show test output for failures only — clean signal during the
+# 1900-test pass, full detail when something breaks.
+failure-output = "immediate-final"
+success-output = "never"
+
+# Slow-test threshold: warn after 60s, terminate after 180s. Catches
+# a hung wiremock fixture or a deadlocked async test before the whole
+# CI run wedges. Live-smoke tests are `#[ignore]`'d and only run with
+# --ignored, so this never trips them.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.ci]
+# CI inherits default + adds JUnit output for GitHub Actions surfacing.
+retries = 2
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+[profile.ci.junit]
+path = "junit.xml"

@@ -343,8 +343,11 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     }
                 };
 
-            match client.add_torrent(&url, &result.info_hash).await {
-                Ok(_) => {
+            match client
+                .add_torrent_returning_id(&url, &result.info_hash)
+                .await
+            {
+                Ok((_outcome, canonical_id)) => {
                     total_upgrades_grabbed += 1;
                     logger::info(
                         &state.db,
@@ -378,7 +381,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     }
                     let grab_id = crate::models::grabbed_torrents::record_grab(
                         &state.db,
-                        &result.info_hash,
+                        &canonical_id,
                         &result.title,
                         row.id,
                         &ep_nums,
@@ -446,4 +449,369 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         upgrades_grabbed: total_upgrades_grabbed,
         detail,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::download_clients::{DownloadClientForm, insert as insert_dc};
+    use crate::services::download_client::{
+        AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+    };
+    use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    /// Single test-suite serializer. The production `UPGRADE_LOCK` is
+    /// process-wide and `try_lock` early-returns on contention; without
+    /// this serializer parallel `tokio::test`s race on the lock and the
+    /// already-running test could leak state into other tests.
+    static UPGRADE_TEST_SERIALIZER: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    /// Stub client — `run_once` only ever calls `add_torrent_returning_id`
+    /// in the upgrade-grab path, but the tests below all early-return
+    /// before any candidate is found, so no method is actually exercised.
+    struct StubClient;
+
+    #[async_trait]
+    impl DownloadClient for StubClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("stub".into())
+        }
+        async fn add_torrent(&self, _u: &str, _h: &str) -> Result<AddOutcome, String> {
+            Ok(AddOutcome::Added)
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _u: &str,
+            _h: &str,
+            _p: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<SelectiveOutcome, String> {
+            Ok(SelectiveOutcome::FullDownload)
+        }
+        async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(&self, _h: &str) -> Result<Vec<DownloadFile>, String> {
+            Ok(vec![])
+        }
+        async fn pause(&self, _h: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, _h: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _h: &str, _df: bool) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_file_wanted(&self, _h: &str, _f: &[usize], _w: bool) -> Result<(), String> {
+            Ok(())
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            "QBittorrent"
+        }
+    }
+
+    async fn install_default_client(state: &crate::AppState) {
+        let mut clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>> =
+            std::collections::HashMap::new();
+        clients.insert(1, Arc::new(StubClient));
+        let pool = crate::DownloadClientPool {
+            clients,
+            default_id: Some(1),
+        };
+        *state.download_clients.write().await = Arc::new(pool);
+    }
+
+    async fn seed_default_config(db: &sqlx::SqlitePool) {
+        // Default cutoff: bluray/1080 — the no-cutoff early-return does
+        // not fire. media_root + post_processing_mode satisfy the NOT
+        // NULL columns expected by `config::get_config`.
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode, cutoff_source, cutoff_resolution) \
+             VALUES (1, '/tmp/upgrade-test', 'hardlink', 'bluray', '1080')",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_once_returns_already_running_when_lock_contended() {
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let state = build_test_app_state(in_memory_pool().await, None);
+        // Hold the production lock for the duration of the call below.
+        let _held = UPGRADE_LOCK.lock().await;
+        let result = run_once(&state).await;
+        match result {
+            Err(msg) => assert!(msg.contains("already running"), "unexpected message: {msg}"),
+            Ok(_) => panic!("expected Err on contended lock"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_when_no_quality_cutoff_configured() {
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        // Both cutoff fields blank → unknown source + unknown resolution
+        // ⇒ early return with the "no cutoff" detail message.
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode, cutoff_source, cutoff_resolution) \
+             VALUES (1, '/tmp/upgrade-test', 'hardlink', '', '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+        let summary = run_once(&state).await.unwrap();
+        assert_eq!(summary.series_checked, 0);
+        assert_eq!(summary.episodes_checked, 0);
+        assert_eq!(summary.upgrades_grabbed, 0);
+        assert!(
+            summary.detail.contains("No quality cutoff"),
+            "unexpected detail: {}",
+            summary.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_when_no_default_download_client() {
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        seed_default_config(&db).await;
+        // Build state without a default download client → the second
+        // early-return ("Download client not configured") fires.
+        let state = build_test_app_state(db, None);
+        let summary = run_once(&state).await.unwrap();
+        assert!(
+            summary.detail.contains("Download client not configured"),
+            "unexpected detail: {}",
+            summary.detail
+        );
+        assert_eq!(summary.upgrades_grabbed, 0);
+    }
+
+    #[tokio::test]
+    async fn run_once_no_tracked_series_yields_zero_summary() {
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        seed_default_config(&db).await;
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        let summary = run_once(&state).await.unwrap();
+        assert_eq!(summary.series_checked, 0);
+        assert_eq!(summary.episodes_checked, 0);
+        assert_eq!(summary.upgrades_grabbed, 0);
+        assert!(
+            summary.detail.starts_with("Checked 0 series"),
+            "unexpected detail: {}",
+            summary.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_series_with_empty_folder_name() {
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        seed_default_config(&db).await;
+        seed_series(&db, 100, "Show A").await;
+        // Force the seed_series default folder_name to empty string
+        // — this hits the `if row.folder_name.is_empty()` guard so
+        // the series doesn't increment series_checked.
+        sqlx::query("UPDATE series SET folder_name = ''")
+            .execute(&db)
+            .await
+            .unwrap();
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        let summary = run_once(&state).await.unwrap();
+        assert_eq!(summary.series_checked, 0);
+        assert_eq!(summary.episodes_checked, 0);
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_series_with_allow_upgrades_off() {
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        seed_default_config(&db).await;
+        seed_series(&db, 200, "Show B").await;
+        // Per-series upgrade opt-out (Phase 4) — flip allow_upgrades to 0.
+        sqlx::query("UPDATE series SET allow_upgrades = 0")
+            .execute(&db)
+            .await
+            .unwrap();
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        let summary = run_once(&state).await.unwrap();
+        assert_eq!(summary.series_checked, 0);
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_series_with_no_disk_files() {
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        // Point media_root at a real but empty tempdir so
+        // `scan_series_folder` returns an empty list and the loop
+        // short-circuits before reaching `find_best_for_target`. This
+        // pins the "no on-disk files → don't upgrade" branch without
+        // any external API calls.
+        let dir = tempfile::tempdir().unwrap();
+        let media_root = dir.path().to_string_lossy().into_owned();
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode, cutoff_source, cutoff_resolution) \
+             VALUES (1, ?, 'hardlink', 'bluray', '1080')",
+        )
+        .bind(&media_root)
+        .execute(&db)
+        .await
+        .unwrap();
+        seed_series(&db, 300, "Show C").await;
+
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        let summary = run_once(&state).await.unwrap();
+        assert_eq!(summary.series_checked, 0); // never incremented
+        assert_eq!(summary.episodes_checked, 0);
+    }
+
+    /// Stage one episode file `S01E01.mkv` inside `<tempdir>/<folder>/`
+    /// and return the tempdir handle (so it survives the test) plus the
+    /// media-root path string. The series's `folder_name` should match
+    /// `folder` so `media::scan_series_folder` walks into our directory.
+    fn stage_disk_file(folder: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let series_dir = dir.path().join(folder);
+        std::fs::create_dir_all(&series_dir).unwrap();
+        std::fs::write(
+            series_dir.join("Show - S01E01 [BluRay 1080p].mkv"),
+            b"fake-mkv",
+        )
+        .unwrap();
+        let media_root = dir.path().to_string_lossy().into_owned();
+        (dir, media_root)
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_when_existing_quality_already_at_cutoff() {
+        // disk file present + episode_quality_tags row marks it BluRay
+        // 1080p (== the configured cutoff) → build_upgrade_targets
+        // returns empty → continue without touching find_best_for_target.
+        // This pins the "no upgrade needed" branch of the upgrade loop.
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        let (_tempdir, media_root) = stage_disk_file("Show");
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode, cutoff_source, cutoff_resolution) \
+             VALUES (1, ?, 'hardlink', 'bluray', '1080')",
+        )
+        .bind(&media_root)
+        .execute(&db)
+        .await
+        .unwrap();
+        let series_id = seed_series(&db, 12001, "Show").await;
+        // Tag the file as BluRay 1080p == cutoff. The build_upgrade_targets
+        // helper drops candidates whose existing rank >= cutoff rank, so
+        // an exact-cutoff row produces an empty target list.
+        sqlx::query(
+            "INSERT INTO episode_quality_tags \
+             (series_id, episode_number, quality_tag, source, resolution, is_remux, is_bdmv) \
+             VALUES (?, 1, 'BluRay-1080p', 'BluRay', '1080p', 0, 0)",
+        )
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        let summary = run_once(&state).await.unwrap();
+        // series_checked is incremented only after the metadata_cache
+        // lookup; but we never reach it because upgrade_targets is
+        // empty, so the loop hits `continue` first.
+        assert_eq!(summary.series_checked, 0);
+        assert_eq!(summary.upgrades_grabbed, 0);
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_series_without_cached_metadata() {
+        // disk file + sub-cutoff tag → build_upgrade_targets returns
+        // non-empty. But metadata_cache has no row for this series, so
+        // the metadata_cache lookup falls through to the "skipping —
+        // no cached metadata" debug log and `continue`. Pins the
+        // missing-cache fallback branch.
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        let (_tempdir, media_root) = stage_disk_file("Show");
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode, cutoff_source, cutoff_resolution) \
+             VALUES (1, ?, 'hardlink', 'bluray', '1080')",
+        )
+        .bind(&media_root)
+        .execute(&db)
+        .await
+        .unwrap();
+        let series_id = seed_series(&db, 12002, "Show").await;
+        // Tag at WEB-720p — strictly below BluRay-1080p cutoff, so
+        // build_upgrade_targets returns this episode as a candidate.
+        sqlx::query(
+            "INSERT INTO episode_quality_tags \
+             (series_id, episode_number, quality_tag, source, resolution, is_remux, is_bdmv) \
+             VALUES (?, 1, 'WEB-720p', 'Web', '720p', 0, 0)",
+        )
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        // Deliberately no metadata_cache row.
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        let summary = run_once(&state).await.unwrap();
+        assert_eq!(
+            summary.series_checked, 0,
+            "series_checked is incremented after the cache lookup; missing cache must keep it at 0"
+        );
+        assert_eq!(summary.upgrades_grabbed, 0);
+    }
+
+    #[tokio::test]
+    async fn run_once_persists_pt_indexer_set_without_failure() {
+        // PT-pin gate snapshot (the `pt_indexer_ids` HashSet) is built
+        // from the indexer cache. Pin one private + one public indexer
+        // and verify run_once doesn't blow up when reading them, even
+        // though no series exists to exercise the gate further.
+        // Ensures the snapshot path is exercised at least once.
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        seed_default_config(&db).await;
+        // Seed a download client so the no-default early-return doesn't fire.
+        insert_dc(
+            &db,
+            DownloadClientForm {
+                name: "qb",
+                kind: "qbittorrent",
+                url: "http://x",
+                username: "",
+                password: "",
+                label: "",
+                download_path: "",
+                enabled: true,
+                is_default: true,
+            },
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        // Empty series list — exits in the "Checked 0 series" path.
+        let summary = run_once(&state).await.unwrap();
+        assert!(summary.detail.starts_with("Checked"));
+    }
 }

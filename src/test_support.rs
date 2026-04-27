@@ -352,6 +352,70 @@ pub fn sonarr_router(state: AppState) -> Router {
     Router::new().merge(routes).with_state(state)
 }
 
+/// Sonarr shim router that includes the resource-tier series + command
+/// routes (`/series`, `/series/{id}`, `/series/lookup`, `/command`) on
+/// top of [`sonarr_router`]'s system-tier surface. Kept as a separate
+/// builder so tests that only exercise auth + system-tier shapes don't
+/// have to load anibridge state, and so the series-tier tests
+/// declare their dependency on those routes explicitly.
+pub fn sonarr_router_with_series(state: AppState) -> Router {
+    use axum::middleware;
+    use axum::routing::{post, put};
+
+    let routes = Router::new()
+        .route(
+            "/api/v3/system/status",
+            get(handlers::sonarr_compat::system_status),
+        )
+        .route(
+            "/api/v3/qualityprofile",
+            get(handlers::sonarr_compat::quality_profiles),
+        )
+        .route(
+            "/api/v3/qualityProfile",
+            get(handlers::sonarr_compat::quality_profiles),
+        )
+        .route(
+            "/api/v3/rootfolder",
+            get(handlers::sonarr_compat::root_folders),
+        )
+        .route(
+            "/api/v3/languageprofile",
+            get(handlers::sonarr_compat::language_profiles),
+        )
+        .route("/api/v3/tag", get(handlers::sonarr_compat::list_tags))
+        .route(
+            "/api/v3/downloadclient",
+            get(handlers::sonarr_compat::list_download_clients),
+        )
+        .route(
+            "/api/v3/series",
+            get(handlers::sonarr_compat::list_series).post(handlers::sonarr_compat::add_series),
+        )
+        .route(
+            "/api/v3/series/lookup",
+            get(handlers::sonarr_compat::series_lookup),
+        )
+        .route(
+            "/api/v3/series/{id}",
+            get(handlers::sonarr_compat::get_series),
+        )
+        .route(
+            "/api/v3/series",
+            put(handlers::sonarr_compat::update_series),
+        )
+        .route(
+            "/api/v3/command",
+            post(handlers::sonarr_compat::execute_command),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::sonarr_compat::require_api_key,
+        ));
+
+    Router::new().merge(routes).with_state(state)
+}
+
 /// Build a minimal Radarr shim router (parallel to [`sonarr_router`]).
 /// Routes are mounted under `/radarr/api/v3/*` to match the
 /// production prefix that lets both shims coexist behind Seerr's
@@ -383,6 +447,67 @@ pub fn radarr_router(state: AppState) -> Router {
         .route(
             "/radarr/api/v3/downloadclient",
             get(handlers::radarr_compat::list_download_clients),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::radarr_compat::require_api_key,
+        ));
+
+    Router::new().merge(routes).with_state(state)
+}
+
+/// Radarr shim router that includes the resource-tier movie + command
+/// routes (`/movie`, `/movie/{id}`, `/movie/lookup`, `/command`) on
+/// top of [`radarr_router`]'s system-tier surface. Same separation
+/// rationale as [`sonarr_router_with_series`].
+pub fn radarr_router_with_movie(state: AppState) -> Router {
+    use axum::middleware;
+    use axum::routing::{post, put};
+
+    let routes = Router::new()
+        .route(
+            "/radarr/api/v3/system/status",
+            get(handlers::radarr_compat::system_status),
+        )
+        .route(
+            "/radarr/api/v3/qualityprofile",
+            get(handlers::radarr_compat::quality_profiles),
+        )
+        .route(
+            "/radarr/api/v3/qualityProfile",
+            get(handlers::radarr_compat::quality_profiles),
+        )
+        .route(
+            "/radarr/api/v3/rootfolder",
+            get(handlers::radarr_compat::root_folders),
+        )
+        .route(
+            "/radarr/api/v3/tag",
+            get(handlers::radarr_compat::list_tags),
+        )
+        .route(
+            "/radarr/api/v3/downloadclient",
+            get(handlers::radarr_compat::list_download_clients),
+        )
+        .route(
+            "/radarr/api/v3/movie",
+            get(handlers::radarr_compat::list_movies).post(handlers::radarr_compat::add_movie),
+        )
+        .route(
+            "/radarr/api/v3/movie/lookup",
+            get(handlers::radarr_compat::movie_lookup),
+        )
+        .route(
+            "/radarr/api/v3/movie/{id}",
+            get(handlers::radarr_compat::get_movie),
+        )
+        .route(
+            "/radarr/api/v3/movie",
+            put(handlers::radarr_compat::update_movie),
+        )
+        .route(
+            "/radarr/api/v3/command",
+            post(handlers::radarr_compat::execute_command),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

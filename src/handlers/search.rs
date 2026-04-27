@@ -314,8 +314,8 @@ pub async fn grab_release(
     } else {
         crate::services::nyaa::extract_hash(&form.url)
     };
-    client
-        .add_torrent(&form.url, &info_hash)
+    let (_outcome, canonical_id) = client
+        .add_torrent_returning_id(&form.url, &info_hash)
         .await
         .map_err(|e| {
             let db = state.db.clone();
@@ -341,7 +341,12 @@ pub async fn grab_release(
     // a stable primary key). Matching against the existing library
     // reuses the RSS matcher — no AniList calls, no HTTP, just the
     // alias/fuzzy-match pass.
-    if let (Some(title), hash) = (form.title.clone(), info_hash.clone())
+    // Persist the client-returned canonical id (BT: equals info_hash;
+    // SAB: nzo_id) so post-processing's `list_scoped` matching works
+    // for both protocols. The pre-add `info_hash` is only the
+    // pre-computed BT shape; SAB grabs would silently never import
+    // if we recorded it instead of the returned id.
+    if let (Some(title), hash) = (form.title.clone(), canonical_id.clone())
         && !title.is_empty()
         && !hash.is_empty()
     {
