@@ -42,7 +42,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let client_opt = state.download_client.read().await.clone();
+    let client_opt = state.default_download_client().await;
     let Some(client) = client_opt.as_ref() else {
         return Ok(UpgradeSummary {
             series_checked: 0,

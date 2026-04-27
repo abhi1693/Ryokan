@@ -75,7 +75,7 @@ pub async fn create_tag(Json(body): Json<TagBody>) -> Json<Tag> {
 pub async fn list_download_clients(
     State(state): State<AppState>,
 ) -> Json<Vec<DownloadClientEntry>> {
-    let client = state.download_client.read().await.clone();
+    let client = state.default_download_client().await;
     let Some(client) = client else {
         return Json(vec![]);
     };

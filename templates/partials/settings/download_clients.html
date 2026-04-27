@@ -1,0 +1,197 @@
+<fieldset>
+    <legend>Download Clients</legend>
+    <p class="form-hint">
+        Ryokan can route grabs to multiple download clients. Pin a specific client to an indexer on the
+        <a href="/settings?tab=indexers" class="link-accent">Indexers</a> tab; built-in Nyaa search uses the dropdown there too.
+        Grabs without an explicit pin land on the default client.
+    </p>
+
+    {% if !download_clients.is_empty() %}
+    <div class="table-scroll-wrap">
+    <table class="indexers-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Kind</th>
+                <th>URL</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for dc in download_clients %}
+            <tr>
+                <td>
+                    {{ dc.name }}
+                    {% if dc.is_default %}<span class="badge badge-success" style="margin-left:6px">default</span>{% endif %}
+                </td>
+                <td>{{ dc.kind }}</td>
+                <td><code>{{ dc.url }}</code></td>
+                <td>{% if dc.enabled %}Enabled{% else %}Disabled{% endif %}</td>
+                <td>
+                    <a href="/settings?tab=integrations&edit_id={{ dc.id }}" class="btn btn-small">Edit</a>
+                    {% if !dc.is_default %}
+                    <form method="post" action="/settings/download-clients/set-default" style="display:inline">
+                        <input type="hidden" name="id" value="{{ dc.id }}">
+                        <button type="submit" class="btn btn-small">Set default</button>
+                    </form>
+                    {% endif %}
+                    <form method="post" action="/settings/download-clients/delete" style="display:inline"
+                          data-ryokan-confirm-title="Delete download client?"
+                          data-ryokan-confirm-body="Remove '{{ dc.name }}' from Ryokan. Any indexers pinned to it (and the Nyaa pin if set) will fall back to the default client at grab time."
+                          data-ryokan-confirm-yes="Delete"
+                          data-ryokan-confirm-no="Cancel"
+                          data-ryokan-confirm-danger="1">
+                        <input type="hidden" name="id" value="{{ dc.id }}">
+                        <button type="submit" class="btn btn-danger btn-small">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% endif %}
+
+    {% if let Some(edit) = download_client_edit %}
+    <h3 class="settings-subheading">Edit Download Client</h3>
+    <p class="form-hint">
+        Updating <strong>{{ edit.name }}</strong>.
+        <a href="/settings?tab=integrations" class="link-accent">Cancel and return to Add Client.</a>
+    </p>
+    <form method="post" action="/settings/download-clients/upsert" class="settings-form settings-subform">
+        <input type="hidden" name="id" value="{{ edit.id }}">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-edit-name">Name</label>
+                <input id="dc-edit-name" type="text" name="name" required maxlength="100" value="{{ edit.name }}">
+            </div>
+            <div class="form-group">
+                <label for="dc-edit-kind">Kind</label>
+                <select id="dc-edit-kind" name="kind">
+                    <option value="qbittorrent" {% if edit.kind == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
+                    <option value="deluge" {% if edit.kind == "deluge" %}selected{% endif %}>Deluge</option>
+                    <option value="transmission" {% if edit.kind == "transmission" %}selected{% endif %}>Transmission</option>
+                    <option value="rtorrent" {% if edit.kind == "rtorrent" %}selected{% endif %}>rTorrent</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="dc-edit-url">URL</label>
+            <input id="dc-edit-url" type="url" name="url" required value="{{ edit.url }}" placeholder="http://localhost:8080">
+            <span class="form-hint">For Deluge / Transmission / rTorrent, point at the Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-edit-username">Username</label>
+                <input id="dc-edit-username" type="text" name="username" autocomplete="off" value="{{ edit.username }}">
+                <span class="form-hint">Deluge ignores the username and uses password only — leave blank.</span>
+            </div>
+            <div class="form-group">
+                <label for="dc-edit-password">Password</label>
+                <input id="dc-edit-password" type="password" name="password" autocomplete="new-password" value="{{ edit.password }}">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-edit-label">Category / label</label>
+                <input id="dc-edit-label" type="text" name="label" value="{{ edit.label }}" placeholder="anime">
+                <span class="form-hint">qBit calls this a "category", the others call it a "label". Ryokan tags every torrent it adds with this value and filters by it when listing.</span>
+            </div>
+            <div class="form-group">
+                <label for="dc-edit-download-path">Download path (as seen by Ryokan)</label>
+                <input id="dc-edit-download-path" type="text" name="download_path" value="{{ edit.download_path }}" placeholder="/downloads">
+                <span class="form-hint">Where the client's completed downloads are accessible to Ryokan. Leave blank if Ryokan and the client see the exact same paths.</span>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" {% if edit.enabled %}checked{% endif %}>
+                    Enabled
+                </label>
+                <span class="form-hint">Disable to keep the row but exclude it from grab routing.</span>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_default" {% if edit.is_default %}checked{% endif %}>
+                    Default client
+                </label>
+                <span class="form-hint">Receives every grab without an explicit pin. Exactly one row holds this flag at a time.</span>
+            </div>
+        </div>
+        <div class="settings-inline-actions">
+            <button type="submit" class="btn btn-primary">Save changes</button>
+            <button type="button" class="btn btn-secondary" onclick="testDownloadClient(this)">Test connection</button>
+            <span class="dc-test-result form-hint"></span>
+        </div>
+    </form>
+    {% else %}
+    <h3 class="settings-subheading">Add Download Client</h3>
+    <form method="post" action="/settings/download-clients/upsert" class="settings-form settings-subform">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-add-name">Name</label>
+                <input id="dc-add-name" type="text" name="name" required maxlength="100" placeholder="e.g. Local qBit">
+            </div>
+            <div class="form-group">
+                <label for="dc-add-kind">Kind</label>
+                <select id="dc-add-kind" name="kind">
+                    <option value="qbittorrent" selected>qBittorrent</option>
+                    <option value="deluge">Deluge</option>
+                    <option value="transmission">Transmission</option>
+                    <option value="rtorrent">rTorrent</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="dc-add-url">URL</label>
+            <input id="dc-add-url" type="url" name="url" required placeholder="http://localhost:8080">
+            <span class="form-hint">For Deluge / Transmission / rTorrent, point at the Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-add-username">Username</label>
+                <input id="dc-add-username" type="text" name="username" autocomplete="off">
+                <span class="form-hint">Deluge ignores the username and uses password only — leave blank.</span>
+            </div>
+            <div class="form-group">
+                <label for="dc-add-password">Password</label>
+                <input id="dc-add-password" type="password" name="password" autocomplete="new-password">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-add-label">Category / label</label>
+                <input id="dc-add-label" type="text" name="label" placeholder="anime">
+                <span class="form-hint">qBit calls this a "category", the others call it a "label". Ryokan tags every torrent it adds with this value and filters by it when listing.</span>
+            </div>
+            <div class="form-group">
+                <label for="dc-add-download-path">Download path (as seen by Ryokan)</label>
+                <input id="dc-add-download-path" type="text" name="download_path" placeholder="/downloads">
+                <span class="form-hint">Where the client's completed downloads are accessible to Ryokan. Leave blank if Ryokan and the client see the exact same paths.</span>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" checked>
+                    Enabled
+                </label>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_default" {% if download_clients.is_empty() %}checked{% endif %}>
+                    Default client
+                </label>
+                <span class="form-hint">Receives every grab without an explicit pin.</span>
+            </div>
+        </div>
+        <div class="settings-inline-actions">
+            <button type="submit" class="btn btn-primary">Add client</button>
+            <button type="button" class="btn btn-secondary" onclick="testDownloadClient(this)">Test connection</button>
+            <span class="dc-test-result form-hint"></span>
+        </div>
+    </form>
+    {% endif %}
+</fieldset>

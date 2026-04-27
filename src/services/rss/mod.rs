@@ -330,7 +330,11 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     for row in &tracked {
         let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
     }
-    let client = state.download_client.read().await.clone();
+    // RSS sync is Nyaa-only today (fetch_feeds hits the Nyaa
+    // categories), so the per-Nyaa client pin is the right routing
+    // dimension. Falls through to the default client when the user
+    // hasn't pinned Nyaa to anything specific.
+    let client = state.client_for_nyaa(cfg.nyaa_download_client_id).await;
 
     // One compiled-CF snapshot for the whole RSS pass so each item's
     // score reflects the user's CF profile. Without this thread-through

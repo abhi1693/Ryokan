@@ -204,14 +204,10 @@ async fn require_download_client(
     std::sync::Arc<dyn crate::services::download_client::DownloadClient>,
     (StatusCode, String),
 > {
-    let guard = state.download_client.read().await;
-    guard
-        .as_ref()
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Download client not configured".to_string(),
-        ))
-        .cloned()
+    state.default_download_client().await.ok_or((
+        StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))
 }
 
 #[utoipa::path(

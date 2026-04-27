@@ -279,16 +279,10 @@ pub async fn grab_release(
     State(state): State<AppState>,
     Json(form): Json<GrabForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let client = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
 
     let form_hash = form.info_hash.clone().unwrap_or_default();
     let info_hash = if !form_hash.is_empty() {
@@ -479,16 +473,10 @@ pub async fn get_torrents(
     Json<Vec<crate::services::download_client::DownloadItem>>,
     (axum::http::StatusCode, String),
 > {
-    let client = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let client = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
 
     let torrents = client
         .list_scoped()

@@ -64,16 +64,10 @@ pub async fn grab_batch_result(
         ));
     }
 
-    let qbit = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let qbit = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
 
     // Same selective-file path as `grab_interactive_result`: narrow
     // a megapack to just the target if it has its own subtitle or
@@ -273,16 +267,10 @@ pub async fn grab_interactive_result(
         ));
     }
 
-    let qbit = {
-        let guard = state.download_client.read().await;
-        guard
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Download client not configured".to_string(),
-            ))?
-            .clone()
-    };
+    let qbit = state.default_download_client().await.ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "Download client not configured".to_string(),
+    ))?;
 
     // If the target is a multi-part entry ("Kizumonogatari II") OR a
     // subtitled season of a franchise ("Stardust Crusaders"), try the

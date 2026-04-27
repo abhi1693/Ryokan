@@ -438,6 +438,41 @@ function testQbit(btn) {
     });
 }
 
+function testDownloadClient(btn) {
+    // Lives next to the Add/Edit Download Client form. Walks up to
+    // the surrounding <form> and POSTs every field needed for a
+    // dry-run connection test — without saving the row. Result
+    // lands in the sibling .dc-test-result span.
+    const form = btn.closest('form');
+    const result = form ? form.querySelector('.dc-test-result') : null;
+    if (!form || !result) return;
+    const payload = {
+        kind: form.querySelector('[name=kind]').value,
+        url: form.querySelector('[name=url]').value,
+        username: (form.querySelector('[name=username]') || {}).value || '',
+        password: (form.querySelector('[name=password]') || {}).value || '',
+        label: (form.querySelector('[name=label]') || {}).value || '',
+    };
+    btn.disabled = true;
+    result.textContent = 'Testing...';
+    fetch('/api/download-clients/test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    })
+    .then(async r => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.message || 'Connection failed');
+        result.textContent = data.message;
+    })
+    .catch(err => {
+        result.textContent = err.message;
+    })
+    .finally(() => {
+        btn.disabled = false;
+    });
+}
+
 function testJellyfin(btn) {
     const result = document.getElementById('jellyfin-test-result');
     const payload = {

@@ -322,8 +322,12 @@ pub async fn webhook_autobrr(
     };
     let (series, ep_nums) = matched;
 
-    // Hand off to the download client.
-    let client = match state.download_client.read().await.as_ref().cloned() {
+    // Hand off to the download client. Multi-client routing —
+    // resolve via the matched indexer's pin first, then fall through
+    // to the default. `indexer_id` is `Some(_)` here because the
+    // earlier guard returned `skipped()` if the indexer wasn't
+    // configured.
+    let client = match state.client_for_indexer(indexer_id).await {
         Some(c) => c,
         None => {
             logger::error(

@@ -93,8 +93,8 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
     }
 
     let client = {
-        let guard = state.download_client.read().await;
-        guard.as_ref().cloned()
+        let client = state.default_download_client().await;
+        client.as_ref().cloned()
     };
     let Some(client) = client else {
         tracing::warn!(

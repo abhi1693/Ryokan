@@ -69,9 +69,26 @@ pub fn build_test_app_state(
 ) -> AppState {
     let cf_cache: CompiledCfCache = Arc::new(RwLock::new(Arc::new(Vec::new())));
     let indexers: crate::IndexerCache = Arc::new(RwLock::new(Arc::new(Vec::new())));
+    // Multi-client routing — pre-populate the pool with id=1 marked
+    // as default if a client was supplied. Tests that exercise the
+    // pin-resolution chain via specific ids should construct their
+    // own pool; the simple "did the grab dispatch?" tests use this
+    // shape and don't care about ids.
+    let mut clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>> =
+        std::collections::HashMap::new();
+    let mut default_id = None;
+    if let Some(c) = download_client {
+        clients.insert(1, c);
+        default_id = Some(1);
+    }
+    let pool = crate::DownloadClientPool {
+        clients,
+        default_id,
+    };
+    let download_clients: crate::DownloadClientsCache = Arc::new(RwLock::new(Arc::new(pool)));
     AppState {
         db,
-        download_client: Arc::new(RwLock::new(download_client)),
+        download_clients,
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
         indexers,

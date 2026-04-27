@@ -92,6 +92,12 @@ use services::{
         // Settings — Indexers (issue #28 PR B)
         handlers::settings::indexers::settings_indexers_upsert,
         handlers::settings::indexers::settings_indexers_delete,
+        // Settings — Download clients (multi-client refactor)
+        handlers::settings::download_clients::settings_download_clients_upsert,
+        handlers::settings::download_clients::settings_download_clients_delete,
+        handlers::settings::download_clients::settings_download_clients_set_default,
+        handlers::settings::download_clients::settings_download_clients_test,
+        handlers::settings::download_clients::settings_indexers_nyaa_pin,
         // Settings — autobrr API key rotation (issue #28 PR D)
         handlers::settings::autobrr_key::settings_autobrr_regenerate_key,
         // Webhooks (issue #28 PR D)
@@ -148,6 +154,10 @@ use services::{
         handlers::downloads::BlocklistRemoveForm,
         handlers::settings::QbitTestForm,
         handlers::settings::JellyfinTestForm,
+        handlers::settings::download_clients::DownloadClientUpsertForm,
+        handlers::settings::download_clients::DownloadClientIdForm,
+        handlers::settings::download_clients::DownloadClientTestForm,
+        handlers::settings::download_clients::NyaaPinForm,
         handlers::settings::custom_formats::CustomFormatUpsertForm,
         handlers::settings::custom_formats::CfTestRequest,
         handlers::settings::custom_formats::CustomFormatDeleteForm,
@@ -444,9 +454,11 @@ async fn main() {
     let indexers = services::indexers::rebuild_cache(&db).await;
 
     // Build shared state.
+    let download_clients: ryokan::DownloadClientsCache =
+        Arc::new(RwLock::new(Arc::new(ryokan::DownloadClientPool::default())));
     let state = AppState {
         db: db.clone(),
-        download_client: Arc::new(RwLock::new(None)),
+        download_clients: download_clients.clone(),
         jellyfin: Arc::new(RwLock::new(None)),
         custom_formats: cf_cache,
         indexers,
@@ -457,20 +469,20 @@ async fn main() {
         start_time: chrono::Utc::now(),
     };
 
-    // Initialize download client from saved config. Branches on
-    // `config.active_client` — the per-client credential columns
-    // (qbit_*, deluge_*) coexist on the same `config` row so a user
-    // can switch between them in Settings without losing the other's
-    // setup. Phase 3+ will add transmission/rtorrent arms here.
-    if let Ok(Some(config)) = models::config::get_config(&db).await {
-        let client = services::download_client::build_download_client(&config);
-        if client.is_some() {
-            *state.download_client.write().await = client;
-        }
-        if !config.jellyfin_url.is_empty() && !config.jellyfin_api_key.is_empty() {
-            let client = JellyfinClient::new(&config.jellyfin_url, &config.jellyfin_api_key);
-            *state.jellyfin.write().await = Some(client);
-        }
+    // Initialize the multi-client pool from `download_clients` rows.
+    // Pre-multi-client installs ran their migration's seed-default
+    // backfill at startup (above), so by the time this runs there
+    // should be either zero rows (fresh install — pool stays empty
+    // until the user adds a row in Settings → Connections →
+    // Downloads) or one row with `is_default = 1` mirroring the
+    // legacy `active_client` choice.
+    services::download_client::rebuild_clients_cache(&state.download_clients, &db).await;
+    if let Ok(Some(config)) = models::config::get_config(&db).await
+        && !config.jellyfin_url.is_empty()
+        && !config.jellyfin_api_key.is_empty()
+    {
+        let client = JellyfinClient::new(&config.jellyfin_url, &config.jellyfin_api_key);
+        *state.jellyfin.write().await = Some(client);
     }
 
     // Routes that don't require auth. The CSRF layer applies to POSTs here
@@ -707,6 +719,26 @@ async fn main() {
         .route(
             "/settings/indexers/delete",
             post(handlers::settings::indexers::settings_indexers_delete),
+        )
+        .route(
+            "/settings/indexers/nyaa-pin",
+            post(handlers::settings::download_clients::settings_indexers_nyaa_pin),
+        )
+        .route(
+            "/settings/download-clients/upsert",
+            post(handlers::settings::download_clients::settings_download_clients_upsert),
+        )
+        .route(
+            "/settings/download-clients/delete",
+            post(handlers::settings::download_clients::settings_download_clients_delete),
+        )
+        .route(
+            "/settings/download-clients/set-default",
+            post(handlers::settings::download_clients::settings_download_clients_set_default),
+        )
+        .route(
+            "/api/download-clients/test",
+            post(handlers::settings::download_clients::settings_download_clients_test),
         )
         .route(
             "/settings/autobrr/regenerate-key",

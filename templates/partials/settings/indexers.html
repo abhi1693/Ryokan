@@ -127,6 +127,20 @@
                 </label>
             </div>
 
+            <div class="form-group">
+                <label for="indexer-edit-dc">Download Client</label>
+                <select id="indexer-edit-dc" name="download_client_id">
+                    <option value="">(use default)</option>
+                    {% for dc in download_clients %}
+                    <option value="{{ dc.id }}"
+                        {% if let Some(pin) = edit.download_client_id %}{% if *pin == dc.id %}selected{% endif %}{% endif %}>
+                        {{ dc.name }}{% if dc.is_default %} (default){% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+                <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag.</span>
+            </div>
+
             <button type="submit" class="btn btn-primary">Save Changes</button>
         </form>
         {% else if let Some(seed) = indexer_seed %}
@@ -219,6 +233,17 @@
                 <span class="form-hint">Marks this indexer as PT for the per-series upgrade opt-in.</span>
             </div>
 
+            <div class="form-group">
+                <label for="indexer-add-dc">Download Client</label>
+                <select id="indexer-add-dc" name="download_client_id">
+                    <option value="">(use default)</option>
+                    {% for dc in download_clients %}
+                    <option value="{{ dc.id }}">{{ dc.name }}{% if dc.is_default %} (default){% endif %}</option>
+                    {% endfor %}
+                </select>
+                <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag.</span>
+            </div>
+
             <button type="submit" class="btn btn-primary">Add Indexer</button>
         </form>
         {% else %}
@@ -242,6 +267,35 @@
         </div>
         {% endif %}
     </fieldset>
+
+    {# Built-in Nyaa search routes through whichever download
+       client this row points at. Empty selection = use the default
+       client. Standalone form (not nested in any other) — POSTs
+       to `/settings/indexers/nyaa-pin`, which writes
+       `config.nyaa_download_client_id`. #}
+    {% if indexer_edit.is_none() && indexer_seed.is_none() %}
+    <fieldset class="settings-form">
+        <legend>Nyaa search</legend>
+        <p class="form-hint" style="margin: 0 0 12px;">
+            Ryokan's built-in Nyaa search (the public-tracker hot path) isn't a torznab indexer row — pin it to a download client here.
+        </p>
+        <form method="post" action="/settings/indexers/nyaa-pin" class="settings-form settings-subform">
+            <div class="form-group">
+                <label for="nyaa-dc">Download Client</label>
+                <select id="nyaa-dc" name="download_client_id">
+                    <option value="">(use default)</option>
+                    {% for dc in download_clients %}
+                    <option value="{{ dc.id }}"
+                        {% if let Some(pin) = config.nyaa_download_client_id %}{% if *pin == dc.id %}selected{% endif %}{% endif %}>
+                        {{ dc.name }}{% if dc.is_default %} (default){% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit" class="btn btn-primary">Save Nyaa pin</button>
+        </form>
+    </fieldset>
+    {% endif %}
 
     {# Push receivers — webhook-driven release sources. autobrr's
        Webhook action POSTs releases at Ryokan's /api/webhook/autobrr

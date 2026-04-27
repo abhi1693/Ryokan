@@ -286,7 +286,7 @@ pub async fn remove_series(
         };
 
         if !hashes.is_empty() {
-            let client_opt = state.download_client.read().await.clone();
+            let client_opt = state.default_download_client().await;
             if let Some(client) = client_opt {
                 for (_id, hash) in &hashes {
                     if hash.is_empty() {
@@ -560,7 +560,7 @@ pub async fn set_monitoring(
     // so narrowing transitions (`all → missing`) are a natural no-op.
     if mode != monitoring::MonitorMode::None
         && summary.monitored_count > 0
-        && state.download_client.read().await.is_some()
+        && state.default_download_client().await.is_some()
     {
         let cfg = config::get_config(&state.db).await.ok().flatten();
         let auto_grab_on_add = cfg.as_ref().map(|c| c.auto_grab_on_add).unwrap_or(true);

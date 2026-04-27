@@ -313,10 +313,8 @@ async fn import_torrent(
     torrent_save_path: &str,
 ) -> Result<ImportOutcome, String> {
     let client = state
-        .download_client
-        .read()
+        .default_download_client()
         .await
-        .clone()
         .ok_or("Download client not configured")?;
 
     let files = client
@@ -1263,7 +1261,7 @@ pub async fn run_once(state: &AppState) {
         return;
     }
 
-    let client = match state.download_client.read().await.clone() {
+    let client = match state.default_download_client().await {
         Some(c) => c,
         None => return,
     };
@@ -1525,7 +1523,7 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         .map_err(|_| ())?
         .unwrap_or_default();
 
-    let client = match state.download_client.read().await.clone() {
+    let client = match state.default_download_client().await {
         Some(c) => c,
         None => return Ok(()),
     };

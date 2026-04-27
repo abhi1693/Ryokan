@@ -96,5 +96,15 @@
 </div>
 {% endif %}
 
+{# Multi-client refactor: download-clients management is rendered
+   page-level (outside the bulk Settings <form>) because each row
+   carries its own per-action <form> and HTML5 forbids nested
+   forms. Only on the Connections (integrations) tab. #}
+{% if tab == "integrations" %}
+<div class="settings-tab-panel active">
+{%~ include "partials/settings/download_clients.html" ~%}
+</div>
+{% endif %}
+
 <script src="/static/js/settings.js" defer></script>
 {% endblock %}

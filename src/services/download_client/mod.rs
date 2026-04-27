@@ -475,6 +475,86 @@ pub fn translate_client_path(
 /// "which impl do we pick" logic lives in one place and the arm for
 /// each client ships alongside its `mod deluge` / `mod qbittorrent`
 /// etc. as Phase 3+ clients land.
+/// Multi-client routing — materialize every enabled row in
+/// `download_clients` into a live `Arc<dyn DownloadClient>`,
+/// keyed by row id. Used at startup and on Settings → Downloads
+/// add/edit/delete to rebuild the cache.
+///
+/// Failed instantiations (bad URL, reqwest::Client build failure)
+/// log + drop. The default client id is captured separately so
+/// [`AppState::client_for_indexer`] can fall through to it
+/// without re-querying the DB.
+pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sqlx::SqlitePool) {
+    use crate::DownloadClientPool;
+    use crate::models::download_clients;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    let rows = match download_clients::list_enabled(db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("download_clients: failed to load from DB: {e}");
+            Vec::new()
+        }
+    };
+    let mut clients: HashMap<i64, Arc<dyn DownloadClient>> = HashMap::new();
+    let mut default_id: Option<i64> = None;
+    for row in rows {
+        let client: Option<Arc<dyn DownloadClient>> = match row.kind.as_str() {
+            "deluge" if !row.url.is_empty() => Some(Arc::new(deluge::DelugeClient::new(
+                &row.url,
+                &row.password,
+                &row.label,
+            ))),
+            "transmission" if !row.url.is_empty() => {
+                Some(Arc::new(transmission::TransmissionClient::new(
+                    &row.url,
+                    &row.username,
+                    &row.password,
+                    &row.label,
+                )))
+            }
+            "rtorrent" if !row.url.is_empty() => Some(Arc::new(rtorrent::RtorrentClient::new(
+                &row.url,
+                &row.username,
+                &row.password,
+                &row.label,
+            ))),
+            "qbittorrent" if !row.url.is_empty() => Some(Arc::new(qbittorrent::QbitClient::new(
+                &row.url,
+                &row.username,
+                &row.password,
+                &row.label,
+            ))),
+            other => {
+                tracing::warn!(
+                    "download_clients: skipping #{} ({}) — unknown / unsupported kind {:?}",
+                    row.id,
+                    row.name,
+                    other,
+                );
+                None
+            }
+        };
+        if let Some(c) = client {
+            if row.is_default {
+                default_id = Some(row.id);
+            }
+            clients.insert(row.id, c);
+        }
+    }
+    // Fall-through: if the user marked a kind+URL combo as default
+    // but it failed to instantiate, pick any other surviving row
+    // so the grab path isn't surprised by a present-but-empty pool.
+    if default_id.is_none() && !clients.is_empty() {
+        default_id = clients.keys().min().copied();
+    }
+    let pool = Arc::new(DownloadClientPool {
+        clients,
+        default_id,
+    });
+    *cache.write().await = pool;
+}
+
 pub fn build_download_client(
     config: &crate::models::config::Config,
 ) -> Option<std::sync::Arc<dyn DownloadClient>> {

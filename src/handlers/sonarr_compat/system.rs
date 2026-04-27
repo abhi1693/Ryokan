@@ -73,7 +73,7 @@ pub async fn list_tags() -> Json<Vec<Tag>> {
 pub async fn list_download_clients(
     State(state): State<AppState>,
 ) -> Json<Vec<DownloadClientEntry>> {
-    let client = state.download_client.read().await.clone();
+    let client = state.default_download_client().await;
     let Some(client) = client else {
         return Json(vec![]);
     };

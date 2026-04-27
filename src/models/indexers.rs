@@ -46,6 +46,10 @@ pub struct Indexer {
     /// means use the process default (30s, overridable via
     /// `RYOKAN_INDEXER_DEFAULT_TIMEOUT_SECS`).
     pub request_timeout_secs: Option<i64>,
+    /// Multi-client routing pin — id of the row in
+    /// `download_clients` this indexer routes to. `None` means
+    /// "fall through to the default client" at grab time.
+    pub download_client_id: Option<i64>,
     /// Cached caps response body. Empty until the first probe
     /// succeeds (PR B). Read with a 7-day TTL — stale caps trigger
     /// a transparent re-fetch on next read.
@@ -71,11 +75,14 @@ pub struct IndexerForm<'a> {
     pub seed_time_minutes: Option<i64>,
     pub min_seeders: i32,
     pub request_timeout_secs: Option<i64>,
+    /// Multi-client routing pin. `None` = use the default
+    /// download client at grab time.
+    pub download_client_id: Option<i64>,
 }
 
 const SELECT_COLUMNS: &str = "id, name, kind, url, api_key, priority, enabled, \
     is_private_tracker, seed_ratio, seed_time_minutes, min_seeders, request_timeout_secs, \
-    caps_json, caps_refreshed_at, created_at, updated_at";
+    download_client_id, caps_json, caps_refreshed_at, created_at, updated_at";
 
 fn row_to_indexer(row: &sqlx::sqlite::SqliteRow) -> Indexer {
     // Nullable columns explicitly typed as `Option<T>` so sqlx
@@ -101,6 +108,9 @@ fn row_to_indexer(row: &sqlx::sqlite::SqliteRow) -> Indexer {
         min_seeders: row.try_get("min_seeders").unwrap_or(1),
         request_timeout_secs: row
             .try_get::<Option<i64>, _>("request_timeout_secs")
+            .unwrap_or(None),
+        download_client_id: row
+            .try_get::<Option<i64>, _>("download_client_id")
             .unwrap_or(None),
         caps_json: row.try_get("caps_json").unwrap_or_default(),
         caps_refreshed_at: row
@@ -149,8 +159,9 @@ pub async fn insert(db: &SqlitePool, form: IndexerForm<'_>) -> Result<i64, sqlx:
     let result = sqlx::query(
         "INSERT INTO indexers \
          (name, kind, url, api_key, priority, enabled, is_private_tracker, \
-          seed_ratio, seed_time_minutes, min_seeders, request_timeout_secs) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          seed_ratio, seed_time_minutes, min_seeders, request_timeout_secs, \
+          download_client_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(form.name)
     .bind(form.kind)
@@ -163,6 +174,7 @@ pub async fn insert(db: &SqlitePool, form: IndexerForm<'_>) -> Result<i64, sqlx:
     .bind(form.seed_time_minutes)
     .bind(form.min_seeders)
     .bind(form.request_timeout_secs)
+    .bind(form.download_client_id)
     .execute(db)
     .await?;
     Ok(result.last_insert_rowid())
@@ -173,7 +185,8 @@ pub async fn update(db: &SqlitePool, id: i64, form: IndexerForm<'_>) -> Result<(
         "UPDATE indexers SET \
          name = ?, kind = ?, url = ?, api_key = ?, priority = ?, enabled = ?, \
          is_private_tracker = ?, seed_ratio = ?, seed_time_minutes = ?, min_seeders = ?, \
-         request_timeout_secs = ?, updated_at = strftime('%s','now') \
+         request_timeout_secs = ?, download_client_id = ?, \
+         updated_at = strftime('%s','now') \
          WHERE id = ?",
     )
     .bind(form.name)
@@ -187,6 +200,7 @@ pub async fn update(db: &SqlitePool, id: i64, form: IndexerForm<'_>) -> Result<(
     .bind(form.seed_time_minutes)
     .bind(form.min_seeders)
     .bind(form.request_timeout_secs)
+    .bind(form.download_client_id)
     .bind(id)
     .execute(db)
     .await?;
@@ -266,6 +280,7 @@ mod tests {
             seed_time_minutes: None,
             min_seeders: 1,
             request_timeout_secs: None,
+            download_client_id: None,
         }
     }
 

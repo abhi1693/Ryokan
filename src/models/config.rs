@@ -137,6 +137,12 @@ pub struct Config {
     /// also enforces the range on input. No-op when no external
     /// account is linked, regardless of the value.
     pub external_sync_interval_minutes: i32,
+    /// Multi-client routing — id of the `download_clients` row to
+    /// route built-in Nyaa search hits through. `None` falls back
+    /// to whichever row holds `is_default = 1`. Surfaced as a
+    /// dropdown on the Indexers tab; stored alongside the row's
+    /// `download_client_id` pin to preserve the same shape.
+    pub nyaa_download_client_id: Option<i64>,
 }
 
 impl Default for Config {
@@ -197,6 +203,7 @@ impl Default for Config {
             default_restrict_to_uploader: String::new(),
             grab_preview_mode: "batches_only".to_string(),
             external_sync_interval_minutes: 30,
+            nyaa_download_client_id: None,
         }
     }
 }
@@ -258,6 +265,7 @@ struct ConfigRow {
     default_restrict_to_uploader: String,
     grab_preview_mode: String,
     external_sync_interval_minutes: i64,
+    nyaa_download_client_id: Option<i64>,
 }
 
 /// Cheap title-language lookup with a safe default. Used by every page
@@ -279,7 +287,7 @@ pub async fn get_title_language(db: &SqlitePool) -> String {
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes FROM config WHERE id = 1",
+        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -340,6 +348,7 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         default_restrict_to_uploader: r.default_restrict_to_uploader,
         grab_preview_mode: r.grab_preview_mode,
         external_sync_interval_minutes: r.external_sync_interval_minutes as i32,
+        nyaa_download_client_id: r.nyaa_download_client_id,
     }))
 }
 
