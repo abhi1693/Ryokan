@@ -680,6 +680,106 @@ mod tests {
         assert_eq!(summary.episodes_checked, 0);
     }
 
+    /// Stage one episode file `S01E01.mkv` inside `<tempdir>/<folder>/`
+    /// and return the tempdir handle (so it survives the test) plus the
+    /// media-root path string. The series's `folder_name` should match
+    /// `folder` so `media::scan_series_folder` walks into our directory.
+    fn stage_disk_file(folder: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let series_dir = dir.path().join(folder);
+        std::fs::create_dir_all(&series_dir).unwrap();
+        std::fs::write(
+            series_dir.join("Show - S01E01 [BluRay 1080p].mkv"),
+            b"fake-mkv",
+        )
+        .unwrap();
+        let media_root = dir.path().to_string_lossy().into_owned();
+        (dir, media_root)
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_when_existing_quality_already_at_cutoff() {
+        // disk file present + episode_quality_tags row marks it BluRay
+        // 1080p (== the configured cutoff) → build_upgrade_targets
+        // returns empty → continue without touching find_best_for_target.
+        // This pins the "no upgrade needed" branch of the upgrade loop.
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        let (_tempdir, media_root) = stage_disk_file("Show");
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode, cutoff_source, cutoff_resolution) \
+             VALUES (1, ?, 'hardlink', 'bluray', '1080')",
+        )
+        .bind(&media_root)
+        .execute(&db)
+        .await
+        .unwrap();
+        let series_id = seed_series(&db, 12001, "Show").await;
+        // Tag the file as BluRay 1080p == cutoff. The build_upgrade_targets
+        // helper drops candidates whose existing rank >= cutoff rank, so
+        // an exact-cutoff row produces an empty target list.
+        sqlx::query(
+            "INSERT INTO episode_quality_tags \
+             (series_id, episode_number, quality_tag, source, resolution, is_remux, is_bdmv) \
+             VALUES (?, 1, 'BluRay-1080p', 'BluRay', '1080p', 0, 0)",
+        )
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        let summary = run_once(&state).await.unwrap();
+        // series_checked is incremented only after the metadata_cache
+        // lookup; but we never reach it because upgrade_targets is
+        // empty, so the loop hits `continue` first.
+        assert_eq!(summary.series_checked, 0);
+        assert_eq!(summary.upgrades_grabbed, 0);
+    }
+
+    #[tokio::test]
+    async fn run_once_skips_series_without_cached_metadata() {
+        // disk file + sub-cutoff tag → build_upgrade_targets returns
+        // non-empty. But metadata_cache has no row for this series, so
+        // the metadata_cache lookup falls through to the "skipping —
+        // no cached metadata" debug log and `continue`. Pins the
+        // missing-cache fallback branch.
+        let _serial = UPGRADE_TEST_SERIALIZER.lock().await;
+        let db = in_memory_pool().await;
+        let (_tempdir, media_root) = stage_disk_file("Show");
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode, cutoff_source, cutoff_resolution) \
+             VALUES (1, ?, 'hardlink', 'bluray', '1080')",
+        )
+        .bind(&media_root)
+        .execute(&db)
+        .await
+        .unwrap();
+        let series_id = seed_series(&db, 12002, "Show").await;
+        // Tag at WEB-720p — strictly below BluRay-1080p cutoff, so
+        // build_upgrade_targets returns this episode as a candidate.
+        sqlx::query(
+            "INSERT INTO episode_quality_tags \
+             (series_id, episode_number, quality_tag, source, resolution, is_remux, is_bdmv) \
+             VALUES (?, 1, 'WEB-720p', 'Web', '720p', 0, 0)",
+        )
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        // Deliberately no metadata_cache row.
+        let state = build_test_app_state(db, None);
+        install_default_client(&state).await;
+
+        let summary = run_once(&state).await.unwrap();
+        assert_eq!(
+            summary.series_checked, 0,
+            "series_checked is incremented after the cache lookup; missing cache must keep it at 0"
+        );
+        assert_eq!(summary.upgrades_grabbed, 0);
+    }
+
     #[tokio::test]
     async fn run_once_persists_pt_indexer_set_without_failure() {
         // PT-pin gate snapshot (the `pt_indexer_ids` HashSet) is built
