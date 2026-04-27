@@ -405,6 +405,67 @@ pub async fn clear_cache_for_tests() {
     *w = None;
 }
 
+/// Test-only: seed the in-memory cache with arbitrary TVDB/TMDB →
+/// AniList/MAL mappings. Lets handler tests for `add_series` /
+/// `add_movie` exercise the resolved-mapping branch (the one that
+/// fetches AL detail and upserts the series row) without ever
+/// reaching the network or disk-cache path.
+///
+/// `tvdb` / `tmdb` entries are tuples of `(external_id, season,
+/// anilist_id, mal_id)`. Season `0` is the unscoped catch-all the
+/// real data uses for shows TMDB hasn't sub-divided. Pass `None` for
+/// `mal_id` when you only want the AL side mapped.
+///
+/// Distinct entry from `seed_mal_to_anilist_for_tests` because the
+/// `add_series` path doesn't go through the MAL→AL bridge — it asks
+/// the TVDB or TMDB index directly. Calling both helpers in the
+/// same test would clobber each other (each seeds a fresh
+/// `MappingCache`); pick whichever the code path under test actually
+/// reads.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn seed_external_mappings_for_tests(
+    tvdb: &[(i64, i32, Option<i64>, Option<i64>)],
+    tmdb: &[(i64, i32, Option<i64>, Option<i64>)],
+) {
+    let mut tvdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>> = HashMap::new();
+    let mut tmdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>> = HashMap::new();
+    let mut anilist_to_tmdb: HashMap<i64, i64> = HashMap::new();
+    let mut mal_to_tmdb: HashMap<i64, i64> = HashMap::new();
+    for &(tvdb_id, season, al, mal) in tvdb {
+        tvdb_to_anime
+            .entry((tvdb_id, season))
+            .or_default()
+            .push(AnimeIds {
+                anilist_id: al,
+                mal_id: mal,
+            });
+    }
+    for &(tmdb_id, season, al, mal) in tmdb {
+        tmdb_to_anime
+            .entry((tmdb_id, season))
+            .or_default()
+            .push(AnimeIds {
+                anilist_id: al,
+                mal_id: mal,
+            });
+        if let Some(al_id) = al {
+            anilist_to_tmdb.insert(al_id, tmdb_id);
+        }
+        if let Some(mid) = mal {
+            mal_to_tmdb.insert(mid, tmdb_id);
+        }
+    }
+    let data = MappingCache {
+        tmdb_to_anime,
+        tvdb_to_anime,
+        anilist_to_tmdb,
+        mal_to_tmdb,
+        mal_to_anilist: HashMap::new(),
+    };
+    let mut w = CACHE.write().await;
+    *w = Some(CacheState { data });
+}
+
 /// Resolve a TMDB ID from either an AniList ID or a MAL ID. Tries
 /// AniList first, falls back to MAL when given. Returns 0 when neither
 /// path produces a hit — callers (the Sonarr/Radarr compat handlers)
