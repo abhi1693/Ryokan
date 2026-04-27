@@ -12,7 +12,7 @@ use crate::services::download_client::DownloadClient;
 async fn pause_sends_queue_pause_with_nzo_id() {
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .and(query_param("name", "pause"))
         .and(query_param("value", "SABnzbd_nzo_xyz"))
@@ -29,7 +29,7 @@ async fn pause_sends_queue_pause_with_nzo_id() {
 async fn resume_sends_queue_resume_with_nzo_id() {
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .and(query_param("name", "resume"))
         .and(query_param("value", "SABnzbd_nzo_xyz"))
@@ -51,7 +51,7 @@ async fn delete_tries_queue_first_then_falls_back_to_history() {
     // their unpacked output cleaned up.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .and(query_param("name", "delete"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -61,7 +61,7 @@ async fn delete_tries_queue_first_then_falls_back_to_history() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "history"))
         .and(query_param("name", "delete"))
         .and(query_param("del_files", "1"))
@@ -81,7 +81,7 @@ async fn delete_tries_queue_first_then_falls_back_to_history() {
 async fn delete_surfaces_error_when_both_queue_and_history_fail() {
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .and(query_param("name", "delete"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -90,7 +90,7 @@ async fn delete_surfaces_error_when_both_queue_and_history_fail() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "history"))
         .and(query_param("name", "delete"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

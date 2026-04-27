@@ -14,7 +14,7 @@ use crate::services::download_client::{AddOutcome, DownloadClient};
 async fn add_returns_canonical_nzo_id_from_addurl_response() {
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "addurl"))
         .and(query_param("apikey", TEST_API_KEY))
         .and(query_param("cat", "ryokan-test"))
@@ -40,7 +40,7 @@ async fn add_returns_canonical_nzo_id_from_addurl_response() {
 async fn add_paused_sends_priority_minus_1() {
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "addurl"))
         .and(query_param("priority", "-1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -68,7 +68,7 @@ async fn empty_nzo_ids_falls_through_to_queue_scan_for_already_present() {
     // for a matching URL and reports AlreadyPresent if found.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "addurl"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "status": true,
@@ -77,7 +77,7 @@ async fn empty_nzo_ids_falls_through_to_queue_scan_for_already_present() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "queue": {
@@ -111,7 +111,7 @@ async fn empty_nzo_ids_with_no_matching_slot_surfaces_error() {
     // would slip past as a silent success.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "addurl"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "status": true,
@@ -120,7 +120,7 @@ async fn empty_nzo_ids_with_no_matching_slot_surfaces_error() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "queue": { "slots": [] }
@@ -128,7 +128,7 @@ async fn empty_nzo_ids_with_no_matching_slot_surfaces_error() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "history"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "history": { "slots": [] }

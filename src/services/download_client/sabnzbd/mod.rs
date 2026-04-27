@@ -30,13 +30,17 @@
 //!
 //! ### Per-client wire quirks (live-probed against SAB 4.x)
 //!
-//! - **Endpoint shape:** every call is `GET /sabnzbd/api?apikey=…&mode=…&output=json`.
-//!   Some installs strip the `/sabnzbd` prefix at the reverse proxy
-//!   (e.g. behind nginx with a single SAB instance), so the impl
-//!   accepts either `http://host:8080` or `http://host:8080/sabnzbd`
-//!   as the base URL — the URL builder appends `/sabnzbd/api` only if
-//!   the base doesn't already end in `/sabnzbd`. Same shape Deluge
-//!   uses for its `/json` suffix handling.
+//! - **Endpoint shape:** every call is `GET <base>/api?apikey=…&mode=…&output=json`.
+//!   The user's configured base IS the base — the impl just appends
+//!   `/api`. The `/sabnzbd` URL_BASE prefix isn't default; it's
+//!   per-install (set via SAB's `URL_BASE` config). The
+//!   linuxserver/sabnzbd Docker image, the Ubuntu .deb, and most
+//!   bare installs serve the API at `/api` directly. Installs that
+//!   kept SAB's `URL_BASE = /sabnzbd` should configure the base
+//!   URL as `http://host:8080/sabnzbd`, and the impl appends `/api`
+//!   to land at `/sabnzbd/api`. Live-probed 2026-04-27 against the
+//!   linuxserver/sabnzbd image — pre-fix v1 of this impl assumed
+//!   the prefix was default and 404'd.
 //! - **Add response surface:** `mode=addurl` returns
 //!   `{"status":true,"nzo_ids":["SABnzbd_nzo_..."]}` on success.
 //!   Empty `nzo_ids` array can mean "duplicate" (SAB's pre-queue dup
@@ -144,16 +148,22 @@ impl SabClient {
         }
     }
 
-    /// Build a `mode=…` URL keyed by the API key. Tolerates both
-    /// `http://host:8080` (we append `/sabnzbd/api`) and
-    /// `http://host:8080/sabnzbd` (we append `/api`) — common in
-    /// reverse-proxy setups that strip the SAB prefix.
+    /// Build the `/api` URL. The user provides the full base
+    /// (`http://host:8080` for installs with no URL_BASE prefix —
+    /// linuxserver/sabnzbd Docker, the Ubuntu .deb, most bare
+    /// installs; or `http://host:8080/sabnzbd` for installs that
+    /// kept SAB's default URL_BASE) and the impl just appends
+    /// `/api`.
+    ///
+    /// Live-probed 2026-04-27: the `/sabnzbd` prefix is NOT default
+    /// on the linuxserver image; it's a per-install knob the user
+    /// sets via SAB's `URL_BASE` config option. Pre-fix v1 of this
+    /// impl defaulted the *other* direction (appending `/sabnzbd/api`
+    /// when the base didn't have the prefix), which 404'd against
+    /// every install that didn't change `URL_BASE`. The user's
+    /// configured base IS the base — we don't second-guess.
     fn endpoint(&self) -> String {
-        if self.base_url.ends_with("/sabnzbd") {
-            format!("{}/api", self.base_url)
-        } else {
-            format!("{}/sabnzbd/api", self.base_url)
-        }
+        format!("{}/api", self.base_url)
     }
 
     /// Single-pair query helper. SAB takes mode + per-mode args via
@@ -733,13 +743,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoint_appends_sabnzbd_when_missing_from_base() {
+    fn endpoint_appends_api_to_bare_base() {
+        // No-prefix install (linuxserver/sabnzbd, Ubuntu .deb, most
+        // bare installs). Live-probed 2026-04-27.
         let c = SabClient::new("http://host:8080", "", "k", "anime");
-        assert_eq!(c.endpoint(), "http://host:8080/sabnzbd/api");
+        assert_eq!(c.endpoint(), "http://host:8080/api");
     }
 
     #[test]
-    fn endpoint_does_not_double_up_sabnzbd_prefix() {
+    fn endpoint_appends_api_when_base_has_url_base_prefix() {
+        // Install with SAB's `URL_BASE = /sabnzbd` config. User
+        // provides the full prefix; impl just appends `/api`.
         let c = SabClient::new("http://host:8080/sabnzbd", "", "k", "anime");
         assert_eq!(c.endpoint(), "http://host:8080/sabnzbd/api");
     }
@@ -747,7 +761,7 @@ mod tests {
     #[test]
     fn endpoint_strips_trailing_slash_from_base() {
         let c = SabClient::new("http://host:8080/", "", "k", "anime");
-        assert_eq!(c.endpoint(), "http://host:8080/sabnzbd/api");
+        assert_eq!(c.endpoint(), "http://host:8080/api");
     }
 
     #[test]

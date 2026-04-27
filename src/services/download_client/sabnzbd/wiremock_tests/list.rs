@@ -13,7 +13,7 @@ async fn list_scoped_merges_queue_and_history_filtered_by_category() {
     // Queue carries a mix: one in-category, one foreign-category.
     // Only the in-category slot should land in the result.
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "queue": {
@@ -44,7 +44,7 @@ async fn list_scoped_merges_queue_and_history_filtered_by_category() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "history"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "history": {
@@ -112,7 +112,7 @@ async fn list_scoped_merges_queue_and_history_filtered_by_category() {
 async fn list_scoped_returns_empty_when_no_matching_category() {
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "queue": { "slots": [] }
@@ -120,7 +120,7 @@ async fn list_scoped_returns_empty_when_no_matching_category() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "history"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "history": { "slots": [] }
@@ -139,7 +139,7 @@ async fn list_scoped_unknown_history_status_surfaces_as_errored() {
     // complete. Errored makes post-processing skip them.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "queue"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "queue": { "slots": [] }
@@ -147,7 +147,7 @@ async fn list_scoped_unknown_history_status_surfaces_as_errored() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sabnzbd/api"))
+        .and(path("/api"))
         .and(query_param("mode", "history"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "history": {
