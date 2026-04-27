@@ -823,6 +823,14 @@ pub async fn settings_submit(
         force_mal_fallback: current_force_mal_fallback,
         rss_enabled: form.rss_enabled.is_some(),
         rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
+        // multi-rss commit E — preserve the existing master flag
+        // through the Settings save. The master flag has its own
+        // dedicated handler (commit G) so save-on-the-main-form
+        // doesn't accidentally toggle it.
+        rss_master_enabled: existing_cfg
+            .as_ref()
+            .map(|cfg| cfg.rss_master_enabled)
+            .unwrap_or(true),
         force_kitsu_fallback: current_force_kitsu_fallback,
         post_processing_enabled: form.post_processing_enabled.is_some(),
         post_processing_mode: match form.post_processing_mode.as_str() {

@@ -1,6 +1,7 @@
 pub mod artwork_cache;
 pub mod config;
 pub mod custom_formats;
+pub mod direct_rss_feeds;
 pub mod download_clients;
 pub mod episode_tags;
 pub mod external_accounts;
@@ -15,7 +16,6 @@ pub mod monitoring;
 pub mod nyaa_description_cache;
 pub mod pending_grabs;
 pub mod rss;
-pub mod rss_feeds;
 pub mod scheduled_tasks;
 pub mod series;
 pub mod series_custom_lists;

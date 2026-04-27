@@ -2418,6 +2418,102 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // multi-rss commit E — observability fields on each per-source
+    // row so the Settings UI can render "last polled 3m ago, 18
+    // items" inline. Nyaa is the singleton out-of-band path and
+    // has no row to write to; users see Nyaa status via System →
+    // Logs filtered to LogCategory::Rss (decision #11).
+    sqlx::query("ALTER TABLE indexers ADD COLUMN rss_last_polled_at INTEGER")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE indexers ADD COLUMN rss_last_poll_error TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE indexers ADD COLUMN rss_last_item_count INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    // multi-rss commit E — rename rss_feeds → direct_rss_feeds
+    // (the latter matches the plan's terminology and disambiguates
+    // from the indexer-RSS path). SQLite's RENAME preserves all
+    // columns including the FK on download_client_id.
+    sqlx::query("ALTER TABLE rss_feeds RENAME TO direct_rss_feeds")
+        .execute(db)
+        .await
+        .ok();
+    // Per-feed observability + protocol detection columns.
+    // `detected_protocol` is populated by the Test button (commit
+    // G) — empty until the first successful test, after which the
+    // pin save path enforces protocol match. `request_timeout_secs`
+    // mirrors the per-indexer override.
+    sqlx::query("ALTER TABLE direct_rss_feeds ADD COLUMN request_timeout_secs INTEGER")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query(
+        "ALTER TABLE direct_rss_feeds ADD COLUMN detected_protocol TEXT NOT NULL DEFAULT ''",
+    )
+    .execute(db)
+    .await
+    .ok();
+    sqlx::query("ALTER TABLE direct_rss_feeds ADD COLUMN last_polled_at INTEGER")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE direct_rss_feeds ADD COLUMN last_poll_error TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query(
+        "ALTER TABLE direct_rss_feeds ADD COLUMN last_item_count INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // multi-rss commit E — per-source dedup scoping on rss_seen.
+    // Without this, three sources can produce identical numeric
+    // GUIDs (different sites' internal IDs) and a SubsPlease item
+    // would silently dedup against an unrelated Nyaa item.
+    //
+    //   (source = 'nyaa',    source_id = NULL) → legacy Nyaa entries
+    //   (source = 'indexer', source_id = N)   → indexer N's RSS
+    //   (source = 'direct',  source_id = N)   → direct_rss_feeds N
+    //
+    // Default 'nyaa' on existing rows preserves their meaning under
+    // the new shape — they were Nyaa entries before the migration,
+    // the column just makes that explicit. SQLite treats NULL as
+    // distinct in the index, so `source = 'nyaa' AND source_id IS
+    // NULL AND key = ?` uses the index correctly.
+    sqlx::query("ALTER TABLE rss_seen ADD COLUMN source TEXT NOT NULL DEFAULT 'nyaa'")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE rss_seen ADD COLUMN source_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_rss_seen_source_key \
+         ON rss_seen (source, source_id, item_key)",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // multi-rss commit E — master kill switch for the whole RSS
+    // sync. Off = no fetches at all (Nyaa + indexers + direct).
+    // Default 1 so existing installs keep their current behavior.
+    // `config.rss_enabled` retains its v1 semantics (Nyaa-only
+    // flag); see decision #8.
+    sqlx::query("ALTER TABLE config ADD COLUMN rss_master_enabled INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 
