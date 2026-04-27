@@ -22,3 +22,21 @@
 mod file_ops;
 mod filenames;
 mod lock;
+mod run_once;
+
+/// Serializes the `lock.rs` test and the `run_once.rs` tests so they
+/// don't race on the production `POST_PROC_LOCK`. Both touch the
+/// same `tokio::Mutex` (lock.rs asserts `try_lock` semantics
+/// directly; run_once tests indirectly via the production code's
+/// own `try_lock`). Without this serializer a parallel test holding
+/// `POST_PROC_LOCK` would make a peer test's `run_once` silently
+/// no-op (try_lock → Err → early return), and the peer's
+/// `list_scoped` call-count assertions would fail with no useful
+/// signal.
+///
+/// `tokio::Mutex` rather than `std::sync::Mutex` so the test
+/// `tokio::test` runtime can `.lock().await` without blocking the
+/// scheduler. The mutex never holds across `.await` for production
+/// reasons; here it's purely a test-harness serialization knob.
+pub(super) static POST_PROC_TEST_SERIALIZER: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
