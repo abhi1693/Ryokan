@@ -25,6 +25,12 @@ use crate::models::indexers as model;
 pub struct TorznabIndexer {
     id: i64,
     name: String,
+    /// multi-rss PR 4 — protocol kind of the source row
+    /// ("torznab" / "newznab"). Surfaced via the trait's `kind()`
+    /// method so the RSS fan-out can stamp the right
+    /// `RssSource::Indexer { kind }` on each item for the
+    /// download-client protocol guard at grab time.
+    kind: String,
     /// Opaque base URL — the user pastes Prowlarr's "Copy
     /// Torznab Url" verbatim, ending in `/api`. Ryokan
     /// appends `?t=...&apikey=...&...` and never tries to
@@ -66,6 +72,7 @@ impl TorznabIndexer {
         Ok(Self {
             id: row.id,
             name: row.name.clone(),
+            kind: row.kind.clone(),
             base_url: row.url.trim_end_matches('/').to_string(),
             api_key: row.api_key.trim().to_string(),
             priority: row.priority,
@@ -168,6 +175,9 @@ impl Indexer for TorznabIndexer {
     }
     fn name(&self) -> &str {
         &self.name
+    }
+    fn kind(&self) -> &str {
+        &self.kind
     }
     fn priority(&self) -> i32 {
         self.priority
