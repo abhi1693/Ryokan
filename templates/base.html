@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="/static/css/modals.css">
     {% block page_css %}{% endblock %}
 </head>
-<body>
+<body hx-boost="true">
     <script>
     // Pre-render FOUC guard: sets the title-language data attribute on
     // <html> before any content paints. Must stay inline (non-deferred)
@@ -43,7 +43,7 @@
             <a href="/downloads" class="{% if page == "downloads" %}active{% endif %}">Downloads</a>
             <a href="/settings" class="{% if page == "settings" %}active{% endif %}">Settings</a>
             <a href="/system" class="{% if page == "system" %}active{% endif %}">System</a>
-            <a href="/logout" class="nav-logout">Logout</a>
+            <a href="/logout" class="nav-logout" hx-boost="false">Logout</a>
         </div>
     </nav>
     <main class="content">
@@ -165,6 +165,13 @@
          window.ryokanToast({kind, title, body, duration}). -->
     <div class="ryokan-toast-stack" id="ryokan-toast-stack" aria-live="polite" aria-atomic="false"></div>
 
+    {# HTMX migration (issue #129) — vendored htmx 2.0.9 core + SSE
+       extension. Must load before base.js so any custom JS that touches
+       `htmx.*` (e.g. progress streaming, fragment dispatch) sees the
+       global. `hx-boost="true"` on <body> makes every same-origin nav
+       a fragment swap; logout opts out (full reload clears state). #}
+    <script src="/static/vendor/htmx-2.0.9.min.js" defer></script>
+    <script src="/static/vendor/htmx-ext-sse-2.2.4.min.js" defer></script>
     <script src="/static/js/base.js" defer></script>
 </body>
 </html>

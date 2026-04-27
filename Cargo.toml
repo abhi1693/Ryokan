@@ -25,6 +25,11 @@ path = "tests/pr0_foundation.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "htmx_foundation"
+path = "tests/htmx_foundation.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "external_sync_e2e"
 path = "tests/external_sync_e2e.rs"
 required-features = ["test-support"]
@@ -52,6 +57,12 @@ required-features = ["test-support"]
 [dependencies]
 # Web framework + async runtime
 axum = { version = "0.8", features = ["macros"] }
+# HTMX request detection — provides the `HxRequest` extractor so handlers
+# can return either full pages (regular nav) or HTML fragments
+# (HTMX swap target) based on the `HX-Request: true` header. Lives at
+# `services/htmx_response.rs` for the project's helper conventions.
+# Issue #129 (HTMX migration).
+axum-htmx = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace", "compression-br", "compression-gzip", "set-header"] }
