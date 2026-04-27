@@ -744,8 +744,12 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         };
 
         let info_hash = crate::services::nyaa::extract_hash(&grab_url);
-        match client.add_torrent(&grab_url, &info_hash).await {
-            Ok(_) => {
+        // PR G — use the returning-id variant so SAB grabs persist
+        // their `nzo_id` instead of the pre-computed BT-style hash.
+        // For BT clients the returned id equals `info_hash` (default
+        // impl), no behavior change.
+        match client.add_torrent_returning_id(&grab_url, &info_hash).await {
+            Ok((_outcome, canonical_id)) => {
                 grabbed += 1;
                 let action = if cand.is_upgrade { "upgrade" } else { "new" };
                 let reason = if cand.item.is_batch {
@@ -780,11 +784,14 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     },
                 )
                 .await;
-                // Record for post-processing.
+                // Record for post-processing. Persist the canonical
+                // id returned by the client (BT: matches info_hash;
+                // SAB: nzo_id) so post-processing's match-by-hash
+                // works for both.
                 let ep_list: Vec<i32> = cand.found.resolved_eps.iter().copied().collect();
                 let grab_id = crate::models::grabbed_torrents::record_grab(
                     &state.db,
-                    &cand.item.info_hash,
+                    &canonical_id,
                     &cand.item.title,
                     cand.found.series.id,
                     &ep_list,

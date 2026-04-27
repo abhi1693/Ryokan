@@ -41,6 +41,8 @@ pub mod rtorrent;
 
 pub mod transmission;
 
+pub mod sabnzbd;
+
 #[async_trait]
 pub trait DownloadClient: Send + Sync {
     /// Test connection and return the client's version string.
@@ -50,6 +52,30 @@ pub trait DownloadClient: Send + Sync {
     /// the v1 infohash Ryokan pre-computed from the magnet; impls may
     /// use it for idempotency checks and addressing.
     async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String>;
+
+    /// Adopt-style add that returns the canonical client-side id
+    /// alongside the outcome. Mirrors Sonarr's `Download(...) -> string`:
+    /// the caller doesn't have to know whether the id is a v1 infohash
+    /// or a SAB `nzo_id` — the client tells it. Returned id is what
+    /// Ryokan persists on `grabbed_torrents.hash` and what every
+    /// subsequent op (`list_scoped`, `get_files`, `delete`, etc.)
+    /// receives.
+    ///
+    /// Default impl: forwards to [`add_torrent`] and returns the
+    /// caller's pre-computed `info_hash`. BT impls (qBit, Deluge,
+    /// Transmission, rtorrent) all use this default — the v1 infohash
+    /// IS the canonical id at the wire level. Only impls whose wire
+    /// id can't be derived from the URL alone need to override —
+    /// SAB returns the `nzo_id` from the queue add response;
+    /// hypothetical NZBGet would return its `NzbId`.
+    async fn add_torrent_returning_id(
+        &self,
+        url: &str,
+        info_hash: &str,
+    ) -> Result<(AddOutcome, String), String> {
+        let outcome = self.add_torrent(url, info_hash).await?;
+        Ok((outcome, info_hash.to_string()))
+    }
 
     /// Add a torrent in a state where **file data does not actively
     /// download until the caller resumes**. Entry point for the
@@ -520,6 +546,19 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
                 &row.label,
             ))),
             "qbittorrent" if !row.url.is_empty() => Some(Arc::new(qbittorrent::QbitClient::new(
+                &row.url,
+                &row.username,
+                &row.password,
+                &row.label,
+            ))),
+            // PR G — SAB takes (url, username, api_key, category).
+            // The `download_clients.password` column carries the SAB
+            // API key for usenet rows (SAB has no per-user auth at
+            // the API layer; the API key is the only credential).
+            // Naming is awkward but reusing the column avoids a
+            // schema change and the form already labels it "API key"
+            // for the Usenet kind.
+            "sabnzbd" if !row.url.is_empty() => Some(Arc::new(sabnzbd::SabClient::new(
                 &row.url,
                 &row.username,
                 &row.password,

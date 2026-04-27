@@ -18,7 +18,7 @@ use crate::AppState;
 use crate::models::download_clients::{DownloadClientForm, delete, insert, set_default, update};
 use crate::models::log::LogCategory;
 use crate::services::download_client::{
-    DownloadClient, deluge, qbittorrent, rtorrent, transmission,
+    DownloadClient, deluge, qbittorrent, rtorrent, sabnzbd, transmission,
 };
 use crate::services::logger;
 
@@ -29,11 +29,12 @@ const KIND_QBITTORRENT: &str = "qbittorrent";
 const KIND_DELUGE: &str = "deluge";
 const KIND_TRANSMISSION: &str = "transmission";
 const KIND_RTORRENT: &str = "rtorrent";
+const KIND_SABNZBD: &str = "sabnzbd";
 
 fn is_known_kind(kind: &str) -> bool {
     matches!(
         kind,
-        KIND_QBITTORRENT | KIND_DELUGE | KIND_TRANSMISSION | KIND_RTORRENT
+        KIND_QBITTORRENT | KIND_DELUGE | KIND_TRANSMISSION | KIND_RTORRENT | KIND_SABNZBD
     )
 }
 
@@ -309,6 +310,12 @@ pub async fn settings_download_clients_test(
             form.label.trim(),
         )),
         KIND_RTORRENT => std::sync::Arc::new(rtorrent::RtorrentClient::new(
+            url,
+            form.username.trim(),
+            &form.password,
+            form.label.trim(),
+        )),
+        KIND_SABNZBD => std::sync::Arc::new(sabnzbd::SabClient::new(
             url,
             form.username.trim(),
             &form.password,

@@ -343,8 +343,11 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     }
                 };
 
-            match client.add_torrent(&url, &result.info_hash).await {
-                Ok(_) => {
+            match client
+                .add_torrent_returning_id(&url, &result.info_hash)
+                .await
+            {
+                Ok((_outcome, canonical_id)) => {
                     total_upgrades_grabbed += 1;
                     logger::info(
                         &state.db,
@@ -378,7 +381,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     }
                     let grab_id = crate::models::grabbed_torrents::record_grab(
                         &state.db,
-                        &result.info_hash,
+                        &canonical_id,
                         &result.title,
                         row.id,
                         &ep_nums,

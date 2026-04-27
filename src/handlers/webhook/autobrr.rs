@@ -343,8 +343,17 @@ pub async fn webhook_autobrr(
             );
         }
     };
-    let add_outcome = match client.add_torrent(&download_url, &info_hash_lc).await {
-        Ok(o) => o,
+    // PR G — `add_torrent_returning_id` returns the canonical client-
+    // side id alongside the outcome. For BT clients the returned id
+    // equals the input info_hash; for SAB it's the `nzo_id` SAB
+    // hands back from `mode=addurl`. Either way, persist the
+    // returned value so post-processing's `list_scoped` matching
+    // works for both protocols.
+    let (add_outcome, canonical_id) = match client
+        .add_torrent_returning_id(&download_url, &info_hash_lc)
+        .await
+    {
+        Ok(t) => t,
         Err(e) => {
             logger::error(
                 &state.db,
@@ -370,7 +379,7 @@ pub async fn webhook_autobrr(
     // grab row gets caught by the next reconcile pass.
     let grab_id = grabbed_torrents::record_grab(
         &state.db,
-        &info_hash_lc,
+        &canonical_id,
         &payload.torrent_name,
         series.id,
         &ep_nums,
@@ -383,7 +392,7 @@ pub async fn webhook_autobrr(
         let respected = download_client::apply_indexer_seed_rules(
             &state.db,
             &*client,
-            &info_hash_lc,
+            &canonical_id,
             indexer_id,
         )
         .await;
