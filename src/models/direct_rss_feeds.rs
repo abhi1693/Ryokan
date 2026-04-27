@@ -161,20 +161,58 @@ pub async fn update(
     id: i64,
     form: DirectRssFeedForm<'_>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE direct_rss_feeds SET \
-         name = ?, url = ?, enabled = ?, download_client_id = ?, \
-         request_timeout_secs = ?, updated_at = strftime('%s','now') \
-         WHERE id = ?",
-    )
-    .bind(form.name)
-    .bind(form.url)
-    .bind(form.enabled as i64)
-    .bind(form.download_client_id)
-    .bind(form.request_timeout_secs)
-    .bind(id)
-    .execute(db)
-    .await?;
+    // PR 112 review #B — clear `detected_protocol` whenever the
+    // URL changes. Without this, a user can edit URL_A (torrent
+    // feed, detected = "torrent", pinned to qBit) over to URL_B
+    // (an actual NZB feed) without re-testing — the
+    // protocol-mismatch guard then permits the qBit pin because
+    // the stored detected_protocol still matches qBit's protocol,
+    // and the next sync tick dispatches NZB items to qBit which
+    // hard-fails.
+    //
+    // Clearing forces the user to re-Test before the next pin
+    // gate runs (the Test endpoint repopulates
+    // detected_protocol on success). The pin guard's "permissive
+    // when detected_protocol is empty" branch handles the gap.
+    let url_changed =
+        sqlx::query_scalar::<_, String>("SELECT url FROM direct_rss_feeds WHERE id = ?")
+            .bind(id)
+            .fetch_optional(db)
+            .await?
+            .is_some_and(|existing_url| existing_url != form.url);
+
+    if url_changed {
+        sqlx::query(
+            "UPDATE direct_rss_feeds SET \
+             name = ?, url = ?, enabled = ?, download_client_id = ?, \
+             request_timeout_secs = ?, detected_protocol = '', \
+             updated_at = strftime('%s','now') \
+             WHERE id = ?",
+        )
+        .bind(form.name)
+        .bind(form.url)
+        .bind(form.enabled as i64)
+        .bind(form.download_client_id)
+        .bind(form.request_timeout_secs)
+        .bind(id)
+        .execute(db)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE direct_rss_feeds SET \
+             name = ?, url = ?, enabled = ?, download_client_id = ?, \
+             request_timeout_secs = ?, updated_at = strftime('%s','now') \
+             WHERE id = ?",
+        )
+        .bind(form.name)
+        .bind(form.url)
+        .bind(form.enabled as i64)
+        .bind(form.download_client_id)
+        .bind(form.request_timeout_secs)
+        .bind(id)
+        .execute(db)
+        .await?;
+    }
     Ok(())
 }
 
@@ -412,6 +450,85 @@ mod tests {
         assert!(
             row.download_client_id.is_none(),
             "FK ON DELETE SET NULL must clear the pin"
+        );
+    }
+
+    #[tokio::test]
+    async fn url_change_clears_detected_protocol_on_update() {
+        // PR 112 review #B — without this clear, a user editing
+        // a feed's URL (without re-testing) leaves a stale
+        // protocol stamp that the pin-guard then trusts. Pin so
+        // a regression that drops the URL-change check fails
+        // here.
+        let db = in_memory_pool().await;
+        let id = insert(&db, form("Feed", "https://a.example/rss"))
+            .await
+            .unwrap();
+        set_detected_protocol(&db, id, "torrent").await.unwrap();
+        // Sanity: detected_protocol stamped.
+        assert_eq!(
+            get_by_id(&db, id).await.unwrap().unwrap().detected_protocol,
+            "torrent"
+        );
+
+        // Edit URL — `detected_protocol` should clear.
+        update(
+            &db,
+            id,
+            DirectRssFeedForm {
+                name: "Feed",
+                url: "https://b.example/rss",
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_by_id(&db, id).await.unwrap().unwrap().detected_protocol,
+            "",
+            "URL change must clear stale detected_protocol"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_url_preserves_detected_protocol_on_update() {
+        // Sibling case: editing other fields without changing
+        // URL must NOT clear the protocol stamp. Otherwise every
+        // Save round-trips through Test which is annoying UX.
+        let db = in_memory_pool().await;
+        let id = insert(
+            &db,
+            DirectRssFeedForm {
+                name: "Feed",
+                url: "https://x.example/rss",
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        set_detected_protocol(&db, id, "torrent").await.unwrap();
+
+        // Edit name only.
+        update(
+            &db,
+            id,
+            DirectRssFeedForm {
+                name: "Feed (renamed)",
+                url: "https://x.example/rss",
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_by_id(&db, id).await.unwrap().unwrap().detected_protocol,
+            "torrent"
         );
     }
 

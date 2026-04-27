@@ -141,16 +141,21 @@ impl TorznabIndexer {
             // torznab layer sees the request. Surface the status
             // so the caller's error message tells the operator
             // whether the indexer URL is reachable at all.
-            let body = resp.text().await.unwrap_or_default();
+            let body = crate::services::rss::feed::read_capped_body(resp)
+                .await
+                .unwrap_or_default();
             return Err(format!(
                 "Indexer returned HTTP {}: {}",
                 status,
                 truncate_body(&body)
             ));
         }
-        resp.text()
-            .await
-            .map_err(|e| format!("indexer response read failed: {e}"))
+        // PR 112 review #A — share the same 10 MB body cap with
+        // the RSS path. Prowlarr is local-trust but a misconfigured
+        // upstream indexer behind it can still return the full
+        // historical archive on `t=tvsearch&q=`; the cap turns OOM
+        // into a clean Err the caller logs + skips.
+        crate::services::rss::feed::read_capped_body(resp).await
     }
 
     /// Apply pre-score filtering to a release set. Currently:

@@ -144,16 +144,54 @@ pub(super) fn build_item_key(item: &RssItem) -> String {
 
 async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
     let url = format!("{}&c={}", NYAA_RSS_BASE, category);
-    let xml = RSS_HTTP_CLIENT
+    let resp = RSS_HTTP_CLIENT
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("RSS request failed: {}", e))?
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read RSS response: {}", e))?;
-
+        .map_err(|e| format!("RSS request failed: {}", e))?;
+    // PR 112 review #A — cap Nyaa-direct fetch at the same 10 MB
+    // ceiling as `fetch_user_feed`. Nyaa is "trusted" but a
+    // reverse-proxy redirect / CF challenge / hijacked domain
+    // can still serve gigabytes; the asymmetry was a smell.
+    let xml = read_capped_body(resp).await?;
     Ok(parse_feed(&xml, RssSource::Nyaa))
+}
+
+/// 10 MB streaming-body cap shared between every RSS fetch path
+/// (Nyaa-direct, user-supplied direct feeds, torznab indexer
+/// polls). PR 112 review #A — user-supplied URLs were already
+/// capped via `fetch_user_feed`, but the Nyaa + indexer paths
+/// shared the same OOM-on-hostile-source threat shape. Extracted
+/// here so all three sites use one cap.
+///
+/// Streams via `Response::chunk()` (default-enabled in reqwest;
+/// avoids the `stream` feature flag) and bails with a clear error
+/// once the total crosses the cap. Returns the concatenated body
+/// as a String via `from_utf8_lossy` — RSS bodies are XML, which
+/// is conventionally UTF-8; replacement chars on malformed input
+/// are preferable to a parse refusal.
+pub(crate) async fn read_capped_body(resp: reqwest::Response) -> Result<String, String> {
+    /// 10 MB — far above any real feed (SubsPlease 1080p ~80 KB,
+    /// largest Nyaa category response ~1.5 MB), far below a
+    /// memory-pressure problem on the smallest deployments.
+    const RSS_BODY_CAP_BYTES: usize = 10 * 1024 * 1024;
+
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("RSS body read failed: {}", e))?
+    {
+        if buf.len() + chunk.len() > RSS_BODY_CAP_BYTES {
+            return Err(format!(
+                "RSS feed body exceeded {} MB cap",
+                RSS_BODY_CAP_BYTES / (1024 * 1024)
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// multi-rss PR 3 — generic RSS fetch for user-configured feeds
@@ -177,40 +215,13 @@ async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
 /// gigabytes. Streaming-with-cap rather than a Content-Length
 /// check because some servers omit the header.
 pub async fn fetch_user_feed(url: &str, source: RssSource) -> Result<Vec<RssItem>, String> {
-    /// 10 MB — far above any real feed, far below a memory-pressure
-    /// problem on the smallest deployments.
-    const RSS_BODY_CAP_BYTES: usize = 10 * 1024 * 1024;
-
     let resp = RSS_HTTP_CLIENT
         .get(url)
         .send()
         .await
         .map_err(|e| format!("RSS request failed: {}", e))?;
     let status = resp.status();
-
-    // Chunk through the body so we can short-circuit on the cap
-    // before allocating the whole thing into memory. `Response
-    // ::chunk()` yields whatever reqwest's already-buffered the
-    // bottom-half of the I/O loop; we just stop pulling once we
-    // hit the limit. Avoids the `stream` feature flag on
-    // reqwest by using the default-enabled `chunk()` helper.
-    let mut resp = resp;
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("RSS body read failed: {}", e))?
-    {
-        if buf.len() + chunk.len() > RSS_BODY_CAP_BYTES {
-            return Err(format!(
-                "RSS feed body exceeded {} MB cap",
-                RSS_BODY_CAP_BYTES / (1024 * 1024)
-            ));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    let xml = String::from_utf8_lossy(&buf).into_owned();
-
+    let xml = read_capped_body(resp).await?;
     if !status.is_success() {
         // Truncate the body for the error string so a Cloudflare
         // HTML error page doesn't render multi-KB inline in the

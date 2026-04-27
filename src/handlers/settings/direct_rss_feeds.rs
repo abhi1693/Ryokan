@@ -101,28 +101,59 @@ pub async fn settings_direct_rss_feeds_upsert(
     // detected_protocol yet (the Test button hasn't run), so the
     // first save is permissive. Once the user runs Test, the
     // protocol becomes known and subsequent saves are gated.
-    if let (Some(id), Some(client_id)) = (form.id, download_client_id)
-        && let Ok(Some(feed_row)) = get_by_id(&state.db, id).await
-        && !feed_row.detected_protocol.is_empty()
-        && let Ok(Some(client_row)) =
-            crate::models::download_clients::get_by_id(&state.db, client_id).await
-    {
-        let client_proto =
-            crate::services::download_client::protocol_for_client_kind(&client_row.kind);
-        if let Some(cp) = client_proto
-            && feed_row.detected_protocol != cp
+    //
+    // PR 112 review #C — fail closed on transient DB errors. A
+    // hiccup at save time shouldn't let a mismatch through; if
+    // we can't read the row, refuse the save with a retry-now
+    // toast rather than skipping the gate.
+    if let (Some(id), Some(client_id)) = (form.id, download_client_id) {
+        let feed_row = match get_by_id(&state.db, id).await {
+            Ok(Some(row)) => Some(row),
+            Ok(None) => None, // intentional: row deleted between page-load and submit
+            Err(e) => {
+                let msg = urlencoding::encode(&format!(
+                    "Couldn't verify protocol pin (DB error: {e}); please retry."
+                ))
+                .into_owned();
+                return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+            }
+        };
+        if let Some(feed_row) = feed_row
+            && !feed_row.detected_protocol.is_empty()
         {
-            let msg = urlencoding::encode(&format!(
-                "Can't pin a {} feed to a {} client (protocol mismatch — \
-                 the feed delivers {} releases, {} accepts {})",
-                feed_row.detected_protocol,
-                client_row.kind,
-                feed_row.detected_protocol,
-                client_row.kind,
-                cp
-            ))
-            .into_owned();
-            return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+            let client_row =
+                match crate::models::download_clients::get_by_id(&state.db, client_id).await {
+                    Ok(Some(row)) => Some(row),
+                    Ok(None) => None, // intentional: client deleted between page-load and submit
+                    Err(e) => {
+                        let msg = urlencoding::encode(&format!(
+                            "Couldn't verify protocol pin (DB error: {e}); please retry."
+                        ))
+                        .into_owned();
+                        return Redirect::to(&format!("/settings?tab=indexers&err={msg}"))
+                            .into_response();
+                    }
+                };
+            if let Some(client_row) = client_row {
+                let client_proto =
+                    crate::services::download_client::protocol_for_client_kind(&client_row.kind);
+                if let Some(cp) = client_proto
+                    && feed_row.detected_protocol != cp
+                {
+                    let msg = urlencoding::encode(&format!(
+                        "Can't pin a {} feed to a {} client (protocol mismatch — \
+                         the feed delivers {} releases, {} accepts {})",
+                        feed_row.detected_protocol,
+                        client_row.kind,
+                        feed_row.detected_protocol,
+                        client_row.kind,
+                        cp
+                    ))
+                    .into_owned();
+                    return Redirect::to(&format!("/settings?tab=indexers&err={msg}"))
+                        .into_response();
+                }
+            }
         }
     }
 
