@@ -136,6 +136,7 @@ use services::{
         services::progress::ProgressEvent,
         services::progress::ProgressPoll,
         services::task_registry::TaskSnapshot,
+        handlers::system::SystemTasksResponse,
         models::log::LogEntry,
         models::episode_tags::GrabHistoryEntry,
         handlers::system::ClientLogForm,
@@ -1131,9 +1132,9 @@ async fn main() {
     // silent for the rest of the process lifetime.
     {
         let rss_state = state.clone();
-        let task_registry_rss_sync = state.tasks.clone();
         tokio::spawn(async move {
-            supervise(&task_registry_rss_sync, "rss_sync", move || {
+            let registry = rss_state.tasks.clone();
+            supervise(&registry, "rss_sync", move || {
                 let inner_state = rss_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -1435,56 +1436,51 @@ async fn main() {
     // Background task: post-processing — move/rename completed downloads every minute.
     {
         let pp_state = state.clone();
-        let task_registry_post_processing = state.tasks.clone();
         tokio::spawn(async move {
-            supervise(
-                &task_registry_post_processing,
-                "post_processing",
-                move || {
-                    let pp_state = pp_state.clone();
-                    async move {
-                        let mut interval =
-                            tokio::time::interval(std::time::Duration::from_secs(60));
-                        loop {
-                            interval.tick().await;
-                            let enabled = models::config::get_config(&pp_state.db)
-                                .await
-                                .ok()
-                                .flatten()
-                                .map(|c| c.post_processing_enabled)
-                                .unwrap_or(false);
-                            let _ = models::scheduled_tasks::touch_definition(
-                                &pp_state.db,
-                                "post_processing",
-                                "Post-processing",
-                                "Every 1 minute (when enabled)",
-                                enabled,
-                            )
-                            .await;
-                            // Call run_once unconditionally so the #14 lightweight
-                            // `advance_state_without_import` sweep can fire when
-                            // post-processing is disabled. run_once internally
-                            // branches on cfg.post_processing_enabled to choose
-                            // between the full import flow and the state-only
-                            // advance.
-                            let _ = models::scheduled_tasks::mark_started(
-                                &pp_state.db,
-                                "post_processing",
-                                "Checking for completed downloads",
-                            )
-                            .await;
-                            services::post_processing::run_once(&pp_state).await;
-                            let _ = models::scheduled_tasks::mark_finished(
-                                &pp_state.db,
-                                "post_processing",
-                                "ok",
-                                "",
-                            )
-                            .await;
-                        }
+            let registry = pp_state.tasks.clone();
+            supervise(&registry, "post_processing", move || {
+                let pp_state = pp_state.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    loop {
+                        interval.tick().await;
+                        let enabled = models::config::get_config(&pp_state.db)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|c| c.post_processing_enabled)
+                            .unwrap_or(false);
+                        let _ = models::scheduled_tasks::touch_definition(
+                            &pp_state.db,
+                            "post_processing",
+                            "Post-processing",
+                            "Every 1 minute (when enabled)",
+                            enabled,
+                        )
+                        .await;
+                        // Call run_once unconditionally so the #14 lightweight
+                        // `advance_state_without_import` sweep can fire when
+                        // post-processing is disabled. run_once internally
+                        // branches on cfg.post_processing_enabled to choose
+                        // between the full import flow and the state-only
+                        // advance.
+                        let _ = models::scheduled_tasks::mark_started(
+                            &pp_state.db,
+                            "post_processing",
+                            "Checking for completed downloads",
+                        )
+                        .await;
+                        services::post_processing::run_once(&pp_state).await;
+                        let _ = models::scheduled_tasks::mark_finished(
+                            &pp_state.db,
+                            "post_processing",
+                            "ok",
+                            "",
+                        )
+                        .await;
                     }
-                },
-            )
+                }
+            })
             .await;
         });
     }
@@ -1503,69 +1499,65 @@ async fn main() {
     // classify anything.
     {
         let classify_state = state.clone();
-        let task_registry_library_classify = state.tasks.clone();
         tokio::spawn(async move {
-            supervise(
-                &task_registry_library_classify,
-                "library_classify",
-                move || {
-                    let classify_state = classify_state.clone();
-                    async move {
-                        let period = std::time::Duration::from_secs(6 * 60 * 60);
-                        // Even when the persisted timer says we're overdue,
-                        // nudge a minimum startup delay so a big ffprobe sweep
-                        // doesn't race the rest of initialization on a cold
-                        // boot. Five minutes gives the rest of main.rs time
-                        // to settle and the user time to see the library
-                        // index render before we start hammering the disk.
-                        const MIN_STARTUP_DELAY: std::time::Duration =
-                            std::time::Duration::from_secs(5 * 60);
-                        let delay = models::scheduled_tasks::duration_until_next_run(
+            let registry = classify_state.tasks.clone();
+            supervise(&registry, "library_classify", move || {
+                let classify_state = classify_state.clone();
+                async move {
+                    let period = std::time::Duration::from_secs(6 * 60 * 60);
+                    // Even when the persisted timer says we're overdue,
+                    // nudge a minimum startup delay so a big ffprobe sweep
+                    // doesn't race the rest of initialization on a cold
+                    // boot. Five minutes gives the rest of main.rs time
+                    // to settle and the user time to see the library
+                    // index render before we start hammering the disk.
+                    const MIN_STARTUP_DELAY: std::time::Duration =
+                        std::time::Duration::from_secs(5 * 60);
+                    let delay = models::scheduled_tasks::duration_until_next_run(
+                        &classify_state.db,
+                        "library_classify",
+                        period,
+                    )
+                    .await
+                    .max(MIN_STARTUP_DELAY);
+                    tokio::time::sleep(delay).await;
+                    loop {
+                        let _ = models::scheduled_tasks::touch_definition(
                             &classify_state.db,
                             "library_classify",
-                            period,
+                            "Library classify sweep",
+                            "Every 6 hours",
+                            true,
                         )
-                        .await
-                        .max(MIN_STARTUP_DELAY);
-                        tokio::time::sleep(delay).await;
-                        loop {
-                            let _ = models::scheduled_tasks::touch_definition(
-                                &classify_state.db,
-                                "library_classify",
-                                "Library classify sweep",
-                                "Every 6 hours",
-                                true,
-                            )
-                            .await;
-                            let _ = models::scheduled_tasks::mark_started(
-                                &classify_state.db,
-                                "library_classify",
-                                "Re-classifying unknown / unclassified files",
-                            )
-                            .await;
-                            let report = services::post_processing::scan_library_for_unclassified(
-                                &classify_state,
-                            )
-                            .await;
-                            let detail = format!(
-                                "series={}, files_scanned={}, classified={}, needs_review={}",
-                                report.series_scanned,
-                                report.files_scanned,
-                                report.files_classified,
-                                report.files_needing_review,
-                            );
-                            let _ = models::scheduled_tasks::mark_finished(
-                                &classify_state.db,
-                                "library_classify",
-                                "ok",
-                                &detail,
-                            )
-                            .await;
-                            tokio::time::sleep(period).await;
-                        }
+                        .await;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &classify_state.db,
+                            "library_classify",
+                            "Re-classifying unknown / unclassified files",
+                        )
+                        .await;
+                        let report = services::post_processing::scan_library_for_unclassified(
+                            &classify_state,
+                        )
+                        .await;
+                        let detail = format!(
+                            "series={}, files_scanned={}, classified={}, needs_review={}",
+                            report.series_scanned,
+                            report.files_scanned,
+                            report.files_classified,
+                            report.files_needing_review,
+                        );
+                        let _ = models::scheduled_tasks::mark_finished(
+                            &classify_state.db,
+                            "library_classify",
+                            "ok",
+                            &detail,
+                        )
+                        .await;
+                        tokio::time::sleep(period).await;
                     }
-                },
-            )
+                }
+            })
             .await;
         });
     }
@@ -1575,9 +1567,9 @@ async fn main() {
     // potentially-30-minute sweep that just finished an hour ago.
     {
         let upgrade_state = state.clone();
-        let task_registry_upgrade_search = state.tasks.clone();
         tokio::spawn(async move {
-            supervise(&task_registry_upgrade_search, "upgrade_search", move || {
+            let registry = upgrade_state.tasks.clone();
+            supervise(&registry, "upgrade_search", move || {
                 let upgrade_state = upgrade_state.clone();
                 async move {
                     let period = std::time::Duration::from_secs(24 * 60 * 60);
@@ -1738,9 +1730,9 @@ async fn main() {
     // a HashMap retain) so a 30s tick is fine.
     {
         let progress_state = state.clone();
-        let task_registry_progress_sweep = state.tasks.clone();
         tokio::spawn(async move {
-            supervise(&task_registry_progress_sweep, "progress_sweep", move || {
+            let registry = progress_state.tasks.clone();
+            supervise(&registry, "progress_sweep", move || {
                 let progress = progress_state.progress.clone();
                 async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -1763,9 +1755,9 @@ async fn main() {
     // branches that skip auto-commit but still delete the row.
     {
         let grab_sweep_state = state.clone();
-        let task_registry_grab_sweep = state.tasks.clone();
         tokio::spawn(async move {
-            supervise(&task_registry_grab_sweep, "grab_sweep", move || {
+            let registry = grab_sweep_state.tasks.clone();
+            supervise(&registry, "grab_sweep", move || {
                 let state = grab_sweep_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(services::grab_sweep::SWEEP_INTERVAL);
@@ -1798,9 +1790,9 @@ async fn main() {
     // MAL animelist + token-refresh, and the staging-table merge.
     {
         let ext_sync_state = state.clone();
-        let task_registry_external_sync = state.tasks.clone();
         tokio::spawn(async move {
-            supervise(&task_registry_external_sync, "external_sync", move || {
+            let registry = ext_sync_state.tasks.clone();
+            supervise(&registry, "external_sync", move || {
                 let state = ext_sync_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));

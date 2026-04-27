@@ -107,6 +107,19 @@ impl ExitKind {
 /// hot path doesn't contend with snapshot readers. `Arc`-shared so
 /// the supervise closure and the registry's HashMap point at the
 /// same instance.
+///
+/// Snapshot reads are NOT atomic across fields. Writes go through
+/// `Ordering::Relaxed` and `mark_started` / `mark_exited` /
+/// `mark_backoff` each touch multiple atomics. A reader can interleave
+/// at the field-update granularity and observe transient
+/// inconsistency — e.g. `status = Backoff` paired with
+/// `started_at` already updated for the next iteration, or
+/// `current_backoff_ms = 0` paired with `status = Backoff` for a
+/// few microseconds. This is acceptable for the UI's polling cadence
+/// (the System page re-fetches every few seconds) but worth knowing
+/// before reading the snapshot programmatically. Don't alarm-trigger
+/// off a single inconsistent read; require the same shape across
+/// two consecutive polls if precision matters.
 pub struct TaskState {
     pub name: &'static str,
     /// Unix seconds when the most recent iteration started. 0 until
@@ -119,10 +132,16 @@ pub struct TaskState {
     /// it's been running steadily since.
     last_exit_at: AtomicI64,
     last_exit_kind: AtomicU8,
-    /// Total restarts since registration. Monotonic, not reset on
-    /// healthy-runtime backoff resets (those reset the *backoff*,
-    /// not the count).
-    restart_count: AtomicU64,
+    /// Total iteration exits since registration. Bumped on every
+    /// `mark_exited` call — i.e. once per completed iteration of the
+    /// supervise loop. After N exits the task has been started N+1
+    /// times (initial start + N restarts), so the count is the
+    /// "iterations completed" / "restart count + 1" reading rather
+    /// than literal "restart count" — a snapshot taken mid-backoff
+    /// shows the count incremented before the next iteration starts.
+    /// Monotonic; never reset (healthy-runtime backoff reset only
+    /// touches the sleep duration, not the counter).
+    exit_count: AtomicU64,
     /// Current sleep duration before the next respawn, in
     /// milliseconds. Reads as 0 while `Running`. Reads as the
     /// backoff value while `Backoff`. Surfaced so the System page
@@ -139,7 +158,7 @@ impl TaskState {
             started_at: AtomicI64::new(0),
             last_exit_at: AtomicI64::new(0),
             last_exit_kind: AtomicU8::new(ExitKind::None as u8),
-            restart_count: AtomicU64::new(0),
+            exit_count: AtomicU64::new(0),
             current_backoff_ms: AtomicU64::new(0),
             status: AtomicU8::new(TaskStatus::Running as u8),
         }
@@ -157,13 +176,13 @@ impl TaskState {
     }
 
     /// Called when the iteration's join handle resolves. Records the
-    /// exit kind and bumps the restart count so the snapshot shows
-    /// "restarted N times" without the supervise loop having to
-    /// hold a separate counter.
+    /// exit kind and bumps `exit_count` so the snapshot shows how
+    /// many iterations have completed without the supervise loop
+    /// having to hold a separate counter.
     pub fn mark_exited(&self, unix_seconds: i64, kind: ExitKind) {
         self.last_exit_at.store(unix_seconds, Ordering::Relaxed);
         self.last_exit_kind.store(kind as u8, Ordering::Relaxed);
-        self.restart_count.fetch_add(1, Ordering::Relaxed);
+        self.exit_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Called as the supervise loop enters its `tokio::time::sleep`
@@ -223,6 +242,13 @@ impl TaskRegistry {
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct TaskSnapshot {
     pub name: &'static str,
+    /// Current execution state: `running` (the wrapped future is
+    /// executing) or `backoff` (the future returned and the supervise
+    /// loop is sleeping before respawning). Field-level enum
+    /// documentation per the OpenAPI reviewer feedback so Swagger UI
+    /// shows the valid value set; the underlying `TaskStatus` enum
+    /// in the registry stays internal.
+    #[schema(example = "running")]
     pub status: &'static str,
     /// Unix seconds when the current (or most recent) iteration
     /// started. 0 means the task hasn't run yet — only possible in
@@ -233,9 +259,24 @@ pub struct TaskSnapshot {
     /// task has been running steadily since registration. Useful for
     /// "task last restarted N seconds ago" UI labels.
     pub last_exit_at: i64,
+    /// Cause of the most recent iteration's exit: `none` (still
+    /// running, never exited), `normal` (the wrapped future returned
+    /// `()` from its outer loop — anomalous; outer loops are
+    /// `loop { … }`), `panic` (the future panicked — supervise
+    /// caught it at the join boundary), or `join_error` (non-panic
+    /// JoinError — cancellation token, runtime drop). Lets the
+    /// System page distinguish a panic'd task in backoff from a
+    /// task that exited cleanly.
+    #[schema(example = "none")]
     pub last_exit_kind: &'static str,
-    /// Total respawns since registration.
-    pub restart_count: u64,
+    /// Total iteration exits since registration. Bumped on every
+    /// completed iteration of the supervise loop. Note this is "exits"
+    /// not "restarts": the count reflects the number of times the
+    /// wrapped future has returned (cleanly, panic'd, or join-errored),
+    /// so a snapshot taken mid-backoff shows the count already
+    /// incremented before the next iteration's restart fires. After
+    /// N exits the task has been spawned N+1 times.
+    pub exit_count: u64,
     /// Configured wait before the next respawn. 0 while running.
     pub current_backoff_ms: u64,
 }
@@ -247,7 +288,7 @@ fn snapshot_one(state: &Arc<TaskState>) -> TaskSnapshot {
         started_at: state.started_at.load(Ordering::Relaxed),
         last_exit_at: state.last_exit_at.load(Ordering::Relaxed),
         last_exit_kind: ExitKind::from_u8(state.last_exit_kind.load(Ordering::Relaxed)).as_str(),
-        restart_count: state.restart_count.load(Ordering::Relaxed),
+        exit_count: state.exit_count.load(Ordering::Relaxed),
         current_backoff_ms: state.current_backoff_ms.load(Ordering::Relaxed),
     }
 }
@@ -284,7 +325,7 @@ mod tests {
         assert_eq!(task.started_at, t0);
         assert_eq!(task.last_exit_at, 0);
         assert_eq!(task.last_exit_kind, "none");
-        assert_eq!(task.restart_count, 0);
+        assert_eq!(task.exit_count, 0);
         assert_eq!(task.current_backoff_ms, 0);
 
         state.mark_exited(t0 + 10, ExitKind::Panic);
@@ -294,7 +335,7 @@ mod tests {
         assert_eq!(task.status, "backoff");
         assert_eq!(task.last_exit_at, t0 + 10);
         assert_eq!(task.last_exit_kind, "panic");
-        assert_eq!(task.restart_count, 1);
+        assert_eq!(task.exit_count, 1);
         assert_eq!(task.current_backoff_ms, 5_000);
     }
 
