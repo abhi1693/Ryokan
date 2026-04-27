@@ -156,6 +156,40 @@ async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
     Ok(parse_feed(&xml, RssSource::Nyaa))
 }
 
+/// multi-rss PR 3 — generic RSS fetch for user-configured feeds
+/// from `models::rss_feeds`. Reuses the same XML parser the
+/// Nyaa-direct path uses, but feeds it the caller's `source` so
+/// every item carries the right `RssSource::UserFeed { id, name
+/// }` attribution.
+///
+/// User-supplied URLs are arbitrary, so we don't trust them: the
+/// 30s `RSS_HTTP_CLIENT` timeout caps a hung connection from
+/// blocking the sync, and a non-2xx response surfaces as an Err
+/// the caller can log + skip without aborting the rest of the
+/// fan-out (a single broken feed shouldn't take down RSS sync
+/// for every other source).
+pub async fn fetch_user_feed(url: &str, source: RssSource) -> Result<Vec<RssItem>, String> {
+    let resp = RSS_HTTP_CLIENT
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("RSS request failed: {}", e))?;
+    let status = resp.status();
+    let xml = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read RSS response: {}", e))?;
+    if !status.is_success() {
+        // Truncate the body for the error string so a Cloudflare
+        // HTML error page doesn't render multi-KB inline in the
+        // Settings UI / log line. Same shape as `services::mal`'s
+        // `excerpt` helper — keep it self-contained here.
+        let preview: String = xml.chars().take(120).collect();
+        return Err(format!("RSS feed returned {status}: {preview}"));
+    }
+    Ok(parse_feed(&xml, source))
+}
+
 /// Fetch RSS items from all relevant Nyaa categories.
 /// Uses English-translated (1_2) by default; adds music categories (1_1, 2_0)
 /// if any tracked series has MUSIC format; uses All (1_0) when allow_non_english.

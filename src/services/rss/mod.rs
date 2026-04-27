@@ -14,7 +14,7 @@ use crate::{
     services::{auto_search, logger, media, monitoring as monitoring_service, quality},
 };
 
-mod feed;
+pub mod feed;
 use feed::{build_item_key, detect_batch, extract_group, extract_resolution, fetch_feeds};
 
 static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
