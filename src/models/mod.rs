@@ -15,6 +15,7 @@ pub mod monitoring;
 pub mod nyaa_description_cache;
 pub mod pending_grabs;
 pub mod rss;
+pub mod rss_feeds;
 pub mod scheduled_tasks;
 pub mod series;
 pub mod series_custom_lists;

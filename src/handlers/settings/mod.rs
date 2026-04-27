@@ -1986,6 +1986,7 @@ mod tests {
                     min_seeders: 1,
                     request_timeout_secs: None,
                     download_client_id: None,
+                    rss_enabled: false,
                 },
             )
             .await

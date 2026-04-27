@@ -50,6 +50,14 @@ pub struct Indexer {
     /// `download_clients` this indexer routes to. `None` means
     /// "fall through to the default client" at grab time.
     pub download_client_id: Option<i64>,
+    /// multi-rss PR 1 — when true, this indexer participates in the
+    /// 60s RSS sync fan-out via its torznab/newznab `?t=tvsearch`
+    /// endpoint (Option B). Default false so the existing search-
+    /// only fan-out is unaffected; users opt in per-row in
+    /// Settings → Indexers. Distinct from `enabled`, which gates
+    /// the search-time fan-out — an indexer can be search-only
+    /// (the historical default) or RSS-enabled too.
+    pub rss_enabled: bool,
     /// Cached caps response body. Empty until the first probe
     /// succeeds (PR B). Read with a 7-day TTL — stale caps trigger
     /// a transparent re-fetch on next read.
@@ -78,11 +86,15 @@ pub struct IndexerForm<'a> {
     /// Multi-client routing pin. `None` = use the default
     /// download client at grab time.
     pub download_client_id: Option<i64>,
+    /// multi-rss PR 1 — opt this indexer into the per-tick RSS
+    /// fan-out via its `?t=tvsearch` (torznab) or `?t=search` /
+    /// `?t=tvsearch` (newznab) endpoint. Default false.
+    pub rss_enabled: bool,
 }
 
 const SELECT_COLUMNS: &str = "id, name, kind, url, api_key, priority, enabled, \
     is_private_tracker, seed_ratio, seed_time_minutes, min_seeders, request_timeout_secs, \
-    download_client_id, caps_json, caps_refreshed_at, created_at, updated_at";
+    download_client_id, rss_enabled, caps_json, caps_refreshed_at, created_at, updated_at";
 
 fn row_to_indexer(row: &sqlx::sqlite::SqliteRow) -> Indexer {
     // Nullable columns explicitly typed as `Option<T>` so sqlx
@@ -112,6 +124,7 @@ fn row_to_indexer(row: &sqlx::sqlite::SqliteRow) -> Indexer {
         download_client_id: row
             .try_get::<Option<i64>, _>("download_client_id")
             .unwrap_or(None),
+        rss_enabled: row.try_get::<i64, _>("rss_enabled").unwrap_or(0) != 0,
         caps_json: row.try_get("caps_json").unwrap_or_default(),
         caps_refreshed_at: row
             .try_get::<Option<i64>, _>("caps_refreshed_at")
@@ -145,6 +158,22 @@ pub async fn list_enabled(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> 
     Ok(rows.iter().map(row_to_indexer).collect())
 }
 
+pub async fn list_rss_enabled(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> {
+    // multi-rss PR 1 — indexers opted into the RSS sync fan-out.
+    // Both `enabled` and `rss_enabled` must be true: a user can
+    // pause an indexer entirely (enabled=0) without losing the
+    // RSS opt-in, and a user can keep an indexer search-only
+    // (rss_enabled=0) without disabling search.
+    let rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLUMNS} FROM indexers \
+         WHERE enabled = 1 AND rss_enabled = 1 \
+         ORDER BY priority ASC, id ASC"
+    ))
+    .fetch_all(db)
+    .await?;
+    Ok(rows.iter().map(row_to_indexer).collect())
+}
+
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Indexer>, sqlx::Error> {
     let row = sqlx::query(&format!(
         "SELECT {SELECT_COLUMNS} FROM indexers WHERE id = ?"
@@ -160,8 +189,8 @@ pub async fn insert(db: &SqlitePool, form: IndexerForm<'_>) -> Result<i64, sqlx:
         "INSERT INTO indexers \
          (name, kind, url, api_key, priority, enabled, is_private_tracker, \
           seed_ratio, seed_time_minutes, min_seeders, request_timeout_secs, \
-          download_client_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          download_client_id, rss_enabled) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(form.name)
     .bind(form.kind)
@@ -175,6 +204,7 @@ pub async fn insert(db: &SqlitePool, form: IndexerForm<'_>) -> Result<i64, sqlx:
     .bind(form.min_seeders)
     .bind(form.request_timeout_secs)
     .bind(form.download_client_id)
+    .bind(form.rss_enabled as i64)
     .execute(db)
     .await?;
     Ok(result.last_insert_rowid())
@@ -185,7 +215,7 @@ pub async fn update(db: &SqlitePool, id: i64, form: IndexerForm<'_>) -> Result<(
         "UPDATE indexers SET \
          name = ?, kind = ?, url = ?, api_key = ?, priority = ?, enabled = ?, \
          is_private_tracker = ?, seed_ratio = ?, seed_time_minutes = ?, min_seeders = ?, \
-         request_timeout_secs = ?, download_client_id = ?, \
+         request_timeout_secs = ?, download_client_id = ?, rss_enabled = ?, \
          updated_at = strftime('%s','now') \
          WHERE id = ?",
     )
@@ -201,6 +231,7 @@ pub async fn update(db: &SqlitePool, id: i64, form: IndexerForm<'_>) -> Result<(
     .bind(form.min_seeders)
     .bind(form.request_timeout_secs)
     .bind(form.download_client_id)
+    .bind(form.rss_enabled as i64)
     .bind(id)
     .execute(db)
     .await?;
@@ -281,6 +312,7 @@ mod tests {
             min_seeders: 1,
             request_timeout_secs: None,
             download_client_id: None,
+            rss_enabled: false,
         }
     }
 
@@ -337,6 +369,38 @@ mod tests {
         let enabled = list_enabled(&db).await.unwrap();
         assert_eq!(enabled.len(), 1);
         assert_eq!(enabled[0].name, "On");
+    }
+
+    #[tokio::test]
+    async fn list_rss_enabled_requires_both_enabled_and_rss_enabled() {
+        // multi-rss PR 1: the RSS fan-out filter is conjunctive —
+        // an indexer must have BOTH enabled=1 AND rss_enabled=1 to
+        // contribute to the per-tick fan-out. A user who paused an
+        // indexer entirely (enabled=0) shouldn't see its feed
+        // continue running just because rss_enabled=1, and a
+        // search-only indexer (rss_enabled=0) shouldn't get pulled
+        // in just because enabled=1.
+        let db = fresh_db().await;
+        let mut both = sample_form();
+        both.name = "Both";
+        both.enabled = true;
+        both.rss_enabled = true;
+        let mut search_only = sample_form();
+        search_only.name = "SearchOnly";
+        search_only.enabled = true;
+        search_only.rss_enabled = false;
+        let mut paused = sample_form();
+        paused.name = "Paused";
+        paused.enabled = false;
+        paused.rss_enabled = true;
+
+        insert(&db, both).await.unwrap();
+        insert(&db, search_only).await.unwrap();
+        insert(&db, paused).await.unwrap();
+
+        let rss = list_rss_enabled(&db).await.unwrap();
+        assert_eq!(rss.len(), 1);
+        assert_eq!(rss[0].name, "Both");
     }
 
     #[tokio::test]

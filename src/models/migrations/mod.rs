@@ -2383,6 +2383,41 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         }
     }
 
+    // multi-rss PR 1 — user-configured RSS feeds (Option A). Custom
+    // feeds beyond Nyaa-direct: per-uploader Nyaa filters, SubsPlease's
+    // direct per-quality feeds, indexer-of-the-week aggregators, etc.
+    // The sync loop fetches every enabled row each tick and merges
+    // items into the same `rss_seen` dedup pool that already keys on
+    // info_hash / GUID. `download_client_id` lets a feed pin to a
+    // specific client (e.g. a public-feed grab routes to local qBit
+    // while a PT-indexer-RSS feed routes to the seedbox); NULL falls
+    // through to the default at grab time.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS rss_feeds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL UNIQUE,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            download_client_id INTEGER REFERENCES download_clients(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    // multi-rss PR 1 — Option B: let an enabled torznab/newznab indexer
+    // contribute its `?t=tvsearch&extended=1` (or `&t=search` newznab
+    // RSS) endpoint to the per-tick fan-out. Default 0 (off) so the
+    // existing search-only indexer fan-out is unaffected; users opt
+    // in per-indexer via the Settings → Indexers row toggle.
+    sqlx::query("ALTER TABLE indexers ADD COLUMN rss_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

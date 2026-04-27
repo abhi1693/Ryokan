@@ -293,6 +293,7 @@ mod tests {
             min_seeders: 1,
             request_timeout_secs: None,
             download_client_id: None,
+            rss_enabled: false,
             caps_json: String::new(),
             caps_refreshed_at: None,
             created_at: 0,

@@ -43,6 +43,9 @@ pub struct IndexerUpsertForm {
     /// `download_clients` this indexer routes to. Empty
     /// string = NULL (use the default client at grab time).
     pub download_client_id: Option<String>,
+    /// multi-rss PR 1 — opt this indexer into the RSS sync
+    /// fan-out. Checkbox; presence-equivalent to true.
+    pub rss_enabled: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -129,6 +132,7 @@ pub async fn settings_indexers_upsert(
         min_seeders,
         request_timeout_secs,
         download_client_id,
+        rss_enabled: form.rss_enabled.is_some(),
     };
 
     let result = match form.id {
@@ -365,6 +369,7 @@ mod tests {
                 min_seeders: Some("1".into()),
                 request_timeout_secs: None,
                 download_client_id: Some(dc_id.to_string()),
+                rss_enabled: None,
             }
         }
 
@@ -540,6 +545,7 @@ mod tests {
                 min_seeders: Some("1".to_string()),
                 request_timeout_secs: None,
                 download_client_id: None,
+                rss_enabled: None,
             }
         }
 
@@ -578,6 +584,7 @@ mod tests {
                     min_seeders: 1,
                     request_timeout_secs: None,
                     download_client_id: None,
+                    rss_enabled: false,
                 },
             )
             .await
@@ -612,6 +619,7 @@ mod tests {
                     min_seeders: 1,
                     request_timeout_secs: None,
                     download_client_id: None,
+                    rss_enabled: false,
                 },
             )
             .await

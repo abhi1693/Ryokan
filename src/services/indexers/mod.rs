@@ -860,6 +860,7 @@ mod tests {
             min_seeders: 0,
             request_timeout_secs: None,
             download_client_id: None,
+            rss_enabled: false,
         };
         let a_id = insert(&db, mk("A", "https://a.example/api", 5))
             .await
