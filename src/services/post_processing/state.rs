@@ -482,4 +482,120 @@ mod tests {
         // releases of a 48-episode show to E0.
         assert_eq!(fallback_ep_offset(47, 47), 0);
     }
+
+    // ── grab_is_stale ────────────────────────────────────────────────
+
+    fn ts_secs_ago(secs: i64) -> String {
+        let t = chrono::Utc::now().naive_utc() - chrono::Duration::seconds(secs);
+        t.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    #[test]
+    fn grab_is_stale_true_for_age_beyond_threshold() {
+        // 5 minutes old, threshold 1 minute → stale.
+        let ts = ts_secs_ago(300);
+        assert!(grab_is_stale(&ts, 60));
+    }
+
+    #[test]
+    fn grab_is_stale_false_for_age_within_threshold() {
+        // 30 seconds old, threshold 5 minutes → fresh.
+        let ts = ts_secs_ago(30);
+        assert!(!grab_is_stale(&ts, 300));
+    }
+
+    #[test]
+    fn grab_is_stale_boundary_exactly_at_threshold_is_not_stale() {
+        // Strictly `>` in the impl, so `elapsed == max_age_secs` does
+        // NOT count as stale. Pin this so a future tweak of the operator
+        // can't silently change the boundary semantics.
+        let ts = ts_secs_ago(60);
+        // Allow ±1s slack for the inevitable wallclock advance between
+        // `ts_secs_ago(60)` and `Utc::now()` inside `grab_is_stale`.
+        assert!(grab_is_stale(&ts, 58));
+        assert!(!grab_is_stale(&ts, 62));
+    }
+
+    #[test]
+    fn grab_is_stale_returns_false_on_unparseable_timestamp() {
+        // SQLite always emits "YYYY-MM-DD HH:MM:SS"; an unparseable
+        // value (corruption, manual edit, ISO-8601 with a `T`) returns
+        // false rather than panicking — staleness is an optimization,
+        // not a correctness gate.
+        assert!(!grab_is_stale("not a date", 60));
+        assert!(!grab_is_stale("2026-04-25T12:00:00Z", 60));
+        assert!(!grab_is_stale("", 60));
+    }
+
+    // ── scan_for_unclassified — early returns and empty cases ────────
+
+    #[tokio::test]
+    async fn scan_for_unclassified_returns_zero_when_no_config() {
+        // Fresh DB has no `config` row → early-return with all counters at zero.
+        let state = crate::test_support::build_test_app_state(
+            crate::test_support::in_memory_pool().await,
+            None,
+        );
+        let report = scan_for_unclassified(&state, None).await;
+        assert_eq!(report.series_scanned, 0);
+        assert_eq!(report.files_scanned, 0);
+        assert_eq!(report.files_classified, 0);
+        assert_eq!(report.files_needing_review, 0);
+    }
+
+    #[tokio::test]
+    async fn scan_for_unclassified_returns_zero_when_media_root_empty() {
+        // Config row exists but `media_root` is "" → second early return.
+        let db = crate::test_support::in_memory_pool().await;
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode) VALUES (1, '', 'hardlink')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = crate::test_support::build_test_app_state(db, None);
+        let report = scan_for_unclassified(&state, None).await;
+        assert_eq!(report.series_scanned, 0);
+        assert_eq!(report.files_scanned, 0);
+    }
+
+    #[tokio::test]
+    async fn scan_series_for_unclassified_bails_on_unknown_series_id() {
+        // Single-series fast path with an id that doesn't resolve →
+        // early return without touching the filesystem.
+        let db = crate::test_support::in_memory_pool().await;
+        sqlx::query("INSERT INTO config (id, media_root, post_processing_mode) VALUES (1, '/nonexistent', 'hardlink')")
+            .execute(&db).await.unwrap();
+        let state = crate::test_support::build_test_app_state(db, None);
+        let report = scan_series_for_unclassified(&state, 9999).await;
+        assert_eq!(report.series_scanned, 0);
+    }
+
+    #[tokio::test]
+    async fn scan_for_unclassified_skips_series_with_empty_folder_name() {
+        // Tracked series with `folder_name = ''` is skipped without
+        // bumping any counter — the loop's first guard.
+        let db = crate::test_support::in_memory_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let media_root = dir.path().to_string_lossy().into_owned();
+        sqlx::query(
+            "INSERT INTO config (id, media_root, post_processing_mode) VALUES (1, ?, 'hardlink')",
+        )
+        .bind(&media_root)
+        .execute(&db)
+        .await
+        .unwrap();
+        crate::test_support::seed_series(&db, 1, "Show").await;
+        // The seed helper sets a non-empty folder by default; force it
+        // to empty so we hit the guard branch deterministically.
+        sqlx::query("UPDATE series SET folder_name = ''")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let state = crate::test_support::build_test_app_state(db, None);
+        let report = scan_for_unclassified(&state, None).await;
+        assert_eq!(report.series_scanned, 0);
+        assert_eq!(report.files_scanned, 0);
+    }
 }

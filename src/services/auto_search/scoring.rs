@@ -450,4 +450,345 @@ mod tests {
         let s = format_scoring_detail(60, 300, &breakdown, 10000, 10360, false);
         assert_eq!(s, "base=60, cf=+300 [x265 +300], seadex=10000, final=10360");
     }
+
+    // ----- apply_cf_seadex_overlay_with_breakdown -----
+
+    fn candidate(title: &str, info_hash: &str) -> SearchResult {
+        crate::services::custom_formats::test_helpers::candidate(title, "GroupX", 0, info_hash)
+    }
+
+    fn cls(source: Source, resolution: Resolution) -> ClassificationResult {
+        crate::services::custom_formats::test_helpers::classification(source, resolution)
+    }
+
+    #[test]
+    fn overlay_passes_through_base_when_no_cfs_or_seadex() {
+        let r = candidate("[GroupX] Show 01 [1080p].mkv", "abc");
+        let c = cls(Source::Web, Resolution::R1080p);
+        let seadex = HashSet::new();
+
+        let (final_score, parts) =
+            apply_cf_seadex_overlay_with_breakdown(100, &r, &c, &[], &seadex, true, 0).unwrap();
+        assert_eq!(final_score, 100);
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn overlay_drops_candidate_below_minimum_score_floor() {
+        // Empty CF list ⇒ cf=0. With minimum_score=1, 0 < 1 ⇒ drop.
+        let r = candidate("garbage", "abc");
+        let c = cls(Source::Unknown, Resolution::Unknown);
+        let seadex = HashSet::new();
+        let result = apply_cf_seadex_overlay_with_breakdown(50, &r, &c, &[], &seadex, true, 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn overlay_adds_seadex_bonus_on_hash_match_when_enabled() {
+        let hash = "DEADBEEF";
+        let r = candidate("title", hash);
+        let c = cls(Source::Web, Resolution::R1080p);
+        let mut seadex = HashSet::new();
+        seadex.insert(hash.to_ascii_lowercase());
+
+        let (final_score, parts) =
+            apply_cf_seadex_overlay_with_breakdown(20, &r, &c, &[], &seadex, true, 0).unwrap();
+        assert_eq!(
+            final_score,
+            20 + crate::services::seadex::SEADEX_SCORE_BOOST
+        );
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].label, "SeaDex Best");
+        assert_eq!(parts[0].delta, crate::services::seadex::SEADEX_SCORE_BOOST);
+    }
+
+    #[test]
+    fn overlay_skips_seadex_bonus_when_disabled() {
+        let hash = "DEADBEEF";
+        let r = candidate("title", hash);
+        let c = cls(Source::Web, Resolution::R1080p);
+        let mut seadex = HashSet::new();
+        seadex.insert(hash.to_ascii_lowercase());
+
+        let (final_score, parts) = apply_cf_seadex_overlay_with_breakdown(
+            20,
+            &r,
+            &c,
+            &[],
+            &seadex,
+            /*enabled*/ false,
+            0,
+        )
+        .unwrap();
+        assert_eq!(final_score, 20);
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn overlay_skips_seadex_when_info_hash_empty_even_if_set_membership_would_match() {
+        // SearchResults from some upstreams have empty info_hash. The
+        // boost predicate explicitly guards against that — an empty
+        // string membership check would always be false, but the
+        // explicit `is_empty()` short-circuit makes the intent clear
+        // and prevents future regressions if the seadex set ever
+        // included an empty-string sentinel.
+        let r = candidate("title", ""); // empty hash
+        let c = cls(Source::Web, Resolution::R1080p);
+        let mut seadex = HashSet::new();
+        seadex.insert(String::new()); // pathological membership
+        let (final_score, parts) =
+            apply_cf_seadex_overlay_with_breakdown(20, &r, &c, &[], &seadex, true, 0).unwrap();
+        assert_eq!(final_score, 20);
+        assert!(parts.is_empty());
+    }
+
+    // ----- rescore_for_auto_search_with_breakdown -----
+
+    fn default_config() -> Config {
+        Config::default()
+    }
+
+    fn rescore(
+        result: &SearchResult,
+        classification: &ClassificationResult,
+        target: &SearchTarget,
+        is_finished: bool,
+        finished_mode: quality::FinishedSeriesMode,
+        absolute_offset: i32,
+        batch_search_mode: bool,
+    ) -> (i32, Vec<ScoreComponent>) {
+        rescore_for_auto_search_with_breakdown(
+            result,
+            classification,
+            &default_config(),
+            &["Show".to_string()],
+            target,
+            1,
+            is_finished,
+            finished_mode,
+            Source::Web,
+            Resolution::R1080p,
+            Source::Hdtv,
+            Resolution::R720p,
+            absolute_offset,
+            batch_search_mode,
+        )
+    }
+
+    #[test]
+    fn rescore_episode_target_rewards_episode_match_and_single_episode_bonus() {
+        let mut r = candidate("[GroupX] Show - 05 [1080p].mkv", "h1");
+        r.score = 100;
+        r.is_batch = false;
+        let c = cls(Source::Web, Resolution::R1080p);
+        let (score, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Episode(5),
+            false,
+            quality::FinishedSeriesMode::SameAsAiring,
+            0,
+            false,
+        );
+
+        let labels: Vec<_> = parts.iter().map(|p| p.label.as_str()).collect();
+        assert!(labels.contains(&"Single-Episode Target"), "{labels:?}");
+        assert!(labels.contains(&"Episode Number Match"), "{labels:?}");
+        assert!(labels.contains(&"Title Alias Match"), "{labels:?}");
+        // Score climbed from 100 by alias + single-ep + episode-match
+        // contributions (≥ 50 minimum: 10 + 40).
+        assert!(score >= 100 + 10 + 40, "got {score}");
+    }
+
+    #[test]
+    fn rescore_episode_target_penalizes_batch_when_not_batch_search_mode() {
+        let mut r = candidate("[GroupX] Show 01-12 Batch [1080p].mkv", "h1");
+        r.score = 0;
+        r.is_batch = true;
+        let c = cls(Source::Web, Resolution::R1080p);
+        let (_, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Episode(5),
+            false,
+            quality::FinishedSeriesMode::SameAsAiring,
+            0,
+            /* batch_search_mode */ false,
+        );
+        let batch_pen = parts
+            .iter()
+            .find(|p| p.label.starts_with("Batch Penalty"))
+            .expect("expected batch penalty in non-batch-search mode");
+        assert_eq!(batch_pen.delta, -20);
+    }
+
+    #[test]
+    fn rescore_suppresses_batch_penalty_in_batch_search_mode() {
+        let mut r = candidate("[GroupX] Show 01-12 Batch [1080p].mkv", "h1");
+        r.score = 0;
+        r.is_batch = true;
+        let c = cls(Source::Web, Resolution::R1080p);
+        let (_, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Episode(5),
+            false,
+            quality::FinishedSeriesMode::SameAsAiring,
+            0,
+            /* batch_search_mode */ true,
+        );
+        assert!(
+            !parts.iter().any(|p| p.label.starts_with("Batch Penalty")),
+            "batch_search_mode must suppress batch penalty: {parts:?}"
+        );
+    }
+
+    #[test]
+    fn rescore_buries_franchise_pass_release_with_wrong_episode_number() {
+        // absolute_offset > 0 + parsed numbers don't match either
+        // relative or absolute target ⇒ -1000 "Wrong Episode Number"
+        // burial. This is the franchise-alias guard from #30.
+        let mut r = candidate("[GroupX] Other Show - 99 [1080p].mkv", "h1");
+        r.score = 0;
+        r.is_batch = false;
+        let c = cls(Source::Web, Resolution::R1080p);
+        let (_, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Episode(5),
+            false,
+            quality::FinishedSeriesMode::SameAsAiring,
+            10,
+            false,
+        );
+        let pen = parts
+            .iter()
+            .find(|p| p.label == "Wrong Episode Number")
+            .expect("expected -1000 burial");
+        assert_eq!(pen.delta, -1000);
+    }
+
+    #[test]
+    fn rescore_buries_unparseable_episode_in_franchise_pass() {
+        // absolute_offset > 0 + no parseable numbers ⇒ -500 "Unparseable
+        // Episode Number" — softer than the wrong-number burial because
+        // a movie release titled with no episode marker can show up here.
+        let mut r = candidate("[GroupX] Show Movie [1080p].mkv", "h1");
+        r.score = 0;
+        r.is_batch = false;
+        let c = cls(Source::Web, Resolution::R1080p);
+        let (_, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Episode(5),
+            false,
+            quality::FinishedSeriesMode::SameAsAiring,
+            10,
+            false,
+        );
+        let pen = parts
+            .iter()
+            .find(|p| p.label == "Unparseable Episode Number")
+            .expect("expected -500 burial");
+        assert_eq!(pen.delta, -500);
+    }
+
+    #[test]
+    fn rescore_single_target_movie_bonus_outside_batch_mode() {
+        let mut r = candidate("[GroupX] Show The Movie [1080p].mkv", "h1");
+        r.score = 0;
+        r.is_batch = false;
+        let c = cls(Source::Web, Resolution::R1080p);
+        let (_, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Single,
+            false,
+            quality::FinishedSeriesMode::SameAsAiring,
+            0,
+            false,
+        );
+        let bonus = parts
+            .iter()
+            .find(|p| p.label == "Movie / Special / OVA")
+            .expect("movie bonus");
+        assert_eq!(bonus.delta, 8);
+    }
+
+    #[test]
+    fn rescore_finished_series_bd_bonus_only_with_prefer_bd_mode_and_bluray_source() {
+        let mut r = candidate("[GroupX] Show 01 BD [1080p].mkv", "h1");
+        r.score = 0;
+        let c = cls(Source::BluRay, Resolution::R1080p);
+
+        // Wrong mode → no BD bonus.
+        let (_, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Episode(1),
+            true,
+            quality::FinishedSeriesMode::SameAsAiring,
+            0,
+            false,
+        );
+        assert!(!parts.iter().any(|p| p.label == "Finished Series BD Bonus"));
+
+        // PreferBd + BluRay + finished → bonus fires.
+        let (_, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Episode(1),
+            true,
+            quality::FinishedSeriesMode::PreferBd,
+            0,
+            false,
+        );
+        let bd_bonus = parts
+            .iter()
+            .find(|p| p.label == "Finished Series BD Bonus")
+            .expect("BD bonus");
+        assert_eq!(bd_bonus.delta, 35);
+
+        // PreferBd + BluRay but airing (is_finished=false) → no bonus.
+        let (_, parts) = rescore(
+            &r,
+            &c,
+            &SearchTarget::Episode(1),
+            false,
+            quality::FinishedSeriesMode::PreferBd,
+            0,
+            false,
+        );
+        assert!(!parts.iter().any(|p| p.label == "Finished Series BD Bonus"));
+    }
+
+    #[test]
+    fn rescore_season_mismatch_applies_minus_100() {
+        // Aliases include "Show"; expected season is 1 but the title
+        // says S03 — the explicit season-mismatch penalty fires.
+        let mut r = candidate("[GroupX] Show S03E05 [1080p].mkv", "h1");
+        r.score = 0;
+        let c = cls(Source::Web, Resolution::R1080p);
+        let (_, parts) = rescore_for_auto_search_with_breakdown(
+            &r,
+            &c,
+            &default_config(),
+            &["Show".to_string()],
+            &SearchTarget::Episode(5),
+            1,
+            false,
+            quality::FinishedSeriesMode::SameAsAiring,
+            Source::Web,
+            Resolution::R1080p,
+            Source::Hdtv,
+            Resolution::R720p,
+            0,
+            false,
+        );
+        let pen = parts
+            .iter()
+            .find(|p| p.label == "Season Mismatch")
+            .expect("season-mismatch penalty");
+        assert_eq!(pen.delta, -100);
+    }
 }

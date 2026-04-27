@@ -294,3 +294,217 @@ pub async fn clear_all_history(db: &SqlitePool) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM rss_seen").execute(db).await?;
     Ok(result.rows_affected())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::in_memory_pool;
+
+    fn record<'a>(item_key: &'a str, title: &'a str, decision: &'a str) -> DecisionRecord<'a> {
+        DecisionRecord {
+            item_key,
+            title,
+            link: "https://nyaa.si/view/123",
+            series_id: None,
+            series_title: "Show",
+            group_name: "GroupX",
+            is_batch: false,
+            decision,
+            reason: "test",
+            source: "rss",
+        }
+    }
+
+    #[tokio::test]
+    async fn start_run_then_finish_run_round_trips_summary() {
+        let db = in_memory_pool().await;
+        let id = start_run(&db, "scheduled").await.unwrap();
+        finish_run(
+            &db,
+            id,
+            RunSummary {
+                status: "ok",
+                items_seen: 100,
+                matched: 5,
+                grabbed: 3,
+                skipped: 2,
+                detail: "done",
+            },
+        )
+        .await
+        .unwrap();
+
+        let run = latest_run(&db).await.unwrap().expect("a run");
+        assert_eq!(run.id, id);
+        assert_eq!(run.trigger_source, "scheduled");
+        assert_eq!(run.status, "ok");
+        assert_eq!(run.items_seen, 100);
+        assert_eq!(run.matched, 5);
+        assert_eq!(run.grabbed, 3);
+        assert_eq!(run.skipped, 2);
+        assert_eq!(run.detail, "done");
+        assert!(!run.finished_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_run_returns_none_on_empty_table() {
+        let db = in_memory_pool().await;
+        assert!(latest_run(&db).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn latest_run_returns_most_recent_by_id() {
+        let db = in_memory_pool().await;
+        let _first = start_run(&db, "scheduled").await.unwrap();
+        let second = start_run(&db, "manual").await.unwrap();
+        let run = latest_run(&db).await.unwrap().expect("latest");
+        assert_eq!(run.id, second);
+        assert_eq!(run.trigger_source, "manual");
+        // Unfinished run reads back finished_at as empty string (the
+        // NULL→default in `latest_run`'s map).
+        assert!(run.finished_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_decision_inserts_row_and_upserts_on_conflict() {
+        let db = in_memory_pool().await;
+        record_decision(&db, record("guid:1", "Title v1", "skipped"))
+            .await
+            .unwrap();
+        // Re-record the same key with a different decision — ON
+        // CONFLICT(item_key) overwrites in place.
+        record_decision(&db, record("guid:1", "Title v2", "grabbed"))
+            .await
+            .unwrap();
+
+        let recents = recent_decisions(&db, 10).await.unwrap();
+        assert_eq!(recents.len(), 1);
+        assert_eq!(recents[0].title, "Title v2");
+        assert_eq!(recents[0].decision, "grabbed");
+    }
+
+    #[tokio::test]
+    async fn grabbed_item_keys_returns_only_grabbed() {
+        let db = in_memory_pool().await;
+        record_decision(&db, record("k:1", "Grabbed", "grabbed"))
+            .await
+            .unwrap();
+        record_decision(&db, record("k:2", "Skipped", "skipped"))
+            .await
+            .unwrap();
+        record_decision(&db, record("k:3", "Failed", "failed"))
+            .await
+            .unwrap();
+
+        let keys = grabbed_item_keys(&db).await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains("k:1"));
+    }
+
+    #[tokio::test]
+    async fn recent_decisions_orders_desc_and_respects_limit() {
+        let db = in_memory_pool().await;
+        for i in 0..5 {
+            record_decision(
+                &db,
+                record(&format!("k:{i}"), &format!("Title {i}"), "grabbed"),
+            )
+            .await
+            .unwrap();
+        }
+        let rows = recent_decisions(&db, 3).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].title, "Title 4");
+        assert_eq!(rows[2].title, "Title 2");
+    }
+
+    #[tokio::test]
+    async fn grabbed_titles_returns_only_grabbed_in_recent_first_order() {
+        let db = in_memory_pool().await;
+        record_decision(&db, record("k:1", "First", "grabbed"))
+            .await
+            .unwrap();
+        record_decision(&db, record("k:2", "Skipped", "skipped"))
+            .await
+            .unwrap();
+        record_decision(&db, record("k:3", "Second", "grabbed"))
+            .await
+            .unwrap();
+
+        let titles = grabbed_titles(&db, 10).await.unwrap();
+        assert_eq!(titles, vec!["Second".to_string(), "First".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn cleanup_old_decisions_removes_only_aged_rows() {
+        let db = in_memory_pool().await;
+        // Three rows with rolled-back created_at: 5d, 35d, 60d.
+        record_decision(&db, record("k:5d", "Recent", "grabbed"))
+            .await
+            .unwrap();
+        record_decision(&db, record("k:35d", "Older", "grabbed"))
+            .await
+            .unwrap();
+        record_decision(&db, record("k:60d", "Oldest", "grabbed"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE rss_seen SET created_at = datetime('now', '-5 days') WHERE item_key = 'k:5d'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE rss_seen SET created_at = datetime('now', '-35 days') WHERE item_key = 'k:35d'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE rss_seen SET created_at = datetime('now', '-60 days') WHERE item_key = 'k:60d'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let removed = cleanup_old_decisions(&db, 30).await.unwrap();
+        assert_eq!(removed, 2);
+
+        let remaining = recent_decisions(&db, 10).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].title, "Recent");
+    }
+
+    #[tokio::test]
+    async fn clear_grab_history_only_removes_grabbed_rows() {
+        let db = in_memory_pool().await;
+        record_decision(&db, record("k:1", "G", "grabbed"))
+            .await
+            .unwrap();
+        record_decision(&db, record("k:2", "S", "skipped"))
+            .await
+            .unwrap();
+
+        let removed = clear_grab_history(&db).await.unwrap();
+        assert_eq!(removed, 1);
+
+        let remaining = recent_decisions(&db, 10).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].decision, "skipped");
+    }
+
+    #[tokio::test]
+    async fn clear_all_history_drops_every_row() {
+        let db = in_memory_pool().await;
+        record_decision(&db, record("k:1", "G", "grabbed"))
+            .await
+            .unwrap();
+        record_decision(&db, record("k:2", "S", "skipped"))
+            .await
+            .unwrap();
+
+        let removed = clear_all_history(&db).await.unwrap();
+        assert_eq!(removed, 2);
+        assert!(recent_decisions(&db, 10).await.unwrap().is_empty());
+    }
+}

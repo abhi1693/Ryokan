@@ -161,3 +161,168 @@ pub async fn list(db: &SqlitePool) -> Result<Vec<ScheduledTaskStatus>, sqlx::Err
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::in_memory_pool;
+
+    #[tokio::test]
+    async fn touch_definition_inserts_then_upserts() {
+        let db = in_memory_pool().await;
+        touch_definition(&db, "rss_sync", "RSS Sync", "every 60s", true)
+            .await
+            .unwrap();
+
+        let rows = list(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_key, "rss_sync");
+        assert_eq!(rows[0].display_name, "RSS Sync");
+        assert_eq!(rows[0].schedule_label, "every 60s");
+        assert!(rows[0].enabled);
+
+        // Re-touch updates display name + label without inserting a row.
+        touch_definition(&db, "rss_sync", "RSS Sync (renamed)", "every 30s", false)
+            .await
+            .unwrap();
+        let rows = list(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].display_name, "RSS Sync (renamed)");
+        assert_eq!(rows[0].schedule_label, "every 30s");
+        assert!(!rows[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn mark_started_then_finished_writes_status() {
+        let db = in_memory_pool().await;
+        touch_definition(&db, "post_proc", "Post-Processing", "60s", true)
+            .await
+            .unwrap();
+
+        mark_started(&db, "post_proc", "starting").await.unwrap();
+        let rows = list(&db).await.unwrap();
+        assert_eq!(rows[0].last_status, "running");
+        assert_eq!(rows[0].last_detail, "starting");
+        assert!(rows[0].last_started_at.is_some());
+        assert!(rows[0].last_finished_at.is_none());
+
+        mark_finished(&db, "post_proc", "ok", "imported 3 files")
+            .await
+            .unwrap();
+        let rows = list(&db).await.unwrap();
+        assert_eq!(rows[0].last_status, "ok");
+        assert_eq!(rows[0].last_detail, "imported 3 files");
+        assert!(rows[0].last_finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn mark_calls_on_unknown_key_are_noops() {
+        // The UPDATE has a `WHERE task_key = ?` clause, so calling
+        // mark_started/mark_finished without a prior touch_definition
+        // is safe — it just affects zero rows.
+        let db = in_memory_pool().await;
+        mark_started(&db, "ghost", "x").await.unwrap();
+        mark_finished(&db, "ghost", "ok", "y").await.unwrap();
+        assert!(list(&db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_orders_by_display_name() {
+        let db = in_memory_pool().await;
+        touch_definition(&db, "z_key", "Zebra", "1h", true)
+            .await
+            .unwrap();
+        touch_definition(&db, "a_key", "Apple", "1h", true)
+            .await
+            .unwrap();
+        touch_definition(&db, "m_key", "Mango", "1h", true)
+            .await
+            .unwrap();
+
+        let rows = list(&db).await.unwrap();
+        let names: Vec<_> = rows.iter().map(|r| r.display_name.as_str()).collect();
+        assert_eq!(names, vec!["Apple", "Mango", "Zebra"]);
+    }
+
+    #[tokio::test]
+    async fn minutes_since_last_finished_returns_none_for_never_run() {
+        let db = in_memory_pool().await;
+        // Never-touched task.
+        assert!(minutes_since_last_finished(&db, "absent").await.is_none());
+        // Touched but never finished.
+        touch_definition(&db, "fresh", "Fresh", "1h", true)
+            .await
+            .unwrap();
+        assert!(minutes_since_last_finished(&db, "fresh").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn minutes_since_last_finished_returns_zero_for_just_finished() {
+        let db = in_memory_pool().await;
+        touch_definition(&db, "k", "K", "1h", true).await.unwrap();
+        mark_finished(&db, "k", "ok", "").await.unwrap();
+        let m = minutes_since_last_finished(&db, "k").await.unwrap();
+        // The minutes since "now" → 0 most of the time, but allow 1 if
+        // we cross a minute boundary mid-test. It must never be > 1.
+        assert!(m == 0 || m == 1, "unexpected minutes_ago: {m}");
+    }
+
+    #[tokio::test]
+    async fn duration_until_next_run_zero_when_never_ran() {
+        let db = in_memory_pool().await;
+        let d = duration_until_next_run(&db, "never", Duration::from_secs(3600)).await;
+        assert_eq!(d, Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn duration_until_next_run_zero_when_just_finished_with_short_interval() {
+        // Finish the task, then ask for "next run" with a 1-second
+        // interval — saturating_sub clamps to ZERO once elapsed >=
+        // interval. This pins the "overdue → run now" branch.
+        let db = in_memory_pool().await;
+        touch_definition(&db, "k", "K", "1s", true).await.unwrap();
+        mark_finished(&db, "k", "ok", "").await.unwrap();
+        // Nudge the stored timestamp 5 minutes into the past so
+        // elapsed >> interval regardless of test scheduling jitter.
+        sqlx::query(
+            "UPDATE scheduled_task_runs
+             SET last_finished_at = datetime('now', '-5 minutes')
+             WHERE task_key = ?",
+        )
+        .bind("k")
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let d = duration_until_next_run(&db, "k", Duration::from_secs(60)).await;
+        assert_eq!(d, Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn duration_until_next_run_returns_remainder_when_within_interval() {
+        // Finished 5 minutes ago with a 1-hour interval → remainder
+        // should be ~55 minutes. Allow a small tolerance for the
+        // minute-truncation in `minutes_since_last_finished`.
+        let db = in_memory_pool().await;
+        touch_definition(&db, "k", "K", "1h", true).await.unwrap();
+        mark_finished(&db, "k", "ok", "").await.unwrap();
+        sqlx::query(
+            "UPDATE scheduled_task_runs
+             SET last_finished_at = datetime('now', '-5 minutes')
+             WHERE task_key = ?",
+        )
+        .bind("k")
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let d = duration_until_next_run(&db, "k", Duration::from_secs(3600)).await;
+        // Expect ~55 minutes remaining (3300s); accept 54..=56 to
+        // tolerate the SQL-side minute-bucket rounding.
+        let secs = d.as_secs();
+        assert!(
+            (3240..=3360).contains(&secs),
+            "unexpected remainder: {secs}s"
+        );
+    }
+}
