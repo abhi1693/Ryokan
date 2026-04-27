@@ -30,6 +30,11 @@ path = "tests/htmx_foundation.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "htmx_settings_delete"
+path = "tests/htmx_settings_delete.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "external_sync_e2e"
 path = "tests/external_sync_e2e.rs"
 required-features = ["test-support"]

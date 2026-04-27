@@ -94,6 +94,9 @@
                 </a>
                 <div class="cf-card-actions">
                     <form method="post" action="/settings/custom-formats/delete" class="group-delete-form"
+                          hx-post="/settings/custom-formats/delete"
+                          hx-target="closest .cf-card"
+                          hx-swap="outerHTML"
                           data-ryokan-confirm-title="Delete Custom Format"
                           data-ryokan-confirm-body="Delete &quot;{{ cf.row.name }}&quot;? This cannot be undone."
                           data-ryokan-confirm-label="Delete">

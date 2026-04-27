@@ -11,8 +11,10 @@ use askama::Template;
 use axum::{
     Form, Json,
     extract::{Query, State},
+    http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
 };
+use axum_htmx::HxRequest;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -39,7 +41,7 @@ pub struct CustomFormatUpsertForm {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CustomFormatDeleteForm {
-    id: i64,
+    pub id: i64,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -265,8 +267,9 @@ pub async fn settings_custom_formats_upsert(
 )]
 pub async fn settings_custom_formats_delete(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<CustomFormatDeleteForm>,
-) -> Redirect {
+) -> Response {
     match cf_model::delete(&state.db, form.id).await {
         Ok(_) => {
             cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
@@ -277,7 +280,15 @@ pub async fn settings_custom_formats_delete(
                 "",
             )
             .await;
-            Redirect::to(&cf_redirect(None, Some("Custom Format deleted."), None))
+            // HTMX migration (issue #129) — empty 200 lets the card form's
+            // `hx-target="closest .cf-card" hx-swap="outerHTML"` remove
+            // the card from the grid without a full page reload.
+            if is_htmx {
+                StatusCode::OK.into_response()
+            } else {
+                Redirect::to(&cf_redirect(None, Some("Custom Format deleted."), None))
+                    .into_response()
+            }
         }
         Err(e) => {
             logger::error(
@@ -287,11 +298,16 @@ pub async fn settings_custom_formats_delete(
                 &e.to_string(),
             )
             .await;
-            Redirect::to(&cf_redirect(
-                None,
-                None,
-                Some(&format!("Delete failed: {e}")),
-            ))
+            if is_htmx {
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            } else {
+                Redirect::to(&cf_redirect(
+                    None,
+                    None,
+                    Some(&format!("Delete failed: {e}")),
+                ))
+                .into_response()
+            }
         }
     }
 }

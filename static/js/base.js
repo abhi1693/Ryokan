@@ -505,9 +505,26 @@ window.addEventListener('DOMContentLoaded', function () {
 //   data-ryokan-confirm-danger   (any truthy value tints the Yes
 //                                 button red — use for destructive
 //                                 actions like delete / regenerate)
+// HTMX migration (issue #129) — forms with both `data-ryokan-confirm-*`
+// AND `hx-*` attributes need their submit re-fired through the event
+// system after confirmation, not via `form.submit()` (which bypasses
+// event listeners by spec and would silently skip htmx). The WeakSet
+// guard tracks "this form has been confirmed; let the next submit
+// event through without re-prompting." WeakSet ensures forms get GC'd
+// after they leave the DOM (e.g., after a swap removes the row).
+const ryokanConfirmedForms = new WeakSet();
+
 window.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('form[data-ryokan-confirm-title]').forEach(function (form) {
         form.addEventListener('submit', function (ev) {
+            // Re-entrant call after the user already confirmed:
+            // let the event propagate so htmx (or the native form
+            // submission) handles it. Clear the flag so a future
+            // submit on the same form re-prompts.
+            if (ryokanConfirmedForms.has(form)) {
+                ryokanConfirmedForms.delete(form);
+                return;
+            }
             ev.preventDefault();
             const title = form.getAttribute('data-ryokan-confirm-title') || 'Confirm';
             const body = form.getAttribute('data-ryokan-confirm-body') || 'Are you sure?';
@@ -519,13 +536,12 @@ window.addEventListener('DOMContentLoaded', function () {
                 danger: danger,
             }).then(function (result) {
                 if (!result || !result.ok) return;
-                // HTMLFormElement.submit() bypasses event handlers
-                // by spec — this listener won't re-fire, so no
-                // re-prompt loop possible. (If we ever switch to
-                // requestSubmit() to re-enable native form
-                // validation, we'll need a flag to skip the second
-                // intercept.)
-                form.submit();
+                // requestSubmit() (vs submit()) fires a real submit
+                // event so htmx's listener can intercept it for the
+                // hx-* attribute path. This re-enters the handler
+                // above, where the WeakSet guard lets it through.
+                ryokanConfirmedForms.add(form);
+                form.requestSubmit();
             });
         });
     });

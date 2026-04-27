@@ -10,8 +10,10 @@
 use axum::{
     Form, Json,
     extract::State,
+    http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
+use axum_htmx::HxRequest;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -160,8 +162,9 @@ pub async fn settings_download_clients_upsert(
 )]
 pub async fn settings_download_clients_delete(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<DownloadClientIdForm>,
-) -> Redirect {
+) -> Response {
     let display_name = crate::models::download_clients::get_by_id(&state.db, form.id)
         .await
         .ok()
@@ -183,9 +186,16 @@ pub async fn settings_download_clients_delete(
             )
             .await;
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
-            let msg = urlencoding::encode(&format!("Download client '{display_name}' deleted"))
-                .into_owned();
-            Redirect::to(&format!("/settings?tab=integrations&msg={msg}"))
+            // HTMX migration (issue #129) — empty 200 lets the row form's
+            // `hx-target="closest tr" hx-swap="outerHTML"` remove the row
+            // from the table without a full page reload.
+            if is_htmx {
+                StatusCode::OK.into_response()
+            } else {
+                let msg = urlencoding::encode(&format!("Download client '{display_name}' deleted"))
+                    .into_owned();
+                Redirect::to(&format!("/settings?tab=integrations&msg={msg}")).into_response()
+            }
         }
         Err(e) => {
             logger::error(
@@ -195,7 +205,11 @@ pub async fn settings_download_clients_delete(
                 &e.to_string(),
             )
             .await;
-            Redirect::to("/settings?tab=integrations&err=Delete+failed")
+            if is_htmx {
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            } else {
+                Redirect::to("/settings?tab=integrations&err=Delete+failed").into_response()
+            }
         }
     }
 }
@@ -590,6 +604,7 @@ mod tests {
         let state = build_test_app_state(db, None);
         let _ = settings_download_clients_delete(
             State(state.clone()),
+            axum_htmx::HxRequest(false),
             Form(DownloadClientIdForm { id }),
         )
         .await;

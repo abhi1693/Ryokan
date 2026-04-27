@@ -27,6 +27,9 @@
                     <td>
                         <a href="/settings?tab=indexers&edit_id={{ idx.id }}" class="btn btn-small">Edit</a>
                         <form method="post" action="/settings/indexers/delete" style="display:inline"
+                              hx-post="/settings/indexers/delete"
+                              hx-target="closest tr"
+                              hx-swap="outerHTML"
                               data-ryokan-confirm-title="Delete indexer?"
                               data-ryokan-confirm-body="Remove '{{ idx.name }}' from Ryokan. Existing grab history is preserved with the indexer reference cleared. The deletion can't be undone; you'll need to re-add the row from scratch."
                               data-ryokan-confirm-yes="Delete"

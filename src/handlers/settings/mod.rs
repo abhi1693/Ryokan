@@ -2,8 +2,10 @@ use askama::Template;
 use axum::{
     Form, Json,
     extract::{Query, State},
-    response::{Html, Redirect},
+    http::StatusCode,
+    response::{Html, IntoResponse, Redirect, Response},
 };
+use axum_htmx::HxRequest;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -1141,7 +1143,7 @@ pub struct GroupUpsertForm {
 
 #[derive(Deserialize)]
 pub struct GroupDeleteForm {
-    group_name: String,
+    pub group_name: String,
 }
 
 /// Upsert a user-edited row in `group_source_map`. Silently no-ops on an
@@ -1192,11 +1194,19 @@ pub async fn settings_groups_upsert(
 /// one-session reset.
 pub async fn settings_groups_delete(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<GroupDeleteForm>,
-) -> Redirect {
+) -> Response {
     let name = form.group_name.trim();
     if name.is_empty() {
-        return Redirect::to("/settings?tab=groups");
+        return if is_htmx {
+            // Empty name from HTMX is a programmer error (the form
+            // should have a hidden input); 400 makes it visible in
+            // devtools rather than silently no-op'ing the row removal.
+            StatusCode::BAD_REQUEST.into_response()
+        } else {
+            Redirect::to("/settings?tab=groups").into_response()
+        };
     }
     match group_source_map::delete(&state.db, name).await {
         Ok(_) => {
@@ -1207,6 +1217,13 @@ pub async fn settings_groups_delete(
                 "",
             )
             .await;
+            // HTMX migration (issue #129) — empty 200 lets the row form's
+            // `hx-target="closest tr" hx-swap="outerHTML"` remove the row.
+            if is_htmx {
+                StatusCode::OK.into_response()
+            } else {
+                Redirect::to("/settings?tab=groups").into_response()
+            }
         }
         Err(e) => {
             logger::error(
@@ -1216,9 +1233,13 @@ pub async fn settings_groups_delete(
                 &e.to_string(),
             )
             .await;
+            if is_htmx {
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            } else {
+                Redirect::to("/settings?tab=groups").into_response()
+            }
         }
     }
-    Redirect::to("/settings?tab=groups")
 }
 
 #[utoipa::path(

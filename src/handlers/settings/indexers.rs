@@ -9,8 +9,10 @@
 use axum::{
     Form, Json,
     extract::State,
+    http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
+use axum_htmx::HxRequest;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -205,8 +207,9 @@ pub async fn settings_indexers_upsert(
 )]
 pub async fn settings_indexers_delete(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<IndexerDeleteForm>,
-) -> Redirect {
+) -> Response {
     // PR #107 round-3 review fixes #2+#3: the SET-NULL UPDATEs
     // for grabbed_torrents.indexer_id + pending_grabs.indexer_id
     // are now folded into models::indexers::delete as a transaction
@@ -233,9 +236,19 @@ pub async fn settings_indexers_delete(
             .await;
             // PR #107 review fix #4: same cache refresh as upsert.
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
-            let msg =
-                urlencoding::encode(&format!("Indexer '{display_name}' deleted")).into_owned();
-            Redirect::to(&format!("/settings?tab=indexers&msg={msg}"))
+            // HTMX migration (issue #129) — the row form has
+            // `hx-target="closest tr" hx-swap="outerHTML"`; an empty
+            // 200 response replaces the row with nothing, removing it
+            // from the DOM without a full page reload. The non-HTMX
+            // path keeps the redirect-with-flash so progressive
+            // enhancement holds.
+            if is_htmx {
+                StatusCode::OK.into_response()
+            } else {
+                let msg =
+                    urlencoding::encode(&format!("Indexer '{display_name}' deleted")).into_owned();
+                Redirect::to(&format!("/settings?tab=indexers&msg={msg}")).into_response()
+            }
         }
         Err(e) => {
             logger::error(
@@ -248,8 +261,14 @@ pub async fn settings_indexers_delete(
             // PR #107 round-4 review fix #3: surface the failure
             // via `&err=` so the user sees an inline banner instead
             // of a quiet success-looking redirect. Mirrors the
-            // upsert handler's "Save failed" pattern.
-            Redirect::to("/settings?tab=indexers&err=Delete+failed")
+            // upsert handler's "Save failed" pattern. For HTMX,
+            // return a 5xx so `htmx:responseError` fires and the
+            // row stays put; the toast helper picks up the status.
+            if is_htmx {
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            } else {
+                Redirect::to("/settings?tab=indexers&err=Delete+failed").into_response()
+            }
         }
     }
 }
@@ -741,9 +760,12 @@ mod tests {
             .await
             .expect("seed indexer");
             let state = build_test_app_state(db, None);
-            let resp =
-                settings_indexers_delete(State(state), Form(IndexerDeleteForm { id: row_id }))
-                    .await;
+            let resp = settings_indexers_delete(
+                State(state),
+                axum_htmx::HxRequest(false),
+                Form(IndexerDeleteForm { id: row_id }),
+            )
+            .await;
             // `delete` returns Redirect (not Response); `IntoResponse`
             // turns it into a Response that has the Location header.
             use axum::response::IntoResponse;
@@ -772,8 +794,12 @@ mod tests {
             // weaker `!contains("''")` check.
             let db = in_memory_pool().await;
             let state = build_test_app_state(db, None);
-            let resp =
-                settings_indexers_delete(State(state), Form(IndexerDeleteForm { id: 9999 })).await;
+            let resp = settings_indexers_delete(
+                State(state),
+                axum_htmx::HxRequest(false),
+                Form(IndexerDeleteForm { id: 9999 }),
+            )
+            .await;
             use axum::response::IntoResponse;
             let resp = resp.into_response();
             let location = extract_location(resp);
