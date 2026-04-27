@@ -749,8 +749,11 @@ pub async fn grab_cancel(
     // fall back to default. A vanished client (deleted/disabled mid-
     // modal) skips the destructive delete but still drops the
     // pending row so the modal state doesn't linger; the torrent
-    // either stays orphaned in the unreachable client (rare) or
-    // gets cleaned up on a subsequent rebuild_clients_cache.
+    // stays orphaned in the unreachable client and the user must
+    // remove it from that client's UI manually (Ryokan has no handle
+    // to it once the row is gone from `download_clients`, and
+    // `rebuild_clients_cache` only refreshes the in-memory pool — it
+    // doesn't reach into a removed client to clean up).
     let client_opt: Option<std::sync::Arc<dyn crate::services::download_client::DownloadClient>> =
         match row.download_client_id {
             Some(id) => state.client_by_id(id).await,

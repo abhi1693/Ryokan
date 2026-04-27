@@ -92,16 +92,28 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
         return;
     }
 
-    let client = {
-        let client = state.default_download_client().await;
-        client.as_ref().cloned()
+    // Multi-client routing — the auto-commit-on-walkaway path is the
+    // 4th manual dispatch site (alongside the two grab handlers and
+    // the picker confirm/cancel pair) and must hit the same client
+    // the preview's `add_torrent_paused` landed on. Mirroring the
+    // cancel handler's lookup: stamped id → `client_by_id`, NULL →
+    // default. Pre-fix this path always grabbed the default, so a
+    // walkaway on a torrent paused on the seedbox would `set_file_wanted`
+    // + `resume` against local qBit, fail (the torrent isn't there),
+    // log a warn, and the user's torrent stayed paused on the seedbox
+    // forever — no retry because the pending row gets dropped after
+    // this function returns regardless of outcome.
+    let client = match row.download_client_id {
+        Some(id) => state.client_by_id(id).await,
+        None => state.default_download_client().await,
     };
     let Some(client) = client else {
         tracing::warn!(
             target: "ryokan::services::grab_sweep",
             preview_id = %row.preview_id,
             info_hash = %row.info_hash,
-            "download client not configured; can't auto-commit expired pending grab"
+            stamped_client_id = ?row.download_client_id,
+            "download client not available; can't auto-commit expired pending grab"
         );
         return;
     };
@@ -444,6 +456,96 @@ mod tests {
             resumed,
             vec!["hash-happy".to_string()],
             "expected one resume call on the row's info_hash"
+        );
+    }
+
+    /// Multi-client routing regression — the auto-commit-on-walkaway
+    /// path must dispatch to the client the preview added the torrent
+    /// to (per `pending_grabs.download_client_id`), NOT the pool's
+    /// default. Pre-PR-110-review-1 the sweep used
+    /// `default_download_client()` unconditionally; a walkaway on a
+    /// torrent pinned to a non-default client would leave the torrent
+    /// paused on the wrong client forever (no retry).
+    ///
+    /// Pool shape: id=1 default + id=2 second client. Pending row
+    /// stamped with `download_client_id=2`. Assert the
+    /// set_file_wanted+resume call pair lands on the id=2 client, not
+    /// id=1.
+    #[tokio::test]
+    async fn sweep_dispatches_to_pinned_client_not_default() {
+        let db = in_memory_pool().await;
+        pending_grabs::create(
+            &db,
+            "pinned",
+            "hash-pinned",
+            "deluge",
+            None,
+            None,
+            "{}",
+            true,
+            Some(2),
+        )
+        .await
+        .unwrap();
+        pending_grabs::set_file_list(&db, "pinned", "[{\"name\":\"a.mkv\",\"size\":1}]")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE pending_grabs SET heartbeat_at = ?")
+            .bind(now_unix() - HEARTBEAT_TTL_SECS - 5)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // Build a multi-client pool by hand. `build_test_app_state`
+        // can't do this (it plants the supplied client at id=1 with
+        // `default_id=Some(1)`), so the pool ends up with one entry
+        // and `client_by_id(2)` always misses — an existing bug
+        // would silently fall through to default and the test would
+        // pass even with the regression in place.
+        let default_client = Arc::new(RecordingClient::default());
+        let pinned_client = Arc::new(RecordingClient::default());
+        let mut clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>> =
+            std::collections::HashMap::new();
+        clients.insert(1, default_client.clone());
+        clients.insert(2, pinned_client.clone());
+        let pool = crate::DownloadClientPool {
+            clients,
+            default_id: Some(1),
+        };
+        let state = build_test_app_state(db.clone(), None);
+        // Override the pool — `build_test_app_state` left it empty
+        // since we passed `None`. Direct mutation is fine in tests.
+        *state.download_clients.write().await = Arc::new(pool);
+
+        let count = sweep_once(&state).await.unwrap();
+        assert_eq!(count, 1);
+
+        // The pinned client must have received the calls.
+        let pinned_wanted = pinned_client.set_wanted_calls.lock().unwrap().clone();
+        let pinned_resumed = pinned_client.resume_calls.lock().unwrap().clone();
+        assert_eq!(
+            pinned_wanted,
+            vec![("hash-pinned".to_string(), vec![0], true)],
+            "set_file_wanted must hit the PINNED client (id=2), not the default"
+        );
+        assert_eq!(
+            pinned_resumed,
+            vec!["hash-pinned".to_string()],
+            "resume must hit the PINNED client (id=2), not the default"
+        );
+
+        // The default client must NOT have received any calls — this
+        // is the assertion that catches the regression. Pre-fix this
+        // would fail because every call landed on the default.
+        let default_wanted = default_client.set_wanted_calls.lock().unwrap().clone();
+        let default_resumed = default_client.resume_calls.lock().unwrap().clone();
+        assert!(
+            default_wanted.is_empty(),
+            "default client must not see set_file_wanted; got {default_wanted:?}"
+        );
+        assert!(
+            default_resumed.is_empty(),
+            "default client must not see resume; got {default_resumed:?}"
         );
     }
 
