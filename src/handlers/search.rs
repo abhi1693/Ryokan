@@ -82,6 +82,13 @@ pub struct GrabForm {
     /// Gates auto_expand at grab time.
     #[serde(default)]
     is_batch: Option<bool>,
+    /// Multi-client routing — id of the indexer that surfaced this
+    /// release. `None` for Nyaa-direct hits (which route via the
+    /// Nyaa pin), `Some(id)` for torznab/newznab fan-out hits (which
+    /// route via the indexer's per-row pin). Frontend reads this
+    /// from `SearchResult.indexer_id` and round-trips it on grab.
+    #[serde(default)]
+    indexer_id: Option<i64>,
 }
 
 /// Helper to build SearchOptions from config.
@@ -279,7 +286,24 @@ pub async fn grab_release(
     State(state): State<AppState>,
     Json(form): Json<GrabForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let (client, dispatch_client_id) = state.default_download_client_with_id().await.ok_or((
+    // Pin chain: indexer_id (when the result came from a torznab/newznab
+    // fan-out) > Nyaa pin (Nyaa-direct results) > default. The manual-
+    // search page only invokes `nyaa::search` today, so any form arriving
+    // here without `indexer_id` is implicitly Nyaa-direct and routes
+    // through the Nyaa pin. Pre-PR-F-followup this always hit the default.
+    let resolved = if form.indexer_id.is_some() {
+        state.client_for_indexer_with_id(form.indexer_id).await
+    } else {
+        let cfg = crate::models::config::get_config(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        state
+            .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
+            .await
+    };
+    let (client, dispatch_client_id) = resolved.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "Download client not configured".to_string(),
     ))?;

@@ -48,7 +48,7 @@
             </thead>
             <tbody id="results-body">
                 {% for r in results %}
-                <tr class="{% if r.is_batch && r.is_trusted %}is-batch is-trusted{% else if r.is_batch %}is-batch{% else if r.is_trusted %}is-trusted{% endif %}" data-score="{{ r.score }}" data-name="{{ r.title }}" data-size="{{ r.size_bytes }}" data-size-human="{{ r.size }}" data-date="{{ r.upload_date }}" data-seeders="{{ r.seeders }}" data-leechers="{{ r.leechers }}" data-downloads="{{ r.downloads }}" data-info-hash="{{ r.info_hash }}" data-group="{{ r.group }}">
+                <tr class="{% if r.is_batch && r.is_trusted %}is-batch is-trusted{% else if r.is_batch %}is-batch{% else if r.is_trusted %}is-trusted{% endif %}" data-score="{{ r.score }}" data-name="{{ r.title }}" data-size="{{ r.size_bytes }}" data-size-human="{{ r.size }}" data-date="{{ r.upload_date }}" data-seeders="{{ r.seeders }}" data-leechers="{{ r.leechers }}" data-downloads="{{ r.downloads }}" data-info-hash="{{ r.info_hash }}" data-group="{{ r.group }}"{% if let Some(idx) = r.indexer_id %} data-indexer-id="{{ idx }}"{% endif %}>
                     <td class="col-score">
                         <details class="score-details" name="score-breakdown">
                             <summary class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}" title="Click to see breakdown">{{ r.score }}</summary>
@@ -103,7 +103,7 @@
            paginated results show up regardless of viewport. #}
         <div class="results-cards" id="results-cards">
             {% for r in results %}
-            <div class="result-card {% if r.is_batch %}is-batch{% endif %} {% if r.is_trusted %}is-trusted{% endif %}" data-name="{{ r.title }}" data-size-human="{{ r.size }}" data-seeders="{{ r.seeders }}" data-info-hash="{{ r.info_hash }}" data-group="{{ r.group }}">
+            <div class="result-card {% if r.is_batch %}is-batch{% endif %} {% if r.is_trusted %}is-trusted{% endif %}" data-name="{{ r.title }}" data-size-human="{{ r.size }}" data-seeders="{{ r.seeders }}" data-info-hash="{{ r.info_hash }}" data-group="{{ r.group }}"{% if let Some(idx) = r.indexer_id %} data-indexer-id="{{ idx }}"{% endif %}>
                 <div class="result-card-header">
                     <span class="score-badge {% if r.score >= 60 %}score-high{% else if r.score >= 30 %}score-mid{% else %}score-low{% endif %}">{{ r.score }}</span>
                     <a class="result-card-title" href="{{ r.link }}" target="_blank" rel="noopener">{{ r.title }}</a>
