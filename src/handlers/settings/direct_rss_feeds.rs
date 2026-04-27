@@ -87,11 +87,50 @@ pub async fn settings_direct_rss_feeds_upsert(
         return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
     }
 
+    let download_client_id = parse_optional_i64(&form.download_client_id);
+
+    // PR 112 review #1 — protocol guard. The model doc promises
+    // the upsert path enforces protocol match against
+    // `detected_protocol` (populated by the Test button on first
+    // successful fetch). Without this gate, a user who tested a
+    // torrent feed and then saved with an SAB pin would silently
+    // persist the mismatch and only fail at grab time. Mirrors
+    // the indexer-pin guard at `handlers::settings::indexers`.
+    //
+    // Only enforced on the update path: a fresh feed has no
+    // detected_protocol yet (the Test button hasn't run), so the
+    // first save is permissive. Once the user runs Test, the
+    // protocol becomes known and subsequent saves are gated.
+    if let (Some(id), Some(client_id)) = (form.id, download_client_id)
+        && let Ok(Some(feed_row)) = get_by_id(&state.db, id).await
+        && !feed_row.detected_protocol.is_empty()
+        && let Ok(Some(client_row)) =
+            crate::models::download_clients::get_by_id(&state.db, client_id).await
+    {
+        let client_proto =
+            crate::services::download_client::protocol_for_client_kind(&client_row.kind);
+        if let Some(cp) = client_proto
+            && feed_row.detected_protocol != cp
+        {
+            let msg = urlencoding::encode(&format!(
+                "Can't pin a {} feed to a {} client (protocol mismatch — \
+                 the feed delivers {} releases, {} accepts {})",
+                feed_row.detected_protocol,
+                client_row.kind,
+                feed_row.detected_protocol,
+                client_row.kind,
+                cp
+            ))
+            .into_owned();
+            return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+        }
+    }
+
     let payload = DirectRssFeedForm {
         name: &name,
         url: &url,
         enabled: form.enabled.is_some(),
-        download_client_id: parse_optional_i64(&form.download_client_id),
+        download_client_id,
         request_timeout_secs: parse_optional_i64(&form.request_timeout_secs),
     };
 
@@ -369,6 +408,200 @@ mod tests {
         )
         .await;
         assert!(!resp.0.ok);
+    }
+
+    #[tokio::test]
+    async fn upsert_protocol_guard_rejects_torrent_feed_pinned_to_sab() {
+        // PR 112 review #1 — the model doc says the upsert path
+        // enforces protocol match against detected_protocol. Pin
+        // the rejection so a regression that drops the guard
+        // fails this test loudly.
+        let db = in_memory_pool().await;
+        let sab_id = crate::models::download_clients::insert(
+            &db,
+            crate::models::download_clients::DownloadClientForm {
+                name: "SAB",
+                kind: "sabnzbd",
+                url: "http://sab",
+                username: "",
+                password: "",
+                label: "",
+                download_path: "",
+                enabled: true,
+                is_default: false,
+            },
+        )
+        .await
+        .unwrap();
+        // Insert a feed + stamp detected_protocol = "torrent"
+        // (mimics post-Test state). Then attempt to update with a
+        // SAB pin — should reject.
+        let feed_id = crate::models::direct_rss_feeds::insert(
+            &db,
+            crate::models::direct_rss_feeds::DirectRssFeedForm {
+                name: "SubsPlease",
+                url: "https://subsplease.org/rss",
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        crate::models::direct_rss_feeds::set_detected_protocol(&db, feed_id, "torrent")
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db.clone(), None);
+        let resp = settings_direct_rss_feeds_upsert(
+            State(state),
+            Form(DirectRssFeedUpsertForm {
+                id: Some(feed_id),
+                name: "SubsPlease".into(),
+                url: "https://subsplease.org/rss".into(),
+                enabled: Some("on".into()),
+                download_client_id: Some(sab_id.to_string()),
+                request_timeout_secs: None,
+            }),
+        )
+        .await
+        .into_response();
+        let location = resp
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            location.contains("err=") && location.contains("protocol+mismatch")
+                || location.contains("protocol%20mismatch"),
+            "expected protocol-mismatch err in redirect: {location}"
+        );
+
+        // Verify the row's pin was NOT updated.
+        let feed = crate::models::direct_rss_feeds::get_by_id(&db, feed_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(feed.download_client_id.is_none(), "pin must remain None");
+    }
+
+    #[tokio::test]
+    async fn upsert_protocol_guard_permits_matching_protocol() {
+        // Sibling case: torrent feed pinned to qBit (matching
+        // protocol) saves cleanly.
+        let db = in_memory_pool().await;
+        let qbit_id = crate::models::download_clients::insert(
+            &db,
+            crate::models::download_clients::DownloadClientForm {
+                name: "qBit",
+                kind: "qbittorrent",
+                url: "http://qbit",
+                username: "",
+                password: "",
+                label: "",
+                download_path: "",
+                enabled: true,
+                is_default: false,
+            },
+        )
+        .await
+        .unwrap();
+        let feed_id = crate::models::direct_rss_feeds::insert(
+            &db,
+            crate::models::direct_rss_feeds::DirectRssFeedForm {
+                name: "SubsPlease",
+                url: "https://subsplease.org/rss",
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        crate::models::direct_rss_feeds::set_detected_protocol(&db, feed_id, "torrent")
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db.clone(), None);
+        let _ = settings_direct_rss_feeds_upsert(
+            State(state),
+            Form(DirectRssFeedUpsertForm {
+                id: Some(feed_id),
+                name: "SubsPlease".into(),
+                url: "https://subsplease.org/rss".into(),
+                enabled: Some("on".into()),
+                download_client_id: Some(qbit_id.to_string()),
+                request_timeout_secs: None,
+            }),
+        )
+        .await;
+        let feed = crate::models::direct_rss_feeds::get_by_id(&db, feed_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(feed.download_client_id, Some(qbit_id));
+    }
+
+    #[tokio::test]
+    async fn upsert_protocol_guard_permissive_when_protocol_not_yet_detected() {
+        // Fresh feed (no Test pass yet) — detected_protocol is
+        // empty, so the pin save permits any client. The user
+        // can re-test later and the next save will gate.
+        let db = in_memory_pool().await;
+        let sab_id = crate::models::download_clients::insert(
+            &db,
+            crate::models::download_clients::DownloadClientForm {
+                name: "SAB",
+                kind: "sabnzbd",
+                url: "http://sab",
+                username: "",
+                password: "",
+                label: "",
+                download_path: "",
+                enabled: true,
+                is_default: false,
+            },
+        )
+        .await
+        .unwrap();
+        let feed_id = crate::models::direct_rss_feeds::insert(
+            &db,
+            crate::models::direct_rss_feeds::DirectRssFeedForm {
+                name: "Untested",
+                url: "https://untested.example/rss",
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        // detected_protocol is empty (no Test ran).
+
+        let state = build_test_app_state(db.clone(), None);
+        let _ = settings_direct_rss_feeds_upsert(
+            State(state),
+            Form(DirectRssFeedUpsertForm {
+                id: Some(feed_id),
+                name: "Untested".into(),
+                url: "https://untested.example/rss".into(),
+                enabled: Some("on".into()),
+                download_client_id: Some(sab_id.to_string()),
+                request_timeout_secs: None,
+            }),
+        )
+        .await;
+        let feed = crate::models::direct_rss_feeds::get_by_id(&db, feed_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            feed.download_client_id,
+            Some(sab_id),
+            "untested feed permits any pin; subsequent Test+Save will gate"
+        );
     }
 
     #[test]

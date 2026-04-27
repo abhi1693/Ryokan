@@ -40,10 +40,18 @@ fn source_dedup_key(s: &RssSource) -> (&'static str, Option<i64>) {
 /// same sync tick may still resolve to a client (e.g. if a single
 /// indexer's pin points at a deleted client, that indexer's items
 /// reject but everything else still flows).
+///
+/// `direct_feed_pins` is pre-loaded by the caller from the same
+/// `list_enabled` query the fan-out used; passing it down avoids
+/// an N×SELECT-per-item lookup inside the grab loop. Indexer + Nyaa
+/// pins resolve through the in-memory caches already (`state
+/// .indexers` / `state.download_clients`); only direct feeds
+/// needed this dimension. PR 112 review #5.
 async fn resolve_dispatch_for_item(
     state: &AppState,
     cfg: &config::Config,
     item: &RssItem,
+    direct_feed_pins: &std::collections::HashMap<i64, Option<i64>>,
 ) -> Option<(
     std::sync::Arc<dyn crate::services::download_client::DownloadClient>,
     i64,
@@ -56,14 +64,9 @@ async fn resolve_dispatch_for_item(
         }
         RssSource::Indexer { id, .. } => state.client_for_indexer_with_id(Some(*id)).await,
         RssSource::UserFeed { id, .. } => {
-            // Direct-feed pin lookup. Read the row each time —
-            // the read is cached at the SQLite layer + this is
-            // fewer queries than the per-item match path that
-            // surrounds it.
-            let pin = match crate::models::direct_rss_feeds::get_by_id(&state.db, *id).await {
-                Ok(Some(row)) => row.download_client_id,
-                _ => None,
-            };
+            // Direct-feed pin lookup via the pre-loaded HashMap —
+            // no DB round-trip per item.
+            let pin = direct_feed_pins.get(id).copied().unwrap_or(None);
             state.client_for_nyaa_with_id(pin).await
         }
     }
@@ -364,6 +367,29 @@ pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, S
         .try_lock()
         .map_err(|_| "RSS sync is already running".to_string())?;
 
+    // PR 112 review #3 — hoist the master-flag check up to here
+    // so an off install doesn't write a `rss_runs` row + two log
+    // rows every 60s tick. The cheap config read is a single
+    // SELECT; we eat that to honor the kill switch's intent
+    // ("don't poll, don't make noise"). Returning the same
+    // SyncSummary shape the inner function would for the
+    // master-off branch keeps callers' summary parsing stable.
+    let cfg_master_off = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| !c.rss_master_enabled)
+        .unwrap_or(false);
+    if cfg_master_off {
+        return Ok(SyncSummary {
+            items_seen: 0,
+            matched: 0,
+            grabbed: 0,
+            skipped: 0,
+            detail: "RSS master switch is off; no sources polled".to_string(),
+        });
+    }
+
     let run_id = rss::start_run(&state.db, trigger)
         .await
         .map_err(|e| e.to_string())?;
@@ -563,6 +589,12 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     // so flipping the master back on takes effect within one tick
     // (no restart needed). Per the plan's truth table, the master
     // overrides every per-source flag.
+    //
+    // PR 112 review #3 — the outer `sync_once` already
+    // short-circuits on the master flag before writing a
+    // `rss_runs` row, so this branch is defense-in-depth (covers
+    // a future caller that bypasses `sync_once`). The cheap
+    // re-read is acceptable for the redundancy.
     if !cfg.rss_master_enabled {
         return Ok(SyncSummary {
             items_seen: 0,
@@ -608,6 +640,22 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     // is consulted, which only the auto/upgrade paths do today.
     let cfs = state.custom_formats.read().await.clone();
     let empty_seadex_hashes: HashSet<String> = HashSet::new();
+
+    // PR 112 review #5 — pre-load every direct feed's
+    // `download_client_id` pin into a HashMap so the per-item
+    // grab dispatcher resolves in-memory rather than firing one
+    // SELECT per direct-fed item. The fan-out's `list_enabled`
+    // call already pulled these rows from the DB; we re-query
+    // here so the snapshot is fresh at grab time (a feed pin
+    // edited mid-tick still gets honored). Single SELECT vs
+    // N×items.
+    let direct_feed_pins: HashMap<i64, Option<i64>> =
+        crate::models::direct_rss_feeds::list_all(&state.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| (row.id, row.download_client_id))
+            .collect();
 
     let whitelist = quality::parse_group_list(&cfg.preferred_groups);
     let blacklist = quality::parse_group_list(&cfg.blocked_groups);
@@ -1018,7 +1066,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         // shutting down the whole sync (other items in this tick
         // may have valid pins).
         let Some((client, dispatch_client_id)) =
-            resolve_dispatch_for_item(state, &cfg, &cand.item).await
+            resolve_dispatch_for_item(state, &cfg, &cand.item, &direct_feed_pins).await
         else {
             skipped += 1;
             let reason = format!(

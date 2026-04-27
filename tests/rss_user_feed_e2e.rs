@@ -84,6 +84,37 @@ async fn fetch_user_feed_returns_err_on_5xx() {
 }
 
 #[tokio::test]
+async fn fetch_user_feed_caps_body_at_10mb() {
+    // PR 112 review #6 — user-supplied URLs are arbitrary; the
+    // 30s timeout caps a hung connection but a hostile /
+    // misconfigured source can return arbitrarily large XML.
+    // Pin the cap so a regression that drops it surfaces here.
+    // Body size is 11 MB to cross the 10 MB threshold.
+    let mock = MockServer::start().await;
+    let huge_body = "x".repeat(11 * 1024 * 1024);
+    Mock::given(method("GET"))
+        .and(path("/huge"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(huge_body))
+        .mount(&mock)
+        .await;
+
+    let url = format!("{}/huge", mock.uri());
+    let result = feed::fetch_user_feed(
+        &url,
+        RssSource::UserFeed {
+            id: 1,
+            name: "Hostile".into(),
+        },
+    )
+    .await;
+    let err = result.expect_err("11 MB body must be rejected");
+    assert!(
+        err.contains("MB cap") || err.to_lowercase().contains("exceeded"),
+        "expected size-cap error, got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn fetch_user_feed_returns_empty_for_no_items() {
     // Empty feed (channel with no items) is a valid response shape
     // for an idle period — must NOT be an Err. Pin so a future tweak

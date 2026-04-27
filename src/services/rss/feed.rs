@@ -168,17 +168,49 @@ async fn fetch_feed(category: &str) -> Result<Vec<RssItem>, String> {
 /// the caller can log + skip without aborting the rest of the
 /// fan-out (a single broken feed shouldn't take down RSS sync
 /// for every other source).
+///
+/// PR 112 review #6 — body-size cap. Read the response in chunks
+/// and bail with a clear error once we cross 10 MB. Real anime
+/// RSS feeds are tiny (SubsPlease's 1080p index is ~80 KB; the
+/// largest Nyaa category response is ~1.5 MB); the cap exists so
+/// a hostile / misconfigured source can't OOM the sync by serving
+/// gigabytes. Streaming-with-cap rather than a Content-Length
+/// check because some servers omit the header.
 pub async fn fetch_user_feed(url: &str, source: RssSource) -> Result<Vec<RssItem>, String> {
+    /// 10 MB — far above any real feed, far below a memory-pressure
+    /// problem on the smallest deployments.
+    const RSS_BODY_CAP_BYTES: usize = 10 * 1024 * 1024;
+
     let resp = RSS_HTTP_CLIENT
         .get(url)
         .send()
         .await
         .map_err(|e| format!("RSS request failed: {}", e))?;
     let status = resp.status();
-    let xml = resp
-        .text()
+
+    // Chunk through the body so we can short-circuit on the cap
+    // before allocating the whole thing into memory. `Response
+    // ::chunk()` yields whatever reqwest's already-buffered the
+    // bottom-half of the I/O loop; we just stop pulling once we
+    // hit the limit. Avoids the `stream` feature flag on
+    // reqwest by using the default-enabled `chunk()` helper.
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| format!("Failed to read RSS response: {}", e))?;
+        .map_err(|e| format!("RSS body read failed: {}", e))?
+    {
+        if buf.len() + chunk.len() > RSS_BODY_CAP_BYTES {
+            return Err(format!(
+                "RSS feed body exceeded {} MB cap",
+                RSS_BODY_CAP_BYTES / (1024 * 1024)
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let xml = String::from_utf8_lossy(&buf).into_owned();
+
     if !status.is_success() {
         // Truncate the body for the error string so a Cloudflare
         // HTML error page doesn't render multi-KB inline in the

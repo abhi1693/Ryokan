@@ -825,9 +825,11 @@ pub async fn settings_submit(
         rss_enabled: form.rss_enabled.is_some(),
         rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
         // multi-rss commit E — preserve the existing master flag
-        // through the Settings save. The master flag has its own
-        // dedicated handler (commit G) so save-on-the-main-form
-        // doesn't accidentally toggle it.
+        // through the Settings save. The toggle UI for this flag
+        // is deferred to 1.5.1; until then it can be flipped
+        // directly via SQL on the `config.rss_master_enabled`
+        // column. The save-on-the-main-form path here just keeps
+        // the existing value intact rather than clobbering it.
         rss_master_enabled: existing_cfg
             .as_ref()
             .map(|cfg| cfg.rss_master_enabled)

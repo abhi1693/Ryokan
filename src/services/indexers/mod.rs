@@ -494,6 +494,14 @@ impl Release {
             // straight from `link`.
             torrent: self.link.clone(),
             magnet: self.magnet.clone(),
+            // PR 112 review #7 — torznab releases carry an
+            // info_hash via `<torznab:attr name="infohash">`;
+            // newznab releases never do (it's an NZB pointer,
+            // not a torrent), so this stays empty for newznab
+            // items. `build_item_key` falls through to GUID →
+            // link → title for the dedup key when info_hash is
+            // absent, so newznab items dedup by GUID just fine —
+            // the info_hash dedup path is torznab-only by design.
             info_hash: self.info_hash.clone(),
             group,
             resolution,
