@@ -275,3 +275,217 @@ pub async fn delete_defaults_with_tx(tx: &mut Transaction<'_, Sqlite>) -> Result
         .await?;
     Ok(res.rows_affected())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::in_memory_pool;
+
+    #[tokio::test]
+    async fn insert_then_list_round_trips_with_score_join() {
+        let db = in_memory_pool().await;
+        let id = insert(
+            &db,
+            "BD-1080p-Tier",
+            Some("trash-abc"),
+            r#"{"k":1}"#,
+            250,
+            ORIGIN_MANUAL,
+        )
+        .await
+        .unwrap();
+        assert!(id > 0);
+
+        let rows = list_with_scores(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.id, id);
+        assert_eq!(r.name, "BD-1080p-Tier");
+        assert_eq!(r.trash_id.as_deref(), Some("trash-abc"));
+        assert_eq!(r.json, r#"{"k":1}"#);
+        assert_eq!(r.score, 250);
+        assert_eq!(r.origin, ORIGIN_MANUAL);
+        // Both timestamps populated, equal on insert.
+        assert!(r.created_at > 0);
+        assert_eq!(r.created_at, r.updated_at);
+    }
+
+    #[tokio::test]
+    async fn list_orders_by_name_case_insensitively() {
+        // ORDER BY cf.name COLLATE NOCASE — pin so a future tweak
+        // doesn't quietly drop the case-insensitive sort and leave
+        // the settings page jumbled when a CF name starts with a
+        // lowercase letter.
+        let db = in_memory_pool().await;
+        insert(&db, "Zulu", None, "{}", 1, ORIGIN_MANUAL)
+            .await
+            .unwrap();
+        insert(&db, "alpha", None, "{}", 1, ORIGIN_MANUAL)
+            .await
+            .unwrap();
+        insert(&db, "Mango", None, "{}", 1, ORIGIN_MANUAL)
+            .await
+            .unwrap();
+
+        let rows = list_with_scores(&db).await.unwrap();
+        let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "Mango", "Zulu"]);
+    }
+
+    #[tokio::test]
+    async fn get_by_id_returns_none_for_unknown_id() {
+        let db = in_memory_pool().await;
+        assert!(get_by_id(&db, 9999).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn get_by_id_includes_zero_score_when_score_row_missing() {
+        // Defensive: the COALESCE means a CF without a score entry
+        // still reads back with score=0 rather than failing the row
+        // map. We don't expect this state in practice (insert always
+        // pairs score), but pin the COALESCE so a future refactor
+        // that drops it surfaces cleanly.
+        let db = in_memory_pool().await;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO custom_formats (name, trash_id, json, origin, created_at, updated_at) \
+             VALUES ('orphan', NULL, '{}', 'manual', 1, 1) RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+        let row = get_by_id(&db, id).await.unwrap().unwrap();
+        assert_eq!(row.score, 0);
+    }
+
+    #[tokio::test]
+    async fn update_changes_name_and_score_in_place() {
+        let db = in_memory_pool().await;
+        let id = insert(&db, "Old", Some("t1"), "{}", 100, ORIGIN_MANUAL)
+            .await
+            .unwrap();
+        // Sleep a sec so updated_at meaningfully advances.
+        let original = get_by_id(&db, id).await.unwrap().unwrap();
+
+        update(&db, id, "New", Some("t2"), r#"{"v":2}"#, 200)
+            .await
+            .unwrap();
+        let updated = get_by_id(&db, id).await.unwrap().unwrap();
+        assert_eq!(updated.name, "New");
+        assert_eq!(updated.trash_id.as_deref(), Some("t2"));
+        assert_eq!(updated.json, r#"{"v":2}"#);
+        assert_eq!(updated.score, 200);
+        // updated_at is at least as recent as created_at; it may equal
+        // when the test runs in the same wall-clock second.
+        assert!(updated.updated_at >= original.updated_at);
+    }
+
+    #[tokio::test]
+    async fn update_inserts_score_row_when_missing() {
+        // The score side uses INSERT ... ON CONFLICT, so a CF that
+        // started without a score row gets one on first edit. Pin the
+        // upsert path.
+        //
+        // Insert via raw SQL with `RETURNING id` rather than two
+        // separate statements — sqlx's connection pool can dispatch
+        // `last_insert_rowid()` to a different connection than the
+        // INSERT, returning 0 / a stale id on the second statement
+        // and producing a phantom FK violation on the follow-up
+        // update.
+        let db = in_memory_pool().await;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO custom_formats (name, trash_id, json, origin, created_at, updated_at) \
+             VALUES ('NeedsScore', NULL, '{}', 'manual', 1, 1) RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        update(&db, id, "NeedsScore", None, "{}", 333)
+            .await
+            .unwrap();
+        let row = get_by_id(&db, id).await.unwrap().unwrap();
+        assert_eq!(row.score, 333);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_row_and_cascades_score_via_fk() {
+        let db = in_memory_pool().await;
+        let id = insert(&db, "ToDelete", None, "{}", 50, ORIGIN_MANUAL)
+            .await
+            .unwrap();
+        delete(&db, id).await.unwrap();
+        assert!(get_by_id(&db, id).await.unwrap().is_none());
+        // FK cascade: the score row must be gone too.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM custom_format_scores WHERE custom_format_id = ?",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "score row must cascade-drop with the CF");
+    }
+
+    #[tokio::test]
+    async fn delete_defaults_with_tx_only_drops_defaults_origin() {
+        // The Reset Defaults handler relies on `delete_defaults_with_tx`
+        // leaving manual + import rows alone. Pin the WHERE clause so
+        // a future regression can't widen the delete and wipe the
+        // user's authored rows.
+        let db = in_memory_pool().await;
+        insert(&db, "user-cf", None, "{}", 100, ORIGIN_MANUAL)
+            .await
+            .unwrap();
+        insert(&db, "imported-cf", None, "{}", 100, ORIGIN_IMPORT)
+            .await
+            .unwrap();
+        insert(&db, "default-1", None, "{}", 100, ORIGIN_DEFAULTS)
+            .await
+            .unwrap();
+        insert(&db, "default-2", None, "{}", 100, ORIGIN_DEFAULTS)
+            .await
+            .unwrap();
+
+        let mut tx = db.begin().await.unwrap();
+        let dropped = delete_defaults_with_tx(&mut tx).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(dropped, 2);
+
+        let remaining = list_with_scores(&db).await.unwrap();
+        let names: Vec<_> = remaining.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["imported-cf", "user-cf"]);
+    }
+
+    #[tokio::test]
+    async fn insert_with_tx_lets_caller_bundle_multi_step_operations() {
+        // The reset-defaults flow uses insert_with_tx alongside
+        // delete_defaults_with_tx in a single transaction. Verify the
+        // commit-on-success / rollback-on-drop semantics by exercising
+        // the rollback path.
+        let db = in_memory_pool().await;
+        let mut tx = db.begin().await.unwrap();
+        let _id = insert_with_tx(&mut tx, "EphemeralA", None, "{}", 1, ORIGIN_DEFAULTS)
+            .await
+            .unwrap();
+        let _id = insert_with_tx(&mut tx, "EphemeralB", None, "{}", 1, ORIGIN_DEFAULTS)
+            .await
+            .unwrap();
+        // Drop the transaction without committing; sqlx rolls back.
+        drop(tx);
+
+        let rows = list_with_scores(&db).await.unwrap();
+        assert!(rows.is_empty(), "uncommitted tx must roll back");
+    }
+
+    #[tokio::test]
+    async fn insert_rejects_duplicate_name() {
+        // `name` is UNIQUE — re-inserting the same name fails. Pin so
+        // the settings-form upsert can't silently overwrite a row.
+        let db = in_memory_pool().await;
+        insert(&db, "Unique", None, "{}", 1, ORIGIN_MANUAL)
+            .await
+            .unwrap();
+        let err = insert(&db, "Unique", None, "{}", 2, ORIGIN_MANUAL).await;
+        assert!(err.is_err());
+    }
+}

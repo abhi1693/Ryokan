@@ -266,3 +266,165 @@ async fn run_auto_expand(
         .await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+
+    fn pending_grab_for(series_id: Option<i64>, info_hash: &str) -> PendingGrab {
+        PendingGrab {
+            preview_id: "pv-1".to_string(),
+            info_hash: info_hash.to_string(),
+            client_kind: "qbittorrent".to_string(),
+            indexer_id: None,
+            series_id,
+            created_at: 0,
+            heartbeat_at: 0,
+            file_list_json: String::new(),
+            release_metadata_json: String::new(),
+            error_message: String::new(),
+            we_added_torrent: true,
+            download_client_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_returns_none_when_pending_grab_has_no_series_id() {
+        // Bare-magnet grab from the global search page (no series
+        // attribution). The handler still issues the resume — this
+        // helper just bails on the library-attribution write.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db.clone(), None);
+        let row = pending_grab_for(None, "deadbeef");
+        let result = commit_grab_and_expand(&state, &row, vec![], "[Group] Show 01", false).await;
+        assert!(result.is_none());
+        // Nothing was written.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn commit_returns_none_when_release_title_is_empty() {
+        // Defensive — the handler shouldn't be calling with an empty
+        // title, but if it does we don't want to write a grab row
+        // with `release_title = ''` (post-processing keys naming
+        // off this column).
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 1, "Show").await;
+        let state = build_test_app_state(db.clone(), None);
+        let row = pending_grab_for(Some(series_id), "deadbeef");
+        let result = commit_grab_and_expand(&state, &row, vec!["a.mkv".into()], "  ", false).await;
+        assert!(result.is_none());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn commit_writes_grab_row_with_parsed_episode_numbers() {
+        // Happy path: series attribution + a parseable single-episode
+        // title → record_grab returns Some(id), the row lands with
+        // episode_numbers=[1]. We pass empty `filenames` so the
+        // fire-and-forget auto_expand spawn no-ops (the
+        // `if !filenames.is_empty()` guard skips it), keeping the
+        // test deterministic.
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 100, "Show").await;
+        let state = build_test_app_state(db.clone(), None);
+        let row = pending_grab_for(Some(series_id), "abcdef0001");
+        let id = commit_grab_and_expand(
+            &state,
+            &row,
+            vec![], // empty so auto_expand spawn doesn't fire
+            "[GroupX] Show - 01 [1080p].mkv",
+            false,
+        )
+        .await
+        .expect("commit should succeed and return a grab id");
+
+        let (got_hash, got_series, got_eps): (String, i64, String) = sqlx::query_as(
+            "SELECT hash, series_id, episode_numbers FROM grabbed_torrents WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(got_hash, "abcdef0001");
+        assert_eq!(got_series, series_id);
+        assert_eq!(got_eps, "[1]", "parsed episode numbers should round-trip");
+    }
+
+    #[tokio::test]
+    async fn commit_handles_unparseable_title_with_empty_episode_list() {
+        // A title that the parser can't decode (no number tokens at
+        // all) writes the grab row with an empty episode_numbers
+        // array. Post-processing per-file classification picks up
+        // the slack at import time.
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 200, "Movie").await;
+        let state = build_test_app_state(db.clone(), None);
+        let row = pending_grab_for(Some(series_id), "unparseable01");
+        let id = commit_grab_and_expand(&state, &row, vec![], "Some Movie [1080p]", false)
+            .await
+            .expect("commit should succeed even with unparseable title");
+        let eps: String =
+            sqlx::query_scalar("SELECT episode_numbers FROM grabbed_torrents WHERE id = ?")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(eps, "[]");
+    }
+
+    #[tokio::test]
+    async fn commit_dedups_against_inflight_pending_row_by_hash() {
+        // record_grab returns Ok(None) when an in-flight `pending`
+        // row already exists for the same hash (PR 110's dedup
+        // guard). Pin that path: a second commit with the same
+        // hash returns None and doesn't double-insert.
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 300, "Show").await;
+        let state = build_test_app_state(db.clone(), None);
+        let row = pending_grab_for(Some(series_id), "dup-hash-1");
+
+        let first = commit_grab_and_expand(&state, &row, vec![], "[G] Show - 01.mkv", false).await;
+        assert!(first.is_some());
+
+        let second = commit_grab_and_expand(&state, &row, vec![], "[G] Show - 01.mkv", false).await;
+        assert!(
+            second.is_none(),
+            "dedup must return None on the second call"
+        );
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents WHERE hash = 'dup-hash-1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "exactly one row should exist after the dedup");
+    }
+
+    #[tokio::test]
+    async fn commit_writes_is_batch_flag_into_grab_row() {
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 400, "Show").await;
+        let state = build_test_app_state(db.clone(), None);
+        let row = pending_grab_for(Some(series_id), "batch-hash");
+        let id = commit_grab_and_expand(&state, &row, vec![], "[G] Show 01-12 Batch [1080p]", true)
+            .await
+            .expect("commit");
+        let is_batch: i64 =
+            sqlx::query_scalar("SELECT is_batch FROM grabbed_torrents WHERE id = ?")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(is_batch, 1);
+    }
+}
