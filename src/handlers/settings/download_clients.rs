@@ -377,19 +377,37 @@ pub async fn settings_indexers_nyaa_pin(
     // A SAB pin would resolve at grab time and immediately fail at
     // SAB's `mode=addurl` ("invalid NZB"). Refuse the save with a
     // clear toast instead.
-    if let Some(client_id) = pin
-        && let Ok(Some(row)) =
-            crate::models::download_clients::get_by_id(&state.db, client_id).await
-        && let Some(client_proto) =
-            crate::services::download_client::protocol_for_client_kind(&row.kind)
-        && client_proto != "torrent"
-    {
-        let msg = urlencoding::encode(&format!(
-            "Can't pin Nyaa to a {} client (Nyaa returns torrents; {} accepts {client_proto})",
-            row.kind, row.kind
-        ))
-        .into_owned();
-        return Redirect::to(&format!("/settings?tab=indexers&err={msg}"));
+    //
+    // PR 112 review #1 (4th pass) — fail closed on transient DB
+    // error. The earlier `if let Ok(Some(row))` shape silently
+    // skipped the gate when get_by_id returned Err, which would
+    // let a Nyaa→SAB pin slip through under a hiccup at save
+    // time. Match Err explicitly. Ok(None) still permits (client
+    // deleted between page-load and submit is intentional).
+    if let Some(client_id) = pin {
+        let row = match crate::models::download_clients::get_by_id(&state.db, client_id).await {
+            Ok(Some(row)) => Some(row),
+            Ok(None) => None, // intentional: client deleted between page-load and submit
+            Err(e) => {
+                let msg = urlencoding::encode(&format!(
+                    "Couldn't verify protocol pin (DB error: {e}); please retry."
+                ))
+                .into_owned();
+                return Redirect::to(&format!("/settings?tab=indexers&err={msg}"));
+            }
+        };
+        if let Some(row) = row
+            && let Some(client_proto) =
+                crate::services::download_client::protocol_for_client_kind(&row.kind)
+            && client_proto != "torrent"
+        {
+            let msg = urlencoding::encode(&format!(
+                "Can't pin Nyaa to a {} client (Nyaa returns torrents; {} accepts {client_proto})",
+                row.kind, row.kind
+            ))
+            .into_owned();
+            return Redirect::to(&format!("/settings?tab=indexers&err={msg}"));
+        }
     }
     let result = sqlx::query("UPDATE config SET nyaa_download_client_id = ? WHERE id = 1")
         .bind(pin)
@@ -740,6 +758,57 @@ mod tests {
         assert!(
             pinned.is_none(),
             "Nyaa→SAB save must be rejected, not silently persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn nyaa_pin_db_error_during_lookup_fails_closed() {
+        // PR 112 review #1 (4th pass) — a transient DB error on the
+        // pin's protocol lookup must NOT silently skip the gate. The
+        // prior `if let Ok(Some(row))` shape would let a Nyaa→SAB
+        // pin through under a hiccup at save time. Provoke the
+        // error by closing the pool and confirm we redirect to a
+        // "DB error" toast instead of persisting the pin.
+        let db = in_memory_pool().await;
+        let sab = crate::models::download_clients::insert(
+            &db,
+            DownloadClientForm {
+                name: "SAB",
+                kind: "sabnzbd",
+                url: "http://sab.local",
+                username: "",
+                password: "key",
+                label: "tv",
+                download_path: "",
+                enabled: true,
+                is_default: false,
+            },
+        )
+        .await
+        .unwrap();
+        let _ = sqlx::query("INSERT OR IGNORE INTO config (id) VALUES (1)")
+            .execute(&db)
+            .await;
+        let state = build_test_app_state(db.clone(), None);
+        db.close().await;
+        let resp = settings_indexers_nyaa_pin(
+            State(state.clone()),
+            Form(NyaaPinForm {
+                download_client_id: Some(sab.to_string()),
+            }),
+        )
+        .await
+        .into_response();
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            location.contains("err=")
+                && (location.contains("DB%20error") || location.contains("DB+error")),
+            "expected fail-closed err redirect mentioning DB error, got: {location}"
         );
     }
 }

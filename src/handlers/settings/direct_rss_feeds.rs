@@ -102,6 +102,15 @@ pub async fn settings_direct_rss_feeds_upsert(
     // first save is permissive. Once the user runs Test, the
     // protocol becomes known and subsequent saves are gated.
     //
+    // PR 112 review #2 (4th pass) — the INSERT path is intentionally
+    // unguarded. The current Add form doesn't expose a download-
+    // client picker on insert (only the Test button → confirm → save
+    // flow is wired), so an INSERT can't carry a `download_client_id`
+    // through the UI. Curl-driven inserts and a future Add-form-with-
+    // client-picker would bypass this branch; if/when that lands,
+    // either run Test inline during INSERT or extend this guard to
+    // cover both paths.
+    //
     // PR 112 review #C — fail closed on transient DB errors. A
     // hiccup at save time shouldn't let a mismatch through; if
     // we can't read the row, refuse the save with a retry-now

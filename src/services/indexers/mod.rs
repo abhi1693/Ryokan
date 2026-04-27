@@ -687,6 +687,12 @@ fn format_publish_date(unix_ts: i64) -> String {
 /// default applies (typically 50 items, well over what a 60s
 /// sync tick actually needs but consistent with existing search
 /// behavior).
+///
+/// `categories` is empty — both `torznab/client.rs` and the
+/// newznab path fall through to `[TORZNAB_CAT_ANIME]` (5070) on
+/// an empty list. The 5070 category id is shared between the two
+/// protocols (newznab's anime category is also 5070 in mainline
+/// schemas); no protocol-aware branching needed here.
 pub async fn fetch_indexer_rss(
     indexer: &dyn Indexer,
 ) -> Result<Vec<crate::services::rss::RssItem>, String> {

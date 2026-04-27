@@ -129,6 +129,14 @@
 
             <div class="form-group">
                 <label for="indexer-edit-dc">Download Client</label>
+                {# kind→protocol mapping below mirrors
+                   `services::download_client::protocol_for_client_kind`.
+                   Keep them in sync — adding a future client kind
+                   (e.g. NZBGet → usenet) means editing both. The JS
+                   in static/js/settings.js gates the picker by
+                   data-protocol; a missing/wrong value would leak
+                   protocol-mismatch saves through to the server-side
+                   guard. #}
                 <select id="indexer-edit-dc" name="download_client_id">
                     <option value="">(use default)</option>
                     {% for dc in download_clients %}

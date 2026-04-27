@@ -299,6 +299,53 @@ async fn run_once_fans_out_list_scoped_per_pinned_client() {
 }
 
 #[tokio::test]
+async fn run_once_cleans_orphan_stamps_when_no_default_client_exists() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    // PR 112 review #3 (4th pass) — the pre-pass orphan cleanup at
+    // post_processing/mod.rs exists specifically for the case where
+    // every pending grab points at a gone client AND there's no
+    // default to fall back to. The pre-existing
+    // `run_once_nulls_stamp_when_client_id_no_longer_in_pool` test
+    // seeds a default, which masks this code path entirely (the
+    // fan-out's `else if let Some(id) = default_id_opt` branch
+    // saves the day). Without this test, a future refactor that
+    // moves the cleanup back inside the loop would silently regress
+    // — the grab would stay orphaned forever and never reach the
+    // stale-grab pruning path.
+    let db = in_memory_pool().await;
+    seed_config(&db).await;
+    let series_id = seed_series(&db, 1, "Show").await;
+    let g =
+        grabbed_torrents::record_grab(&db, "all_orphan_no_default", "rel", series_id, &[1], false)
+            .await
+            .unwrap()
+            .unwrap();
+    grabbed_torrents::set_download_client(&db, g, Some(999))
+        .await
+        .unwrap();
+
+    let state = build_test_app_state(db.clone(), None);
+    // Empty pool: no clients, no default. This is the genuine
+    // "all-orphans-no-default" shape the pre-pass defends.
+    install_pool(&state, Vec::new()).await;
+
+    post_processing::run_once(&state).await;
+
+    let stamp_after: Option<i64> =
+        sqlx::query_scalar("SELECT download_client_id FROM grabbed_torrents WHERE id = ?")
+            .bind(g)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(
+        stamp_after.is_none(),
+        "stamp must be NULLed even when no default client exists. \
+         Without the pre-pass cleanup the fan-out's `clients.is_empty()` \
+         early-return would skip the per-loop NULL and orphan the grab forever."
+    );
+}
+
+#[tokio::test]
 async fn run_once_nulls_stamp_when_client_id_no_longer_in_pool() {
     let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
     // A grab stamped with `download_client_id = 999` (a deleted /

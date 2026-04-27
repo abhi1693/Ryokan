@@ -100,22 +100,41 @@ pub async fn settings_indexers_upsert(
     // surfaces at grab time as "client rejected URL" with no upfront
     // signal — better to refuse the save with a clear toast. Mirrors
     // Sonarr's per-indexer Protocol enum check.
-    if let Some(client_id) = download_client_id
-        && let Ok(Some(row)) =
-            crate::models::download_clients::get_by_id(&state.db, client_id).await
-    {
-        let indexer_proto = crate::services::download_client::protocol_for_indexer_kind(kind);
-        let client_proto = crate::services::download_client::protocol_for_client_kind(&row.kind);
-        if let (Some(ip), Some(cp)) = (indexer_proto, client_proto)
-            && ip != cp
-        {
-            let msg = urlencoding::encode(&format!(
-                "Can't pin a {kind} indexer to a {} client (protocol mismatch — \
-                 {kind} returns {ip} URLs, {} accepts {cp})",
-                row.kind, row.kind
-            ))
-            .into_owned();
-            return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+    //
+    // PR 112 review #1 (4th pass) — fail closed on transient DB
+    // error. The earlier `if let Ok(Some(row))` shape silently
+    // skipped the gate when get_by_id returned Err, which would
+    // let a torznab→SAB pin slip through under a hiccup at save
+    // time. Match Err explicitly with a "DB error: ...; please
+    // retry" toast. Ok(None) still permits (row deleted between
+    // page-load and submit is intentional).
+    if let Some(client_id) = download_client_id {
+        let row = match crate::models::download_clients::get_by_id(&state.db, client_id).await {
+            Ok(Some(row)) => Some(row),
+            Ok(None) => None, // intentional: client deleted between page-load and submit
+            Err(e) => {
+                let msg = urlencoding::encode(&format!(
+                    "Couldn't verify protocol pin (DB error: {e}); please retry."
+                ))
+                .into_owned();
+                return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+            }
+        };
+        if let Some(row) = row {
+            let indexer_proto = crate::services::download_client::protocol_for_indexer_kind(kind);
+            let client_proto =
+                crate::services::download_client::protocol_for_client_kind(&row.kind);
+            if let (Some(ip), Some(cp)) = (indexer_proto, client_proto)
+                && ip != cp
+            {
+                let msg = urlencoding::encode(&format!(
+                    "Can't pin a {kind} indexer to a {} client (protocol mismatch — \
+                     {kind} returns {ip} URLs, {} accepts {cp})",
+                    row.kind, row.kind
+                ))
+                .into_owned();
+                return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+            }
         }
     }
 
@@ -580,6 +599,28 @@ mod tests {
             assert!(
                 location.contains("msg=") && !location.contains("err="),
                 "expected success redirect, got: {location}"
+            );
+        }
+
+        #[tokio::test]
+        async fn db_error_during_pin_lookup_fails_closed() {
+            // PR 112 review #1 (4th pass) — a transient DB error on
+            // the protocol-pin lookup must NOT silently skip the
+            // gate (the prior `if let Ok(Some(row))` shape did this).
+            // Provoke the error by closing the pool, then confirm
+            // upsert returns a "DB error" toast and refuses the save.
+            let db = in_memory_pool().await;
+            let (_qbit, sab) = seed_clients(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            db.close().await;
+            let resp =
+                settings_indexers_upsert(State(state.clone()), Form(upsert_form("torznab", sab)))
+                    .await;
+            let location = extract_location(resp);
+            assert!(
+                location.contains("err=")
+                    && (location.contains("DB%20error") || location.contains("DB+error")),
+                "expected fail-closed err redirect mentioning DB error, got: {location}"
             );
         }
     }
