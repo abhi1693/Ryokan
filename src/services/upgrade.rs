@@ -42,15 +42,21 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let client_opt = state.default_download_client().await;
-    let Some(client) = client_opt.as_ref() else {
+    // Multi-client routing — resolved per-result inside the loop via
+    // `client_for_indexer_with_id(result.indexer_id)`. We bail early
+    // here only when the pool is empty (no clients configured at all);
+    // an individual indexer's pin can still resolve later. Pre-1.5.x
+    // a single global client was checked once at top — that's now
+    // wrong because a per-indexer pin can route grabs to a different
+    // client than the default.
+    if state.default_download_client().await.is_none() {
         return Ok(UpgradeSummary {
             series_checked: 0,
             episodes_checked: 0,
             upgrades_grabbed: 0,
             detail: "Download client not configured; skipping upgrade search".to_string(),
         });
-    };
+    }
 
     let mut total_series_checked: usize = 0;
     let mut total_episodes_checked: usize = 0;
@@ -317,6 +323,26 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 continue;
             }
 
+            // Resolve the right client per-result so a PT indexer
+            // pinned to the seedbox (and a public indexer landing on
+            // local qBit) both work in the same sweep. Skip the
+            // result if pin resolution finds no client at all
+            // (pool empty or all-disabled mid-sweep).
+            let (client, dispatch_client_id) =
+                match state.client_for_indexer_with_id(result.indexer_id).await {
+                    Some(t) => t,
+                    None => {
+                        logger::warn(
+                            &state.db,
+                            LogCategory::QBit,
+                            &format!("Upgrade skip: no download client for {}", result.title),
+                            "indexer pin resolution returned None",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
             match client.add_torrent(&url, &result.info_hash).await {
                 Ok(_) => {
                     total_upgrades_grabbed += 1;
@@ -350,7 +376,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         // doesn't re-find / re-grab the same pack.
                         covered_by_batch.extend(&ep_nums);
                     }
-                    let _ = crate::models::grabbed_torrents::record_grab(
+                    let grab_id = crate::models::grabbed_torrents::record_grab(
                         &state.db,
                         &result.info_hash,
                         &result.title,
@@ -358,7 +384,17 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         &ep_nums,
                         result.is_batch,
                     )
-                    .await;
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(gid) = grab_id {
+                        let _ = crate::models::grabbed_torrents::set_download_client(
+                            &state.db,
+                            gid,
+                            Some(dispatch_client_id),
+                        )
+                        .await;
+                    }
                     for ep_num in &ep_nums {
                         let _ = episode_tags::record_grab(
                             &state.db,

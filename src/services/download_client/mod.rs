@@ -543,10 +543,20 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
         }
     }
     // Fall-through: if the user marked a kind+URL combo as default
-    // but it failed to instantiate, pick any other surviving row
-    // so the grab path isn't surprised by a present-but-empty pool.
+    // but it failed to instantiate (or didn't mark anything as default
+    // after a manual DB edit), pick the lowest surviving row id so the
+    // grab path isn't surprised by a present-but-empty pool. Surface
+    // this in logs — when a user reports "I marked X as default but
+    // grabs are landing on Y" the warn line names the picked id and
+    // makes the diagnosis obvious.
     if default_id.is_none() && !clients.is_empty() {
         default_id = clients.keys().min().copied();
+        if let Some(picked) = default_id {
+            tracing::warn!(
+                "download_clients: no row marked is_default=1; \
+                 picking client id {picked} as fallback default"
+            );
+        }
     }
     let pool = Arc::new(DownloadClientPool {
         clients,

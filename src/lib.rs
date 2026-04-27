@@ -170,20 +170,33 @@ impl AppState {
         &self,
         indexer_id: Option<i64>,
     ) -> Option<Arc<dyn DownloadClient>> {
+        self.client_for_indexer_with_id(indexer_id)
+            .await
+            .map(|(c, _)| c)
+    }
+
+    /// Same resolution as [`Self::client_for_indexer`] but also
+    /// returns the resolved `download_clients.id` so callers can
+    /// stamp it on `grabbed_torrents.download_client_id`.
+    /// Post-processing routes per-grab through that id back to the
+    /// owning client.
+    pub async fn client_for_indexer_with_id(
+        &self,
+        indexer_id: Option<i64>,
+    ) -> Option<(Arc<dyn DownloadClient>, i64)> {
         let pool = self.download_clients.read().await.clone();
         if let Some(id) = indexer_id {
-            // Look up the indexer's pin from the indexer cache.
             let indexers = self.indexers.read().await.clone();
             if let Some(idx) = indexers.iter().find(|i| i.id() == id)
                 && let Some(pinned) = idx.download_client_id()
                 && let Some(client) = pool.clients.get(&pinned)
             {
-                return Some(client.clone());
+                return Some((client.clone(), pinned));
             }
         }
-        // Fall through to default.
-        pool.default_id
-            .and_then(|id| pool.clients.get(&id).cloned())
+        let default_id = pool.default_id?;
+        let client = pool.clients.get(&default_id)?.clone();
+        Some((client, default_id))
     }
 
     /// Resolve a download client for the built-in Nyaa search
@@ -192,14 +205,24 @@ impl AppState {
     /// default. Caller must pass the current config so the
     /// helper doesn't fire a DB query per grab.
     pub async fn client_for_nyaa(&self, nyaa_pin: Option<i64>) -> Option<Arc<dyn DownloadClient>> {
+        self.client_for_nyaa_with_id(nyaa_pin).await.map(|(c, _)| c)
+    }
+
+    /// Same resolution as [`Self::client_for_nyaa`] but also returns
+    /// the resolved `download_clients.id` for grab-row stamping.
+    pub async fn client_for_nyaa_with_id(
+        &self,
+        nyaa_pin: Option<i64>,
+    ) -> Option<(Arc<dyn DownloadClient>, i64)> {
         let pool = self.download_clients.read().await.clone();
         if let Some(pinned) = nyaa_pin
             && let Some(client) = pool.clients.get(&pinned)
         {
-            return Some(client.clone());
+            return Some((client.clone(), pinned));
         }
-        pool.default_id
-            .and_then(|id| pool.clients.get(&id).cloned())
+        let default_id = pool.default_id?;
+        let client = pool.clients.get(&default_id)?.clone();
+        Some((client, default_id))
     }
 
     /// Default client — used by paths that don't have an
@@ -208,9 +231,28 @@ impl AppState {
     /// resolution as the helpers above with a None pin: just
     /// the default.
     pub async fn default_download_client(&self) -> Option<Arc<dyn DownloadClient>> {
+        self.default_download_client_with_id().await.map(|(c, _)| c)
+    }
+
+    /// Same resolution as [`Self::default_download_client`] but also
+    /// returns the resolved id for grab-row stamping. Mirror of the
+    /// `_with_id` helpers above.
+    pub async fn default_download_client_with_id(&self) -> Option<(Arc<dyn DownloadClient>, i64)> {
         let pool = self.download_clients.read().await.clone();
-        pool.default_id
-            .and_then(|id| pool.clients.get(&id).cloned())
+        let default_id = pool.default_id?;
+        let client = pool.clients.get(&default_id)?.clone();
+        Some((client, default_id))
+    }
+
+    /// Look up a specific client by `download_clients.id`. Used by
+    /// post-processing's per-grab routing — `grabbed_torrents.download_client_id`
+    /// stamps the row, and this helper resolves it back to the live
+    /// client. Returns None when the row referenced was deleted from
+    /// the pool (e.g. user removed the client mid-import); caller
+    /// should fall back to default.
+    pub async fn client_by_id(&self, id: i64) -> Option<Arc<dyn DownloadClient>> {
+        let pool = self.download_clients.read().await.clone();
+        pool.clients.get(&id).cloned()
     }
 }
 

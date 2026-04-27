@@ -327,8 +327,8 @@ pub async fn webhook_autobrr(
     // to the default. `indexer_id` is `Some(_)` here because the
     // earlier guard returned `skipped()` if the indexer wasn't
     // configured.
-    let client = match state.client_for_indexer(indexer_id).await {
-        Some(c) => c,
+    let (client, dispatch_client_id) = match state.client_for_indexer_with_id(indexer_id).await {
+        Some(t) => t,
         None => {
             logger::error(
                 &state.db,
@@ -389,6 +389,12 @@ pub async fn webhook_autobrr(
         .await;
         let _ =
             grabbed_torrents::set_indexer_attribution(&state.db, gid, indexer_id, respected).await;
+        // Stamp the client this grab landed on so post-processing
+        // routes `list_scoped` / `get_files` to the same place. NULL
+        // would force fall-through to the current default — wrong
+        // when the grab actually went to a non-default client.
+        let _ =
+            grabbed_torrents::set_download_client(&state.db, gid, Some(dispatch_client_id)).await;
     }
 
     let outcome_label = match add_outcome {

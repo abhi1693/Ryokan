@@ -141,9 +141,12 @@ pub async fn insert(db: &SqlitePool, form: DownloadClientForm<'_>) -> Result<i64
     .bind(form.name.trim())
     .bind(form.kind)
     .bind(form.url.trim())
-    .bind(form.username)
+    .bind(form.username.trim())
+    // Don't `.trim()` password — leading/trailing whitespace can be
+    // intentional (passphrase generators, rare but real) and silently
+    // dropping it would lock a user out of their own client.
     .bind(form.password)
-    .bind(form.label)
+    .bind(form.label.trim())
     .bind(form.download_path.trim().trim_end_matches('/'))
     .bind(if form.enabled { 1_i64 } else { 0_i64 })
     .bind(if form.is_default { 1_i64 } else { 0_i64 })
@@ -175,9 +178,9 @@ pub async fn update(
     .bind(form.name.trim())
     .bind(form.kind)
     .bind(form.url.trim())
-    .bind(form.username)
+    .bind(form.username.trim())
     .bind(form.password)
-    .bind(form.label)
+    .bind(form.label.trim())
     .bind(form.download_path.trim().trim_end_matches('/'))
     .bind(if form.enabled { 1_i64 } else { 0_i64 })
     .bind(if form.is_default { 1_i64 } else { 0_i64 })
@@ -220,9 +223,11 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 }
 
 /// Mark `id` as the default and clear every other row's flag.
-/// Idempotent — calling on an already-default row is a no-op
-/// at the value level (still does two UPDATEs that touch zero
-/// rows).
+/// Idempotent at the `is_default` value level (a re-call on an
+/// already-default row leaves the flag at 1); `updated_at` is
+/// bumped on every call regardless. Tighten the second UPDATE to
+/// `WHERE is_default = 0` if a strict no-op-on-repeat semantics is
+/// ever needed for an audit-log trigger.
 pub async fn set_default(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     sqlx::query("UPDATE download_clients SET is_default = 0 WHERE is_default = 1 AND id != ?")

@@ -64,7 +64,7 @@ pub async fn grab_batch_result(
         ));
     }
 
-    let qbit = state.default_download_client().await.ok_or((
+    let (qbit, dispatch_client_id) = state.default_download_client_with_id().await.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "Download client not configured".to_string(),
     ))?;
@@ -162,6 +162,14 @@ pub async fn grab_batch_result(
         .await
         .ok()
         .flatten();
+        if let Some(gid) = grab_id {
+            let _ = crate::models::grabbed_torrents::set_download_client(
+                &state.db,
+                gid,
+                Some(dispatch_client_id),
+            )
+            .await;
+        }
         for ep_num in &ep_nums {
             let _ = episode_tags::record_grab(
                 &state.db,
@@ -267,7 +275,7 @@ pub async fn grab_interactive_result(
         ));
     }
 
-    let qbit = state.default_download_client().await.ok_or((
+    let (qbit, dispatch_client_id) = state.default_download_client_with_id().await.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "Download client not configured".to_string(),
     ))?;
@@ -356,7 +364,7 @@ pub async fn grab_interactive_result(
 
     if let Some(sid) = series_id {
         // Interactive single-episode grab — not a batch by definition.
-        let _ = crate::models::grabbed_torrents::record_grab(
+        let grab_id = crate::models::grabbed_torrents::record_grab(
             &state.db,
             &info_hash,
             &title,
@@ -364,7 +372,17 @@ pub async fn grab_interactive_result(
             &[episode_number],
             false,
         )
-        .await;
+        .await
+        .ok()
+        .flatten();
+        if let Some(gid) = grab_id {
+            let _ = crate::models::grabbed_torrents::set_download_client(
+                &state.db,
+                gid,
+                Some(dispatch_client_id),
+            )
+            .await;
+        }
         let _ = episode_tags::record_grab(
             &state.db,
             sid,

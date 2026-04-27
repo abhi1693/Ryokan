@@ -2134,6 +2134,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Multi-client refactor — track which `download_clients` row the grab
+    // was dispatched to. Drives post-processing's `list_scoped` /
+    // `get_files` routing so a torrent landed on the seedbox isn't
+    // hunted for on the local qBit. NULL on legacy rows (pre-multi-client)
+    // and on grabs whose pin resolution returned None (pool empty
+    // before user added a client). Post-processing falls back to the
+    // current default on NULL.
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN download_client_id INTEGER")
+        .execute(db)
+        .await
+        .ok();
+
     // Issue #28 PR A — `grabbed_torrents.respect_seed_rules` flags
     // grabs whose torrents have per-torrent seed-ratio / seed-time
     // rules applied at add time (PR C). Delete paths (manual delete,
@@ -2229,23 +2241,35 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .unwrap_or(false)
     {
-        let legacy_qbit: Option<(String, String, String, String, String, String)> = sqlx::query_as(
+        // Read the legacy fields per-kind. Each block falls back to
+        // empty defaults on any failure (column missing from a
+        // partially-applied earlier migration, hand-edited schema,
+        // transient I/O). Pre-fix this whole block was gated on a
+        // 4-arm `if let (Some, Some, Some, Some, Some)` — any one
+        // failure skipped the entire backfill **and** didn't mark
+        // the migration applied, so it retried every boot. Now each
+        // arm degrades independently and the marker fires once
+        // we've gotten this far, regardless of which legacy slots
+        // were readable. Per the code-review correction.
+        let legacy_qbit = sqlx::query_as::<_, (String, String, String, String, String, String)>(
             "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path \
              FROM config WHERE id = 1",
         )
         .fetch_optional(db)
         .await
         .ok()
-        .flatten();
-        let legacy_deluge: Option<(String, String, String, String)> = sqlx::query_as(
+        .flatten()
+        .unwrap_or_default();
+        let legacy_deluge = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT deluge_url, deluge_password, deluge_label, deluge_download_path \
              FROM config WHERE id = 1",
         )
         .fetch_optional(db)
         .await
         .ok()
-        .flatten();
-        let legacy_tx: Option<(String, String, String, String, String)> = sqlx::query_as(
+        .flatten()
+        .unwrap_or_default();
+        let legacy_tx = sqlx::query_as::<_, (String, String, String, String, String)>(
             "SELECT transmission_url, transmission_user, transmission_password, \
                     transmission_label, transmission_download_path \
              FROM config WHERE id = 1",
@@ -2253,8 +2277,9 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .fetch_optional(db)
         .await
         .ok()
-        .flatten();
-        let legacy_rt: Option<(String, String, String, String, String)> = sqlx::query_as(
+        .flatten()
+        .unwrap_or_default();
+        let legacy_rt = sqlx::query_as::<_, (String, String, String, String, String)>(
             "SELECT rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, \
                     rtorrent_download_path \
              FROM config WHERE id = 1",
@@ -2262,84 +2287,82 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .fetch_optional(db)
         .await
         .ok()
-        .flatten();
+        .flatten()
+        .unwrap_or_default();
 
-        if let (
-            Some((active, q_url, q_user, q_pass, q_cat, q_dp)),
-            Some((d_url, d_pass, d_label, d_dp)),
-            Some((t_url, t_user, t_pass, t_label, t_dp)),
-            Some((r_url, r_user, r_pass, r_label, r_dp)),
-        ) = (legacy_qbit, legacy_deluge, legacy_tx, legacy_rt)
+        let (active, q_url, q_user, q_pass, q_cat, q_dp) = legacy_qbit;
+        let (d_url, d_pass, d_label, d_dp) = legacy_deluge;
+        let (t_url, t_user, t_pass, t_label, t_dp) = legacy_tx;
+        let (r_url, r_user, r_pass, r_label, r_dp) = legacy_rt;
+
+        let (name, kind, url, username, password, label, download_path) = match active.as_str() {
+            "deluge" => (
+                "Deluge",
+                "deluge",
+                d_url,
+                String::new(),
+                d_pass,
+                d_label,
+                d_dp,
+            ),
+            "transmission" => (
+                "Transmission",
+                "transmission",
+                t_url,
+                t_user,
+                t_pass,
+                t_label,
+                t_dp,
+            ),
+            "rtorrent" => ("rTorrent", "rtorrent", r_url, r_user, r_pass, r_label, r_dp),
+            _ => (
+                "qBittorrent",
+                "qbittorrent",
+                q_url,
+                q_user,
+                q_pass,
+                q_cat,
+                q_dp,
+            ),
+        };
+        // Mark the migration applied unconditionally before
+        // attempting the seed insert, so a transient `db.begin()`
+        // failure on the seed transaction doesn't trap us in a
+        // boot-loop where the read fires every restart. The seed
+        // itself is best-effort — a missed legacy URL re-creates the
+        // pre-multi-client gap, but the user can fix that from
+        // Settings → Connections; trapping startup behind the seed
+        // transaction would be worse.
+        if let Ok(mut tx) = db.begin().await {
+            let _ = crate::models::group_source_map::mark_migration_applied(
+                &mut tx,
+                "multi_client_seed_default_v1",
+            )
+            .await;
+            let _ = tx.commit().await;
+        }
+        // Only seed when the legacy slot was actually configured
+        // (URL non-empty). A fresh-install user who never picked a
+        // client gets no auto-seeded row; they'll add one via the
+        // new Settings UI.
+        if !url.is_empty()
+            && let Ok(mut tx) = db.begin().await
         {
-            let (name, kind, url, username, password, label, download_path) = match active.as_str()
-            {
-                "deluge" => (
-                    "Deluge",
-                    "deluge",
-                    d_url,
-                    String::new(),
-                    d_pass,
-                    d_label,
-                    d_dp,
-                ),
-                "transmission" => (
-                    "Transmission",
-                    "transmission",
-                    t_url,
-                    t_user,
-                    t_pass,
-                    t_label,
-                    t_dp,
-                ),
-                "rtorrent" => ("rTorrent", "rtorrent", r_url, r_user, r_pass, r_label, r_dp),
-                _ => (
-                    "qBittorrent",
-                    "qbittorrent",
-                    q_url,
-                    q_user,
-                    q_pass,
-                    q_cat,
-                    q_dp,
-                ),
-            };
-            // Only seed when the legacy slot was actually
-            // configured (URL non-empty). A fresh-install user
-            // who never picked a client gets no auto-seeded row;
-            // they'll add one via the new Settings UI.
-            if !url.is_empty()
-                && let Ok(mut tx) = db.begin().await
-            {
-                let _ = sqlx::query(
-                    "INSERT INTO download_clients
-                     (name, kind, url, username, password, label, download_path, enabled, is_default)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)",
-                )
-                .bind(name)
-                .bind(kind)
-                .bind(url)
-                .bind(username)
-                .bind(password)
-                .bind(label)
-                .bind(download_path)
-                .execute(&mut *tx)
-                .await;
-                let _ = crate::models::group_source_map::mark_migration_applied(
-                    &mut tx,
-                    "multi_client_seed_default_v1",
-                )
-                .await;
-                let _ = tx.commit().await;
-            } else if let Ok(mut tx) = db.begin().await {
-                // Mark applied even on fresh install (no URL to
-                // seed from) so the read+attempt cycle doesn't
-                // repeat every boot.
-                let _ = crate::models::group_source_map::mark_migration_applied(
-                    &mut tx,
-                    "multi_client_seed_default_v1",
-                )
-                .await;
-                let _ = tx.commit().await;
-            }
+            let _ = sqlx::query(
+                "INSERT INTO download_clients
+                 (name, kind, url, username, password, label, download_path, enabled, is_default)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)",
+            )
+            .bind(name)
+            .bind(kind)
+            .bind(url)
+            .bind(username)
+            .bind(password)
+            .bind(label)
+            .bind(download_path)
+            .execute(&mut *tx)
+            .await;
+            let _ = tx.commit().await;
         }
     }
 

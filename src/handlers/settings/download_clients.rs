@@ -282,12 +282,12 @@ pub struct DownloadClientTestForm {
 )]
 pub async fn settings_download_clients_test(
     Json(form): Json<DownloadClientTestForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let url = form.url.trim();
     if url.is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            serde_json::json!({"ok": false, "message": "URL required"}).to_string(),
+            Json(serde_json::json!({"ok": false, "message": "URL required"})),
         ));
     }
     let client: std::sync::Arc<dyn DownloadClient> = match form.kind.as_str() {
@@ -317,11 +317,10 @@ pub async fn settings_download_clients_test(
         other => {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
-                serde_json::json!({
+                Json(serde_json::json!({
                     "ok": false,
                     "message": format!("Unknown client kind: {other}"),
-                })
-                .to_string(),
+                })),
             ));
         }
     };
@@ -329,11 +328,11 @@ pub async fn settings_download_clients_test(
     match client.test().await {
         Ok(version) => Ok(Json(serde_json::json!({
             "ok": true,
-            "message": format!("Connected — {version}"),
+            "message": format!("Connected; {version}"),
         }))),
         Err(err) => Err((
             axum::http::StatusCode::BAD_GATEWAY,
-            serde_json::json!({"ok": false, "message": err}).to_string(),
+            Json(serde_json::json!({"ok": false, "message": err})),
         )),
     }
 }

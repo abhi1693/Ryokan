@@ -7,6 +7,7 @@ use crate::models::log::LogCategory;
 use crate::models::{
     config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series,
 };
+use crate::services::download_client::DownloadClient;
 use crate::services::source::{self, SeriesContext};
 use crate::services::{logger, media, nfo};
 
@@ -311,12 +312,12 @@ async fn import_torrent(
     grab: &grabbed_torrents::GrabbedTorrent,
     torrent_hash: &str,
     torrent_save_path: &str,
+    // Multi-client routing — the client this grab landed on, threaded
+    // through from `run_once`'s per-grab resolution. Pre-PR-F this was
+    // re-fetched here as `default_download_client()`, which silently
+    // routed `get_files` to the wrong client for any pinned grab.
+    client: &std::sync::Arc<dyn DownloadClient>,
 ) -> Result<ImportOutcome, String> {
-    let client = state
-        .default_download_client()
-        .await
-        .ok_or("Download client not configured")?;
-
     let files = client
         .get_files(torrent_hash)
         .await
@@ -1261,44 +1262,118 @@ pub async fn run_once(state: &AppState) {
         return;
     }
 
-    let client = match state.default_download_client().await {
-        Some(c) => c,
-        None => return,
+    // Multi-client fan-out: pending grabs may have landed on
+    // different clients (autobrr → seedbox Deluge, RSS → Nyaa-pinned,
+    // manual → default). Each grab carries its `download_client_id`
+    // (NULL for legacy / unstamped rows → fall back to default).
+    // Pre-#PR-F we called `list_scoped()` on the default only, which
+    // missed every pinned grab and marked them stale after 60s.
+    //
+    // Strategy: collect the distinct client ids referenced, fan out
+    // `list_scoped()` once per unique client, and build a per-client
+    // (hash → torrent) lookup. Each grab is then matched against the
+    // map for *its* client. A failed `list_scoped` against one client
+    // doesn't poison the others — its grabs just stay pending until
+    // the next pass.
+    use std::collections::HashSet;
+    let default_id_opt = {
+        let pool = state.download_clients.read().await.clone();
+        pool.default_id
     };
-
-    let torrents = match client.list_scoped().await {
-        Ok(t) => t,
-        Err(e) => {
-            logger::error(
-                &state.db,
-                LogCategory::PostProcess,
-                "Failed to query download client",
-                &e.to_string(),
-            )
-            .await;
-            return;
+    let mut needed_ids: HashSet<i64> = HashSet::new();
+    for grab in &pending {
+        if let Some(id) = grab.download_client_id {
+            needed_ids.insert(id);
+        } else if let Some(id) = default_id_opt {
+            needed_ids.insert(id);
         }
-    };
+    }
+    if needed_ids.is_empty() {
+        // No clients in pool — same posture as the pre-PR-F early
+        // return when default_download_client returned None.
+        return;
+    }
 
-    // Build lookup maps by hash and name for all torrents.
-    let all_by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
-        .iter()
-        .map(|t| (t.hash.to_lowercase(), t))
-        .collect();
+    // Build per-client lookup maps. Resolves each id back to its
+    // `Arc<dyn DownloadClient>`. A client deleted between the grab
+    // and now (rare race) drops out — affected grabs see no match
+    // and re-poll on the next pass. The structure carries the
+    // resolved Arc so each grab's per-torrent calls (`get_files`,
+    // etc.) reach the right client.
+    let mut clients: HashMap<i64, std::sync::Arc<dyn DownloadClient>> = HashMap::new();
+    let mut by_hash_per_client: HashMap<
+        i64,
+        HashMap<String, crate::services::download_client::DownloadItem>,
+    > = HashMap::new();
+    let mut by_name_per_client: HashMap<
+        i64,
+        HashMap<String, crate::services::download_client::DownloadItem>,
+    > = HashMap::new();
+    for id in needed_ids {
+        let Some(client) = state.client_by_id(id).await else {
+            tracing::debug!("post_processing: skipping client id {id} — no longer in pool");
+            continue;
+        };
+        match client.list_scoped().await {
+            Ok(torrents) => {
+                let by_hash: HashMap<String, _> = torrents
+                    .iter()
+                    .map(|t| (t.hash.to_lowercase(), t.clone()))
+                    .collect();
+                let by_name: HashMap<String, _> = torrents
+                    .iter()
+                    .map(|t| (t.name.to_lowercase(), t.clone()))
+                    .collect();
+                by_hash_per_client.insert(id, by_hash);
+                by_name_per_client.insert(id, by_name);
+                clients.insert(id, client);
+            }
+            Err(e) => {
+                logger::error(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!("Failed to query download client id={id}"),
+                    &e.to_string(),
+                )
+                .await;
+                // Fall through — this client's grabs stay pending; the
+                // others still get processed.
+            }
+        }
+    }
 
-    let all_by_name: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
-        .iter()
-        .map(|t| (t.name.to_lowercase(), t))
-        .collect();
+    if clients.is_empty() {
+        return;
+    }
 
     let mut any_imported = false;
 
     for grab in &pending {
-        // Match grab to a qBit torrent.
+        // Resolve which client this grab landed on.
+        let resolved_id = grab.download_client_id.or(default_id_opt);
+        let Some(grab_client_id) = resolved_id else {
+            continue;
+        };
+        let Some(client) = clients.get(&grab_client_id).cloned() else {
+            // The client this grab routed to wasn't reachable on this
+            // pass (list_scoped failed, or row deleted). Leave the
+            // grab pending so the next pass retries; don't mark stale
+            // because the absence isn't evidence the user removed the
+            // torrent.
+            continue;
+        };
+        let all_by_hash = match by_hash_per_client.get(&grab_client_id) {
+            Some(m) => m,
+            None => continue,
+        };
+        let all_by_name = match by_name_per_client.get(&grab_client_id) {
+            Some(m) => m,
+            None => continue,
+        };
         let matched = if !grab.hash.is_empty() {
-            all_by_hash.get(&grab.hash.to_lowercase()).copied()
+            all_by_hash.get(&grab.hash.to_lowercase())
         } else {
-            all_by_name.get(&grab.torrent_name.to_lowercase()).copied()
+            all_by_name.get(&grab.torrent_name.to_lowercase())
         };
 
         let Some(torrent) = matched else {
@@ -1353,12 +1428,26 @@ pub async fn run_once(state: &AppState) {
         // hardlink the file into the library. Done BEFORE import so
         // that even if import errors out mid-way, the UI still has a
         // record of where the client left the file. Apply the
-        // user-configured per-client download path (#63 Phase 2) so a
-        // seedbox- or container-reported `/downloads/…` path is
-        // rewritten to the local mount point (e.g.
-        // `/mnt/seedbox/downloads/…`) before we read from disk. Empty
-        // download_path = same-host client, no rewrite needed.
-        let local_download_path = crate::services::download_client::per_client_download_path(&cfg);
+        // download_path from the *actual* `download_clients` row this
+        // grab landed on (#PR-F multi-client) so a seedbox-reported
+        // `/downloads/…` path is rewritten to Ryokan's local mount
+        // (e.g. `/mnt/seedbox/downloads/…`). Empty path = same-host
+        // client, no rewrite needed. Pre-PR-F this read from
+        // `cfg.<active_client>_download_path` — wrong in multi-client
+        // because pinned grabs land on a non-default client.
+        let local_download_path_owned =
+            crate::models::download_clients::get_by_id(&state.db, grab_client_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.download_path)
+                .unwrap_or_else(|| {
+                    // Row was deleted between grab and import. Fall back to
+                    // the legacy active_client download path so we don't lose
+                    // the user's pre-multi-client config on rollover.
+                    crate::services::download_client::per_client_download_path(&cfg).to_string()
+                });
+        let local_download_path = local_download_path_owned.as_str();
         let client_path = {
             let raw = if !torrent.content_path.is_empty() {
                 torrent.content_path.clone()
@@ -1378,7 +1467,7 @@ pub async fn run_once(state: &AppState) {
         );
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
-        match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path).await {
+        match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path, &client).await {
             Ok(ImportOutcome::Imported) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
