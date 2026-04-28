@@ -18,6 +18,7 @@
 //!     history fallback for delete).
 
 mod add;
+mod auth_test;
 mod control;
 mod fixture;
 mod list;
