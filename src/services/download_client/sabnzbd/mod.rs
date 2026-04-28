@@ -480,7 +480,10 @@ impl DownloadClient for SabClient {
         if body.status {
             return Ok(());
         }
-        // Fallback: history.
+        // Fallback: history. Mirror the queue branch and always send
+        // `del_files` explicitly — SAB's documented default is 0, but
+        // omitting the param leaves us at the mercy of any reverse
+        // proxy / future SAB version that fills in a different default.
         let mut q: Vec<(&str, &str)> = vec![
             ("mode", "history"),
             ("name", "delete"),
@@ -488,6 +491,8 @@ impl DownloadClient for SabClient {
         ];
         if delete_files {
             q.push(("del_files", one));
+        } else {
+            q.push(("del_files", zero));
         }
         let resp = self
             .http
