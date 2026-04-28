@@ -362,11 +362,7 @@
                     <td class="ep-col-monitor">
                         {% if is_tracked %}
                         {% if let Some(id) = db_id %}
-                        <button class="ep-mon-btn {% if ep.monitored %}ep-mon-yes{% else %}ep-mon-no{% endif %}" type="button"
-                            onclick="toggleEpisodeMonitor({{ id }}, {{ ep.number }}, {{ ep.monitored }}, this)"
-                            title="{% if ep.monitored %}Monitored — click to unmonitor{% else %}Not monitored — click to monitor{% endif %}">
-                            {% if ep.monitored %}Yes{% else %}No{% endif %}
-                        </button>
+                        {%~ include "partials/series/episode_monitor_button.html" ~%}
                         {% endif %}
                         {% else %}
                         <span class="ep-action-placeholder">—</span>
