@@ -59,7 +59,21 @@ pub enum LogCategory {
     Nyaa,
     AniList,
     Jikan,
-    QBit,
+    /// Kitsu metadata provider — third in the AL → Jikan → Kitsu
+    /// fallback chain. Used by `metadata_sync` to attribute per-series
+    /// fallback rows to whichever provider actually carried the load,
+    /// instead of stuffing every fallback success into AniList. Both
+    /// the by-mal-id lookup and the title-fuzz path emit under this
+    /// category.
+    Kitsu,
+    /// Download-client family — qBittorrent, Deluge, Transmission,
+    /// rTorrent, SAB. Was previously `QBit` (and persisted as the
+    /// `qbit` category string) when qBittorrent was the only client;
+    /// after the multi-client refactor it became a misleading name.
+    /// Renamed to `DownloadClient` and persisted as `download_client`;
+    /// the migration in `migrations::migrate` rewrites existing
+    /// `category = 'qbit'` log rows to `category = 'download_client'`.
+    DownloadClient,
     Jellyfin,
     Media,
     Library,
@@ -99,7 +113,8 @@ impl LogCategory {
             LogCategory::Nyaa => "nyaa",
             LogCategory::AniList => "anilist",
             LogCategory::Jikan => "jikan",
-            LogCategory::QBit => "qbit",
+            LogCategory::Kitsu => "kitsu",
+            LogCategory::DownloadClient => "download_client",
             LogCategory::Jellyfin => "jellyfin",
             LogCategory::Media => "media",
             LogCategory::Library => "library",
@@ -122,7 +137,11 @@ impl LogCategory {
             "nyaa" => Some(LogCategory::Nyaa),
             "anilist" => Some(LogCategory::AniList),
             "jikan" => Some(LogCategory::Jikan),
-            "qbit" => Some(LogCategory::QBit),
+            "kitsu" => Some(LogCategory::Kitsu),
+            // Accept the legacy "qbit" string so any pre-rename URL
+            // params (bookmarks, deep links) still resolve to the
+            // renamed variant. New rows persist as "download_client".
+            "qbit" | "download_client" => Some(LogCategory::DownloadClient),
             "jellyfin" => Some(LogCategory::Jellyfin),
             "media" => Some(LogCategory::Media),
             "library" => Some(LogCategory::Library),
@@ -145,7 +164,8 @@ impl LogCategory {
             LogCategory::Nyaa => "Nyaa",
             LogCategory::AniList => "AniList",
             LogCategory::Jikan => "Jikan",
-            LogCategory::QBit => "qBittorrent",
+            LogCategory::Kitsu => "Kitsu",
+            LogCategory::DownloadClient => "Download Client",
             LogCategory::Jellyfin => "Jellyfin",
             LogCategory::Media => "Media",
             LogCategory::Library => "Library",
@@ -466,7 +486,8 @@ mod tests {
             LogCategory::Nyaa,
             LogCategory::AniList,
             LogCategory::Jikan,
-            LogCategory::QBit,
+            LogCategory::Kitsu,
+            LogCategory::DownloadClient,
             LogCategory::Jellyfin,
             LogCategory::Media,
             LogCategory::Library,
@@ -511,15 +532,20 @@ mod tests {
     }
 
     #[test]
-    fn log_category_qbit_label_renders_as_qbittorrent() {
-        // CLAUDE.md: "UI label is 'qBittorrent' — kept as the enum
-        // name even after multi-client work because renaming it
-        // would be a data migration on the existing logs table; the
-        // label function is where the display name lives."
-        assert_eq!(LogCategory::QBit.label(), "qBittorrent");
-        // Wire string stays as `"qbit"` so the on-disk rows keep
-        // their column value.
-        assert_eq!(LogCategory::QBit.as_str(), "qbit");
+    fn log_category_download_client_renames_from_qbit() {
+        // The `QBit` variant was renamed to `DownloadClient` after the
+        // multi-client refactor since it covers Deluge / Transmission
+        // / rTorrent / SAB too. Persisted wire string flipped from
+        // "qbit" to "download_client" with a one-shot migration in
+        // `migrations::migrate` rewriting existing rows; the legacy
+        // string still parses for backward-compat URL params.
+        assert_eq!(LogCategory::DownloadClient.label(), "Download Client");
+        assert_eq!(LogCategory::DownloadClient.as_str(), "download_client");
+        assert_eq!(
+            LogCategory::from_str("qbit"),
+            Some(LogCategory::DownloadClient),
+            "legacy 'qbit' wire string must still parse to DownloadClient"
+        );
     }
 
     #[test]

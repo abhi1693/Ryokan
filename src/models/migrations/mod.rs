@@ -2527,6 +2527,21 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // 2026-04-28 — `LogCategory::QBit` → `LogCategory::DownloadClient`
+    // rename. The variant covered every torrent client (and SAB) since
+    // the multi-client refactor, but the persisted wire string was
+    // still `qbit`, so System → Logs filtered to "qBittorrent" was
+    // showing Deluge / Transmission / rTorrent / SAB rows too. Rewrite
+    // existing rows in place; the new code persists the new string,
+    // so the UPDATE is a one-shot but idempotent (subsequent boots
+    // match zero rows). Failure to rewrite is non-fatal — old rows
+    // would just stay under the legacy filter, which `from_str` still
+    // accepts as a backward-compat alias.
+    sqlx::query("UPDATE logs SET category = 'download_client' WHERE category = 'qbit'")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

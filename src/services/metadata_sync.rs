@@ -22,6 +22,37 @@ fn is_authoritative_detail(tracked: &series::Series, detail: &anilist::AnimeDeta
     detail.id > 0 && detail.id == tracked.anilist_id
 }
 
+/// Map a fetched `detail` to the `LogCategory` of the provider that
+/// produced it, so per-series success / fallback log rows show up
+/// under the correct System → Logs filter.
+///
+///   - `detail.id < 0`  → Jikan (the negative `-mal_id` sentinel that
+///     `services::jikan::*` stamps on every response).
+///   - `detail.id > 0 && detail.id == tracked.anilist_id` → AniList
+///     (canonical AL response for an AL-tracked series).
+///   - everything else (positive id that doesn't equal the tracked
+///     anilist_id, or any positive id when tracked has no AL id) →
+///     Kitsu, since Kitsu's `to_anime_detail` stamps its own positive
+///     id space which can't collide with AL or MAL.
+///
+/// Without this dispatch, every metadata-related log row was filed
+/// under `LogCategory::AniList` even when AL was the unhealthy
+/// provider and Jikan / Kitsu carried the load — making the System →
+/// Logs Jikan/Kitsu filters dead-letter dropdowns and obscuring which
+/// provider was actually responsible for each line during an outage.
+fn provider_category_for_detail(
+    tracked: &series::Series,
+    detail: &anilist::AnimeDetail,
+) -> LogCategory {
+    if detail.id < 0 {
+        LogCategory::Jikan
+    } else if detail.id > 0 && detail.id == tracked.anilist_id {
+        LogCategory::AniList
+    } else {
+        LogCategory::Kitsu
+    }
+}
+
 /// `true` when `detail` is *trustworthy enough to write* to the row
 /// (core metadata, relations, episode cache), even if it isn't the
 /// canonical AL detail. Looser than `is_authoritative_detail` because
@@ -619,7 +650,7 @@ async fn refresh_series_metadata_inner(
         if !authoritative_detail {
             logger::info(
                 db,
-                LogCategory::AniList,
+                provider_category_for_detail(tracked, &detail),
                 &format!(
                     "Rebuilt cached metadata from fallback source for {}",
                     tracked.title
@@ -760,7 +791,7 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
                 if rebuild_artifacts {
                     logger::info(
                         db,
-                        LogCategory::AniList,
+                        provider_category_for_detail(&tracked, &detail),
                         &format!("Rebuilt cached metadata for {}", tracked.title),
                         &format!(
                             "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
@@ -847,7 +878,7 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
                     if rebuild_artifacts {
                         logger::info(
                             db,
-                            LogCategory::AniList,
+                            provider_category_for_detail(&tracked, &detail),
                             &format!("Rebuilt cached metadata for {}", tracked.title),
                             &format!(
                                 "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
@@ -1062,6 +1093,53 @@ mod tests {
             is_trustworthy_write(&tracked, &detail),
             "MAL fallback (exact mal_id lookup, not fuzzy) must be \
              trustworthy enough to overwrite stale AL data on a refresh"
+        );
+    }
+
+    // ── provider_category_for_detail ─────────────────────────────────
+
+    #[test]
+    fn provider_category_routes_negative_id_to_jikan() {
+        // -mal_id sentinel from a Jikan/MAL fallback during AL outage.
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(-5678);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::Jikan
+        );
+    }
+
+    #[test]
+    fn provider_category_routes_matching_positive_id_to_anilist() {
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(1234);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::AniList
+        );
+    }
+
+    #[test]
+    fn provider_category_routes_mismatched_positive_id_to_kitsu() {
+        // Kitsu's title-fuzz / by-mal-id paths stamp Kitsu's own id
+        // space — positive but not equal to tracked.anilist_id.
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(9999);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::Kitsu
+        );
+    }
+
+    #[test]
+    fn provider_category_for_mal_only_series_uses_jikan() {
+        // MAL-only tracked series (anilist_id <= 0) with the matching
+        // negative sentinel back from Jikan still routes to Jikan.
+        let tracked = series_fixture(-12345);
+        let detail = detail_fixture(-12345);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::Jikan
         );
     }
 

@@ -868,7 +868,7 @@ async fn import_torrent(
                     if grabbed_torrents::respects_seed_rules(&state.db, &old_grab.hash).await {
                         logger::info(
                             &state.db,
-                            LogCategory::QBit,
+                            LogCategory::DownloadClient,
                             &format!(
                                 "Skipping client delete for upgraded torrent {} (respect_seed_rules)",
                                 old_grab.torrent_name

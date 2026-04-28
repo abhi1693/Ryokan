@@ -157,7 +157,7 @@ pub async fn delete_episode_file(
                         if grabbed_torrents::respects_seed_rules(&state.db, &grab.hash).await {
                             logger::info(
                                 &state.db,
-                                LogCategory::QBit,
+                                LogCategory::DownloadClient,
                                 &format!(
                                     "Skipping client delete for {} (respect_seed_rules); client will stop on its own ratio policy",
                                     grab.torrent_name
@@ -176,7 +176,7 @@ pub async fn delete_episode_file(
                             Err(e) => {
                                 logger::debug(
                                     &state.db,
-                                    LogCategory::QBit,
+                                    LogCategory::DownloadClient,
                                     &format!(
                                         "Download client delete failed for episode {} torrent '{}' — continuing with file delete",
                                         episode_number, grab.torrent_name
@@ -359,7 +359,7 @@ pub async fn cancel_pending_episode(
             torrent_failures.push(format!("{}: {}", grab.torrent_name, e));
             logger::warn(
                 &state.db,
-                LogCategory::QBit,
+                LogCategory::DownloadClient,
                 &format!(
                     "Failed to remove pending torrent for S?E{:02} cancel: '{}'",
                     episode_number, grab.torrent_name
@@ -505,7 +505,7 @@ pub async fn mark_episode_failed(
                 if grabbed_torrents::respects_seed_rules(&state.db, &old.hash).await {
                     crate::services::logger::info(
                         &state.db,
-                        crate::models::log::LogCategory::QBit,
+                        crate::models::log::LogCategory::DownloadClient,
                         &format!(
                             "Skipping client delete for replaced torrent {} (respect_seed_rules)",
                             old.torrent_name
@@ -518,7 +518,7 @@ pub async fn mark_episode_failed(
                 if let Err(e) = client.delete(&old.hash, true).await {
                     crate::services::logger::warn(
                         &state.db,
-                        crate::models::log::LogCategory::QBit,
+                        crate::models::log::LogCategory::DownloadClient,
                         &format!(
                             "Failed to remove old torrent for S?E{:02} replacement: '{}'",
                             episode_number, old.torrent_name
@@ -642,7 +642,7 @@ pub async fn episode_download_progress(
             if crate::services::post_processing::grab_is_stale(&grab.grabbed_at, 30) {
                 logger::info(
                     &state.db,
-                    LogCategory::QBit,
+                    LogCategory::DownloadClient,
                     &format!(
                         "Torrent removed in download client — reconciling '{}'",
                         grab.torrent_name

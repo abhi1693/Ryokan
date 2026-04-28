@@ -334,7 +334,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     None => {
                         logger::warn(
                             &state.db,
-                            LogCategory::QBit,
+                            LogCategory::DownloadClient,
                             &format!("Upgrade skip: no download client for {}", result.title),
                             "indexer pin resolution returned None",
                         )
@@ -415,7 +415,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 Err(err) => {
                     logger::error(
                         &state.db,
-                        LogCategory::QBit,
+                        LogCategory::DownloadClient,
                         &format!("Upgrade grab failed: {} {}", title, label),
                         &err,
                     )
