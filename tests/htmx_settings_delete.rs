@@ -158,7 +158,14 @@ async fn indexers_delete_returns_redirect_for_non_htmx_request() {
 // ─── Download clients ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn download_clients_delete_returns_empty_200_for_htmx_request() {
+async fn download_clients_delete_returns_section_partial_for_htmx_request() {
+    // Phase 7 follow-up — the picker moved to its own tab and now
+    // every state-changing HTMX action returns the whole #dc-section
+    // partial in one swap (cards re-render with the deleted row
+    // gone, the "+ Add" button re-emits, and the empty-state CTA
+    // surfaces if the table went from 1→0). Previously this returned
+    // empty 200 + per-row outerHTML swap; both shapes are visible
+    // here so we don't regress the tab body silently.
     let db = in_memory_pool().await;
     let id = seed_download_client(&db).await;
     let state = build_test_app_state(db.clone(), None);
@@ -172,10 +179,19 @@ async fn download_clients_delete_returns_empty_200_for_htmx_request() {
     .into_response();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
         .await
         .expect("read body");
-    assert!(body.is_empty());
+    let html = std::str::from_utf8(&body).expect("partial is utf-8");
+    assert!(
+        html.contains("id=\"dc-section\""),
+        "section root must be the swap target; got: {html}"
+    );
+    // Empty-state CTA renders since the deletion left the table at 0 rows.
+    assert!(
+        html.contains("No download clients configured"),
+        "empty-state CTA must render after the only row is deleted; got: {html}"
+    );
 }
 
 #[tokio::test]
@@ -195,8 +211,8 @@ async fn download_clients_delete_returns_redirect_for_non_htmx_request() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = extract_location(&resp).unwrap_or_default();
     assert!(
-        location.starts_with("/settings?tab=integrations"),
-        "non-HTMX delete must redirect back to integrations tab; got: {location}"
+        location.starts_with("/settings?tab=downloads"),
+        "non-HTMX delete must redirect back to the Download Clients tab; got: {location}"
     );
 }
 

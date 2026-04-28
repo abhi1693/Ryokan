@@ -170,13 +170,9 @@ struct SettingsTemplate {
     /// they bypass the picker).
     indexer_seed: Option<&'static crate::services::indexer_catalog::SeededIndexer>,
     /// Multi-client refactor — every configured download client
-    /// for the Connections tab list. Sorted default-first then
+    /// for the Download Clients tab list. Sorted default-first then
     /// case-insensitive by name (see `models::download_clients::list_all`).
     download_clients: Vec<crate::models::download_clients::DownloadClientRow>,
-    /// Prefill for the Edit Download Client form when
-    /// `?tab=integrations&edit_id=N` is set. Mirrors the
-    /// `indexer_edit` pattern. `None` renders the bare Add form.
-    download_client_edit: Option<crate::models::download_clients::DownloadClientRow>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -505,6 +501,12 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
         // surface scaffolded; CRUD form lands in PR B alongside
         // the TorznabIndexer impl that needs caps probing on save.
         Some("indexers") => "indexers".to_string(),
+        // Phase 7 follow-up — the multi-client picker was promoted
+        // out of the Connections tab into its own page so the cards
+        // grid + add slot has the full width and isn't wedged below
+        // the bulk Save Settings button (HTML5 forbids nested forms,
+        // so the picker has always lived outside the bulk form).
+        Some("downloads") => "downloads".to_string(),
         _ => "integrations".to_string(),
     }
 }
@@ -697,10 +699,6 @@ async fn build_settings_template(
         None
     };
     let download_clients = download_clients_res.unwrap_or_default();
-    let download_client_edit = match edit_id {
-        Some(id) => download_clients.iter().find(|r| r.id == id).cloned(),
-        None => None,
-    };
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -721,7 +719,6 @@ async fn build_settings_template(
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
         indexer_seed,
         download_clients,
-        download_client_edit,
     }
 }
 
@@ -1034,7 +1031,6 @@ pub async fn settings_submit(
             indexer_catalog: crate::services::indexer_catalog::SEEDED,
             indexer_seed: None,
             download_clients,
-            download_client_edit: None,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1143,7 +1139,6 @@ pub async fn settings_submit(
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
         indexer_seed: None,
         download_clients,
-        download_client_edit: None,
     };
     Html(template.render().unwrap_or_default())
 }

@@ -7,18 +7,21 @@
 //! lets the user verify a configuration before saving without
 //! mutating any DB row.
 
+use askama::Template;
 use axum::{
     Form,
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_htmx::HxRequest;
 use serde::Deserialize;
 
 use crate::AppState;
 use crate::handlers::settings::ConnectionTestResultPartial;
-use crate::models::download_clients::{DownloadClientForm, delete, insert, set_default, update};
+use crate::models::download_clients::{
+    DownloadClientForm, DownloadClientRow, delete, get_by_id, insert, list_all, set_default, update,
+};
 use crate::models::log::LogCategory;
 use crate::services::download_client::{
     DownloadClient, deluge, qbittorrent, rtorrent, sabnzbd, transmission,
@@ -39,6 +42,92 @@ fn is_known_kind(kind: &str) -> bool {
         kind,
         KIND_QBITTORRENT | KIND_DELUGE | KIND_TRANSMISSION | KIND_RTORRENT | KIND_SABNZBD
     )
+}
+
+/// Pretty-print the wire `kind` discriminator for the per-card badge
+/// in `templates/partials/settings/download_clients/list.html`.
+/// Public because Askama calls it via the `crate::handlers::...`
+/// path from the template.
+pub fn kind_label(kind: &str) -> &'static str {
+    match kind {
+        KIND_QBITTORRENT => "qBittorrent",
+        KIND_DELUGE => "Deluge",
+        KIND_TRANSMISSION => "Transmission",
+        KIND_RTORRENT => "rTorrent",
+        KIND_SABNZBD => "SABnzbd",
+        _ => "Unknown",
+    }
+}
+
+/// Section partial — the entire card list + add slot wrapped in
+/// `#dc-section`. Every successful HTMX action (upsert / delete /
+/// set-default) returns this so a single swap re-renders the
+/// whole tab body without a page reload.
+#[derive(Template)]
+#[template(path = "partials/settings/download_clients/list.html")]
+struct DownloadClientsListPartial {
+    rows: Vec<DownloadClientRow>,
+}
+
+impl DownloadClientsListPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
+/// Inline edit form for one card. Returned by `GET
+/// /settings/download-clients/{id}/edit-form`; replaces the
+/// card's `<article>` in place via `hx-target="#dc-card-{id}"
+/// hx-swap="outerHTML"`.
+#[derive(Template)]
+#[template(path = "partials/settings/download_clients/edit_form.html")]
+struct DownloadClientEditFormPartial {
+    row: DownloadClientRow,
+}
+
+impl DownloadClientEditFormPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
+/// Inline add form. Returned by `GET
+/// /settings/download-clients/add-form`; replaces `#dc-add-slot`
+/// when the user clicks "+ Add download client". `first_client`
+/// pre-checks the "default" checkbox so the very first row is
+/// guaranteed to land as default (empty default = grabs surface
+/// "no download client configured" at routing time).
+#[derive(Template)]
+#[template(path = "partials/settings/download_clients/add_form.html")]
+struct DownloadClientAddFormPartial {
+    first_client: bool,
+}
+
+impl DownloadClientAddFormPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
+/// Default state of the add slot — just the "+ Add" button.
+/// Returned by `GET /settings/download-clients/add-button` when
+/// the user clicks Cancel inside the open add form.
+#[derive(Template)]
+#[template(path = "partials/settings/download_clients/add_button.html")]
+struct DownloadClientAddButtonPartial;
+
+impl DownloadClientAddButtonPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
+/// Helper — load the current rows and render the section partial.
+/// Used by the success path of every state-changing endpoint plus
+/// the `/api/download-clients/section` cancel-edit refresh route.
+async fn render_section(state: &AppState) -> Response {
+    let rows = list_all(&state.db).await.unwrap_or_default();
+    DownloadClientsListPartial { rows }.into_html_ok()
 }
 
 /// Form payload for create/update. `id == None` creates a new row;
@@ -82,21 +171,27 @@ pub struct DownloadClientIdForm {
 )]
 pub async fn settings_download_clients_upsert(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<DownloadClientUpsertForm>,
 ) -> Response {
+    // Validation errors fall back to the form-POST redirect path even
+    // for HTMX callers — htmx 2.x's default error policy is skip-the-
+    // swap on 4xx, so returning a redirect from the htmx form actually
+    // works (the browser follows the redirect). The new tab path
+    // replaces the legacy `?tab=integrations` redirect destination.
     let name = form.name.trim();
     if name.is_empty() {
-        return Redirect::to("/settings?tab=integrations&err=Name+required").into_response();
+        return Redirect::to("/settings?tab=downloads&err=Name+required").into_response();
     }
     if !is_known_kind(&form.kind) {
-        return Redirect::to("/settings?tab=integrations&err=Invalid+client+kind").into_response();
+        return Redirect::to("/settings?tab=downloads&err=Invalid+client+kind").into_response();
     }
     let url = form.url.trim();
     if url.is_empty() {
-        return Redirect::to("/settings?tab=integrations&err=URL+required").into_response();
+        return Redirect::to("/settings?tab=downloads&err=URL+required").into_response();
     }
     if reqwest::Url::parse(url).is_err() {
-        return Redirect::to("/settings?tab=integrations&err=Invalid+URL+syntax").into_response();
+        return Redirect::to("/settings?tab=downloads&err=Invalid+URL+syntax").into_response();
     }
 
     let payload = DownloadClientForm {
@@ -135,8 +230,17 @@ pub async fn settings_download_clients_upsert(
                 &state.db,
             )
             .await;
-            let msg = urlencoding::encode(&format!("Download client '{name}' {verb}")).into_owned();
-            Redirect::to(&format!("/settings?tab=integrations&msg={msg}")).into_response()
+            if is_htmx {
+                // Re-render the whole section in one swap — picks up
+                // the new card, the moved "default" badge if the user
+                // flipped that flag, and a refreshed "+ Add" button
+                // (since the section partial re-emits the slot).
+                render_section(&state).await
+            } else {
+                let msg =
+                    urlencoding::encode(&format!("Download client '{name}' {verb}")).into_owned();
+                Redirect::to(&format!("/settings?tab=downloads&msg={msg}")).into_response()
+            }
         }
         Err(e) => {
             logger::error(
@@ -146,7 +250,7 @@ pub async fn settings_download_clients_upsert(
                 &e.to_string(),
             )
             .await;
-            Redirect::to("/settings?tab=integrations&err=Save+failed").into_response()
+            Redirect::to("/settings?tab=downloads&err=Save+failed").into_response()
         }
     }
 }
@@ -187,15 +291,15 @@ pub async fn settings_download_clients_delete(
             )
             .await;
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
-            // HTMX migration (issue #129) — empty 200 lets the row form's
-            // `hx-target="closest tr" hx-swap="outerHTML"` remove the row
-            // from the table without a full page reload.
+            // HTMX redesign (#129 follow-up) — re-render the whole
+            // section so the "+ Add" button + empty-state CTA both
+            // surface correctly when the table goes from N to 0.
             if is_htmx {
-                StatusCode::OK.into_response()
+                render_section(&state).await
             } else {
                 let msg = urlencoding::encode(&format!("Download client '{display_name}' deleted"))
                     .into_owned();
-                Redirect::to(&format!("/settings?tab=integrations&msg={msg}")).into_response()
+                Redirect::to(&format!("/settings?tab=downloads&msg={msg}")).into_response()
             }
         }
         Err(e) => {
@@ -209,7 +313,7 @@ pub async fn settings_download_clients_delete(
             if is_htmx {
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             } else {
-                Redirect::to("/settings?tab=integrations&err=Delete+failed").into_response()
+                Redirect::to("/settings?tab=downloads&err=Delete+failed").into_response()
             }
         }
     }
@@ -227,9 +331,10 @@ pub async fn settings_download_clients_delete(
 )]
 pub async fn settings_download_clients_set_default(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<DownloadClientIdForm>,
-) -> Redirect {
-    let display_name = crate::models::download_clients::get_by_id(&state.db, form.id)
+) -> Response {
+    let display_name = get_by_id(&state.db, form.id)
         .await
         .ok()
         .flatten()
@@ -252,9 +357,17 @@ pub async fn settings_download_clients_set_default(
                 &state.db,
             )
             .await;
-            let msg =
-                urlencoding::encode(&format!("'{display_name}' is now the default")).into_owned();
-            Redirect::to(&format!("/settings?tab=integrations&msg={msg}"))
+            if is_htmx {
+                // Section re-render so the "default" badge moves
+                // between cards in one swap. Per-card swap would
+                // require an OOB pair (clear old, set new) and
+                // get fragile fast.
+                render_section(&state).await
+            } else {
+                let msg = urlencoding::encode(&format!("'{display_name}' is now the default"))
+                    .into_owned();
+                Redirect::to(&format!("/settings?tab=downloads&msg={msg}")).into_response()
+            }
         }
         Err(e) => {
             logger::error(
@@ -264,7 +377,7 @@ pub async fn settings_download_clients_set_default(
                 &e.to_string(),
             )
             .await;
-            Redirect::to("/settings?tab=integrations&err=Save+failed")
+            Redirect::to("/settings?tab=downloads&err=Save+failed").into_response()
         }
     }
 }
@@ -366,6 +479,84 @@ pub async fn settings_download_clients_test(Form(form): Form<DownloadClientTestF
         },
     };
     result.into_html_ok()
+}
+
+// ── HTMX partial-fragment endpoints (Phase 7 follow-up) ────────────
+//
+// The Settings → Download Clients tab is rendered through three
+// partials: `list.html` (the whole section, swapped on every state-
+// changing action), `edit_form.html` (one card swapped in place
+// when the user clicks Edit), and `add_form.html` (the slot
+// expansion when the user clicks "+ Add"). These read-only
+// endpoints surface those partials so HTMX can swap them in without
+// a full page reload.
+
+#[utoipa::path(
+    get,
+    path = "/api/download-clients/section",
+    tag = "Settings",
+    summary = "Render the Download Clients section partial",
+    description = "Returns the cards-list + add-slot fragment that lives at #dc-section on the Download Clients tab. Used by Cancel buttons inside inline edit / add forms to restore the section to its baseline rendering without losing scroll position.",
+    responses(
+        (status = 200, description = "HTML fragment"),
+    ),
+)]
+pub async fn settings_download_clients_section(State(state): State<AppState>) -> Response {
+    render_section(&state).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/settings/download-clients/{id}/edit-form",
+    tag = "Settings",
+    summary = "Render the inline edit form for one download client",
+    description = "Returns the edit_form.html fragment for the targeted row, prefilled with current values. Replaces the row's `<article>` in place via `hx-target=\"#dc-card-{id}\" hx-swap=\"outerHTML\"`. Returns 404 when the row no longer exists (e.g. concurrent delete from another tab).",
+    responses(
+        (status = 200, description = "HTML fragment"),
+        (status = 404, description = "Row not found"),
+    ),
+)]
+pub async fn settings_download_clients_edit_form(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Response {
+    match get_by_id(&state.db, id).await {
+        Ok(Some(row)) => DownloadClientEditFormPartial { row }.into_html_ok(),
+        Ok(None) => (StatusCode::NOT_FOUND, "Download client not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/settings/download-clients/add-form",
+    tag = "Settings",
+    summary = "Render the inline add form",
+    description = "Returns the add_form.html fragment that replaces #dc-add-slot when the user clicks \"+ Add download client\". The form's Cancel button hits `/settings/download-clients/add-button` to restore the slot. The default-checkbox is pre-checked when no clients exist yet (the very first row must be default or grabs surface \"no download client configured\" at routing time).",
+    responses(
+        (status = 200, description = "HTML fragment"),
+    ),
+)]
+pub async fn settings_download_clients_add_form(State(state): State<AppState>) -> Response {
+    let first_client = list_all(&state.db)
+        .await
+        .map(|rows| rows.is_empty())
+        .unwrap_or(false);
+    DownloadClientAddFormPartial { first_client }.into_html_ok()
+}
+
+#[utoipa::path(
+    get,
+    path = "/settings/download-clients/add-button",
+    tag = "Settings",
+    summary = "Render the collapsed add slot button",
+    description = "Returns the default \"+ Add download client\" button that #dc-add-slot collapses back to. Used by the Cancel button inside the open add form.",
+    responses(
+        (status = 200, description = "HTML fragment"),
+    ),
+)]
+pub async fn settings_download_clients_add_button() -> Response {
+    DownloadClientAddButtonPartial.into_html_ok()
 }
 
 /// Form payload for the small "Pin Nyaa to client" selector on
@@ -497,11 +688,12 @@ mod tests {
         let state = build_test_app_state(db, None);
         let resp = settings_download_clients_upsert(
             State(state.clone()),
+            axum_htmx::HxRequest(false),
             Form(upsert_form(None, "Local qBit")),
         )
         .await;
         let location = extract_location(resp);
-        assert!(location.contains("tab=integrations"));
+        assert!(location.contains("tab=downloads"));
         assert!(location.contains("msg="));
 
         let rows = list_all(&state.db).await.unwrap();
@@ -532,6 +724,7 @@ mod tests {
         let state = build_test_app_state(db, None);
         let _ = settings_download_clients_upsert(
             State(state.clone()),
+            axum_htmx::HxRequest(false),
             Form(upsert_form(Some(id), "Renamed")),
         )
         .await;
@@ -545,7 +738,12 @@ mod tests {
         let state = build_test_app_state(db, None);
         let mut form = upsert_form(None, "Bad");
         form.kind = "premiumize".to_string();
-        let resp = settings_download_clients_upsert(State(state.clone()), Form(form)).await;
+        let resp = settings_download_clients_upsert(
+            State(state.clone()),
+            axum_htmx::HxRequest(false),
+            Form(form),
+        )
+        .await;
         let location = extract_location(resp);
         assert!(location.contains("err=Invalid+client+kind"));
         assert_eq!(list_all(&state.db).await.unwrap().len(), 0);
@@ -555,9 +753,12 @@ mod tests {
     async fn upsert_rejects_blank_name() {
         let db = in_memory_pool().await;
         let state = build_test_app_state(db, None);
-        let resp =
-            settings_download_clients_upsert(State(state.clone()), Form(upsert_form(None, "  ")))
-                .await;
+        let resp = settings_download_clients_upsert(
+            State(state.clone()),
+            axum_htmx::HxRequest(false),
+            Form(upsert_form(None, "  ")),
+        )
+        .await;
         assert!(extract_location(resp).contains("err=Name+required"));
     }
 
@@ -567,8 +768,36 @@ mod tests {
         let state = build_test_app_state(db, None);
         let mut form = upsert_form(None, "qbit");
         form.url = "not a url".into();
-        let resp = settings_download_clients_upsert(State(state), Form(form)).await;
+        let resp =
+            settings_download_clients_upsert(State(state), axum_htmx::HxRequest(false), Form(form))
+                .await;
         assert!(extract_location(resp).contains("err=Invalid+URL+syntax"));
+    }
+
+    #[tokio::test]
+    async fn upsert_returns_section_partial_when_htmx() {
+        // HTMX-driven create: response body is the `#dc-section`
+        // partial rendered with the new row included, not a 303.
+        // This keeps the inline add slot working without a full
+        // page reload.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let resp = settings_download_clients_upsert(
+            State(state.clone()),
+            axum_htmx::HxRequest(true),
+            Form(upsert_form(None, "Local qBit")),
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains("id=\"dc-section\""), "section root missing");
+        assert!(
+            html.contains("Local qBit"),
+            "freshly-added row should appear in the response: {html}"
+        );
     }
 
     #[tokio::test]
@@ -668,6 +897,7 @@ mod tests {
         let state = build_test_app_state(db, None);
         let _ = settings_download_clients_set_default(
             State(state.clone()),
+            axum_htmx::HxRequest(false),
             Form(DownloadClientIdForm { id: b }),
         )
         .await;

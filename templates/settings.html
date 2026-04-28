@@ -21,6 +21,7 @@
 
 <div class="settings-tabs system-tabs">
     <a href="/settings?tab=integrations" class="system-tab {% if tab == "integrations" %}active{% endif %}">Connections</a>
+    <a href="/settings?tab=downloads" class="system-tab {% if tab == "downloads" %}active{% endif %}">Download Clients</a>
     <a href="/settings?tab=indexers" class="system-tab {% if tab == "indexers" %}active{% endif %}">Indexers</a>
     <a href="/settings?tab=quality" class="system-tab {% if tab == "quality" %}active{% endif %}">Preferred Quality &amp; Releases</a>
     <a href="/settings?tab=custom_formats" class="system-tab {% if tab == "custom_formats" %}active{% endif %}">Custom Formats</a>
@@ -28,7 +29,7 @@
     <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
 </div>
 
-{% if tab != "groups" && tab != "custom_formats" && tab != "indexers" %}
+{% if tab != "groups" && tab != "custom_formats" && tab != "indexers" && tab != "downloads" %}
 <form method="post" action="/settings" class="settings-form">
     <input type="hidden" name="tab" value="{{ tab }}">
 
@@ -99,8 +100,8 @@
 {# Multi-client refactor: download-clients management is rendered
    page-level (outside the bulk Settings <form>) because each row
    carries its own per-action <form> and HTML5 forbids nested
-   forms. Only on the Connections (integrations) tab. #}
-{% if tab == "integrations" %}
+   forms. Lives in its own dedicated tab. #}
+{% if tab == "downloads" %}
 <div class="settings-tab-panel active">
 {%~ include "partials/settings/download_clients.html" ~%}
 </div>

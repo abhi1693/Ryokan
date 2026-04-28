@@ -1,0 +1,93 @@
+{# Inline edit form fragment — replaces a card in #dc-section
+   when the user clicks Edit. Save POSTs to /upsert; on HTMX
+   success the response is the whole section partial which
+   re-renders all cards. Cancel re-fetches the section to
+   restore the unmodified card. #}
+<article class="dc-card dc-card-editing" id="dc-card-{{ row.id }}">
+    <form method="post" action="/settings/download-clients/upsert"
+          class="dc-edit-form"
+          hx-post="/settings/download-clients/upsert"
+          hx-target="#dc-section"
+          hx-swap="outerHTML">
+        <input type="hidden" name="id" value="{{ row.id }}">
+        <header class="dc-card-edit-header">
+            <strong>Editing {{ row.name }}</strong>
+            <div class="dc-card-actions">
+                <button type="submit" class="btn btn-primary btn-small">Save</button>
+                <button type="button" class="btn btn-secondary btn-small"
+                        hx-get="/api/download-clients/section"
+                        hx-target="#dc-section"
+                        hx-swap="outerHTML">Cancel</button>
+            </div>
+        </header>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-edit-name-{{ row.id }}">Name</label>
+                <input id="dc-edit-name-{{ row.id }}" type="text" name="name" required maxlength="100" value="{{ row.name }}">
+            </div>
+            <div class="form-group">
+                <label for="dc-edit-kind-{{ row.id }}">Kind</label>
+                <select id="dc-edit-kind-{{ row.id }}" name="kind">
+                    <option value="qbittorrent" {% if row.kind == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
+                    <option value="deluge" {% if row.kind == "deluge" %}selected{% endif %}>Deluge</option>
+                    <option value="transmission" {% if row.kind == "transmission" %}selected{% endif %}>Transmission</option>
+                    <option value="rtorrent" {% if row.kind == "rtorrent" %}selected{% endif %}>rTorrent</option>
+                    <option value="sabnzbd" {% if row.kind == "sabnzbd" %}selected{% endif %}>SABnzbd (Usenet)</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="dc-edit-url-{{ row.id }}">URL</label>
+            <input id="dc-edit-url-{{ row.id }}" type="url" name="url" required value="{{ row.url }}" placeholder="http://localhost:8080">
+            <span class="form-hint">For Deluge / Transmission / rTorrent, point at the Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-edit-username-{{ row.id }}">Username</label>
+                <input id="dc-edit-username-{{ row.id }}" type="text" name="username" autocomplete="off" value="{{ row.username }}">
+                <span class="form-hint">Deluge ignores the username and uses password only; leave blank.</span>
+            </div>
+            <div class="form-group">
+                <label for="dc-edit-password-{{ row.id }}">Password</label>
+                <input id="dc-edit-password-{{ row.id }}" type="password" name="password" autocomplete="new-password" value="{{ row.password }}">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-edit-label-{{ row.id }}">Category / label</label>
+                <input id="dc-edit-label-{{ row.id }}" type="text" name="label" value="{{ row.label }}" placeholder="anime">
+                <span class="form-hint">qBit calls this a "category", the others call it a "label". Ryokan tags every torrent it adds with this value and filters by it when listing.</span>
+            </div>
+            <div class="form-group">
+                <label for="dc-edit-download-path-{{ row.id }}">Download path (as seen by Ryokan)</label>
+                <input id="dc-edit-download-path-{{ row.id }}" type="text" name="download_path" value="{{ row.download_path }}" placeholder="/downloads">
+                <span class="form-hint">Where the client's completed downloads are accessible to Ryokan. Leave blank if Ryokan and the client see the exact same paths.</span>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" {% if row.enabled %}checked{% endif %}>
+                    Enabled
+                </label>
+                <span class="form-hint">Disable to keep the row but exclude it from grab routing.</span>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_default" {% if row.is_default %}checked{% endif %}>
+                    Default client
+                </label>
+                <span class="form-hint">Receives every grab without an explicit pin. Exactly one row holds this flag at a time.</span>
+            </div>
+        </div>
+        <div class="settings-inline-actions">
+            <button type="button" class="btn btn-secondary"
+                    hx-post="/api/download-clients/test"
+                    hx-include="closest form"
+                    hx-target="next .dc-test-result"
+                    hx-swap="innerHTML"
+                    hx-disabled-elt="this">Test connection</button>
+            <span class="dc-test-result form-hint" aria-live="polite"></span>
+        </div>
+    </form>
+</article>

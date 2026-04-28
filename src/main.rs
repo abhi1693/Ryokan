@@ -96,6 +96,10 @@ use services::{
         handlers::settings::download_clients::settings_download_clients_delete,
         handlers::settings::download_clients::settings_download_clients_set_default,
         handlers::settings::download_clients::settings_download_clients_test,
+        handlers::settings::download_clients::settings_download_clients_section,
+        handlers::settings::download_clients::settings_download_clients_edit_form,
+        handlers::settings::download_clients::settings_download_clients_add_form,
+        handlers::settings::download_clients::settings_download_clients_add_button,
         handlers::settings::download_clients::settings_indexers_nyaa_pin,
         // Settings — autobrr API key rotation (issue #28 PR D)
         handlers::settings::autobrr_key::settings_autobrr_regenerate_key,
@@ -783,6 +787,22 @@ async fn main() {
         .route(
             "/api/download-clients/test",
             post(handlers::settings::download_clients::settings_download_clients_test),
+        )
+        .route(
+            "/api/download-clients/section",
+            get(handlers::settings::download_clients::settings_download_clients_section),
+        )
+        .route(
+            "/settings/download-clients/{id}/edit-form",
+            get(handlers::settings::download_clients::settings_download_clients_edit_form),
+        )
+        .route(
+            "/settings/download-clients/add-form",
+            get(handlers::settings::download_clients::settings_download_clients_add_form),
+        )
+        .route(
+            "/settings/download-clients/add-button",
+            get(handlers::settings::download_clients::settings_download_clients_add_button),
         )
         .route(
             "/settings/autobrr/regenerate-key",

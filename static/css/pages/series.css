@@ -670,6 +670,19 @@
 .relation-card-cover {
     position: relative;
     width: 100%;
+    /* Explicit pixel height instead of `aspect-ratio: 85/115`. The
+     * card is `flex: 0 0 136px`, so the deterministic cover size at
+     * default zoom is 136 * (115/85) ≈ 184px. We previously relied
+     * solely on aspect-ratio, but in practice browsers occasionally
+     * fall back to the child <img>'s intrinsic size when the image
+     * has odd natural dimensions (the Koyomi-History case — a tall
+     * portrait poster whose intrinsic height was less than the
+     * aspect-ratio-derived height, so the box collapsed around it).
+     * A hard `height` is the load-bearing line; `aspect-ratio` stays
+     * as a fallback for any future variant where the card width
+     * might fluid up via media query — both remaining true keeps
+     * the contract consistent. */
+    height: 184px;
     aspect-ratio: 85 / 115;
     overflow: hidden;
     background: var(--bg-elevated);

@@ -1,0 +1,9 @@
+{# Default state of the add slot. Clicking swaps in
+   add_form.html; the form's Cancel button hx-gets this same
+   route to swap back. #}
+<div id="dc-add-slot" class="dc-add-slot">
+    <button type="button" class="btn btn-primary"
+            hx-get="/settings/download-clients/add-form"
+            hx-target="#dc-add-slot"
+            hx-swap="outerHTML">+ Add download client</button>
+</div>
