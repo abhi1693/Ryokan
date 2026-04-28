@@ -679,3 +679,549 @@ async fn reconcile_typed_rename_adds_integer_column_on_fresh_install() {
         "fresh-install path must not create the legacy column",
     );
 }
+
+// ─── PR 6 expansion (2026-04-28) ────────────────────────────────────
+// Added to bring migrations test density up to the planned ~40 mark.
+// Categories:
+//   • Per-table-group existence (cache, seed, external-account tables)
+//   • Default values land on fresh install
+//   • Additional FK cascade + SET NULL behaviors not covered above
+//   • Schema invariants (UNIQUE + CHECK constraints fire as designed)
+//   • Index existence (the partial UNIQUE indexes are load-bearing
+//     for hash-dedup + mal_id collision prevention)
+
+#[tokio::test]
+async fn migrate_creates_metadata_cache_tables() {
+    // Provider chain (AL → Jikan/MAL → Kitsu) leans on these caches
+    // hard. Dropping one of them turns the metadata fallback path
+    // into an unbounded re-fetch loop.
+    let db = fresh_migrated_pool().await;
+    for table in [
+        "episode_cache",
+        "kitsu_episode_cache",
+        "provider_metadata_cache",
+        "provider_relations_cache",
+        "provider_episode_metadata",
+        "series_relations_cache",
+        "series_episode_metadata",
+        "media_probe_cache",
+        "nyaa_description_cache",
+    ] {
+        assert!(
+            table_exists(&db, table).await,
+            "metadata cache table `{table}` missing after migrate"
+        );
+    }
+}
+
+#[tokio::test]
+async fn migrate_creates_seed_and_settings_tables() {
+    let db = fresh_migrated_pool().await;
+    for table in [
+        "custom_formats",
+        "custom_format_scores",
+        "group_source_map",
+        "schema_migrations",
+        "indexers",
+        "download_clients",
+        "scheduled_task_runs",
+        "seadex_lookup_cache",
+        "episode_monitor_state",
+    ] {
+        assert!(
+            table_exists(&db, table).await,
+            "seed/settings table `{table}` missing after migrate"
+        );
+    }
+}
+
+#[tokio::test]
+async fn migrate_creates_external_account_tables() {
+    // #62 (AL/MAL link). external_accounts holds the encrypted token
+    // per linked provider; series_custom_lists records per-series
+    // membership in each list. Both load-bearing for the watch-list
+    // sync background task.
+    let db = fresh_migrated_pool().await;
+    for table in ["external_accounts", "series_custom_lists", "series_genres"] {
+        assert!(
+            table_exists(&db, table).await,
+            "external-account table `{table}` missing after migrate"
+        );
+    }
+}
+
+#[tokio::test]
+async fn migrate_creates_artwork_cache_tables() {
+    // Artwork pipeline writes through these three tables; missing
+    // any of them silently breaks cover/banner downloads.
+    let db = fresh_migrated_pool().await;
+    for table in ["artwork_cache", "image_blobs", "image_refs"] {
+        assert!(
+            table_exists(&db, table).await,
+            "artwork table `{table}` missing after migrate"
+        );
+    }
+}
+
+// ─── Default-value tests ─────────────────────────────────────────────
+//
+// Each test reads the default that a fresh `INSERT INTO config (id)
+// VALUES (1)` (only the singleton row) produces for one column. A
+// regression that flips a default in the wrong direction (e.g.,
+// title_language → 'native' on first boot) would silently surprise
+// users.
+
+async fn insert_default_config_row(db: &SqlitePool) {
+    sqlx::query("INSERT OR IGNORE INTO config (id) VALUES (1)")
+        .execute(db)
+        .await
+        .expect("seed default config row");
+}
+
+#[tokio::test]
+async fn migrate_default_title_language_is_english() {
+    let db = fresh_migrated_pool().await;
+    insert_default_config_row(&db).await;
+    let v: String = sqlx::query_scalar("SELECT title_language FROM config WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(v, "english", "title_language default must be `english`");
+}
+
+#[tokio::test]
+async fn migrate_default_finished_series_quality_is_prefer_bd() {
+    let db = fresh_migrated_pool().await;
+    insert_default_config_row(&db).await;
+    let v: String = sqlx::query_scalar("SELECT finished_series_quality FROM config WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(v, "prefer_bd");
+}
+
+#[tokio::test]
+async fn migrate_default_jellyfin_use_ssl_is_zero() {
+    let db = fresh_migrated_pool().await;
+    insert_default_config_row(&db).await;
+    let v: i64 = sqlx::query_scalar("SELECT jellyfin_use_ssl FROM config WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(v, 0);
+}
+
+#[tokio::test]
+async fn migrate_default_rss_interval_minutes_is_five() {
+    let db = fresh_migrated_pool().await;
+    insert_default_config_row(&db).await;
+    let v: i64 = sqlx::query_scalar("SELECT rss_interval_minutes FROM config WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(v, 5);
+}
+
+#[tokio::test]
+async fn migrate_default_quality_profile_is_web_1080() {
+    let db = fresh_migrated_pool().await;
+    insert_default_config_row(&db).await;
+    let v: String = sqlx::query_scalar("SELECT quality_profile FROM config WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(v, "web_1080");
+}
+
+#[tokio::test]
+async fn migrate_default_series_monitor_mode_is_future() {
+    // series.monitor_mode default is read on every series insert
+    // that doesn't override it. A regression that flipped this to
+    // "all" would silently auto-grab the back-catalogue on every
+    // Add Series.
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+         VALUES (777, 'Default Show', 'Default Show', 'default')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let v: String = sqlx::query_scalar("SELECT monitor_mode FROM series WHERE anilist_id = 777")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(v, "future");
+}
+
+// ─── Additional FK cascade behavior ──────────────────────────────────
+
+#[tokio::test]
+async fn deleting_a_series_cascades_to_episode_grab_history() {
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+         VALUES (10, 'S', 'S', 's')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let series_id: i64 = sqlx::query_scalar("SELECT id FROM series WHERE anilist_id = 10")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    // Need a grabbed_torrent for the FK chain.
+    sqlx::query(
+        "INSERT INTO episode_grab_history (series_id, episode_number, release_title) \
+         VALUES (?, 1, 'fixture release')",
+    )
+    .bind(series_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM series WHERE id = ?")
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .expect("series delete should succeed");
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM episode_grab_history WHERE series_id = ?")
+            .bind(series_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn deleting_a_series_cascades_to_episode_monitor_state() {
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+         VALUES (11, 'S', 'S', 's')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let series_id: i64 = sqlx::query_scalar("SELECT id FROM series WHERE anilist_id = 11")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO episode_monitor_state (series_id, episode_number, monitored) \
+         VALUES (?, 1, 1)",
+    )
+    .bind(series_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM series WHERE id = ?")
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM episode_monitor_state WHERE series_id = ?")
+            .bind(series_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn deleting_a_grabbed_torrent_cascades_to_grabbed_torrent_series() {
+    // The auto-expand sibling-routing rows (grabbed_torrent_series)
+    // belong to a single grab and have no meaning if the parent
+    // grab vanishes — so the FK cascades. Tested explicitly here
+    // because removing this cascade would silently leave ghost
+    // route rows that post-processing would later try to act on.
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+         VALUES (12, 'S', 'S', 's')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let series_id: i64 = sqlx::query_scalar("SELECT id FROM series WHERE anilist_id = 12")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO grabbed_torrents (series_id, hash, torrent_name, episode_numbers, state) \
+         VALUES (?, 'h3', 'name', '[1]', 'pending')",
+    )
+    .bind(series_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let grab_id: i64 = sqlx::query_scalar("SELECT id FROM grabbed_torrents WHERE hash = 'h3'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO grabbed_torrent_series (grab_id, series_id, file_indices, episode_numbers) \
+         VALUES (?, ?, '[0]', '[1]')",
+    )
+    .bind(grab_id)
+    .bind(series_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM grabbed_torrents WHERE id = ?")
+        .bind(grab_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrent_series WHERE grab_id = ?")
+            .bind(grab_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn deleting_an_external_account_sets_synced_series_pointer_to_null() {
+    // ON DELETE SET NULL on series.synced_from_external_account_id
+    // — unlinking an AL/MAL account must NOT cascade-drop the
+    // imported series rows. Just clears the pointer so the user
+    // keeps their library.
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO external_accounts (provider, provider_user_id, username, \
+         access_token_encrypted, linked_at) \
+         VALUES ('anilist', '1001', 'tester', X'00', 0)",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let acct_id: i64 =
+        sqlx::query_scalar("SELECT id FROM external_accounts WHERE provider_user_id = '1001'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name, \
+         synced_from_external_account_id) VALUES (20, 'S', 'S', 's', ?)",
+    )
+    .bind(acct_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM external_accounts WHERE id = ?")
+        .bind(acct_id)
+        .execute(&db)
+        .await
+        .expect("delete external account");
+
+    // Series row survives, pointer is NULL.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE anilist_id = 20")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "series row must survive external_account delete");
+    let pointer: Option<i64> = sqlx::query_scalar(
+        "SELECT synced_from_external_account_id FROM series WHERE anilist_id = 20",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(
+        pointer.is_none(),
+        "synced_from_external_account_id must be NULL after account delete; got {pointer:?}"
+    );
+}
+
+// ─── Schema invariants — UNIQUE + CHECK constraints ─────────────────
+
+#[tokio::test]
+async fn config_id_check_constraint_enforces_singleton() {
+    // `config` has CHECK (id = 1) — only ever one config row. A
+    // refactor that drops the check would let a test write id=2 and
+    // silently shadow the real config until a query fetched the
+    // wrong id.
+    let db = fresh_migrated_pool().await;
+    insert_default_config_row(&db).await;
+    let res = sqlx::query("INSERT INTO config (id) VALUES (2)")
+        .execute(&db)
+        .await;
+    assert!(
+        res.is_err(),
+        "config id=2 must be rejected by CHECK constraint"
+    );
+}
+
+#[tokio::test]
+async fn users_username_unique_constraint_rejects_duplicate() {
+    let db = fresh_migrated_pool().await;
+    sqlx::query("INSERT INTO users (username, password_hash) VALUES ('admin', 'h')")
+        .execute(&db)
+        .await
+        .expect("first user inserts");
+    let res = sqlx::query("INSERT INTO users (username, password_hash) VALUES ('admin', 'h2')")
+        .execute(&db)
+        .await;
+    assert!(res.is_err(), "duplicate username must be rejected");
+}
+
+#[tokio::test]
+async fn series_anilist_id_unique_rejects_duplicate() {
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+         VALUES (50, 'A', 'A', 'a')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let res = sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name) \
+         VALUES (50, 'B', 'B', 'b')",
+    )
+    .execute(&db)
+    .await;
+    assert!(
+        res.is_err(),
+        "duplicate anilist_id must be rejected by UNIQUE"
+    );
+}
+
+#[tokio::test]
+async fn series_mal_id_partial_unique_index_allows_multiple_nulls() {
+    // The mal_id partial UNIQUE index excludes NULL rows
+    // (`WHERE mal_id IS NOT NULL`), so multiple AL-only series
+    // (no MAL mapping) can all live with mal_id IS NULL. A naive
+    // UNIQUE without the partial-index clause would reject every
+    // 2nd insert. Pin so a future migration that "tightens" the
+    // index by dropping the WHERE clause fails this test loudly.
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO series (anilist_id, mal_id, title, title_romaji, folder_name) \
+         VALUES (60, NULL, 'A', 'A', 'a')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO series (anilist_id, mal_id, title, title_romaji, folder_name) \
+         VALUES (61, NULL, 'B', 'B', 'b')",
+    )
+    .execute(&db)
+    .await
+    .expect("second NULL mal_id must be accepted");
+}
+
+#[tokio::test]
+async fn series_mal_id_unique_rejects_duplicate_non_null() {
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO series (anilist_id, mal_id, title, title_romaji, folder_name) \
+         VALUES (70, 1234, 'A', 'A', 'a')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let res = sqlx::query(
+        "INSERT INTO series (anilist_id, mal_id, title, title_romaji, folder_name) \
+         VALUES (71, 1234, 'B', 'B', 'b')",
+    )
+    .execute(&db)
+    .await;
+    assert!(
+        res.is_err(),
+        "duplicate non-NULL mal_id must be rejected by partial UNIQUE index"
+    );
+}
+
+#[tokio::test]
+async fn external_accounts_provider_check_rejects_unknown_provider() {
+    // Schema-level guard against typos. The application-layer
+    // `link()` call also enforces "at most one provider," but the
+    // CHECK is a second line of defense for the value itself.
+    let db = fresh_migrated_pool().await;
+    let res = sqlx::query(
+        "INSERT INTO external_accounts (provider, provider_user_id, username, \
+         access_token_encrypted, linked_at) \
+         VALUES ('not-a-real-provider', '1', 'x', X'00', 0)",
+    )
+    .execute(&db)
+    .await;
+    assert!(
+        res.is_err(),
+        "unknown provider must be rejected by CHECK constraint"
+    );
+}
+
+#[tokio::test]
+async fn external_accounts_provider_unique_rejects_two_same_provider_rows() {
+    // The application-layer `link()` is the primary at-most-one-of-
+    // each guard, but the table also carries a `UNIQUE (provider)`
+    // constraint as a backstop. Pin both so a refactor that drops
+    // the UNIQUE doesn't silently let two anilist rows coexist.
+    let db = fresh_migrated_pool().await;
+    sqlx::query(
+        "INSERT INTO external_accounts (provider, provider_user_id, username, \
+         access_token_encrypted, linked_at) \
+         VALUES ('anilist', '1', 'a', X'00', 0)",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let res = sqlx::query(
+        "INSERT INTO external_accounts (provider, provider_user_id, username, \
+         access_token_encrypted, linked_at) \
+         VALUES ('anilist', '2', 'b', X'00', 0)",
+    )
+    .execute(&db)
+    .await;
+    assert!(
+        res.is_err(),
+        "second `anilist` row must be rejected by UNIQUE (provider)"
+    );
+}
+
+// ─── Index existence ────────────────────────────────────────────────
+
+async fn index_exists(db: &SqlitePool, name: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+    )
+    .bind(name)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0)
+        > 0
+}
+
+#[tokio::test]
+async fn migrate_creates_partial_unique_index_for_active_grab_dedup() {
+    // `idx_grabbed_torrents_hash_active` backs the atomic dedup in
+    // `record_grab`. Without this partial UNIQUE index, two
+    // concurrent grab attempts for the same hash both succeed,
+    // producing a duplicate grab row that the rest of the pipeline
+    // mishandles.
+    let db = fresh_migrated_pool().await;
+    assert!(
+        index_exists(&db, "idx_grabbed_torrents_hash_active").await,
+        "active-grab dedup index missing"
+    );
+}
+
+#[tokio::test]
+async fn migrate_creates_partial_unique_index_for_series_mal_id() {
+    let db = fresh_migrated_pool().await;
+    assert!(
+        index_exists(&db, "idx_series_mal_id").await,
+        "series mal_id partial UNIQUE index missing"
+    );
+}
