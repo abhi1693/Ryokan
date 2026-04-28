@@ -409,6 +409,25 @@ async fn main() {
         tracing::warn!("series_genres backfill failed (filter dropdown may be empty): {e}");
     }
 
+    // Boot-time recovery: any `scheduled_task_runs` row left at
+    // last_status='running' is necessarily stranded — the task that
+    // wrote it lived in a prior process incarnation that has since
+    // gone away. Mark them as 'error' with a user-facing detail so
+    // the System → Scheduled Tasks UI doesn't keep showing them as
+    // in-flight forever. See `recover_stuck_running` for the full
+    // backstory.
+    match models::scheduled_tasks::recover_stuck_running(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            target: "ryokan::scheduled_tasks",
+            "recovered {n} stuck 'running' scheduled-task row(s) at startup"
+        ),
+        Err(e) => tracing::warn!(
+            target: "ryokan::scheduled_tasks",
+            "stuck-task recovery failed (rows may stay at 'running'): {e}"
+        ),
+    }
+
     // Password-recovery boot path (#22). When RYOKAN_RESET_AUTH=1 or
     // --reset-auth is passed AND a `data/.reset-auth` sentinel file exists,
     // wipe users + sessions before the router mounts. `has_users()` then

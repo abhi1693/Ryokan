@@ -82,6 +82,33 @@ pub async fn mark_finished(
     Ok(())
 }
 
+/// Boot-time recovery: any row left at `last_status = 'running'` when
+/// the process starts is by definition stuck. The handler / supervised
+/// loop that wrote it can't still be running — they live in this
+/// process, and this process just started. The `running` row was
+/// stranded by a prior crash, kill -9, OOM, container restart, or (the
+/// 2026-04-28 incident) a request future being dropped on tab-out
+/// before the spawn-detach helper landed. Without this pass, a stuck
+/// `running` row sits forever in System → Scheduled Tasks misleadingly
+/// suggesting work is in flight.
+///
+/// Returns the number of rows recovered so the caller can log it. The
+/// detail message is deliberately user-facing — it shows up in the
+/// row's last_detail column on the UI.
+pub async fn recover_stuck_running(db: &SqlitePool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"UPDATE scheduled_task_runs
+           SET last_status = 'error',
+               last_finished_at = CURRENT_TIMESTAMP,
+               last_detail = 'Task interrupted by process restart. Click Run now to retry.',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE last_status = 'running'"#,
+    )
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Minutes elapsed since `task_key` last finished. Returns `None` if
 /// the task has never recorded a `last_finished_at` (fresh install,
 /// or task has never been run). The caller should treat `None` as
@@ -213,6 +240,71 @@ mod tests {
         assert_eq!(rows[0].last_status, "ok");
         assert_eq!(rows[0].last_detail, "imported 3 files");
         assert!(rows[0].last_finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn recover_stuck_running_flips_running_rows_to_error() {
+        let db = in_memory_pool().await;
+        touch_definition(&db, "metadata_refresh", "Metadata Refresh", "12h", true)
+            .await
+            .unwrap();
+        touch_definition(&db, "rss_sync", "RSS Sync", "60s", true)
+            .await
+            .unwrap();
+        touch_definition(&db, "cleanup", "Cleanup", "1h", true)
+            .await
+            .unwrap();
+        // Two stuck-running rows + one healthy ok row.
+        mark_started(&db, "metadata_refresh", "Manual refresh started")
+            .await
+            .unwrap();
+        mark_started(&db, "rss_sync", "Auto sync started")
+            .await
+            .unwrap();
+        mark_started(&db, "cleanup", "Auto cleanup").await.unwrap();
+        mark_finished(&db, "cleanup", "ok", "Cleanup completed")
+            .await
+            .unwrap();
+
+        let rows = list(&db).await.unwrap();
+        let running: Vec<_> = rows.iter().filter(|r| r.last_status == "running").collect();
+        assert_eq!(running.len(), 2, "expected 2 running rows pre-recovery");
+
+        let recovered = recover_stuck_running(&db).await.unwrap();
+        assert_eq!(recovered, 2);
+
+        let rows = list(&db).await.unwrap();
+        let by_key: std::collections::HashMap<_, _> =
+            rows.iter().map(|r| (r.task_key.as_str(), r)).collect();
+
+        let metadata = by_key["metadata_refresh"];
+        assert_eq!(metadata.last_status, "error");
+        assert!(
+            metadata
+                .last_detail
+                .contains("interrupted by process restart"),
+            "user-facing message must explain the cause: {}",
+            metadata.last_detail
+        );
+        assert!(
+            metadata.last_finished_at.is_some(),
+            "recovered row must record a finished_at so the next run can compute elapsed time"
+        );
+
+        // Healthy row is untouched.
+        let cleanup = by_key["cleanup"];
+        assert_eq!(cleanup.last_status, "ok");
+        assert_eq!(cleanup.last_detail, "Cleanup completed");
+    }
+
+    #[tokio::test]
+    async fn recover_stuck_running_is_idempotent_with_no_running_rows() {
+        let db = in_memory_pool().await;
+        touch_definition(&db, "rss_sync", "RSS Sync", "60s", true)
+            .await
+            .unwrap();
+        let recovered = recover_stuck_running(&db).await.unwrap();
+        assert_eq!(recovered, 0, "no running rows means nothing to recover");
     }
 
     #[tokio::test]
