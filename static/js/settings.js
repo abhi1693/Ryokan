@@ -1,24 +1,11 @@
-// Wire any form carrying data-ryokan-confirm-title/body through the shared
-// ryokanConfirm modal. The form submits natively on "Yes"; a flag keeps
-// the handler from re-prompting after the programmatic submit() call.
-(function() {
-    document.querySelectorAll('form[data-ryokan-confirm-title]').forEach(function(form) {
-        form.addEventListener('submit', function(ev) {
-            if (form.dataset.ryokanConfirmed === '1') return;
-            ev.preventDefault();
-            window.ryokanConfirm({
-                title: form.getAttribute('data-ryokan-confirm-title') || 'Confirm',
-                body: form.getAttribute('data-ryokan-confirm-body') || 'Are you sure?',
-                yesLabel: form.getAttribute('data-ryokan-confirm-label') || 'Yes',
-            }).then(function(result) {
-                if (result.ok) {
-                    form.dataset.ryokanConfirmed = '1';
-                    form.submit();
-                }
-            });
-        });
-    });
-})();
+// HTMX migration (issue #129) — the confirm-modal wiring for forms
+// with `data-ryokan-confirm-title` lives in `base.js` now (one
+// DOMContentLoaded listener for native form-POST forms + an
+// `htmx:confirm` body listener for HTMX forms, both routed through
+// `ryokanConfirmFromAttrs`). The IIFE that previously lived here
+// was a stale duplicate that read the renamed `data-ryokan-confirm-label`
+// attribute (gone since PR 131); `base.js`'s shim is the single
+// source of truth for both paths.
 
 // #11.1 — Client-side filter for the CF card grid. Matches against
 // `data-cf-*` attributes on each card (name is pre-lowercased
