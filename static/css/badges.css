@@ -255,3 +255,30 @@
     padding: 2px 8px;
 }
 
+/* Phase 7 PR G — source kind badges for the Release Group Source Map.
+ * Re-uses the .log-badge typography (uppercase, monospace-y) but tints
+ * each source kind with the same palette the rest of the app uses for
+ * source signals (BD = mauve / accent, WEB = green, DVD = orange,
+ * HDTV = blue, TV = neutral). Single source of truth for source-color
+ * affordance — if you add another source variant, add it here and
+ * the groups + suggestions tables pick it up automatically. */
+.tag-src-bluray { background: var(--mauve-bg); color: var(--accent); }
+.tag-src-web    { background: rgba(125, 211, 147, 0.15); color: var(--green); }
+.tag-src-dvd    { background: rgba(211, 176, 125, 0.15); color: var(--orange); }
+.tag-src-hdtv   { background: rgba(125, 174, 211, 0.15); color: var(--blue); }
+.tag-src-tv,
+.tag-src-unknown {
+    background: rgba(125, 125, 125, 0.15);
+    color: var(--text-dim);
+}
+
+/* User-vs-Seed indicator for the same table. User rows get the
+ * accent treatment so the user can scan at a glance for what
+ * they've personally edited; seed rows fade into the background
+ * with the dim color. */
+.tag-origin-user { background: var(--mauve-bg); color: var(--accent); }
+.tag-origin-seed {
+    background: rgba(125, 125, 125, 0.15);
+    color: var(--text-dim);
+}
+

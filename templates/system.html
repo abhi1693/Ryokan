@@ -224,9 +224,16 @@
 {% else if tab == "tasks" %}
 <div class="rss-panel">
     <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Scheduled tasks</h3>
-        </div>
+        {# The redundant "Scheduled tasks" h3 was dropped — the System
+           tab the user clicked is labeled "Scheduled Tasks" already,
+           and there's nothing else in the section header to anchor.
+           Section gets a one-liner hint instead so the page has a
+           reason to start where it does. #}
+        <p class="form-hint" style="margin:0 0 12px">
+            Background jobs Ryokan schedules. Cadence + last run state for each.
+            Use <strong>Run now</strong> to trigger a job out-of-band — useful for
+            picking up new metadata or RSS items immediately after a settings change.
+        </p>
         {% if scheduled_tasks.is_empty() %}
         <div class="logs-empty">No scheduled task definitions registered yet.</div>
         {% else %}
