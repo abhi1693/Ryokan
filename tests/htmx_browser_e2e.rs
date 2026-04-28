@@ -50,7 +50,7 @@ use std::time::Duration;
 use fantoccini::ClientBuilder;
 use fantoccini::Locator;
 use ryokan::test_support::{
-    build_test_app_state, e2e_browser_app, in_memory_pool, logged_in_session_for,
+    build_test_app_state, e2e_browser_app, in_memory_pool, logged_in_session,
 };
 
 /// Spawn the e2e browser app on a random local port; return the bound
@@ -154,7 +154,11 @@ fn resolve_browser_binary() -> Option<String> {
 fn librewolf_shim(librewolf_path: &str) -> String {
     let wrapper_dir = std::env::temp_dir().join("ryokan-librewolf-shim");
     std::fs::create_dir_all(&wrapper_dir).expect("create shim dir");
-    let wrapper_path = wrapper_dir.join("firefox-shim.sh");
+    // PID in the filename so the three e2e binaries (when `cargo test`
+    // runs them in parallel) each get their own wrapper. Identical
+    // content otherwise — the race was on torn reads of the file body
+    // mid-rewrite, not on the path itself.
+    let wrapper_path = wrapper_dir.join(format!("firefox-shim-{}.sh", std::process::id()));
     let body = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; then\n\
@@ -220,7 +224,7 @@ async fn episode_monitor_button_swaps_in_browser() {
     // Authenticated browsing session: write a row to `sessions` and
     // then preload the cookie via WebDriver before navigating, so the
     // first page load already passes `require_auth`.
-    let (_state2, cookie_value) = logged_in_session_for(&db).await;
+    let (_state2, cookie_value) = logged_in_session(&db).await;
     // cookie_value is "session=<hex>"; split off the value for the
     // WebDriver Cookie payload (it expects name + value separately).
     let token = cookie_value

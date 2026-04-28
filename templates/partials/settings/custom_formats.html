@@ -45,7 +45,8 @@
             <form method="post" action="/settings/custom-formats/install-defaults"
                   data-ryokan-confirm-title="Install bundled defaults"
                   data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
-                  data-ryokan-confirm-label="Install">
+                  data-ryokan-confirm-yes="Install"
+                  data-ryokan-confirm-no="Cancel">
                 <button type="submit" class="btn btn-primary">Install Bundled Defaults</button>
             </form>
         </div>
@@ -99,7 +100,9 @@
                           hx-swap="outerHTML"
                           data-ryokan-confirm-title="Delete Custom Format"
                           data-ryokan-confirm-body="Delete &quot;{{ cf.row.name }}&quot;? This cannot be undone."
-                          data-ryokan-confirm-label="Delete">
+                          data-ryokan-confirm-yes="Delete"
+                          data-ryokan-confirm-no="Cancel"
+                          data-ryokan-confirm-danger="1">
                         <input type="hidden" name="id" value="{{ cf.row.id }}">
                         <button type="submit" class="btn btn-icon-danger" title="Delete {{ cf.row.name }}" aria-label="Delete {{ cf.row.name }}">×</button>
                     </form>
@@ -195,7 +198,9 @@
                 <form id="cf-delete-form" method="post" action="/settings/custom-formats/delete"
                       data-ryokan-confirm-title="Delete Custom Format"
                       data-ryokan-confirm-body="Delete &quot;{{ edit.row.name }}&quot;? This cannot be undone."
-                      data-ryokan-confirm-label="Delete"
+                      data-ryokan-confirm-yes="Delete"
+                      data-ryokan-confirm-no="Cancel"
+                      data-ryokan-confirm-danger="1"
                       style="margin:0">
                     <input type="hidden" name="id" value="{{ edit.row.id }}">
                     <button type="submit" class="btn btn-danger">Delete</button>
@@ -409,13 +414,16 @@
             <form method="post" action="/settings/custom-formats/install-defaults"
                   data-ryokan-confirm-title="Install bundled defaults"
                   data-ryokan-confirm-body="Install the bundled default Custom Formats? CFs whose name already exists will be skipped."
-                  data-ryokan-confirm-label="Install">
+                  data-ryokan-confirm-yes="Install"
+                  data-ryokan-confirm-no="Cancel">
                 <button type="submit" class="btn btn-primary">Install Defaults</button>
             </form>
             <form method="post" action="/settings/custom-formats/reset-defaults"
                   data-ryokan-confirm-title="Reset bundled defaults"
                   data-ryokan-confirm-body="Reset the bundled defaults? Any CF with source=default will be dropped and re-installed from the bundled file. Your manual and imported CFs are untouched."
-                  data-ryokan-confirm-label="Reset">
+                  data-ryokan-confirm-yes="Reset"
+                  data-ryokan-confirm-no="Cancel"
+                  data-ryokan-confirm-danger="1">
                 <button type="submit" class="btn btn-secondary">Reset to Defaults</button>
             </form>
         </div>

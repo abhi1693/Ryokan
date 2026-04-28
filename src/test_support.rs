@@ -252,26 +252,6 @@ pub fn handler_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Variant of [`logged_in_session`] that doesn't rebuild the AppState
-/// — used by the browser-e2e harness, which needs the *same* state
-/// the spawned app is using (so the in-memory pool's seeded data is
-/// visible to the handlers under test). Returns the cookie header
-/// value `session=<hex>`.
-pub async fn logged_in_session_for(db: &SqlitePool) -> (AppState, String) {
-    // Same shape as `logged_in_session` but pulls the second-half
-    // state-building call out so callers that already have an
-    // AppState don't double-build. Kept under a distinct name to
-    // avoid touching every existing call site.
-    let user_id = crate::models::user::create_user(db, "test-user", "hunter2-test-password")
-        .await
-        .expect("create test user");
-    let token = crate::models::session::create_session(db, user_id)
-        .await
-        .expect("create session");
-    let state = build_test_app_state(db.clone(), None);
-    (state, format!("session={}", token))
-}
-
 // ─── Browser-e2e harness (issue #129 HTMX migration) ────────────────
 //
 // Gated on `cfg(feature = "browser-e2e")` so the inline test fixtures

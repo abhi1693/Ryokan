@@ -87,7 +87,7 @@ fn resolve_browser_binary() -> Option<String> {
 fn librewolf_shim(librewolf_path: &str) -> String {
     let wrapper_dir = std::env::temp_dir().join("ryokan-librewolf-shim");
     std::fs::create_dir_all(&wrapper_dir).expect("create shim dir");
-    let wrapper_path = wrapper_dir.join("firefox-shim.sh");
+    let wrapper_path = wrapper_dir.join(format!("firefox-shim-{}.sh", std::process::id()));
     let body = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; then\n\

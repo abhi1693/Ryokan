@@ -101,7 +101,7 @@ fn resolve_browser_binary() -> Option<String> {
 fn librewolf_shim(librewolf_path: &str) -> String {
     let wrapper_dir = std::env::temp_dir().join("ryokan-librewolf-shim");
     std::fs::create_dir_all(&wrapper_dir).expect("create shim dir");
-    let wrapper_path = wrapper_dir.join("firefox-shim.sh");
+    let wrapper_path = wrapper_dir.join(format!("firefox-shim-{}.sh", std::process::id()));
     let body = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"--version\" ] || [ \"$1\" = \"-version\" ]; then\n\
@@ -725,6 +725,13 @@ async fn custom_formats_delete_last_triggers_hx_refresh() {
         assert_htmx_loaded(&client).await?;
         click_delete_for(&client, "Phase1Test-CfSolo").await?;
         wait_for_confirm_modal(&client, Duration::from_secs(2)).await?;
+        // Regression guard for PR 131 review (bug 1): the per-CF
+        // delete form previously used `data-ryokan-confirm-label`,
+        // which `base.js`'s `ryokanConfirmFromAttrs` ignores in favor
+        // of `data-ryokan-confirm-yes`. The Yes button rendered as
+        // the default "Yes" instead of "Delete." Pin the post-fix
+        // text so an attribute-name regression triggers here.
+        assert_modal_text(&client, "yes", "Delete").await?;
         client
             .find(Locator::Id("ryokan-confirm-yes"))
             .await?
