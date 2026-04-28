@@ -150,7 +150,20 @@ function runRssSync(btn) {
     btn.disabled = true;
     result.textContent = 'Syncing...';
     window.ryokanToast({kind: 'info', title: 'RSS sync running', body: 'Checking the feed for new episodes.'});
-    fetch('/api/rss/sync', { method: 'POST', headers: {'Content-Type': 'application/json'} })
+    // AbortController + pagehide/beforeunload listeners so a user who
+    // tabs out mid-sync doesn't see a misleading "RSS sync failed:
+    // NetworkError" toast (and have it persisted to /api/logs/client).
+    // The server-side work continues regardless thanks to the
+    // detached_task spawn-detach in api_rss_sync.
+    const controller = new AbortController();
+    const onLeaving = () => controller.abort();
+    window.addEventListener('beforeunload', onLeaving, { once: true });
+    window.addEventListener('pagehide', onLeaving, { once: true });
+    fetch('/api/rss/sync', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        signal: controller.signal,
+    })
         .then(async r => {
             const data = await r.json();
             if (!r.ok) throw new Error(data.message || 'RSS sync failed');
@@ -165,6 +178,7 @@ function runRssSync(btn) {
             setTimeout(() => window.location.reload(), 600);
         })
         .catch(err => {
+            if (controller.signal.aborted) return;
             result.textContent = err.message;
             window.ryokanToast({
                 kind: 'error',
@@ -172,7 +186,11 @@ function runRssSync(btn) {
                 body: err && err.message ? err.message : 'Unknown error',
             });
         })
-        .finally(() => { btn.disabled = false; });
+        .finally(() => {
+            window.removeEventListener('beforeunload', onLeaving);
+            window.removeEventListener('pagehide', onLeaving);
+            btn.disabled = false;
+        });
 }
 
 // ── Scheduled tasks tab ─────────────────────────────────────────────────
@@ -204,7 +222,16 @@ function forceRunTask(btn, taskKey) {
     }
     btn.disabled = true;
     btn.textContent = 'Running...';
-    fetch(url, { method: 'POST' })
+    // AbortController + pagehide/beforeunload listeners so tab-out
+    // doesn't surface a misleading "Task error: NetworkError" toast.
+    // Server-side work continues thanks to the `detached_task`
+    // spawn-detach in each handler — the in-flight fetch being
+    // cancelled is just the browser unwinding its connection.
+    const controller = new AbortController();
+    const onLeaving = () => controller.abort();
+    window.addEventListener('beforeunload', onLeaving, { once: true });
+    window.addEventListener('pagehide', onLeaving, { once: true });
+    fetch(url, { method: 'POST', signal: controller.signal })
         .then(r => r.json().then(data => ({ ok: r.ok, data })).catch(() => ({ ok: r.ok, data: null })))
         .then(({ ok, data }) => {
             // Queue across the reload — `location.reload()` below
@@ -232,13 +259,19 @@ function forceRunTask(btn, taskKey) {
             location.reload();
         })
         .catch(err => {
+            if (controller.signal.aborted) return;
             window.ryokanToast({
                 kind: 'error',
                 title: 'Task error',
                 body: err && err.message ? err.message : String(err),
             });
         })
-        .finally(() => { btn.disabled = false; btn.textContent = 'Run now'; });
+        .finally(() => {
+            window.removeEventListener('beforeunload', onLeaving);
+            window.removeEventListener('pagehide', onLeaving);
+            btn.disabled = false;
+            btn.textContent = 'Run now';
+        });
 }
 
 // ── Debug tab ───────────────────────────────────────────────────────────
