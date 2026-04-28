@@ -43,6 +43,12 @@ struct SystemTemplate {
     /// entry on the current page. `None` when the page is the last
     /// (or when there are no entries at all).
     log_older_id: Option<i64>,
+    /// Mirrors `log_before_id` for the RSS tab — the active cursor
+    /// the user navigated to (drives the "← Newest" link).
+    rss_before_id: Option<i64>,
+    /// Mirrors `log_older_id` for the RSS tab — the next-page cursor
+    /// when there's more history beyond the current page.
+    rss_older_id: Option<i64>,
     categories: Vec<(&'static str, &'static str)>,
     rss_enabled: bool,
     rss_interval_minutes: i32,
@@ -142,9 +148,13 @@ pub async fn system_page(
             Vec::new()
         }
     };
+    let rss_before_id = params.before_id;
     let rss_recent_fut = async {
         if tab == "rss" {
-            rss::recent_decisions(&state.db, 500)
+            // Same +1 trick the logs query uses: fetch one extra row
+            // so we can tell whether "Older →" should render without
+            // a separate COUNT query. Truncated below.
+            rss::recent_decisions_paginated(&state.db, 201, rss_before_id)
                 .await
                 .unwrap_or_default()
         } else {
@@ -253,6 +263,17 @@ pub async fn system_page(
         };
         (entries, log_older_id)
     };
+    // Same +1-truncate trick for the RSS tab (Phase 7 PR F).
+    let (rss_recent, rss_older_id) = {
+        let mut entries = rss_recent;
+        let rss_older_id = if entries.len() > 200 {
+            entries.truncate(200);
+            entries.last().map(|e| e.id)
+        } else {
+            None
+        };
+        (entries, rss_older_id)
+    };
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -269,6 +290,8 @@ pub async fn system_page(
         filter_search,
         log_before_id: logs_before_id,
         log_older_id,
+        rss_before_id,
+        rss_older_id,
         categories,
         rss_enabled,
         rss_interval_minutes,
@@ -363,6 +386,8 @@ pub async fn debug_settings_submit(
         filter_search: String::new(),
         log_before_id: None,
         log_older_id: None,
+        rss_before_id: None,
+        rss_older_id: None,
         categories: vec![
             ("search", LogCategory::Search.label()),
             ("grab", LogCategory::Grab.label()),

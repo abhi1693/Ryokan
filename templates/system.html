@@ -205,6 +205,19 @@
             </table>
         </div>
         {% endif %}
+        {# Cursor pagination — same shape as the Logs tab. The
+           pagination strip only renders when at least one direction
+           is reachable. #}
+        {% if rss_older_id.is_some() || rss_before_id.is_some() %}
+        <div class="logs-pagination">
+            {% if rss_before_id.is_some() %}
+            <a class="btn btn-ghost btn-sm" href="/system?tab=rss">← Newest</a>
+            {% endif %}
+            {% if let Some(older) = rss_older_id %}
+            <a class="btn btn-ghost btn-sm" href="/system?tab=rss&before_id={{ older }}">Older →</a>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
 </div>
 
