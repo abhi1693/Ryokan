@@ -19,6 +19,39 @@ use crate::models::{
 };
 use crate::services::{logger, metadata_sync, post_processing, rss as rss_service, upgrade};
 
+/// Wrap a handler body in a detached `tokio::spawn` so the work runs
+/// to completion even when the client navigates away mid-flight.
+///
+/// Without this, dropping the request future cancels the body's
+/// `.await` chain in place and the `scheduled_task_runs` row stays at
+/// `last_status = 'running'` until the next process restart — a click-
+/// then-walk-away on Run-now / Sync now / etc. used to corrupt the
+/// scheduled-tasks audit trail. Tokio's `tokio::spawn` decouples the
+/// task lifetime from the JoinHandle lifetime: dropping the handle
+/// (when the request future is dropped) leaves the spawned task
+/// running on the runtime, so `mark_finished` always fires.
+///
+/// One-layer (vs. the three-layer pattern in
+/// `api_rebuild_cached_metadata`): a body panic surfaces as
+/// `Err(JoinError::Panicked)` and `mark_finished` is missed, leaving
+/// the row stuck at running. Acceptable trade-off for the
+/// periodic-refresh / cleanup / library-classify / etc. family
+/// because none of those wrap user-input parsing or speculative I/O
+/// with a realistic panic site. Use the three-layer shape if a new
+/// handler does.
+async fn detached_task<F, T>(future: F) -> Result<T, (StatusCode, String)>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::spawn(future).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("scheduled task failed to join: {}", e),
+        )
+    })
+}
+
 #[derive(Template)]
 #[template(path = "system.html")]
 struct SystemTemplate {
@@ -612,45 +645,48 @@ pub async fn api_rebuild_cached_metadata(
 pub async fn api_anibridge_reload(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    logger::info(
-        &state.db,
-        LogCategory::System,
-        "Anibridge mappings reload requested",
-        "",
-    )
-    .await;
-    let _ = scheduled_tasks::mark_started(
-        &state.db,
-        "anibridge_refresh",
-        "Manual anibridge mappings refresh",
-    )
-    .await;
+    detached_task(async move {
+        logger::info(
+            &state.db,
+            LogCategory::System,
+            "Anibridge mappings reload requested",
+            "",
+        )
+        .await;
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "anibridge_refresh",
+            "Manual anibridge mappings refresh",
+        )
+        .await;
 
-    if crate::services::anibridge::reload().await {
-        let _ = scheduled_tasks::mark_finished(
-            &state.db,
-            "anibridge_refresh",
-            "ok",
-            "Mappings refreshed",
-        )
-        .await;
-        Ok(Json(serde_json::json!({
-            "ok": true,
-            "message": "Anibridge mappings reloaded successfully",
-        })))
-    } else {
-        let _ = scheduled_tasks::mark_finished(
-            &state.db,
-            "anibridge_refresh",
-            "error",
-            "Failed to download mappings",
-        )
-        .await;
-        Err((
-            axum::http::StatusCode::BAD_GATEWAY,
-            "Failed to reload anibridge mappings".to_string(),
-        ))
-    }
+        if crate::services::anibridge::reload().await {
+            let _ = scheduled_tasks::mark_finished(
+                &state.db,
+                "anibridge_refresh",
+                "ok",
+                "Mappings refreshed",
+            )
+            .await;
+            Ok(Json(serde_json::json!({
+                "ok": true,
+                "message": "Anibridge mappings reloaded successfully",
+            })))
+        } else {
+            let _ = scheduled_tasks::mark_finished(
+                &state.db,
+                "anibridge_refresh",
+                "error",
+                "Failed to download mappings",
+            )
+            .await;
+            Err((
+                axum::http::StatusCode::BAD_GATEWAY,
+                "Failed to reload anibridge mappings".to_string(),
+            ))
+        }
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -893,29 +929,34 @@ pub async fn api_logs_client(
 pub async fn api_rss_sync(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(&state.db, "rss_sync", "Manual RSS sync started").await;
-    match rss_service::sync_once(&state, "manual").await {
-        Ok(summary) => {
-            let _ =
-                scheduled_tasks::mark_finished(&state.db, "rss_sync", "ok", &summary.detail).await;
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "message": summary.detail,
-                "summary": summary,
-            })))
+    detached_task(async move {
+        let _ =
+            scheduled_tasks::mark_started(&state.db, "rss_sync", "Manual RSS sync started").await;
+        match rss_service::sync_once(&state, "manual").await {
+            Ok(summary) => {
+                let _ =
+                    scheduled_tasks::mark_finished(&state.db, "rss_sync", "ok", &summary.detail)
+                        .await;
+                Ok(Json(serde_json::json!({
+                    "ok": true,
+                    "message": summary.detail,
+                    "summary": summary,
+                })))
+            }
+            Err(err) => {
+                let _ = scheduled_tasks::mark_finished(&state.db, "rss_sync", "error", &err).await;
+                Err((
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    serde_json::json!({
+                        "ok": false,
+                        "message": err,
+                    })
+                    .to_string(),
+                ))
+            }
         }
-        Err(err) => {
-            let _ = scheduled_tasks::mark_finished(&state.db, "rss_sync", "error", &err).await;
-            Err((
-                axum::http::StatusCode::BAD_GATEWAY,
-                serde_json::json!({
-                    "ok": false,
-                    "message": err,
-                })
-                .to_string(),
-            ))
-        }
-    }
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -961,20 +1002,24 @@ pub async fn api_rss_clear_history(
 pub async fn api_force_metadata_refresh(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(
-        &state.db,
-        "metadata_refresh",
-        "Manual metadata refresh started",
-    )
-    .await;
-    let (refreshed, failed) = metadata_sync::refresh_all_series_metadata(&state.db).await;
-    let status = if failed > 0 { "warn" } else { "ok" };
-    let detail = format!("refreshed={}, failed={}", refreshed, failed);
-    let _ = scheduled_tasks::mark_finished(&state.db, "metadata_refresh", status, &detail).await;
-    Ok(Json(serde_json::json!({
-        "ok": failed == 0,
-        "message": format!("Metadata refresh complete. Refreshed: {}. Failed: {}.", refreshed, failed),
-    })))
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "metadata_refresh",
+            "Manual metadata refresh started",
+        )
+        .await;
+        let (refreshed, failed) = metadata_sync::refresh_all_series_metadata(&state.db).await;
+        let status = if failed > 0 { "warn" } else { "ok" };
+        let detail = format!("refreshed={}, failed={}", refreshed, failed);
+        let _ =
+            scheduled_tasks::mark_finished(&state.db, "metadata_refresh", status, &detail).await;
+        Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
+            "ok": failed == 0,
+            "message": format!("Metadata refresh complete. Refreshed: {}. Failed: {}.", refreshed, failed),
+        })))
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -990,25 +1035,28 @@ pub async fn api_force_metadata_refresh(
 pub async fn api_force_cleanup(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(&state.db, "cleanup", "Manual cleanup started").await;
-    let mut errors = Vec::new();
-    if let Err(e) = crate::models::log::cleanup(&state.db, 30).await {
-        errors.push(format!("logs: {}", e));
-    }
-    if let Err(e) = rss::cleanup_old_decisions(&state.db, 30).await {
-        errors.push(format!("rss: {}", e));
-    }
-    let status = if errors.is_empty() { "ok" } else { "warn" };
-    let detail = if errors.is_empty() {
-        "Cleanup completed".to_string()
-    } else {
-        errors.join("; ")
-    };
-    let _ = scheduled_tasks::mark_finished(&state.db, "cleanup", status, &detail).await;
-    Ok(Json(serde_json::json!({
-        "ok": errors.is_empty(),
-        "message": detail,
-    })))
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(&state.db, "cleanup", "Manual cleanup started").await;
+        let mut errors = Vec::new();
+        if let Err(e) = crate::models::log::cleanup(&state.db, 30).await {
+            errors.push(format!("logs: {}", e));
+        }
+        if let Err(e) = rss::cleanup_old_decisions(&state.db, 30).await {
+            errors.push(format!("rss: {}", e));
+        }
+        let status = if errors.is_empty() { "ok" } else { "warn" };
+        let detail = if errors.is_empty() {
+            "Cleanup completed".to_string()
+        } else {
+            errors.join("; ")
+        };
+        let _ = scheduled_tasks::mark_finished(&state.db, "cleanup", status, &detail).await;
+        Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
+            "ok": errors.is_empty(),
+            "message": detail,
+        })))
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -1030,7 +1078,10 @@ pub async fn api_force_external_sync(
 
     // Bail early when no account is linked — the user otherwise gets
     // a confusing "no-op success" toast since `tick_once_or_busy`
-    // returns Ok(empty summary) on the no-account branch.
+    // returns Ok(empty summary) on the no-account branch. Pre-spawn:
+    // `has_linked_account` is one fast indexed query, no point burning
+    // a `tokio::spawn` round-trip just to bounce on the no-account
+    // path.
     let has_linked = external_sync::has_linked_account(&state.db).await;
     if !has_linked {
         return Err((
@@ -1043,37 +1094,49 @@ pub async fn api_force_external_sync(
         ));
     }
 
+    // Detach the actual sync from the request future. `tick_once_or_busy`
+    // can take 30s+ on a large list with the per-entry merge step, so a
+    // user who clicks Run-now and tabs away should still see the row
+    // exit `running` once the sync completes.
+    //
     // mark_started is deferred until we know we actually have a tick to run
     // (i.e. tick_once_or_busy didn't immediately bounce on the in-flight
     // lock). Otherwise a Run-now click during a supervised tick would
     // momentarily clobber `last_started_at` on the row before the busy
     // error path's mark_finished overwrote it again, which would surface
     // as a stale-then-correct flash on the next page load.
-    match external_sync::tick_once_or_busy(&state).await {
-        Ok(summary) => {
-            let _ = scheduled_tasks::mark_started(
-                &state.db,
-                "external_sync",
-                "Manual watch-list sync started",
-            )
-            .await;
-            let _ =
-                scheduled_tasks::mark_finished(&state.db, "external_sync", "ok", "Sync complete")
-                    .await;
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "message": format!("Sync complete: {summary}"),
-            })))
+    detached_task(async move {
+        match external_sync::tick_once_or_busy(&state).await {
+            Ok(summary) => {
+                let _ = scheduled_tasks::mark_started(
+                    &state.db,
+                    "external_sync",
+                    "Manual watch-list sync started",
+                )
+                .await;
+                let _ = scheduled_tasks::mark_finished(
+                    &state.db,
+                    "external_sync",
+                    "ok",
+                    "Sync complete",
+                )
+                .await;
+                Ok(Json(serde_json::json!({
+                    "ok": true,
+                    "message": format!("Sync complete: {summary}"),
+                })))
+            }
+            Err(err) => Err((
+                axum::http::StatusCode::CONFLICT,
+                serde_json::json!({
+                    "ok": false,
+                    "message": err,
+                })
+                .to_string(),
+            )),
         }
-        Err(err) => Err((
-            axum::http::StatusCode::CONFLICT,
-            serde_json::json!({
-                "ok": false,
-                "message": err,
-            })
-            .to_string(),
-        )),
-    }
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -1089,17 +1152,27 @@ pub async fn api_force_external_sync(
 pub async fn api_force_post_processing(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ =
-        scheduled_tasks::mark_started(&state.db, "post_processing", "Manual post-processing run")
-            .await;
-    post_processing::run_once(&state).await;
-    let _ =
-        scheduled_tasks::mark_finished(&state.db, "post_processing", "ok", "Manual run completed")
-            .await;
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "message": "Post-processing run completed",
-    })))
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "post_processing",
+            "Manual post-processing run",
+        )
+        .await;
+        post_processing::run_once(&state).await;
+        let _ = scheduled_tasks::mark_finished(
+            &state.db,
+            "post_processing",
+            "ok",
+            "Manual run completed",
+        )
+        .await;
+        Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
+            "ok": true,
+            "message": "Post-processing run completed",
+        })))
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -1112,23 +1185,36 @@ pub async fn api_force_post_processing(
         (status = 200, description = "Library classify report", body = serde_json::Value),
     ),
 )]
-pub async fn api_force_library_classify(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let report = post_processing::scan_library_for_unclassified(&state).await;
-    let message = format!(
-        "Library classify scan complete. Series scanned: {}. Files scanned: {}. Classified: {}. Needs review: {}.",
-        report.series_scanned,
-        report.files_scanned,
-        report.files_classified,
-        report.files_needing_review,
-    );
-    Json(serde_json::json!({
-        "ok": true,
-        "message": message,
-        "series_scanned": report.series_scanned,
-        "files_scanned": report.files_scanned,
-        "files_classified": report.files_classified,
-        "files_needing_review": report.files_needing_review,
-    }))
+pub async fn api_force_library_classify(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "library_classify",
+            "Manual library classify run",
+        )
+        .await;
+        let report = post_processing::scan_library_for_unclassified(&state).await;
+        let message = format!(
+            "Library classify scan complete. Series scanned: {}. Files scanned: {}. Classified: {}. Needs review: {}.",
+            report.series_scanned,
+            report.files_scanned,
+            report.files_classified,
+            report.files_needing_review,
+        );
+        let _ =
+            scheduled_tasks::mark_finished(&state.db, "library_classify", "ok", &message).await;
+        Json(serde_json::json!({
+            "ok": true,
+            "message": message,
+            "series_scanned": report.series_scanned,
+            "files_scanned": report.files_scanned,
+            "files_classified": report.files_classified,
+            "files_needing_review": report.files_needing_review,
+        }))
+    })
+    .await
 }
 
 #[utoipa::path(
@@ -1145,28 +1231,38 @@ pub async fn api_force_library_classify(State(state): State<AppState>) -> Json<s
 pub async fn api_force_upgrade_search(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ =
-        scheduled_tasks::mark_started(&state.db, "upgrade_search", "Manual upgrade search started")
-            .await;
-    match upgrade::run_once(&state).await {
-        Ok(summary) => {
-            let _ =
-                scheduled_tasks::mark_finished(&state.db, "upgrade_search", "ok", &summary.detail)
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "upgrade_search",
+            "Manual upgrade search started",
+        )
+        .await;
+        match upgrade::run_once(&state).await {
+            Ok(summary) => {
+                let _ = scheduled_tasks::mark_finished(
+                    &state.db,
+                    "upgrade_search",
+                    "ok",
+                    &summary.detail,
+                )
+                .await;
+                Ok(Json(serde_json::json!({
+                    "ok": true,
+                    "message": summary.detail,
+                    "series_checked": summary.series_checked,
+                    "episodes_checked": summary.episodes_checked,
+                    "upgrades_grabbed": summary.upgrades_grabbed,
+                })))
+            }
+            Err(err) => {
+                let _ = scheduled_tasks::mark_finished(&state.db, "upgrade_search", "error", &err)
                     .await;
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "message": summary.detail,
-                "series_checked": summary.series_checked,
-                "episodes_checked": summary.episodes_checked,
-                "upgrades_grabbed": summary.upgrades_grabbed,
-            })))
+                Err((axum::http::StatusCode::BAD_GATEWAY, err))
+            }
         }
-        Err(err) => {
-            let _ =
-                scheduled_tasks::mark_finished(&state.db, "upgrade_search", "error", &err).await;
-            Err((axum::http::StatusCode::BAD_GATEWAY, err))
-        }
-    }
+    })
+    .await?
 }
 
 /// Wrapper for the `/api/system/tasks` response so OpenAPI / Swagger
@@ -1643,7 +1739,9 @@ mod endpoint_tests {
         // handler wraps the report into the expected JSON shape.
         let db = in_memory_pool().await;
         let state = build_test_app_state(db, None);
-        let resp = api_force_library_classify(axum::extract::State(state)).await;
+        let resp = api_force_library_classify(axum::extract::State(state))
+            .await
+            .expect("library classify spawn should succeed");
         assert_eq!(resp.0["ok"], true);
         assert_eq!(resp.0["series_scanned"], 0);
         assert_eq!(resp.0["files_scanned"], 0);
