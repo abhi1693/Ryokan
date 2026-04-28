@@ -2,7 +2,16 @@
    fetches the edit form into the modal body; the "+ Add" tile
    fetches the add form into the same body. Save returns the
    whole #dc-section partial so a successful save re-renders the
-   cards (with the modal hidden + reset for free). #}
+   cards (with the modal hidden + reset for free).
+
+   Click handlers go through `onclick="openDcEditModal(...)"` /
+   `openDcAddModal()` instead of `<button hx-get hx-on>` because
+   `<button>` is restricted to phrasing content — putting the
+   `<dl>` + `<div>` card layout inside it makes the parser auto-
+   close the button before the inner blocks, which strands all
+   the hx-* attrs on an empty (invisible) element. The JS
+   functions use `htmx.ajax()` to fetch + swap, so we still get
+   the same wire flow without fighting HTML semantics. #}
 <div id="dc-section" class="dc-section">
     {# Pre-compute flags before the for-loop consumes `rows` —
        askama IntoIterator semantics. #}
@@ -17,26 +26,22 @@
 
         {% for row in rows %}
         <article class="dc-card" id="dc-card-{{ row.id }}">
-            {# Whole-card click target. Fetches the edit form into
-               the shared modal body and opens the modal. The
-               `data-dc-name` attribute carries the row name through
-               to the modal title without needing a server-side
-               populated header. #}
-            <button type="button" class="dc-card-body"
-                    data-dc-name="{{ row.name }}"
-                    hx-get="/settings/download-clients/{{ row.id }}/edit-form"
-                    hx-target="#dc-modal-body"
-                    hx-swap="innerHTML"
-                    hx-on::after-request="if (event.detail.successful) openDownloadClientModal('Editing ' + this.dataset.dcName)"
-                    aria-label="Edit {{ row.name }}">
+            <div class="dc-card-body"
+                 role="button"
+                 tabindex="0"
+                 data-dc-id="{{ row.id }}"
+                 data-dc-name="{{ row.name }}"
+                 onclick="openDcEditModal(this.dataset.dcId, this.dataset.dcName)"
+                 onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDcEditModal(this.dataset.dcId, this.dataset.dcName); }"
+                 aria-label="Edit {{ row.name }}">
                 <div class="dc-card-header">
                     <div class="dc-card-title">
                         <strong class="dc-card-name">{{ row.name }}</strong>
                         {% if row.is_default %}<span class="dc-default-pill" title="This client receives every grab without an explicit indexer pin">Default</span>{% endif %}
                     </div>
-                    {# Status pill — placeholder loads then HTMX swap-
-                       on-load replaces with the probed version, or
-                       a static Disabled pill for disabled rows. #}
+                    {# Status pill — placeholder loads then HTMX swap-on-load
+                       replaces with the probed version, or a static Disabled
+                       pill for disabled rows. #}
                     {% if !row.enabled %}
                     <span class="dc-status-pill dc-status-pill-disabled">Disabled</span>
                     {% else %}
@@ -64,12 +69,13 @@
                     </div>
                     {% endif %}
                 </dl>
-            </button>
-            {# Corner × delete — always visible (the user wants the
-               action discoverable without hovering, and the visual
-               weight is small enough not to compete). Same primitive
-               as CF cards' delete. #}
-            <div class="dc-card-actions">
+            </div>
+            {# Corner × delete — always visible (the user wants the action
+               discoverable without hovering). Stop-propagation on the form
+               so a click on the × doesn't bubble up to the dc-card-body
+               click handler and open the edit modal alongside the
+               delete confirm. #}
+            <div class="dc-card-actions" onclick="event.stopPropagation()">
                 <form method="post" action="/settings/download-clients/delete"
                       hx-post="/settings/download-clients/delete"
                       hx-target="#dc-section"
@@ -87,26 +93,23 @@
         </article>
         {% endfor %}
 
-        {# "+ Add download client" tile — fetches the add form into
-           the modal body and opens the modal. Symmetrical with the
-           per-card edit click so the modal body is always
-           authoritative for whichever flow opened it. #}
-        <button type="button" class="dc-card dc-card-add"
-                hx-get="/api/download-clients/add-form"
-                hx-target="#dc-modal-body"
-                hx-swap="innerHTML"
-                hx-on::after-request="if (event.detail.successful) openDownloadClientModal('Add download client')">
+        {# "+ Add download client" tile — same pattern as the per-card
+           click. Fetches the add form into the modal body via
+           openDcAddModal(). #}
+        <div class="dc-card dc-card-add"
+             role="button"
+             tabindex="0"
+             onclick="openDcAddModal()"
+             onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDcAddModal(); }">
             <div class="dc-card-add-icon">+</div>
             <div class="dc-card-add-label">Add download client</div>
-        </button>
+        </div>
     </div>
 
-    {# Shared modal — body content is swapped in by HTMX on each
-       open (Add or Edit). Initial render is the Add form so the
-       modal is functional even if the user opens it from a stale
-       client (e.g. cached page). After a successful save the
-       section re-renders, which resets this whole modal back to
-       the Add form at display:none — no manual cleanup needed. #}
+    {# Shared modal — body content is replaced by HTMX on each open
+       (Add or Edit). Initial render is the Add form so a section-
+       partial swap (after a successful save) leaves the modal at
+       display:none with the right body for the next Add click. #}
     <div class="modal-backdrop" id="dc-modal" style="display:none"
          role="dialog" aria-modal="true" aria-labelledby="dc-modal-title">
         <div class="modal" style="max-width: 640px">

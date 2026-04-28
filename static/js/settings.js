@@ -131,13 +131,19 @@ function closeCfEditorModal() {
 })();
 
 // ── Settings → Download Clients shared add/edit modal ──────────────
-// One modal serves both flows. Per-card click and "+ Add" tile each
-// HTMX-fetch the right form body into `#dc-modal-body`, then call
-// `openDownloadClientModal(title)` from `hx-on::after-request` to
-// reveal the modal once the body is in place. After a successful
-// save the server returns the section partial which re-renders
-// the modal at display:none with the Add form back in body — no
-// manual reset needed in the success path.
+// One modal serves both flows. Per-card click → openDcEditModal(id,
+// name); "+ Add" tile → openDcAddModal(). Each routes through
+// htmx.ajax() to fetch the right form body into `#dc-modal-body`
+// AND opens the modal immediately (no wait for the round-trip — the
+// modal shows a brief loading-flash on the body until the swap lands).
+// After a successful save the form's hx-target="#dc-section" causes
+// the server's section-partial response to replace the entire
+// section, including the modal, at display:none with the Add form
+// back in body — closing + resetting in one shot. No manual
+// `hx-on::after-request="closeModal()"` needed (and removed because
+// `<button>` containing block content was getting auto-closed by
+// the parser, breaking the inline JS hooks anyway — the click
+// handlers live on `<div role="button">` now).
 function openDownloadClientModal(title) {
     const modal = document.getElementById('dc-modal');
     if (!modal) return;
@@ -155,6 +161,26 @@ function openDownloadClientModal(title) {
 function closeDownloadClientModal() {
     const modal = document.getElementById('dc-modal');
     if (modal) modal.style.display = 'none';
+}
+function openDcEditModal(id, name) {
+    openDownloadClientModal('Editing ' + (name || 'download client'));
+    if (window.htmx) {
+        window.htmx.ajax(
+            'GET',
+            '/settings/download-clients/' + encodeURIComponent(id) + '/edit-form',
+            { target: '#dc-modal-body', swap: 'innerHTML' }
+        );
+    }
+}
+function openDcAddModal() {
+    openDownloadClientModal('Add download client');
+    if (window.htmx) {
+        window.htmx.ajax(
+            'GET',
+            '/api/download-clients/add-form',
+            { target: '#dc-modal-body', swap: 'innerHTML' }
+        );
+    }
 }
 // Backdrop-click + Escape dismissal. Re-bound on every section swap
 // because the modal element is replaced when #dc-section re-renders;
