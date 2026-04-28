@@ -652,6 +652,16 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
     // itself takes 0.5–2s for a typical entry), which empirically
     // stays under the rate limit on a small library.
     const INTER_SERIES_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+    // Hard ceiling on total cooldown waits across all retry rounds for
+    // a single sweep. Without this, a sustained AL outage where
+    // concurrent callers (library page renders, RSS-driven scoring,
+    // transitive relation walks) keep observing 5xx responses
+    // re-arms the cooldown every ~60s — faster than the poll
+    // interval clears it — so the inner wait loop spins forever and
+    // the manual `metadata_rebuild` task row stays at status='running'
+    // until the process restarts. Mirrors the matching cap in
+    // `hydrate_relation_tree`.
+    const MAX_COOLDOWN_WAIT_TOTAL: std::time::Duration = std::time::Duration::from_secs(300);
 
     let sweep_label = if rebuild_artifacts {
         "Cached metadata rebuild"
@@ -750,8 +760,25 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
 
     // ── Retry rounds for deferred series ─────────────────────────────────
     let mut round = 0;
+    let mut total_cooldown_wait = std::time::Duration::ZERO;
     while !deferred.is_empty() && round < MAX_RETRY_ROUNDS {
         if anilist::anilist_cooldown_active() {
+            let remaining_budget = MAX_COOLDOWN_WAIT_TOTAL.saturating_sub(total_cooldown_wait);
+            if remaining_budget.is_zero() {
+                logger::warn(
+                    db,
+                    LogCategory::AniList,
+                    &format!(
+                        "{}: cooldown wait budget exhausted with {} series still deferred; \
+                         marking remaining as failed",
+                        sweep_label,
+                        deferred.len()
+                    ),
+                    "",
+                )
+                .await;
+                break;
+            }
             logger::info(
                 db,
                 LogCategory::AniList,
@@ -764,9 +791,14 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
                 "",
             )
             .await;
+            let wait_start = std::time::Instant::now();
             while anilist::anilist_cooldown_active() {
+                if wait_start.elapsed() >= remaining_budget {
+                    break;
+                }
                 tokio::time::sleep(COOLDOWN_POLL_INTERVAL).await;
             }
+            total_cooldown_wait += wait_start.elapsed();
         }
 
         let to_retry = std::mem::take(&mut deferred);
