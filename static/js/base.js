@@ -505,45 +505,71 @@ window.addEventListener('DOMContentLoaded', function () {
 //   data-ryokan-confirm-danger   (any truthy value tints the Yes
 //                                 button red — use for destructive
 //                                 actions like delete / regenerate)
-// HTMX migration (issue #129) — forms with both `data-ryokan-confirm-*`
-// AND `hx-*` attributes need their submit re-fired through the event
-// system after confirmation, not via `form.submit()` (which bypasses
-// event listeners by spec and would silently skip htmx). The WeakSet
-// guard tracks "this form has been confirmed; let the next submit
-// event through without re-prompting." WeakSet ensures forms get GC'd
-// after they leave the DOM (e.g., after a swap removes the row).
-const ryokanConfirmedForms = new WeakSet();
+// Read the data-ryokan-confirm-* attributes off `elt` and call
+// `window.ryokanConfirm`. Returns the resolved promise. Shared between
+// the native-form submit listener (below) and the htmx:confirm bridge
+// (further below) so the modal copy is configured the same way for
+// both paths.
+function ryokanConfirmFromAttrs(elt) {
+    return window.ryokanConfirm({
+        title: elt.getAttribute('data-ryokan-confirm-title') || 'Confirm',
+        body: elt.getAttribute('data-ryokan-confirm-body') || 'Are you sure?',
+        yesLabel: elt.getAttribute('data-ryokan-confirm-yes') || 'Yes',
+        noLabel: elt.getAttribute('data-ryokan-confirm-no') || 'Cancel',
+        danger: !!elt.getAttribute('data-ryokan-confirm-danger'),
+    });
+}
 
+// HTMX migration (issue #129) — forms split into two paths:
+//
+//   1. Native form-POST forms (no hx-* attrs) — submit listener
+//      intercepts, shows modal, calls `form.submit()` on confirm.
+//      Same as the original pre-HTMX behavior.
+//
+//   2. HTMX-driven forms (any hx-* attr) — handled below via the
+//      `htmx:confirm` event. NOT via the submit listener, because
+//      htmx's own submit listener fires before this one (registration
+//      order: htmx loads first), so by the time we'd `preventDefault`
+//      the AJAX request is already in flight. `htmx:confirm` is
+//      htmx's first-class hook for gating the request itself.
 window.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('form[data-ryokan-confirm-title]').forEach(function (form) {
+        if (form.matches('[hx-get], [hx-post], [hx-put], [hx-patch], [hx-delete]')) {
+            return; // handled by htmx:confirm bridge
+        }
         form.addEventListener('submit', function (ev) {
-            // Re-entrant call after the user already confirmed:
-            // let the event propagate so htmx (or the native form
-            // submission) handles it. Clear the flag so a future
-            // submit on the same form re-prompts.
-            if (ryokanConfirmedForms.has(form)) {
-                ryokanConfirmedForms.delete(form);
-                return;
-            }
             ev.preventDefault();
-            const title = form.getAttribute('data-ryokan-confirm-title') || 'Confirm';
-            const body = form.getAttribute('data-ryokan-confirm-body') || 'Are you sure?';
-            const yesLabel = form.getAttribute('data-ryokan-confirm-yes') || 'Yes';
-            const noLabel = form.getAttribute('data-ryokan-confirm-no') || 'Cancel';
-            const danger = !!form.getAttribute('data-ryokan-confirm-danger');
-            window.ryokanConfirm({
-                title: title, body: body, yesLabel: yesLabel, noLabel: noLabel,
-                danger: danger,
-            }).then(function (result) {
+            ryokanConfirmFromAttrs(form).then(function (result) {
                 if (!result || !result.ok) return;
-                // requestSubmit() (vs submit()) fires a real submit
-                // event so htmx's listener can intercept it for the
-                // hx-* attribute path. This re-enters the handler
-                // above, where the WeakSet guard lets it through.
-                ryokanConfirmedForms.add(form);
-                form.requestSubmit();
+                // HTMLFormElement.submit() bypasses event handlers
+                // by spec — this listener won't re-fire, so no
+                // re-prompt loop possible.
+                form.submit();
             });
         });
+    });
+});
+
+// HTMX migration (issue #129) — bridge `data-ryokan-confirm-*` into
+// htmx's request-confirmation hook. Fires for EVERY htmx request, so
+// we filter on the opt-in attr. `evt.preventDefault()` stops the
+// request from going out; on user-confirm we call
+// `evt.detail.issueRequest(true)` to proceed (the `true` argument
+// skips this hook on the re-issue so we don't re-prompt).
+//
+// Listener attached to <body> rather than per-form because htmx
+// processes elements added by swaps automatically; per-form
+// registration would miss any element added to the DOM after
+// initial load (e.g., a row added by a future upsert response).
+document.body.addEventListener('htmx:confirm', function (ev) {
+    var elt = ev.detail && ev.detail.elt;
+    if (!elt || !elt.hasAttribute('data-ryokan-confirm-title')) return;
+    ev.preventDefault();
+    ryokanConfirmFromAttrs(elt).then(function (result) {
+        if (result && result.ok) {
+            ev.detail.issueRequest(true);
+        }
+        // Cancel: request stays prevented; row stays put. Nothing to do.
     });
 });
 
