@@ -14,6 +14,17 @@ rust-version = "1.95"
 # without the helpers. CI flips it on for the test step.
 test-support = []
 
+# Browser-driving e2e tests for the HTMX migration (issue #129). Opt-in
+# because they require a running geckodriver (or chromedriver) on
+# localhost:4444 + a Firefox/LibreWolf binary, and pull `fantoccini`
+# into the dev-dep tree. NOT enabled in CI — they're a local-iteration
+# tool to drive the migration faster, and the plan is to remove this
+# infrastructure (feature flag, dev-dep, test target) once the HTMX
+# migration is complete. Run locally with:
+#   geckodriver --port=4444 &
+#   cargo test --features browser-e2e --test htmx_browser_e2e
+browser-e2e = ["dep:fantoccini"]
+
 # Each integration test target under `tests/` lists the `test-support`
 # feature in `required-features` so a plain `cargo test` (without the
 # flag) silently skips them instead of failing the build. This keeps
@@ -32,6 +43,11 @@ required-features = ["test-support"]
 [[test]]
 name = "htmx_settings_delete"
 path = "tests/htmx_settings_delete.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "htmx_grab_bag"
+path = "tests/htmx_grab_bag.rs"
 required-features = ["test-support"]
 
 [[test]]
@@ -58,6 +74,21 @@ required-features = ["test-support"]
 name = "rss_user_feed_e2e"
 path = "tests/rss_user_feed_e2e.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "htmx_browser_e2e"
+path = "tests/htmx_browser_e2e.rs"
+required-features = ["test-support", "browser-e2e"]
+
+[[test]]
+name = "htmx_browser_e2e_phase1"
+path = "tests/htmx_browser_e2e_phase1.rs"
+required-features = ["test-support", "browser-e2e"]
+
+[[test]]
+name = "htmx_browser_e2e_grab_bag"
+path = "tests/htmx_browser_e2e_grab_bag.rs"
+required-features = ["test-support", "browser-e2e"]
 
 [dependencies]
 # Web framework + async runtime
@@ -168,6 +199,16 @@ ammonia = "4"
 
 # Anime release title tokenization (wraps bundled anitomy C++ lib, compiled via cc)
 anitomy = "0.2"
+
+# fantoccini: WebDriver client for browser-driven e2e tests of the
+# HTMX migration (issue #129). `optional = true` + the `browser-e2e`
+# feature gate means the dep only enters the build graph when
+# explicitly opted in — `cargo build` / `cargo test` (without the
+# flag) don't pull it, so prod and CI stays unaffected. Listed here
+# rather than in [dev-dependencies] because Cargo doesn't allow
+# optional dev-deps. The `browser-e2e` feature is planned to be
+# removed once the HTMX migration is complete; this dep goes with it.
+fantoccini = { version = "0.22", optional = true }
 
 [dev-dependencies]
 # Used only by the env-gated live_smoke tests for the DownloadClient

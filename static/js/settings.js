@@ -438,87 +438,15 @@ function testQbit(btn) {
     });
 }
 
-function testDownloadClient(btn) {
-    // Lives next to the Add/Edit Download Client form. Walks up to
-    // the surrounding <form> and POSTs every field needed for a
-    // dry-run connection test — without saving the row. Result
-    // lands in the sibling .dc-test-result span.
-    const form = btn.closest('form');
-    const result = form ? form.querySelector('.dc-test-result') : null;
-    if (!form || !result) return;
-    const payload = {
-        kind: form.querySelector('[name=kind]').value,
-        url: form.querySelector('[name=url]').value,
-        username: (form.querySelector('[name=username]') || {}).value || '',
-        password: (form.querySelector('[name=password]') || {}).value || '',
-        label: (form.querySelector('[name=label]') || {}).value || '',
-    };
-    btn.disabled = true;
-    result.textContent = 'Testing...';
-    fetch('/api/download-clients/test', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    })
-    .then(async r => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.message || 'Connection failed');
-        result.textContent = data.message;
-    })
-    .catch(err => {
-        result.textContent = err.message;
-    })
-    .finally(() => {
-        btn.disabled = false;
-    });
-}
-
-function testJellyfin(btn) {
-    const result = document.getElementById('jellyfin-test-result');
-    const payload = {
-        jellyfin_url: document.getElementById('jellyfin_url').value,
-        jellyfin_api_key: document.getElementById('jellyfin_api_key').value,
-    };
-    btn.disabled = true;
-    result.textContent = 'Testing...';
-    fetch('/api/jellyfin/test', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    })
-    .then(async r => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.message || 'Connection failed');
-        result.textContent = data.message;
-    })
-    .catch(err => {
-        result.textContent = err.message;
-    })
-    .finally(() => {
-        btn.disabled = false;
-    });
-}
-
-function refreshJellyfin(btn) {
-    const result = document.getElementById('jellyfin-test-result');
-    btn.disabled = true;
-    result.textContent = 'Refreshing...';
-    fetch('/api/jellyfin/refresh', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-    })
-    .then(async r => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.message || 'Refresh failed');
-        result.textContent = data.message || 'Library refresh requested.';
-    })
-    .catch(err => {
-        result.textContent = err.message;
-    })
-    .finally(() => {
-        btn.disabled = false;
-    });
-}
+// HTMX migration (issue #129, Phase 1.5 grab-bag) — testDownloadClient,
+// testJellyfin, refreshJellyfin all removed. The buttons now use
+// `hx-post` + `hx-include="closest form"` + `hx-target="next .dc-test-result"`
+// (or `#jellyfin-test-result` for the singletons). The server returns
+// the rendered partial at `templates/partials/settings/connection_test_result.html`,
+// always 200 so HTMX swaps in both success and failure (htmx 2.x's
+// default error policy skips the swap on 4xx/5xx). Loading state via
+// `hx-disabled-elt="this"` (htmx adds `disabled` for the duration of
+// the request and removes it on response).
 
 // Auto-check connection health on integrations tab load.
 // The download-client status dispatches by `type` (sonarr_impl_name:

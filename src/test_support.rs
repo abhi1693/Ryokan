@@ -252,6 +252,269 @@ pub fn handler_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Variant of [`logged_in_session`] that doesn't rebuild the AppState
+/// — used by the browser-e2e harness, which needs the *same* state
+/// the spawned app is using (so the in-memory pool's seeded data is
+/// visible to the handlers under test). Returns the cookie header
+/// value `session=<hex>`.
+pub async fn logged_in_session_for(db: &SqlitePool) -> (AppState, String) {
+    // Same shape as `logged_in_session` but pulls the second-half
+    // state-building call out so callers that already have an
+    // AppState don't double-build. Kept under a distinct name to
+    // avoid touching every existing call site.
+    let user_id = crate::models::user::create_user(db, "test-user", "hunter2-test-password")
+        .await
+        .expect("create test user");
+    let token = crate::models::session::create_session(db, user_id)
+        .await
+        .expect("create session");
+    let state = build_test_app_state(db.clone(), None);
+    (state, format!("session={}", token))
+}
+
+// ─── Browser-e2e harness (issue #129 HTMX migration) ────────────────
+//
+// Gated on `cfg(feature = "browser-e2e")` so the inline test fixtures
+// + ServeDir wiring don't pull `tower-http`'s `fs` feature into the
+// graph for plain `cargo test --features test-support` runs. The
+// `tower-http = ["fs"]` feature is already on for the production
+// crate, so this gate is a coupling reminder: when the migration is
+// complete and the e2e infra is removed, this whole module section
+// goes too. See the `browser-e2e` feature comment in Cargo.toml.
+
+#[cfg(feature = "browser-e2e")]
+mod e2e {
+    use super::*;
+    use askama::Template;
+    use axum::extract::Query;
+    use axum::middleware;
+    use axum::response::Html;
+    use axum::routing::post;
+    use serde::Deserialize;
+    use tower_http::services::ServeDir;
+
+    /// Fixture-page query: which series + episode to render the
+    /// monitor button for. Both required so the test harness has to
+    /// be explicit about what state it seeded.
+    #[derive(Deserialize)]
+    pub(crate) struct FixtureQuery {
+        pub series_id: i64,
+        pub episode_number: i32,
+    }
+
+    /// Fixture template — full HTML page with the htmx script tag
+    /// and the monitor-button partial rendered for the requested
+    /// series/episode. Reads the live `monitored` state from the DB
+    /// so the test asserts on real state, not a hardcoded literal.
+    #[derive(Template)]
+    #[template(
+        source = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Browser-e2e fixture</title>
+<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+</head>
+<body>
+<button class="ep-mon-btn {% if monitored %}ep-mon-yes{% else %}ep-mon-no{% endif %}"
+    type="button"
+    hx-post="/api/library/episode-monitoring"
+    hx-vals='{"series_id": {{ series_id }}, "episode_number": {{ episode_number }}, "monitored": {% if monitored %}false{% else %}true{% endif %}}'
+    hx-target="this"
+    hx-swap="outerHTML">{% if monitored %}Yes{% else %}No{% endif %}</button>
+</body>
+</html>
+"#,
+        ext = "html"
+    )]
+    struct FixturePage {
+        series_id: i64,
+        episode_number: i32,
+        monitored: bool,
+    }
+
+    /// Fixture page for Phase 1.5 grab-bag connection-test buttons
+    /// (issue #129). Hard-codes one form per endpoint with a sibling
+    /// result span — the test drives the click and asserts on the
+    /// post-swap span text + color. Mirrors the production button
+    /// shape from `templates/partials/settings/{integrations,download_clients}.html`
+    /// closely enough that a divergence in `hx-include` semantics
+    /// would be caught here.
+    // Note: r##"..."## (not r#"..."#) — `hx-target="#foo"` contains
+    // `"#` which would close a single-`#` raw string early.
+    #[derive(Template)]
+    #[template(
+        source = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Connection-test fixture</title>
+<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+</head>
+<body>
+<form id="jellyfin-form">
+    <input type="text" name="jellyfin_url" id="jellyfin_url" value="http://127.0.0.1:1">
+    <input type="text" name="jellyfin_api_key" id="jellyfin_api_key" value="bogus">
+    <button type="button" id="btn-jellyfin-test"
+            hx-post="/api/jellyfin/test"
+            hx-include="closest form"
+            hx-target="#jellyfin-test-result"
+            hx-swap="innerHTML"
+            hx-disabled-elt="this">Test</button>
+    <button type="button" id="btn-jellyfin-refresh"
+            hx-post="/api/jellyfin/refresh"
+            hx-target="#jellyfin-test-result"
+            hx-swap="innerHTML"
+            hx-disabled-elt="this">Refresh Library</button>
+    <span id="jellyfin-test-result"></span>
+</form>
+<form id="dc-form">
+    <input type="text" name="kind" value="qbittorrent">
+    <input type="text" name="url" value="">
+    <input type="text" name="username" value="">
+    <input type="password" name="password" value="">
+    <input type="text" name="label" value="">
+    <button type="button" id="btn-dc-test"
+            hx-post="/api/download-clients/test"
+            hx-include="closest form"
+            hx-target="next .dc-test-result"
+            hx-swap="innerHTML"
+            hx-disabled-elt="this">Test connection</button>
+    <span class="dc-test-result"></span>
+</form>
+</body>
+</html>
+"##,
+        ext = "html"
+    )]
+    struct ConnectionTestFixturePage;
+
+    pub(crate) async fn connection_test_fixture()
+    -> Result<Html<String>, (axum::http::StatusCode, String)> {
+        let html = ConnectionTestFixturePage
+            .render()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Html(html))
+    }
+
+    pub(crate) async fn fixture_page(
+        axum::extract::State(state): axum::extract::State<AppState>,
+        Query(q): Query<FixtureQuery>,
+    ) -> Result<Html<String>, (axum::http::StatusCode, String)> {
+        let monitored = crate::models::monitoring::get_series_states(&state.db, q.series_id)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .find(|row| row.episode_number == q.episode_number)
+            .map(|row| row.monitored)
+            // Default to `true` so a missing row still renders a
+            // pre-click "Yes" — the test seeds explicitly, so this
+            // path is only hit on author error.
+            .unwrap_or(true);
+        let page = FixturePage {
+            series_id: q.series_id,
+            episode_number: q.episode_number,
+            monitored,
+        }
+        .render()
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Html(page))
+    }
+
+    /// Build the e2e router. Mounts only what the browser tests
+    /// drive: `/static/*` for vendored htmx, `/login` for cookie
+    /// preload, the fixture page, and the real episode-monitoring
+    /// API behind `require_auth` so the cookie actually carries
+    /// weight. New e2e fixtures get added here as the migration
+    /// expands — keep this narrow, not "the whole app router."
+    pub fn build(state: AppState) -> Router {
+        // Static dir is repo-relative; tests can run from anywhere
+        // (cargo flips CWD around) so resolve via CARGO_MANIFEST_DIR.
+        let static_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
+
+        let public = Router::new().route(
+            "/login",
+            get(crate::handlers::auth::login_page).post(crate::handlers::auth::login_submit),
+        );
+
+        let protected = Router::new()
+            .route("/__test/episode-monitor-fixture", get(fixture_page))
+            .route(
+                "/__test/connection-test-fixture",
+                get(connection_test_fixture),
+            )
+            .route(
+                "/api/library/episode-monitoring",
+                post(crate::handlers::library::crud::set_episode_monitoring),
+            )
+            // ─── Phase 1.5 grab-bag (issue #129) ───────────────────
+            .route(
+                "/downloads",
+                get(crate::handlers::downloads::downloads_page),
+            )
+            .route(
+                "/api/downloads/blocklist/remove",
+                post(crate::handlers::downloads::api_blocklist_remove),
+            )
+            .route(
+                "/api/jellyfin/test",
+                post(crate::handlers::settings::jellyfin_test),
+            )
+            .route(
+                "/api/jellyfin/refresh",
+                post(crate::handlers::settings::jellyfin_refresh),
+            )
+            .route(
+                "/api/download-clients/test",
+                post(crate::handlers::settings::download_clients::settings_download_clients_test),
+            )
+            // ─── Phase 1 settings-page surface ──────────────────────
+            // Real production settings page + the four per-row delete
+            // endpoints + the upsert/set-default routes the page form
+            // posts to. Mounted here (rather than fixtures) so the
+            // browser tests render the real templates and catch any
+            // hx-attribute drift between the test scaffolding and
+            // production.
+            .route(
+                "/settings",
+                get(crate::handlers::settings::settings_page),
+            )
+            .route(
+                "/settings/indexers/delete",
+                post(crate::handlers::settings::indexers::settings_indexers_delete),
+            )
+            .route(
+                "/settings/download-clients/delete",
+                post(crate::handlers::settings::download_clients::settings_download_clients_delete),
+            )
+            .route(
+                "/settings/download-clients/set-default",
+                post(crate::handlers::settings::download_clients::settings_download_clients_set_default),
+            )
+            .route(
+                "/settings/custom-formats/delete",
+                post(crate::handlers::settings::custom_formats::settings_custom_formats_delete),
+            )
+            .route(
+                "/settings/groups/delete",
+                post(crate::handlers::settings::settings_groups_delete),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::handlers::auth::require_auth,
+            ));
+
+        Router::new()
+            .merge(public)
+            .merge(protected)
+            .nest_service("/static", ServeDir::new(static_dir))
+            .with_state(state)
+    }
+}
+
+#[cfg(feature = "browser-e2e")]
+pub use e2e::build as e2e_browser_app;
+
 /// Persist a `Config` row with the Sonarr shim enabled and a known
 /// API key, so arr-compat tests can exercise authenticated paths
 /// without round-tripping through `handlers::settings::save_settings`.

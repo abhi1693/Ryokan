@@ -1,9 +1,12 @@
 use askama::Template;
 use axum::{
+    extract::Form,
     extract::Query,
     extract::State,
-    response::{Html, Json},
+    http::StatusCode,
+    response::{Html, IntoResponse, Json, Redirect, Response},
 };
+use axum_htmx::HxRequest;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -224,7 +227,7 @@ pub struct TorrentDeleteForm {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct BlocklistRemoveForm {
-    id: i64,
+    pub id: i64,
 }
 
 #[utoipa::path(
@@ -313,21 +316,33 @@ pub async fn api_delete_torrent(
     path = "/api/downloads/blocklist/remove",
     tag = "Downloads",
     summary = "Remove from blocklist",
-    description = "Remove a grabbed torrent entry from the blocklist by its database ID.",
+    description = "Remove a grabbed torrent entry from the blocklist by its database ID. \
+                   HTMX requests get an empty 200 (so `hx-swap=outerHTML` removes the row); \
+                   non-HTMX requests get a 303 redirect back to the blocklist tab. \
+                   Form-encoded body (was JSON pre-issue-#129; the JSON path had no API \
+                   consumer beyond the JS that this handler's HTMX form replaces).",
     request_body = BlocklistRemoveForm,
     responses(
-        (status = 200, description = "Entry removed", body = serde_json::Value),
+        (status = 200, description = "Entry removed (HTMX)"),
+        (status = 303, description = "Entry removed (form-POST fallback) — redirects to /downloads?tab=blocklist"),
         (status = 500, description = "Database error"),
     ),
 )]
 pub async fn api_blocklist_remove(
     State(state): State<AppState>,
-    Json(form): Json<BlocklistRemoveForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<BlocklistRemoveForm>,
+) -> Result<Response, (StatusCode, String)> {
     grabbed_torrents::remove(&state.db, form.id)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({"ok": true})))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if is_htmx {
+        // Empty 200 — `hx-swap=outerHTML` on the row strips it from
+        // the DOM. Same shape as the Phase 1 settings deletes.
+        Ok(StatusCode::OK.into_response())
+    } else {
+        Ok(Redirect::to("/downloads?tab=blocklist&msg=Entry+removed").into_response())
+    }
 }
 
 #[cfg(test)]

@@ -354,3 +354,135 @@ async fn groups_delete_with_empty_name_returns_400_for_htmx_request() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+// ─── Error-path coverage (issue #129 mutation-audit follow-up) ──────
+//
+// The `Err(_) =>` arms of the delete handlers contain `if is_htmx`
+// branches that return 5xx (so `htmx:responseError` fires and the
+// row stays put). Coverage report (cargo llvm-cov) showed these
+// branches were uncovered — the happy-path tests above only exercise
+// `Ok(_)`. These tests force the error path by `pool.close()`-ing
+// the SQLite connection before invoking the handler, so the
+// underlying `delete()` returns `sqlx::Error::PoolClosed`.
+
+async fn closed_pool() -> SqlitePool {
+    let pool = in_memory_pool().await;
+    pool.close().await;
+    pool
+}
+
+#[tokio::test]
+async fn indexers_delete_returns_500_on_db_error_for_htmx_request() {
+    let db = closed_pool().await;
+    let state = build_test_app_state(db, None);
+
+    let resp = settings_indexers_delete(
+        State(state),
+        HxRequest(true),
+        Form(IndexerDeleteForm { id: 1 }),
+    )
+    .await
+    .into_response();
+
+    // `delete()` returns Err → handler hits the
+    // `if is_htmx { StatusCode::INTERNAL_SERVER_ERROR }` branch.
+    // 5xx is the load-bearing signal so htmx skips the swap (per
+    // 2.x default error-response policy) and the row stays put,
+    // letting the user retry.
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn indexers_delete_returns_redirect_with_err_on_db_error_for_non_htmx_request() {
+    let db = closed_pool().await;
+    let state = build_test_app_state(db, None);
+
+    let resp = settings_indexers_delete(
+        State(state),
+        HxRequest(false),
+        Form(IndexerDeleteForm { id: 1 }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = extract_location(&resp).unwrap_or_default();
+    assert!(
+        location.contains("err="),
+        "non-HTMX failure must surface an err= flash; got: {location}"
+    );
+}
+
+#[tokio::test]
+async fn download_clients_delete_returns_500_on_db_error_for_htmx_request() {
+    let db = closed_pool().await;
+    let state = build_test_app_state(db, None);
+
+    let resp = settings_download_clients_delete(
+        State(state),
+        HxRequest(true),
+        Form(DownloadClientIdForm { id: 1 }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn download_clients_delete_returns_redirect_with_err_on_db_error_for_non_htmx_request() {
+    let db = closed_pool().await;
+    let state = build_test_app_state(db, None);
+
+    let resp = settings_download_clients_delete(
+        State(state),
+        HxRequest(false),
+        Form(DownloadClientIdForm { id: 1 }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = extract_location(&resp).unwrap_or_default();
+    assert!(
+        location.contains("err="),
+        "non-HTMX failure must surface an err= flash; got: {location}"
+    );
+}
+
+#[tokio::test]
+async fn custom_formats_delete_returns_500_on_db_error_for_htmx_request() {
+    let db = closed_pool().await;
+    let state = build_test_app_state(db, None);
+
+    let resp = settings_custom_formats_delete(
+        State(state),
+        HxRequest(true),
+        Form(CustomFormatDeleteForm { id: 1 }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn custom_formats_delete_returns_redirect_with_err_on_db_error_for_non_htmx_request() {
+    let db = closed_pool().await;
+    let state = build_test_app_state(db, None);
+
+    let resp = settings_custom_formats_delete(
+        State(state),
+        HxRequest(false),
+        Form(CustomFormatDeleteForm { id: 1 }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = extract_location(&resp).unwrap_or_default();
+    assert!(
+        location.contains("err="),
+        "non-HTMX failure must surface an err= flash; got: {location}"
+    );
+}

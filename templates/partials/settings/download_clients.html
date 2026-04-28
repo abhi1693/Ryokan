@@ -126,8 +126,13 @@
         </div>
         <div class="settings-inline-actions">
             <button type="submit" class="btn btn-primary">Save changes</button>
-            <button type="button" class="btn btn-secondary" onclick="testDownloadClient(this)">Test connection</button>
-            <span class="dc-test-result form-hint"></span>
+            <button type="button" class="btn btn-secondary"
+                    hx-post="/api/download-clients/test"
+                    hx-include="closest form"
+                    hx-target="next .dc-test-result"
+                    hx-swap="innerHTML"
+                    hx-disabled-elt="this">Test connection</button>
+            <span class="dc-test-result form-hint" aria-live="polite"></span>
         </div>
     </form>
     {% else %}
@@ -194,8 +199,13 @@
         </div>
         <div class="settings-inline-actions">
             <button type="submit" class="btn btn-primary">Add client</button>
-            <button type="button" class="btn btn-secondary" onclick="testDownloadClient(this)">Test connection</button>
-            <span class="dc-test-result form-hint"></span>
+            <button type="button" class="btn btn-secondary"
+                    hx-post="/api/download-clients/test"
+                    hx-include="closest form"
+                    hx-target="next .dc-test-result"
+                    hx-swap="innerHTML"
+                    hx-disabled-elt="this">Test connection</button>
+            <span class="dc-test-result form-hint" aria-live="polite"></span>
         </div>
     </form>
     {% endif %}

@@ -1,0 +1,12 @@
+{# HTMX swap target for connection-test buttons (Phase 1.5 grab-bag,
+   issue #129). Rendered into the result <span> by `hx-swap="innerHTML"`.
+   The outer <span> in the page stays put — only its contents change —
+   so a future re-test re-uses the same target without losing the
+   form's surrounding markup. Color is inline so the partial doesn't
+   need a per-class CSS rule (parity with the pre-htmx behavior, which
+   wrote plain text into a `.form-hint` span). #}
+{% if ok %}
+<span class="connection-test-msg" style="color:var(--green)">{{ message }}</span>
+{% else %}
+<span class="connection-test-msg" style="color:var(--red)">{{ message }}</span>
+{% endif %}

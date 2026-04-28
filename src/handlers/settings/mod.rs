@@ -402,8 +402,34 @@ pub struct QbitTestForm {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct JellyfinTestForm {
-    jellyfin_url: String,
-    jellyfin_api_key: String,
+    pub jellyfin_url: String,
+    pub jellyfin_api_key: String,
+}
+
+/// HTMX swap-target partial for connection-test buttons (Phase 1.5
+/// grab-bag, issue #129). Used as the `hx-target` content for
+/// `/api/jellyfin/test`, `/api/jellyfin/refresh`, and the per-row
+/// `/api/download-clients/test` endpoint. Renders a green message
+/// on success and a red one on failure; previously the JS just wrote
+/// plain text into the same element, so the only visible change is
+/// color.
+#[derive(Template)]
+#[template(path = "partials/settings/connection_test_result.html")]
+pub struct ConnectionTestResultPartial {
+    pub ok: bool,
+    pub message: String,
+}
+
+impl ConnectionTestResultPartial {
+    /// Render to a 200 OK Html response. Intentionally always 200
+    /// (success and failure both render), since HTMX's default error-
+    /// response policy in 2.x is "don't swap into the target" — and we
+    /// *do* want the failure message to land in the target. Returning
+    /// 502 on failure would silently fall through and leave the spinner
+    /// visible.
+    pub fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
 }
 
 /// Resolve the `grab_preview_mode` value to persist on save.
@@ -1280,32 +1306,36 @@ pub async fn qbit_test(
     path = "/api/jellyfin/test",
     tag = "System",
     summary = "Test Jellyfin connection",
-    description = "Test connectivity to a Jellyfin instance with the provided URL and API key.",
+    description = "Test connectivity to a Jellyfin instance with the provided URL and API key. \
+                   Returns an HTML fragment (Phase 1.5 grab-bag, issue #129) — `hx-swap=innerHTML` \
+                   on the result span renders the message inline. Always 200 so HTMX swaps in both \
+                   success and failure cases (htmx 2.x default error policy skips the swap on 4xx/5xx).",
     request_body = JellyfinTestForm,
     responses(
-        (status = 200, description = "Connection successful", body = serde_json::Value),
-        (status = 502, description = "Connection failed"),
+        (status = 200, description = "Result rendered as an HTML fragment (success or failure)"),
     ),
 )]
-pub async fn jellyfin_test(
-    Json(form): Json<JellyfinTestForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+pub async fn jellyfin_test(Form(form): Form<JellyfinTestForm>) -> Response {
     let client = JellyfinClient::new(form.jellyfin_url.trim(), &form.jellyfin_api_key);
 
-    match client.test_connection().await {
-        Ok(info) => Ok(Json(serde_json::json!({
-            "ok": true,
-            "message": if info.server_name.trim().is_empty() {
+    let result = match client.test_connection().await {
+        Ok(info) => ConnectionTestResultPartial {
+            ok: true,
+            message: if info.server_name.trim().is_empty() {
                 format!("Connected to Jellyfin {}", info.version)
             } else {
-                format!("Connected to Jellyfin {} ({})", info.server_name, info.version)
-            }
-        }))),
-        Err(err) => Err((
-            axum::http::StatusCode::BAD_GATEWAY,
-            serde_json::json!({"ok": false, "message": err}).to_string(),
-        )),
-    }
+                format!(
+                    "Connected to Jellyfin {} ({})",
+                    info.server_name, info.version
+                )
+            },
+        },
+        Err(err) => ConnectionTestResultPartial {
+            ok: false,
+            message: err,
+        },
+    };
+    result.into_html_ok()
 }
 
 #[utoipa::path(
@@ -1375,35 +1405,35 @@ pub async fn api_health(State(state): State<AppState>) -> Json<serde_json::Value
     path = "/api/jellyfin/refresh",
     tag = "System",
     summary = "Refresh Jellyfin library",
-    description = "Trigger a library scan in Jellyfin to pick up newly added media.",
+    description = "Trigger a library scan in Jellyfin to pick up newly added media. \
+                   Returns an HTML fragment for HTMX swap into the test-result span; always 200 \
+                   (see /api/jellyfin/test for the swap-on-error rationale).",
     responses(
-        (status = 200, description = "Library refresh triggered", body = serde_json::Value),
-        (status = 400, description = "Jellyfin not configured"),
-        (status = 502, description = "Refresh failed"),
+        (status = 200, description = "Result rendered as an HTML fragment (success or failure)"),
     ),
 )]
-pub async fn jellyfin_refresh(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+pub async fn jellyfin_refresh(State(state): State<AppState>) -> Response {
     let client = {
         let jellyfin = state.jellyfin.read().await;
-        jellyfin
-            .as_ref()
-            .ok_or((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Jellyfin not configured".to_string(),
-            ))?
-            .clone()
+        jellyfin.as_ref().cloned()
     };
-
-    client
-        .refresh_library()
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
-    Ok(Json(
-        serde_json::json!({"ok": true, "message": "Jellyfin library refresh queued"}),
-    ))
+    let result = match client {
+        None => ConnectionTestResultPartial {
+            ok: false,
+            message: "Jellyfin not configured".to_string(),
+        },
+        Some(c) => match c.refresh_library().await {
+            Ok(()) => ConnectionTestResultPartial {
+                ok: true,
+                message: "Jellyfin library refresh queued".to_string(),
+            },
+            Err(err) => ConnectionTestResultPartial {
+                ok: false,
+                message: err,
+            },
+        },
+    };
+    result.into_html_ok()
 }
 
 #[cfg(test)]

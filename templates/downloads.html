@@ -149,9 +149,19 @@
                     <td><div class="dl-torrent-name" title="{{ entry.torrent_name }}">{{ entry.torrent_name }}</div></td>
                     <td>{% for ep in entry.episode_numbers %}{% if !loop.first %}, {% endif %}{{ ep }}{% endfor %}</td>
                     <td>
-                        <button class="btn btn-ghost btn-sm" onclick="removeFromBlocklist({{ entry.id }})" title="Remove from blocklist">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
-                        </button>
+                        <form method="post" action="/api/downloads/blocklist/remove" style="display:inline"
+                              hx-post="/api/downloads/blocklist/remove"
+                              hx-target="closest tr"
+                              hx-swap="outerHTML"
+                              data-ryokan-confirm-title="Remove from blocklist?"
+                              data-ryokan-confirm-body="Remove '{{ entry.torrent_name }}' from the blocklist. Future searches will be allowed to grab it again."
+                              data-ryokan-confirm-yes="Remove"
+                              data-ryokan-confirm-no="Cancel">
+                            <input type="hidden" name="id" value="{{ entry.id }}">
+                            <button type="submit" class="btn btn-ghost btn-sm" title="Remove from blocklist">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                            </button>
+                        </form>
                     </td>
                 </tr>
                 {% endfor %}
