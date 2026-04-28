@@ -202,20 +202,11 @@ pub async fn settings_download_clients_upsert(
     if url.is_empty() {
         return Redirect::to("/settings?tab=downloads&err=URL+required").into_response();
     }
-    // The url crate accepts `localhost:8080` as scheme=localhost,
-    // path=8080 — a perfectly valid URL by RFC 3986 even though
-    // it's not what the user meant. The bad save then surfaces at
-    // probe time as a cryptic `reqwest builder error for url
-    // (localhost:8080/api)`. Reject anything that isn't http(s) at
-    // the form layer so the bad shape never lands in the DB.
-    match reqwest::Url::parse(url) {
-        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
-        _ => {
-            return Redirect::to(
-                "/settings?tab=downloads&err=URL+must+start+with+http%3A%2F%2F+or+https%3A%2F%2F",
-            )
-            .into_response();
-        }
+    // Permissive parse — each client impl normalizes the URL itself
+    // (prepending `http://` for scheme-less local addresses), so we
+    // only reject inputs the url crate can't make sense of at all.
+    if reqwest::Url::parse(url).is_err() && reqwest::Url::parse(&format!("http://{url}")).is_err() {
+        return Redirect::to("/settings?tab=downloads&err=Invalid+URL+syntax").into_response();
     }
 
     let payload = DownloadClientForm {
@@ -845,21 +836,17 @@ mod tests {
         let resp =
             settings_download_clients_upsert(State(state), axum_htmx::HxRequest(false), Form(form))
                 .await;
-        // The validator rejects anything that isn't http(s); the
-        // err= text changed from "Invalid URL syntax" to "URL must
-        // start with http://...". Match on the new shape.
-        assert!(extract_location(resp).contains("err=URL+must+start+with"));
+        assert!(extract_location(resp).contains("err=Invalid+URL+syntax"));
     }
 
     #[tokio::test]
-    async fn upsert_rejects_localhost_without_scheme() {
-        // Regression — `reqwest::Url::parse("localhost:8085")`
-        // returns Ok with scheme=localhost, path=8085, so the
-        // pre-fix validator let it through. The bad save then
-        // surfaced at probe time as "SAB request failed: builder
-        // error for url (localhost:8085/api)" with no hint about
-        // the missing scheme. Pin the new shape so a future
-        // refactor can't silently regress.
+    async fn upsert_accepts_localhost_without_scheme() {
+        // The picker's UX promise: typing `localhost:8085` works for
+        // every client kind. Each impl's `normalize_base_url()`
+        // prepends `http://` for local addresses; SAB used to be the
+        // outlier (no normalize), which surfaced as "builder error
+        // for url" at probe time. Pin the permissive shape so a
+        // future stricter validator can't break the consistent UX.
         let db = in_memory_pool().await;
         let state = build_test_app_state(db.clone(), None);
         let mut form = upsert_form(None, "sab");
@@ -868,13 +855,12 @@ mod tests {
         let resp =
             settings_download_clients_upsert(State(state), axum_htmx::HxRequest(false), Form(form))
                 .await;
-        assert!(extract_location(resp).contains("err=URL+must+start+with"));
-        // The bad row must NOT have been persisted.
-        let rows = list_all(&db).await.unwrap();
         assert!(
-            rows.is_empty(),
-            "no-scheme URL must be rejected, not silently persisted"
+            extract_location(resp).contains("msg="),
+            "scheme-less localhost URL must be accepted; the client impl normalizes it"
         );
+        let rows = list_all(&db).await.unwrap();
+        assert_eq!(rows.len(), 1, "row must persist with the user-entered URL");
     }
 
     #[tokio::test]
