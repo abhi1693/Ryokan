@@ -10,7 +10,19 @@ use crate::services::source::ClassificationResult;
 pub struct NeedsReviewEntry {
     pub series_id: i64,
     pub series_anilist_id: i64,
+    /// Default-language title (English with romaji fallback). Kept for
+    /// callers that don't honor the user's title-language preference.
+    /// The Needs Review UI uses the three variants below to drive the
+    /// `.title-switcher` CSS pattern; this field stays as a no-JS
+    /// fallback.
     pub series_title: String,
+    /// Title variants for the language-preference switcher. Empty
+    /// strings when the source row didn't carry that variant; the
+    /// template's `{% if !empty %}…{% else %}fallback{% endif %}`
+    /// chain mirrors what library-card titles do.
+    pub series_title_english: String,
+    pub series_title_romaji: String,
+    pub series_title_native: String,
     pub cover_url: String,
     pub episode_number: i32,
     pub quality_tag: String,
@@ -54,6 +66,9 @@ pub async fn get_needs_review(db: &SqlitePool) -> Result<Vec<NeedsReviewEntry>, 
                 COALESCE(t.classification_evidence, '') AS classification_evidence,
                 s.anilist_id AS series_anilist_id,
                 COALESCE(NULLIF(s.title_english, ''), NULLIF(s.title_romaji, ''), s.title) AS series_title,
+                COALESCE(s.title_english, '') AS series_title_english,
+                COALESCE(s.title_romaji, '') AS series_title_romaji,
+                COALESCE(s.title_native, '') AS series_title_native,
                 s.cover_url
          FROM episode_quality_tags t
          JOIN series s ON s.id = t.series_id

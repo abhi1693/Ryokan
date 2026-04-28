@@ -267,8 +267,14 @@
                         <td>{{ task.schedule_label }}</td>
                         <td>{% if task.enabled %}<span class="log-badge log-badge-info">enabled</span>{% else %}<span class="log-badge log-badge-warn">disabled</span>{% endif %}</td>
                         <td>{% if task.last_status == "ok" %}<span class="log-badge log-badge-info">ok</span>{% else if task.last_status == "warn" %}<span class="log-badge log-badge-warn">warn</span>{% else if task.last_status == "error" %}<span class="log-badge log-badge-error">error</span>{% else if task.last_status == "running" %}<span class="log-badge log-badge-debug">running</span>{% else %}<span class="log-badge">{{ task.last_status }}</span>{% endif %}</td>
-                        <td>{% if let Some(started) = task.last_started_at %}<span data-ts="{{ started }}">{{ started }}</span>{% else %}—{% endif %}</td>
-                        <td>{% if let Some(finished) = task.last_finished_at %}<span data-ts="{{ finished }}">{{ finished }}</span>{% else %}—{% endif %}</td>
+                        {# Render the absolute timestamp directly (no
+                           data-ts) so the time formatter doesn't flash
+                           the relative-time replacement on page load.
+                           For run-state info the exact time is more
+                           useful than "5m ago" anyway — users want to
+                           correlate with other events. #}
+                        <td>{% if let Some(started) = task.last_started_at %}<span class="task-time">{{ started }}</span>{% else %}—{% endif %}</td>
+                        <td>{% if let Some(finished) = task.last_finished_at %}<span class="task-time">{{ finished }}</span>{% else %}—{% endif %}</td>
                         <td class="task-detail-cell"><div class="task-detail-text">{{ task.last_detail }}</div></td>
                         <td><button type="button" class="btn btn-secondary btn-sm task-run-btn" onclick="forceRunTask(this, '{{ task.task_key }}')">Run now</button></td>
                     </tr>
@@ -349,7 +355,17 @@
                                 {% if !entry.cover_url.is_empty() %}
                                 <img src="{{ entry.cover_url }}" alt="" loading="lazy" style="width:32px;height:46px;object-fit:cover;border-radius:2px">
                                 {% endif %}
-                                <span>{{ entry.series_title }}</span>
+                                {# Title-switcher pattern (matches library cards
+                                   + relations cards). The active variant is
+                                   shown via the html[data-title-language]
+                                   attribute selector in base.css; default
+                                   fallback is English-then-romaji-then-the
+                                   server-side `series_title` field. #}
+                                <p class="title-switcher" style="margin:0">
+                                    <span class="title-option" data-title-lang="english">{% if !entry.series_title_english.is_empty() %}{{ entry.series_title_english }}{% else if !entry.series_title_romaji.is_empty() %}{{ entry.series_title_romaji }}{% else if !entry.series_title_native.is_empty() %}{{ entry.series_title_native }}{% else %}{{ entry.series_title }}{% endif %}</span>
+                                    <span class="title-option" data-title-lang="romaji">{% if !entry.series_title_romaji.is_empty() %}{{ entry.series_title_romaji }}{% else if !entry.series_title_english.is_empty() %}{{ entry.series_title_english }}{% else if !entry.series_title_native.is_empty() %}{{ entry.series_title_native }}{% else %}{{ entry.series_title }}{% endif %}</span>
+                                    <span class="title-option" data-title-lang="native">{% if !entry.series_title_native.is_empty() %}{{ entry.series_title_native }}{% else if !entry.series_title_romaji.is_empty() %}{{ entry.series_title_romaji }}{% else if !entry.series_title_english.is_empty() %}{{ entry.series_title_english }}{% else %}{{ entry.series_title }}{% endif %}</span>
+                                </p>
                             </a>
                         </td>
                         <td style="padding:8px 12px;border-bottom:1px solid var(--border)">{{ entry.episode_number }}</td>
@@ -366,7 +382,14 @@
                             {{ "{:.0}%"|format(entry.classification_confidence * 100.0) }}
                         </td>
                         <td style="padding:8px 12px;border-bottom:1px solid var(--border);text-align:right">
-                            <div style="display:inline-flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+                            {# Stacked vertically: source select → resolution
+                               select → Apply + Open as a single inline pair.
+                               Previously the four controls used `flex-wrap`
+                               which let Apply wrap onto one line and Open
+                               drop to the next, looking unintentional.
+                               The button-pair stays as a tight `<div>` so
+                               those two are pinned next to each other. #}
+                            <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
                                 <select class="folder-select review-source">
                                     <option value="bluray_bdmv">BD-RAW</option>
                                     <option value="bluray_remux">BD-Remux</option>
@@ -384,8 +407,10 @@
                                     <option value="576p">576p</option>
                                     <option value="480p">480p</option>
                                 </select>
-                                <button class="btn btn-grab" type="button" onclick="applyReviewOverride(this)">Apply</button>
-                                <a class="btn btn-grab" href="/series/{{ entry.series_id }}">Open</a>
+                                <div style="display:inline-flex;gap:6px">
+                                    <button class="btn btn-grab" type="button" onclick="applyReviewOverride(this)">Apply</button>
+                                    <a class="btn btn-grab" href="/series/{{ entry.series_id }}">Open</a>
+                                </div>
                             </div>
                             <div class="review-status form-hint" style="display:none;text-align:right;margin-top:4px"></div>
                         </td>

@@ -1013,6 +1013,53 @@ pub async fn api_force_cleanup(
 
 #[utoipa::path(
     post,
+    path = "/api/tasks/external-sync",
+    tag = "System",
+    summary = "Trigger external watch-list sync",
+    description = "Manually trigger a watch-list sync against the linked AL/MAL account. Wraps `external_sync::tick_once_or_busy` so a click while a supervised tick is in flight returns an immediate `ok:false, message:\"already running\"` instead of queueing. Returns the success path's summary (`series_added` / `series_updated` / `series_removed`) when the sync completes synchronously. Used by the System → Scheduled Tasks page's Run-now button — the OAuth-flow sync-now path at `/settings/oauth/sync-now` is a different shape (background-spawned with progress polling) and is not interchangeable.",
+    responses(
+        (status = 200, description = "Sync completed (ok=true) or skipped (ok=false; already running / no account)", body = serde_json::Value),
+    ),
+)]
+pub async fn api_force_external_sync(State(state): State<AppState>) -> Json<serde_json::Value> {
+    use crate::services::external_sync;
+
+    // Bail early when no account is linked — the user otherwise gets
+    // a confusing "no-op success" toast since `tick_once_or_busy`
+    // returns Ok(empty summary) on the no-account branch.
+    let has_linked = external_sync::has_linked_account(&state.db).await;
+    if !has_linked {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "No external account is linked. Connect AL or MAL in Settings → Connections first.",
+        }));
+    }
+
+    let _ =
+        scheduled_tasks::mark_started(&state.db, "external_sync", "Manual watch-list sync started")
+            .await;
+    match external_sync::tick_once_or_busy(&state).await {
+        Ok(summary) => {
+            let _ =
+                scheduled_tasks::mark_finished(&state.db, "external_sync", "ok", "Sync complete")
+                    .await;
+            Json(serde_json::json!({
+                "ok": true,
+                "message": format!("Sync complete: {summary}"),
+            }))
+        }
+        Err(err) => {
+            let _ = scheduled_tasks::mark_finished(&state.db, "external_sync", "warn", &err).await;
+            Json(serde_json::json!({
+                "ok": false,
+                "message": err,
+            }))
+        }
+    }
+}
+
+#[utoipa::path(
+    post,
     path = "/api/tasks/post-processing",
     tag = "System",
     summary = "Trigger post-processing",
@@ -1799,6 +1846,26 @@ mod endpoint_tests {
             older,
             Some(200),
             "201 rows on a page-size of 200 → cursor is the 200th row's id (the new boundary for `id < cursor`)"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_force_external_sync_no_account_returns_friendly_message() {
+        // The Run-now button on the Scheduled Tasks tab hits this
+        // endpoint. With no AL/MAL account linked, the underlying
+        // `tick_once_or_busy` returns Ok(empty summary) — confusing
+        // for the user since the toast would say "Sync complete." Pin
+        // the explicit `ok:false` + "no account linked" message so
+        // future refactors can't silently regress to the no-op-success
+        // shape.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let resp = api_force_external_sync(axum::extract::State(state)).await;
+        assert_eq!(resp.0["ok"], false);
+        let msg = resp.0["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("No external account is linked"),
+            "no-account message must surface the precise remediation; got: {msg}"
         );
     }
 

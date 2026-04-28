@@ -105,6 +105,7 @@ use services::{
         handlers::system::api_logs_clear,
         handlers::system::api_logs_export,
         handlers::system::api_logs_client,
+        handlers::system::api_force_external_sync,
         handlers::progress::poll_progress,
         handlers::system::api_rss_sync,
         handlers::system::api_rss_clear_history,
@@ -859,6 +860,10 @@ async fn main() {
         .route(
             "/api/tasks/upgrade-search",
             post(handlers::system::api_force_upgrade_search),
+        )
+        .route(
+            "/api/tasks/external-sync",
+            post(handlers::system::api_force_external_sync),
         )
         .route(
             "/api/system/rebuild-anilist-cache",

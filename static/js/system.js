@@ -183,6 +183,7 @@ function forceRunTask(btn, taskKey) {
         post_processing: '/api/tasks/post-processing',
         upgrade_search: '/api/tasks/upgrade-search',
         anibridge_refresh: '/api/system/reload-anibridge',
+        external_sync: '/api/tasks/external-sync',
     };
     const url = endpoints[taskKey];
     if (!url) {
