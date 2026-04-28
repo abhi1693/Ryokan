@@ -1869,12 +1869,22 @@ async fn main() {
 
                         let every = (cfg.external_sync_interval_minutes as i64).clamp(15, 10080);
 
+                        // Reflect link status in the task row so the
+                        // System → Scheduled Tasks UI shows "disabled"
+                        // when no account is connected. The supervised
+                        // loop still runs (so a fresh link picks up on
+                        // the next minute tick) but the row's enabled
+                        // flag is the right signal that this task is
+                        // dormant by design rather than off due to a
+                        // user toggle.
+                        let has_linked =
+                            services::external_sync::has_linked_account(&state.db).await;
                         let _ = models::scheduled_tasks::touch_definition(
                             &state.db,
                             "external_sync",
                             "External account sync",
                             &format!("Every {} minutes", every),
-                            true,
+                            has_linked,
                         )
                         .await;
 
@@ -1907,7 +1917,7 @@ async fn main() {
                         // after the user actually links — bad UX,
                         // and the comment that used to be here lied
                         // about it.
-                        if !services::external_sync::has_linked_account(&state.db).await {
+                        if !has_linked {
                             continue;
                         }
 
