@@ -72,13 +72,16 @@
         </div>
     </div>
     <div class="modal-footer">
+        {# Test button fires the probe; the response has no body —
+           it carries an HX-Trigger header that fires the toast.
+           No hx-target / hx-swap so the button row stays the same
+           height regardless of result length. #}
         <button type="button" class="btn btn-secondary"
                 hx-post="/api/download-clients/test"
                 hx-include="closest form"
-                hx-target="next .dc-test-result"
-                hx-swap="innerHTML"
+                hx-swap="none"
                 hx-disabled-elt="this">Test connection</button>
-        <span class="dc-test-result form-hint" aria-live="polite" style="margin-right:auto"></span>
+        <span style="margin-right:auto"></span>
         <button type="button" class="btn btn-secondary" onclick="closeDownloadClientModal()">Cancel</button>
         <button type="submit" class="btn btn-primary">Save changes</button>
     </div>

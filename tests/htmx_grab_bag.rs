@@ -176,7 +176,13 @@ async fn jellyfin_refresh_returns_red_message_when_not_configured() {
 }
 
 #[tokio::test]
-async fn download_clients_test_returns_red_message_on_empty_url() {
+async fn download_clients_test_fires_failure_trigger_on_empty_url() {
+    // The Test-connection endpoint moved from rendering an inline
+    // HTML span (which grew the modal-footer button row to fit long
+    // error messages, jittering the layout) to firing an HX-Trigger
+    // event the page-level JS converts into a toast. The body is
+    // empty and the result rides on the `HX-Trigger` header as a
+    // JSON payload — `{"ryokan-dc-test-result": {"ok": ..., "message": "..."}}`.
     let resp = settings_download_clients_test(Form(DownloadClientTestForm {
         kind: "qbittorrent".to_string(),
         url: "  ".to_string(),
@@ -187,16 +193,28 @@ async fn download_clients_test_returns_red_message_on_empty_url() {
     .await;
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = read_body(resp).await;
+    let trigger = resp
+        .headers()
+        .get("HX-Trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     assert!(
-        body.contains("URL required"),
-        "empty URL must surface as a friendly message; got: {body}"
+        trigger.contains("ryokan-dc-test-result"),
+        "test result must fire via HX-Trigger so the toast listener picks it up; got header: {trigger}"
     );
-    assert!(body.contains("var(--red)"));
+    assert!(
+        trigger.contains("URL required"),
+        "empty-URL message must travel in the HX-Trigger payload; got: {trigger}"
+    );
+    assert!(
+        trigger.contains("\"ok\":false"),
+        "empty-URL must mark the result failed so the toast renders red; got: {trigger}"
+    );
 }
 
 #[tokio::test]
-async fn download_clients_test_returns_red_message_on_unknown_kind() {
+async fn download_clients_test_fires_failure_trigger_on_unknown_kind() {
     let resp = settings_download_clients_test(Form(DownloadClientTestForm {
         kind: "telnet-rmn".to_string(),
         url: "http://127.0.0.1:1".to_string(),
@@ -207,9 +225,15 @@ async fn download_clients_test_returns_red_message_on_unknown_kind() {
     .await;
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = read_body(resp).await;
+    let trigger = resp
+        .headers()
+        .get("HX-Trigger")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     assert!(
-        body.contains("Unknown client kind"),
-        "unknown kind must fall through with a clear message; got: {body}"
+        trigger.contains("Unknown client kind"),
+        "unknown-kind branch must travel in the HX-Trigger payload; got: {trigger}"
     );
+    assert!(trigger.contains("\"ok\":false"));
 }

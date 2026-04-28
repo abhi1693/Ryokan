@@ -25,8 +25,8 @@ async fn test_returns_version_string_on_success() {
 
     let result = client.test().await.expect("test should succeed");
     assert_eq!(
-        result, "SABnzbd 4.3.2",
-        "test() should format version with `SABnzbd ` prefix"
+        result, "4.3.2",
+        "test() returns the bare version string; the kind prefix is the UI's job (status pill prepends \"SABnzbd \" itself, the toast says \"Connected: <version>\"). Doubling the prefix here was the bug fix that motivated this regression test."
     );
 }
 

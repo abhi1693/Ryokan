@@ -18,7 +18,6 @@ use axum_htmx::HxRequest;
 use serde::Deserialize;
 
 use crate::AppState;
-use crate::handlers::settings::ConnectionTestResultPartial;
 use crate::models::download_clients::{
     DownloadClientForm, DownloadClientRow, delete, get_by_id, insert, list_all, set_default, update,
 };
@@ -203,8 +202,20 @@ pub async fn settings_download_clients_upsert(
     if url.is_empty() {
         return Redirect::to("/settings?tab=downloads&err=URL+required").into_response();
     }
-    if reqwest::Url::parse(url).is_err() {
-        return Redirect::to("/settings?tab=downloads&err=Invalid+URL+syntax").into_response();
+    // The url crate accepts `localhost:8080` as scheme=localhost,
+    // path=8080 — a perfectly valid URL by RFC 3986 even though
+    // it's not what the user meant. The bad save then surfaces at
+    // probe time as a cryptic `reqwest builder error for url
+    // (localhost:8080/api)`. Reject anything that isn't http(s) at
+    // the form layer so the bad shape never lands in the DB.
+    match reqwest::Url::parse(url) {
+        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
+        _ => {
+            return Redirect::to(
+                "/settings?tab=downloads&err=URL+must+start+with+http%3A%2F%2F+or+https%3A%2F%2F",
+            )
+            .into_response();
+        }
     }
 
     let payload = DownloadClientForm {
@@ -436,11 +447,7 @@ pub struct DownloadClientTestForm {
 pub async fn settings_download_clients_test(Form(form): Form<DownloadClientTestForm>) -> Response {
     let url = form.url.trim();
     if url.is_empty() {
-        return ConnectionTestResultPartial {
-            ok: false,
-            message: "URL required".to_string(),
-        }
-        .into_html_ok();
+        return test_result_response(false, "URL required");
     }
     let client: std::sync::Arc<dyn DownloadClient> = match form.kind.as_str() {
         KIND_QBITTORRENT => std::sync::Arc::new(qbittorrent::QbitClient::new(
@@ -473,25 +480,41 @@ pub async fn settings_download_clients_test(Form(form): Form<DownloadClientTestF
             form.label.trim(),
         )),
         other => {
-            return ConnectionTestResultPartial {
-                ok: false,
-                message: format!("Unknown client kind: {other}"),
-            }
-            .into_html_ok();
+            return test_result_response(false, &format!("Unknown client kind: {other}"));
         }
     };
 
-    let result = match client.test().await {
-        Ok(version) => ConnectionTestResultPartial {
-            ok: true,
-            message: format!("Connected; {version}"),
-        },
-        Err(err) => ConnectionTestResultPartial {
-            ok: false,
-            message: err,
-        },
-    };
-    result.into_html_ok()
+    match client.test().await {
+        Ok(version) => test_result_response(true, &format!("Connected: {version}")),
+        Err(err) => test_result_response(false, &err),
+    }
+}
+
+/// Build the HTMX response for a Test-connection probe. Empty body
+/// (the button has no hx-swap target now), `HX-Trigger` header carries
+/// the result so the body-level listener in `static/js/settings.js`
+/// fires a toast. This replaces the previous inline-span swap shape
+/// — the inline span lived between the Test button and Cancel/Save
+/// in the modal footer and grew its height by one line whenever a
+/// long error came back, jittering the button row. Toasts surface
+/// at the top of the viewport regardless of result length.
+fn test_result_response(ok: bool, message: &str) -> Response {
+    let payload = serde_json::json!({
+        "ryokan-dc-test-result": {
+            "ok": ok,
+            "message": message,
+        }
+    });
+    let mut resp = Response::new(axum::body::Body::empty());
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut().insert(
+        "HX-Trigger",
+        payload
+            .to_string()
+            .parse()
+            .unwrap_or_else(|_| "ryokan-dc-test-result".parse().unwrap()),
+    );
+    resp
 }
 
 // ── HTMX partial-fragment endpoints (Phase 7 follow-up) ────────────
@@ -822,7 +845,36 @@ mod tests {
         let resp =
             settings_download_clients_upsert(State(state), axum_htmx::HxRequest(false), Form(form))
                 .await;
-        assert!(extract_location(resp).contains("err=Invalid+URL+syntax"));
+        // The validator rejects anything that isn't http(s); the
+        // err= text changed from "Invalid URL syntax" to "URL must
+        // start with http://...". Match on the new shape.
+        assert!(extract_location(resp).contains("err=URL+must+start+with"));
+    }
+
+    #[tokio::test]
+    async fn upsert_rejects_localhost_without_scheme() {
+        // Regression — `reqwest::Url::parse("localhost:8085")`
+        // returns Ok with scheme=localhost, path=8085, so the
+        // pre-fix validator let it through. The bad save then
+        // surfaced at probe time as "SAB request failed: builder
+        // error for url (localhost:8085/api)" with no hint about
+        // the missing scheme. Pin the new shape so a future
+        // refactor can't silently regress.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db.clone(), None);
+        let mut form = upsert_form(None, "sab");
+        form.kind = "sabnzbd".into();
+        form.url = "localhost:8085".into();
+        let resp =
+            settings_download_clients_upsert(State(state), axum_htmx::HxRequest(false), Form(form))
+                .await;
+        assert!(extract_location(resp).contains("err=URL+must+start+with"));
+        // The bad row must NOT have been persisted.
+        let rows = list_all(&db).await.unwrap();
+        assert!(
+            rows.is_empty(),
+            "no-scheme URL must be rejected, not silently persisted"
+        );
     }
 
     #[tokio::test]

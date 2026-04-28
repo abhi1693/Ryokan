@@ -227,7 +227,15 @@ impl DownloadClient for SabClient {
             .json()
             .await
             .map_err(|e| format!("SAB version parse failed: {e}"))?;
-        Ok(format!("SABnzbd {}", body.version))
+        // Return just the version string, without the "SABnzbd "
+        // prefix. The status pill on the Settings → Download Clients
+        // tab prepends the client kind label itself, so the prefix
+        // would render as "SABnzbd SABnzbd 4.5.5"; the toast on the
+        // Test-connection button concatenates "Connected: <version>"
+        // and reads more naturally without the kind doubling either.
+        // qBit / Deluge / Transmission / rtorrent all return raw
+        // version strings already; this brings SAB in line.
+        Ok(body.version)
     }
 
     async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {

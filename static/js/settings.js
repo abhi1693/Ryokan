@@ -182,6 +182,18 @@ function openDcAddModal() {
         );
     }
 }
+// Test-connection result — server fires `ryokan-dc-test-result` via
+// HX-Trigger header (empty response body, so the modal footer's button
+// row doesn't grow to fit the message). Convert to a toast that
+// surfaces at the top of the viewport regardless of message length.
+document.body.addEventListener('ryokan-dc-test-result', function (ev) {
+    const detail = ev.detail || {};
+    window.ryokanToast({
+        kind: detail.ok ? 'success' : 'error',
+        title: detail.ok ? 'Connection OK' : 'Connection failed',
+        body: detail.message || '',
+    });
+});
 // Backdrop-click + Escape dismissal. Re-bound on every section swap
 // because the modal element is replaced when #dc-section re-renders;
 // htmx fires `htmx:afterSwap` on the swap target, so we listen there
