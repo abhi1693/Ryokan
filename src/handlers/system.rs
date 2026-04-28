@@ -1016,12 +1016,16 @@ pub async fn api_force_cleanup(
     path = "/api/tasks/external-sync",
     tag = "System",
     summary = "Trigger external watch-list sync",
-    description = "Manually trigger a watch-list sync against the linked AL/MAL account. Wraps `external_sync::tick_once_or_busy` so a click while a supervised tick is in flight returns an immediate `ok:false, message:\"already running\"` instead of queueing. Returns the success path's summary (`series_added` / `series_updated` / `series_removed`) when the sync completes synchronously. Used by the System → Scheduled Tasks page's Run-now button — the OAuth-flow sync-now path at `/settings/oauth/sync-now` is a different shape (background-spawned with progress polling) and is not interchangeable.",
+    description = "Manually trigger a watch-list sync against the linked AL/MAL account. Wraps `external_sync::tick_once_or_busy` so a click while a supervised tick is in flight returns 409 instead of queueing. Returns the success path's summary (`series_added` / `series_updated` / `series_removed`) when the sync completes synchronously. Used by the System → Scheduled Tasks page's Run-now button — the OAuth-flow sync-now path at `/settings/oauth/sync-now` is a different shape (background-spawned with progress polling) and is not interchangeable.",
     responses(
-        (status = 200, description = "Sync completed (ok=true) or skipped (ok=false; already running / no account)", body = serde_json::Value),
+        (status = 200, description = "Sync completed", body = serde_json::Value),
+        (status = 400, description = "No external account is linked"),
+        (status = 409, description = "Sync is already running"),
     ),
 )]
-pub async fn api_force_external_sync(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub async fn api_force_external_sync(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     use crate::services::external_sync;
 
     // Bail early when no account is linked — the user otherwise gets
@@ -1029,32 +1033,46 @@ pub async fn api_force_external_sync(State(state): State<AppState>) -> Json<serd
     // returns Ok(empty summary) on the no-account branch.
     let has_linked = external_sync::has_linked_account(&state.db).await;
     if !has_linked {
-        return Json(serde_json::json!({
-            "ok": false,
-            "message": "No external account is linked. Connect AL or MAL in Settings → Connections first.",
-        }));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "ok": false,
+                "message": "No external account is linked. Connect AL or MAL in Settings → Connections first.",
+            })
+            .to_string(),
+        ));
     }
 
-    let _ =
-        scheduled_tasks::mark_started(&state.db, "external_sync", "Manual watch-list sync started")
-            .await;
+    // mark_started is deferred until we know we actually have a tick to run
+    // (i.e. tick_once_or_busy didn't immediately bounce on the in-flight
+    // lock). Otherwise a Run-now click during a supervised tick would
+    // momentarily clobber `last_started_at` on the row before the busy
+    // error path's mark_finished overwrote it again, which would surface
+    // as a stale-then-correct flash on the next page load.
     match external_sync::tick_once_or_busy(&state).await {
         Ok(summary) => {
+            let _ = scheduled_tasks::mark_started(
+                &state.db,
+                "external_sync",
+                "Manual watch-list sync started",
+            )
+            .await;
             let _ =
                 scheduled_tasks::mark_finished(&state.db, "external_sync", "ok", "Sync complete")
                     .await;
-            Json(serde_json::json!({
+            Ok(Json(serde_json::json!({
                 "ok": true,
                 "message": format!("Sync complete: {summary}"),
-            }))
+            })))
         }
-        Err(err) => {
-            let _ = scheduled_tasks::mark_finished(&state.db, "external_sync", "warn", &err).await;
-            Json(serde_json::json!({
+        Err(err) => Err((
+            axum::http::StatusCode::CONFLICT,
+            serde_json::json!({
                 "ok": false,
                 "message": err,
-            }))
-        }
+            })
+            .to_string(),
+        )),
     }
 }
 
@@ -1855,17 +1873,19 @@ mod endpoint_tests {
         // endpoint. With no AL/MAL account linked, the underlying
         // `tick_once_or_busy` returns Ok(empty summary) — confusing
         // for the user since the toast would say "Sync complete." Pin
-        // the explicit `ok:false` + "no account linked" message so
-        // future refactors can't silently regress to the no-op-success
-        // shape.
+        // the explicit 400 + "no account linked" message so future
+        // refactors can't silently regress to the no-op-success shape.
+        // Status (vs body) is what `system.js` keys "Task failed" toast
+        // off of (`r.ok`), so a green-toast regression would surface
+        // here as the wrong status.
         let db = in_memory_pool().await;
         let state = build_test_app_state(db, None);
         let resp = api_force_external_sync(axum::extract::State(state)).await;
-        assert_eq!(resp.0["ok"], false);
-        let msg = resp.0["message"].as_str().unwrap_or("");
+        let (status, body) = resp.expect_err("no-account branch must surface as Err");
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(
-            msg.contains("No external account is linked"),
-            "no-account message must surface the precise remediation; got: {msg}"
+            body.contains("No external account is linked"),
+            "no-account message must surface the precise remediation; got: {body}"
         );
     }
 

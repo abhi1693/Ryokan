@@ -719,17 +719,15 @@
 
 .relation-card-info {
     padding: 0 2px;
-    /* Pin total info-area height so every card lands at the same
-     * total height regardless of title-clamp / meta-row content
-     * variance. The previous fix (nowrap + min-height on the meta
-     * row) wasn't enough — the title's `min-height: 2.7em + line-
-     * clamp: 2` reservation isn't perfectly stable across content,
-     * and the kind label can render at slightly different heights
-     * depending on the text. Fixed height + overflow:hidden makes
-     * the contract explicit: the info area is a 96px box; whatever
-     * fits, fits. The cover above it is already fixed via aspect-
-     * ratio, so total card height is now deterministic. */
-    height: 96px;
+    /* min-height (not height) so users at large-text zoom or system-
+     * level font scaling get the box growing rather than silently
+     * clipping content. The 96px floor is what pins uniform card
+     * heights at the default font size; the title's line-clamp + meta-
+     * row min-height keep their own bounded heights so the floor still
+     * lands cleanly. overflow:hidden remains as a defensive cap when
+     * a single card legitimately overflows (kind label running long
+     * with a translated locale, etc.) so it doesn't push neighbors. */
+    min-height: 96px;
     overflow: hidden;
 }
 
