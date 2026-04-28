@@ -15,7 +15,11 @@
 
 <div class="detail-header">
     <div class="detail-cover">
-        <img src="{{ detail.cover_url }}" alt="{{ detail.title_romaji }}" loading="lazy">
+        {# Decorative — the title renders as a visible <h1> in
+           .detail-info to the right. Empty alt avoids the alt-text
+           flash during lazy-load and stops screen readers from
+           announcing the title twice. #}
+        <img src="{{ detail.cover_url }}" alt="" loading="lazy">
     </div>
     <div class="detail-info">
         <h1 class="detail-title title-switcher">

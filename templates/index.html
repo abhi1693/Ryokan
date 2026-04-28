@@ -126,7 +126,13 @@
     <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}">
         <div class="series-cover">
             {% if !s.cover_url.is_empty() %}
-            <img src="{{ s.cover_url }}" alt="{{ s.title }}" loading="lazy">
+            {# Decorative — the title renders as visible text in
+               .series-info below. A non-empty alt would (1) flash
+               on page load while loading="lazy" leaves the image
+               unloaded, since browsers paint alt text in the
+               placeholder area, and (2) make screen readers
+               announce the title twice. #}
+            <img src="{{ s.cover_url }}" alt="" loading="lazy">
             {% else %}
             <div class="series-cover-placeholder">No Image</div>
             {% endif %}
