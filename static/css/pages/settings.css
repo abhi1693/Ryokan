@@ -1013,3 +1013,38 @@ fieldset legend {
 .dc-edit-form .form-row   { display: flex; gap: 16px; }
 .dc-edit-form .form-row .form-group { flex: 1; min-width: 0; }
 
+/* ── Multi-RSS status pills ───────────────────────────────────────
+   Surfaces per-indexer + per-direct-feed RSS poll state on the
+   Indexers tab (Off / Idle / ✓ N items / ✗ Error). Same neutral
+   palette as the .badge family but pill-shaped + smaller so the
+   table rows don't grow taller. */
+.rss-pill {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.rss-pill-off {
+    background: rgba(108, 112, 134, 0.18);
+    color: var(--text-dim);
+}
+
+.rss-pill-idle {
+    background: rgba(116, 199, 236, 0.16);
+    color: var(--blue, #74c7ec);
+}
+
+.rss-pill-ok {
+    background: rgba(166, 227, 161, 0.16);
+    color: var(--green, #a6e3a1);
+}
+
+.rss-pill-error {
+    background: rgba(243, 139, 168, 0.16);
+    color: var(--red, #f38ba8);
+}
+
+

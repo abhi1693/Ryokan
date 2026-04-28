@@ -173,6 +173,11 @@ struct SettingsTemplate {
     /// for the Download Clients tab list. Sorted default-first then
     /// case-insensitive by name (see `models::download_clients::list_all`).
     download_clients: Vec<crate::models::download_clients::DownloadClientRow>,
+    /// Multi-RSS PR G/H — user-supplied direct RSS feeds (e.g.
+    /// SubsPlease per-quality feeds) rendered on the Indexers tab
+    /// alongside the torznab/newznab indexer rows. Empty until the
+    /// user adds one via the bottom-of-tab form.
+    direct_rss_feeds: Vec<crate::models::direct_rss_feeds::DirectRssFeed>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -637,6 +642,7 @@ async fn build_settings_template(
         external_account_res,
         indexers_res,
         download_clients_res,
+        direct_rss_feeds_res,
     ) = tokio::join!(
         config::get_config(&state.db),
         load_groups(&state.db),
@@ -645,6 +651,7 @@ async fn build_settings_template(
         crate::models::external_accounts::get_current(&state.db),
         crate::models::indexers::list_all(&state.db),
         crate::models::download_clients::list_all(&state.db),
+        crate::models::direct_rss_feeds::list_all(&state.db),
     );
     let cfg = cfg_res.ok().flatten().unwrap_or_default();
     // A decrypt failure (tampered blob, key rotation without migration)
@@ -699,6 +706,7 @@ async fn build_settings_template(
         None
     };
     let download_clients = download_clients_res.unwrap_or_default();
+    let direct_rss_feeds = direct_rss_feeds_res.unwrap_or_default();
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -719,6 +727,7 @@ async fn build_settings_template(
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
         indexer_seed,
         download_clients,
+        direct_rss_feeds,
     }
 }
 
@@ -1011,6 +1020,9 @@ pub async fn settings_submit(
         let download_clients = crate::models::download_clients::list_all(&state.db)
             .await
             .unwrap_or_default();
+        let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
+            .await
+            .unwrap_or_default();
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
@@ -1031,6 +1043,7 @@ pub async fn settings_submit(
             indexer_catalog: crate::services::indexer_catalog::SEEDED,
             indexer_seed: None,
             download_clients,
+            direct_rss_feeds,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1114,6 +1127,9 @@ pub async fn settings_submit(
     let download_clients = crate::models::download_clients::list_all(&state.db)
         .await
         .unwrap_or_default();
+    let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
+        .await
+        .unwrap_or_default();
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
@@ -1139,6 +1155,7 @@ pub async fn settings_submit(
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
         indexer_seed: None,
         download_clients,
+        direct_rss_feeds,
     };
     Html(template.render().unwrap_or_default())
 }
