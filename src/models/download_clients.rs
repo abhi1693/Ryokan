@@ -207,12 +207,27 @@ pub async fn update(
 /// current default's `list_scoped` (unlikely — wrong client) or
 /// fall through to the stale path and mark it `removed`.
 ///
-/// If the deleted row was the default, the caller is responsible
-/// for picking a new default (or accepting "no default until the
-/// user picks one"). Most user-facing flows just leave the
-/// default empty and let the user pick from the remaining rows.
+/// If the deleted row was the default, **auto-promotes the lowest-id
+/// remaining row to default in the same transaction**. Picking by
+/// min(id) is deterministic (oldest survivor wins) and avoids leaving
+/// the system in a "no default until the user picks one" state where
+/// every grab would fail until the user manually intervenes. Promotion
+/// is skipped when no rows remain (deleting the last client) — caller
+/// is on their own to add a new one.
 pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
+    // Read the deleted row's default-flag BEFORE the row is gone so
+    // we know whether to promote a replacement after the DELETE
+    // commits. None means "row didn't exist anymore" (race with a
+    // parallel delete); skip the promotion check entirely in that
+    // case — the surviving rows already have whatever default state
+    // the other transaction left them in.
+    let was_default =
+        sqlx::query_scalar::<_, i64>("SELECT is_default FROM download_clients WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|i| i != 0);
     sqlx::query("UPDATE indexers SET download_client_id = NULL WHERE download_client_id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -233,6 +248,24 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    // Auto-promote: only when the row we just deleted was the default.
+    // Pick the lowest remaining id; SQL returns NULL when the table
+    // is empty, in which case `bind(None)` is a no-op DELETE-WHERE-NULL
+    // shape — the UPDATE simply matches zero rows. No promotion
+    // happens when there's nothing to promote.
+    if was_default == Some(true) {
+        let next_default: Option<i64> = sqlx::query_scalar("SELECT MIN(id) FROM download_clients")
+            .fetch_one(&mut *tx)
+            .await?;
+        if let Some(next_id) = next_default {
+            sqlx::query(
+                "UPDATE download_clients SET is_default = 1, updated_at = strftime('%s','now') WHERE id = ?",
+            )
+            .bind(next_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -523,5 +556,82 @@ mod tests {
         assert_eq!(rows[0].name, "middle"); // default first
         assert_eq!(rows[1].name, "alpha"); // then case-insensitive name
         assert_eq!(rows[2].name, "zeta");
+    }
+
+    /// Deleting the current default auto-promotes the lowest-id
+    /// surviving row so the system never lands in a "no default"
+    /// state when an alternative exists. Caught a real user-reported
+    /// bug where deleting the active client left RSS / auto-search
+    /// without a target until the user manually set a new default.
+    #[tokio::test]
+    async fn delete_default_auto_promotes_lowest_id_survivor() {
+        let db = in_memory_pool().await;
+        let mut f = form("Default", "qbittorrent", "http://default");
+        f.is_default = true;
+        let default_id = insert(&db, f).await.unwrap();
+        let second_id = insert(&db, form("Second", "deluge", "http://2"))
+            .await
+            .unwrap();
+        let third_id = insert(&db, form("Third", "transmission", "http://3"))
+            .await
+            .unwrap();
+        // Sanity: only `default_id` is the default before delete.
+        assert_eq!(get_default(&db).await.unwrap().unwrap().id, default_id);
+
+        delete(&db, default_id).await.unwrap();
+
+        let new_default = get_default(&db).await.unwrap().expect(
+            "auto-promote must elect a new default when the deleted row was default and \
+             survivors exist",
+        );
+        // Lowest surviving id wins (deterministic, oldest-survivor).
+        assert_eq!(
+            new_default.id,
+            second_id.min(third_id),
+            "lowest-id surviving row should have been promoted to default"
+        );
+
+        // And exactly one row carries is_default = 1.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM download_clients WHERE is_default = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// Deleting a non-default row leaves the existing default untouched.
+    /// Counterpart to the auto-promote test — proves promotion only
+    /// fires when the deleted row was the default, not on every delete.
+    #[tokio::test]
+    async fn delete_non_default_leaves_existing_default_intact() {
+        let db = in_memory_pool().await;
+        let mut f = form("Default", "qbittorrent", "http://default");
+        f.is_default = true;
+        let default_id = insert(&db, f).await.unwrap();
+        let other_id = insert(&db, form("Other", "deluge", "http://other"))
+            .await
+            .unwrap();
+
+        delete(&db, other_id).await.unwrap();
+
+        let still_default = get_default(&db).await.unwrap().unwrap();
+        assert_eq!(still_default.id, default_id);
+    }
+
+    /// Deleting the last remaining row (which happens to be the default)
+    /// leaves the table empty and no default — auto-promote is a no-op
+    /// when there's nothing to promote.
+    #[tokio::test]
+    async fn delete_only_default_leaves_empty_table_with_no_default() {
+        let db = in_memory_pool().await;
+        let mut f = form("Only", "qbittorrent", "http://only");
+        f.is_default = true;
+        let id = insert(&db, f).await.unwrap();
+        delete(&db, id).await.unwrap();
+
+        let rows = list_all(&db).await.unwrap();
+        assert!(rows.is_empty());
+        assert!(get_default(&db).await.unwrap().is_none());
     }
 }

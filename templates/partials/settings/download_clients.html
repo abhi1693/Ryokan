@@ -33,7 +33,7 @@
                     {% if !dc.is_default %}
                     <form method="post" action="/settings/download-clients/set-default" style="display:inline">
                         <input type="hidden" name="id" value="{{ dc.id }}">
-                        <button type="submit" class="btn btn-small">Set default</button>
+                        <button type="submit" class="btn btn-secondary btn-small">Set default</button>
                     </form>
                     {% endif %}
                     <form method="post" action="/settings/download-clients/delete" style="display:inline"
