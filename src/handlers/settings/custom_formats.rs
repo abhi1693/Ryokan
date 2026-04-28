@@ -283,7 +283,31 @@ pub async fn settings_custom_formats_delete(
             // HTMX migration (issue #129) — empty 200 lets the card form's
             // `hx-target="closest .cf-card" hx-swap="outerHTML"` remove
             // the card from the grid without a full page reload.
+            //
+            // Exception: when this delete leaves the table empty, the
+            // "Install bundled defaults" empty-state CTA lives inside an
+            // `{% if custom_formats.is_empty() %}` block in the template
+            // — so it's not in the DOM until the page renders with an
+            // empty list. The per-row swap can't bring it in. Send
+            // `HX-Refresh: true` so the page reloads and the empty state
+            // renders. Costs one full reload on the LAST delete only,
+            // which is justified — the page transitions to a
+            // fundamentally different state (populated grid → empty +
+            // CTA) and a smooth swap-to-empty would lose the CTA the
+            // user needs to see.
             if is_htmx {
+                // Cheap COUNT(*) — we only care whether ANY row remains,
+                // not what's in them. `cf_model` doesn't expose a
+                // dedicated `count()` helper and `list_with_scores`
+                // would fetch full rows + score joins for nothing.
+                let remaining_count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM custom_formats")
+                        .fetch_one(&state.db)
+                        .await
+                        .unwrap_or(0);
+                if remaining_count == 0 {
+                    return ([("HX-Refresh", "true")], StatusCode::OK).into_response();
+                }
                 StatusCode::OK.into_response()
             } else {
                 Redirect::to(&cf_redirect(None, Some("Custom Format deleted."), None))

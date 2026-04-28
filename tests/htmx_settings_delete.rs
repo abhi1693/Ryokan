@@ -203,7 +203,12 @@ async fn download_clients_delete_returns_redirect_for_non_htmx_request() {
 // ─── Custom formats ────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn custom_formats_delete_returns_empty_200_for_htmx_request() {
+async fn custom_formats_delete_returns_hx_refresh_when_table_becomes_empty() {
+    // The "Install bundled defaults" empty-state CTA only renders
+    // inside `{% if custom_formats.is_empty() %}` in the template,
+    // so per-row swap won't bring it into the DOM. When the delete
+    // empties the table, the handler responds with HX-Refresh: true
+    // so HTMX triggers a full reload that renders the empty state.
     let db = in_memory_pool().await;
     let id = seed_custom_format(&db).await;
     let state = build_test_app_state(db.clone(), None);
@@ -217,6 +222,41 @@ async fn custom_formats_delete_returns_empty_200_for_htmx_request() {
     .into_response();
 
     assert_eq!(resp.status(), StatusCode::OK);
+    let hx_refresh = resp
+        .headers()
+        .get("HX-Refresh")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(
+        hx_refresh,
+        Some("true"),
+        "deleting the last CF must send HX-Refresh: true so the empty-state CTA renders"
+    );
+}
+
+#[tokio::test]
+async fn custom_formats_delete_returns_empty_200_when_rows_remain() {
+    // When other CFs survive, the per-row swap is enough — no need
+    // to refresh the page since the empty-state branch isn't entered.
+    let db = in_memory_pool().await;
+    let _keep = seed_custom_format(&db).await;
+    let id_to_delete = cf_model::insert(&db, "Doomed", None, "{}", 0, "manual")
+        .await
+        .expect("seed second cf");
+    let state = build_test_app_state(db.clone(), None);
+
+    let resp = settings_custom_formats_delete(
+        State(state.clone()),
+        HxRequest(true),
+        Form(CustomFormatDeleteForm { id: id_to_delete }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().get("HX-Refresh").is_none(),
+        "non-empty-after-delete must NOT send HX-Refresh (per-row swap is sufficient)"
+    );
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("read body");
