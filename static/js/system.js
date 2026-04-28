@@ -155,7 +155,9 @@ function runRssSync(btn) {
             const data = await r.json();
             if (!r.ok) throw new Error(data.message || 'RSS sync failed');
             result.textContent = data.message || 'RSS sync finished.';
-            window.ryokanToast({
+            // Queue across the reload so the toast survives the
+            // navigation that re-renders the RSS decisions table.
+            window.ryokanQueueToast({
                 kind: 'success',
                 title: 'RSS sync complete',
                 body: data.message || 'Feed checked.',
@@ -181,6 +183,7 @@ function forceRunTask(btn, taskKey) {
         metadata_refresh: '/api/tasks/metadata-refresh',
         cleanup: '/api/tasks/cleanup',
         post_processing: '/api/tasks/post-processing',
+        library_classify: '/api/tasks/library-classify',
         upgrade_search: '/api/tasks/upgrade-search',
         anibridge_refresh: '/api/system/reload-anibridge',
         external_sync: '/api/tasks/external-sync',
@@ -198,20 +201,23 @@ function forceRunTask(btn, taskKey) {
     fetch(url, { method: 'POST' })
         .then(r => r.json().then(data => ({ ok: r.ok, data })).catch(() => ({ ok: r.ok, data: null })))
         .then(({ ok, data }) => {
+            // Queue across the reload — `location.reload()` below
+            // tears down the DOM and a non-queued toast disappears
+            // before the user can read it.
             if (data && data.message) {
-                window.ryokanToast({
+                window.ryokanQueueToast({
                     kind: ok ? 'success' : 'error',
                     title: ok ? 'Task complete' : 'Task failed',
                     body: data.message,
                 });
             } else if (!ok) {
-                window.ryokanToast({
+                window.ryokanQueueToast({
                     kind: 'error',
                     title: 'Task failed',
                     body: 'The task did not report a reason.',
                 });
             } else {
-                window.ryokanToast({
+                window.ryokanQueueToast({
                     kind: 'success',
                     title: 'Task complete',
                     body: taskKey + ' finished.',

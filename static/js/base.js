@@ -361,6 +361,50 @@
     };
 })();
 
+(function () {
+    // ryokanQueueToast({...}) — persist a toast across a navigation
+    // or reload. Use this instead of ryokanToast right before
+    // `location.reload()` / `location.href = …`, otherwise the
+    // navigation tears down the DOM ~200ms later and the toast
+    // stack disappears mid-display. The block below reads the
+    // queued entry on the next page load and fires it through the
+    // normal ryokanToast path so persistence to /api/logs/client
+    // and auto-dismiss timing are unchanged from a fresh toast.
+    //
+    // sessionStorage (not localStorage) is the right scope: same-tab
+    // only, cleared when the tab closes — matches the lifetime of
+    // a "show me the result of the action I just kicked off" toast.
+    const KEY = 'ryokanPendingToast';
+
+    window.ryokanQueueToast = function (opts) {
+        if (!opts || typeof opts !== 'object') return;
+        try {
+            sessionStorage.setItem(KEY, JSON.stringify(opts));
+        } catch (_) {
+            // sessionStorage is unavailable (private mode, quota
+            // exhausted) — fall back to firing the toast inline so
+            // the user at least sees it briefly before the reload.
+            if (window.ryokanToast) window.ryokanToast(opts);
+        }
+    };
+
+    // On every page load, drain the queued toast (if any).
+    try {
+        const raw = sessionStorage.getItem(KEY);
+        if (raw) {
+            sessionStorage.removeItem(KEY);
+            const opts = JSON.parse(raw);
+            if (opts && typeof opts === 'object' && window.ryokanToast) {
+                window.ryokanToast(opts);
+            }
+        }
+    } catch (_) {
+        // Malformed JSON or storage unavailable — drop the entry
+        // silently so we don't loop on the same broken value.
+        try { sessionStorage.removeItem(KEY); } catch (_) {}
+    }
+})();
+
 // Sticky progress toast backed by /api/progress/{id}. The caller is
 // expected to mint a `progressId` string, pass it as `?progress_id=`
 // on the trigger endpoint, and hand it here — this helper opens the
