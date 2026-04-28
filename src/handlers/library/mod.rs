@@ -138,12 +138,6 @@ struct SeriesTemplate {
     /// Rendered inside an "Advanced" collapsible since most users won't
     /// flip it.
     allow_pt_upgrades: bool,
-    /// Issue #28 PR E — `true` when at least one configured indexer
-    /// has `is_private_tracker = 1`. Drives a UI hint: when the user
-    /// has zero PT indexers, the PT-upgrade toggle reads "no private
-    /// trackers configured" instead of being a dangling enabled
-    /// control that affects nothing.
-    any_private_indexer: bool,
     /// #23 — Per-series custom Nyaa query tokens. Empty string means
     /// "use the global default in config." Rendered in the Advanced
     /// search panel on the series detail page.
