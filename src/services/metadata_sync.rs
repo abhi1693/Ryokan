@@ -40,10 +40,25 @@ fn is_authoritative_detail(tracked: &series::Series, detail: &anilist::AnimeDeta
 /// provider and Jikan / Kitsu carried the load — making the System →
 /// Logs Jikan/Kitsu filters dead-letter dropdowns and obscuring which
 /// provider was actually responsible for each line during an outage.
+///
+/// **Caller invariant**: `tracked.anilist_id` must be non-zero. The
+/// external-sync normalize pipeline uses `0` as an *intermediate*
+/// sentinel during the MAL→AL merge, but by the time the metadata
+/// sweep reads `tracked.anilist_id` it's been resolved to either a
+/// positive AL id or a negative MAL fallback marker. A zero here
+/// would mis-route an AL canonical response to Kitsu, so the
+/// debug_assert in this function pins the contract.
 fn provider_category_for_detail(
     tracked: &series::Series,
     detail: &anilist::AnimeDetail,
 ) -> LogCategory {
+    debug_assert!(
+        tracked.anilist_id != 0,
+        "provider_category_for_detail requires a resolved tracked.anilist_id \
+         (positive AL id or negative MAL sentinel); got 0, which is the \
+         external-sync intermediate state and should never reach the \
+         metadata sweep"
+    );
     if detail.id < 0 {
         LogCategory::Jikan
     } else if detail.id > 0 && detail.id == tracked.anilist_id {

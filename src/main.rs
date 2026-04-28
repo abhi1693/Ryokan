@@ -1595,10 +1595,18 @@ async fn main() {
                             "Re-classifying unknown / unclassified files",
                         )
                         .await;
+                        // Hold the process-wide lock so a Run-now
+                        // click during this 6h tick blocks instead
+                        // of interleaving and flipping the row's
+                        // status between two concurrent writes.
+                        let _guard = services::post_processing::LIBRARY_CLASSIFY_LOCK
+                            .lock()
+                            .await;
                         let report = services::post_processing::scan_library_for_unclassified(
                             &classify_state,
                         )
                         .await;
+                        drop(_guard);
                         let detail = format!(
                             "series={}, files_scanned={}, classified={}, needs_review={}",
                             report.series_scanned,

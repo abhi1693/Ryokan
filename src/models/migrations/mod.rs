@@ -2533,14 +2533,36 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // still `qbit`, so System → Logs filtered to "qBittorrent" was
     // showing Deluge / Transmission / rTorrent / SAB rows too. Rewrite
     // existing rows in place; the new code persists the new string,
-    // so the UPDATE is a one-shot but idempotent (subsequent boots
-    // match zero rows). Failure to rewrite is non-fatal — old rows
-    // would just stay under the legacy filter, which `from_str` still
-    // accepts as a backward-compat alias.
-    sqlx::query("UPDATE logs SET category = 'download_client' WHERE category = 'qbit'")
-        .execute(db)
-        .await
-        .ok();
+    // so the UPDATE is a one-shot. Gated through the schema_migrations
+    // ledger so it doesn't run a per-boot table scan over the logs
+    // table (which is bounded by cleanup but still grows between
+    // rotations). Failure to apply is non-fatal — old rows stay under
+    // the legacy filter and `from_str` still accepts "qbit" as a
+    // backward-compat alias.
+    {
+        use crate::models::group_source_map::{
+            ensure_schema_migrations_table, mark_migration_applied, migration_already_applied,
+        };
+        const ID: &str = "logs_category_qbit_to_download_client_v1";
+        ensure_schema_migrations_table(db).await.ok();
+        if !migration_already_applied(db, ID).await.unwrap_or(false) {
+            // Run the UPDATE + ledger insert in one transaction so a
+            // crash mid-migration doesn't leave the rows half-rewritten
+            // with the ledger marked applied. SQLite's default journal
+            // mode is fine here — this is one UPDATE + one INSERT.
+            if let Ok(mut tx) = db.begin().await {
+                let upd = sqlx::query(
+                    "UPDATE logs SET category = 'download_client' WHERE category = 'qbit'",
+                )
+                .execute(&mut *tx)
+                .await;
+                if upd.is_ok() {
+                    let _ = mark_migration_applied(&mut tx, ID).await;
+                    let _ = tx.commit().await;
+                }
+            }
+        }
+    }
 
     Ok(())
 }

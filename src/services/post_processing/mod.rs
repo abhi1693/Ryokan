@@ -21,6 +21,18 @@ pub use state::{grab_is_stale, scan_library_for_unclassified, scan_series_for_un
 pub(crate) static POST_PROC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+/// Process-wide lock for `scan_library_for_unclassified`. Mirrors the
+/// `RSS_SYNC_LOCK` / `EXTERNAL_SYNC_LOCK` shape — the supervised 6h
+/// sweep awaits it, and the manual Run-now click `try_lock`s and
+/// surfaces a friendly busy message instead of interleaving with the
+/// supervised tick. Without this, a Run-now click during the
+/// supervised cadence flipped the row's `last_started_at` /
+/// `last_status` between the two runs' writes (cosmetic flicker on
+/// Scheduled Tasks; not data-corrupting since the scan is read-mostly
+/// but visible to the user).
+pub static LIBRARY_CLASSIFY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 // Completion and error detection goes through the trait's normalized
 // `DownloadItemState` enum (`torrent.state_kind.is_complete()` etc.)
 // rather than matching on the raw `state` string — the string is the

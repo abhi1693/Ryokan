@@ -187,8 +187,11 @@ function runRssSync(btn) {
             });
         })
         .finally(() => {
-            window.removeEventListener('beforeunload', onLeaving);
-            window.removeEventListener('pagehide', onLeaving);
+            // Listeners self-remove on first fire via {once: true}; if
+            // the fetch settled normally without navigation, they
+            // stay registered until the next pagehide / beforeunload
+            // fires (one-shot, no leak). The btn re-enable is the
+            // only thing this needs to do.
             btn.disabled = false;
         });
 }
@@ -267,8 +270,8 @@ function forceRunTask(btn, taskKey) {
             });
         })
         .finally(() => {
-            window.removeEventListener('beforeunload', onLeaving);
-            window.removeEventListener('pagehide', onLeaving);
+            // Listeners self-remove on first fire via {once: true};
+            // see runRssSync for the rationale.
             btn.disabled = false;
             btn.textContent = 'Run now';
         });

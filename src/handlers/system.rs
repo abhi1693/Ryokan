@@ -34,22 +34,44 @@ use crate::services::{logger, metadata_sync, post_processing, rss as rss_service
 /// One-layer (vs. the three-layer pattern in
 /// `api_rebuild_cached_metadata`): a body panic surfaces as
 /// `Err(JoinError::Panicked)` and `mark_finished` is missed, leaving
-/// the row stuck at running. Acceptable trade-off for the
-/// periodic-refresh / cleanup / library-classify / etc. family
-/// because none of those wrap user-input parsing or speculative I/O
-/// with a realistic panic site. Use the three-layer shape if a new
-/// handler does.
+/// the row stuck at running until the next process restart's
+/// `scheduled_tasks::recover_stuck_running` boot pass cleans it up.
+/// Acceptable trade-off for the periodic-refresh / cleanup /
+/// library-classify / etc. family because none of those wrap
+/// user-input parsing or speculative I/O with a realistic panic
+/// site. Use the three-layer shape in `api_rebuild_cached_metadata`
+/// if a new handler does.
 async fn detached_task<F, T>(future: F) -> Result<T, (StatusCode, String)>
 where
     F: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::spawn(future).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("scheduled task failed to join: {}", e),
-        )
-    })
+    match tokio::spawn(future).await {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            // Log loudly on the panic path so the operator has a
+            // breadcrumb in the process logs beyond the eventual
+            // `recover_stuck_running` line at next boot. Without
+            // this, a panic in a spawn body is silent until the
+            // next restart's recovery pass — the row stays at
+            // 'running' for the rest of the current process
+            // lifetime and System → Scheduled Tasks shows no
+            // failure.
+            if e.is_panic() {
+                tracing::error!(
+                    target: "ryokan::system",
+                    "detached scheduled task panicked: {} \
+                     (row will stay 'running' until the next process restart, \
+                     where boot-time recover_stuck_running flips it to 'error')",
+                    e
+                );
+            }
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("scheduled task failed to join: {}", e),
+            ))
+        }
+    }
 }
 
 #[derive(Template)]
@@ -1191,6 +1213,25 @@ pub async fn api_force_library_classify(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     detached_task(async move {
+        // try_lock the process-wide LIBRARY_CLASSIFY_LOCK so a
+        // Run-now click during the supervised 6h tick (which also
+        // holds the lock) returns a friendly busy message instead
+        // of interleaving and flipping the scheduled-tasks row's
+        // status between the two writers. Same shape as
+        // `tick_once_or_busy` for external_sync.
+        let _guard = match post_processing::LIBRARY_CLASSIFY_LOCK.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    serde_json::json!({
+                        "ok": false,
+                        "message": "Library classify is already running.",
+                    })
+                    .to_string(),
+                ));
+            }
+        };
         let _ = scheduled_tasks::mark_started(
             &state.db,
             "library_classify",
@@ -1207,16 +1248,16 @@ pub async fn api_force_library_classify(
         );
         let _ =
             scheduled_tasks::mark_finished(&state.db, "library_classify", "ok", &message).await;
-        Json(serde_json::json!({
+        Ok(Json(serde_json::json!({
             "ok": true,
             "message": message,
             "series_scanned": report.series_scanned,
             "files_scanned": report.files_scanned,
             "files_classified": report.files_classified,
             "files_needing_review": report.files_needing_review,
-        }))
+        })))
     })
-    .await
+    .await?
 }
 
 #[utoipa::path(
