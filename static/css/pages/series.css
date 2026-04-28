@@ -670,6 +670,19 @@
 .relation-card-cover {
     position: relative;
     width: 100%;
+    /* Explicit pixel height instead of `aspect-ratio: 85/115`. The
+     * card is `flex: 0 0 136px`, so the deterministic cover size at
+     * default zoom is 136 * (115/85) ≈ 184px. We previously relied
+     * solely on aspect-ratio, but in practice browsers occasionally
+     * fall back to the child <img>'s intrinsic size when the image
+     * has odd natural dimensions (the Koyomi-History case — a tall
+     * portrait poster whose intrinsic height was less than the
+     * aspect-ratio-derived height, so the box collapsed around it).
+     * A hard `height` is the load-bearing line; `aspect-ratio` stays
+     * as a fallback for any future variant where the card width
+     * might fluid up via media query — both remaining true keeps
+     * the contract consistent. */
+    height: 184px;
     aspect-ratio: 85 / 115;
     overflow: hidden;
     background: var(--bg-elevated);
@@ -719,6 +732,16 @@
 
 .relation-card-info {
     padding: 0 2px;
+    /* min-height (not height) so users at large-text zoom or system-
+     * level font scaling get the box growing rather than silently
+     * clipping content. The 96px floor is what pins uniform card
+     * heights at the default font size; the title's line-clamp + meta-
+     * row min-height keep their own bounded heights so the floor still
+     * lands cleanly. overflow:hidden remains as a defensive cap when
+     * a single card legitimately overflows (kind label running long
+     * with a translated locale, etc.) so it doesn't push neighbors. */
+    min-height: 96px;
+    overflow: hidden;
 }
 
 .relation-card-kind {
@@ -750,7 +773,22 @@
 .relation-card-meta {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
+    /* `nowrap` + `overflow:hidden` instead of the prior `wrap` keeps
+     * every card's meta row at a single line. Combined with the
+     * cover's fixed `aspect-ratio: 85/115` and the title's
+     * `-webkit-line-clamp: 2 + min-height: 2.7em`, this pins the
+     * total card height so the relations row reads as a uniform
+     * grid. Long combinations (long format + 3-digit episode count)
+     * clip at the right edge — acceptable, since the format word is
+     * already a category hint and the episode count is the
+     * higher-signal datum.
+     *
+     * `min-height: 18px` covers the inverse case: cards with no
+     * episode count (TBA / unaired) render only one tag and would
+     * otherwise sit slightly shorter without the reservation. */
+    flex-wrap: nowrap;
+    overflow: hidden;
+    min-height: 18px;
     gap: 6px;
     font-size: 11px;
     color: var(--text-dim);

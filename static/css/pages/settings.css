@@ -833,3 +833,264 @@ fieldset legend {
     line-height: 1.55;
 }
 
+/* ── Settings → Download Clients tab ─────────────────────────────
+   Card-based picker. Each card is a clickable button that swaps to
+   an inline edit form; the trailing "+ Add download client" tile
+   opens a modal so the form has full-width focus instead of pushing
+   the picker grid downward. */
+.dc-page {
+    margin-top: 4px;
+}
+
+.dc-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+}
+
+.dc-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: border-color 0.15s, background 0.15s;
+    min-height: 140px;
+}
+
+.dc-card:hover { border-color: var(--accent); background: var(--bg); }
+
+/* Whole-card click target. The body is a real <button> so
+   keyboard users get focus + Enter/Space activation for free.
+   Stripped of the default button chrome so it reads as a plain
+   card surface. */
+.dc-card-body {
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+    flex: 1 1 auto;
+    border-radius: inherit;
+}
+
+.dc-card-body:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.dc-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    /* Reserve space on the right for the corner × delete button so
+       a long client name + status pill don't collide with the
+       action area. The × is positioned absolutely (top:10px
+       right:10px), 20×20px; padding-right protects 30px of bleed. */
+    padding-right: 30px;
+}
+
+.dc-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.dc-card-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-bright);
+    word-break: break-word;
+    line-height: 1.3;
+}
+
+/* Default-flag pill alongside the name. Small green tag — a config
+   flag that belongs with the identity, not the connection state. */
+.dc-default-pill {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(166, 227, 161, 0.18);
+    color: var(--green, #a6e3a1);
+    flex-shrink: 0;
+}
+
+/* Status pill — probed live via /api/download-clients/{id}/status.
+   Loading state has a dim text + spinning hourglass, success state
+   shows "qBittorrent 5.1.4" in green, failure state shows
+   "Unreachable" in red with the error in `title`. Disabled rows
+   skip the probe and render a static gray pill. */
+.dc-status-pill {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+
+.dc-status-pill-loading  { background: rgba(108, 112, 134, 0.16); color: var(--text-dim); }
+.dc-status-pill-ok       { background: rgba(166, 227, 161, 0.18); color: var(--green, #a6e3a1); }
+.dc-status-pill-err      { background: rgba(243, 139, 168, 0.18); color: var(--red, #f38ba8); cursor: help; }
+.dc-status-pill-disabled { background: rgba(108, 112, 134, 0.18); color: var(--text-dim); }
+
+.dc-card-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    font-size: 13px;
+    margin-top: auto;
+}
+
+.dc-card-meta-row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    min-width: 0;
+}
+
+.dc-card-meta-row dt {
+    font-weight: 500;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    min-width: 64px;
+}
+
+.dc-card-meta-row dd {
+    margin: 0;
+    color: var(--text);
+    word-break: break-all;
+    min-width: 0;
+}
+
+.dc-card-meta-row dd code {
+    background: transparent;
+    padding: 0;
+    color: var(--text);
+    font-size: inherit;
+}
+
+/* Corner delete — same primitive the CF cards use. Always visible
+   per UX request — the small × is unobtrusive enough at rest, and
+   discoverability beats the slight visual quiet a hover-reveal
+   would buy. */
+.dc-card-actions {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+}
+
+/* Empty-state spans the grid so it doesn't sit awkwardly in a
+   single track when the user has no clients yet. */
+.dc-empty {
+    grid-column: 1 / -1;
+    padding: 18px 20px;
+    background: var(--bg-elevated);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    text-align: center;
+}
+
+/* Add tile — same dashed-border affordance as .cf-card-add. */
+.dc-card-add {
+    appearance: none;
+    background: var(--bg-elevated);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    cursor: pointer;
+    text-align: center;
+    padding: 14px 16px;
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    font: inherit;
+}
+
+.dc-card-add:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.04);
+}
+
+.dc-card-add-icon {
+    font-size: 28px;
+    font-weight: 300;
+    line-height: 1;
+    margin-bottom: 6px;
+}
+
+.dc-card-add-label {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+/* Modal-footer reuse — the modal CSS file doesn't define
+   .modal-footer; the CF editor inlines the styles. Defining it
+   here so the download-client modal (and any future modal) gets
+   a consistent footer layout without inline-style noise. */
+.modal-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 24px;
+    border-top: 1px solid var(--border);
+}
+
+.dc-modal-form { display: flex; flex-direction: column; min-height: 0; }
+.dc-modal-form .modal-body { padding: 20px 24px; }
+.dc-modal-form .form-group { margin-bottom: 14px; }
+.dc-modal-form .form-row   { display: flex; gap: 16px; }
+.dc-modal-form .form-row .form-group { flex: 1; min-width: 0; }
+
+/* ── Multi-RSS status pills ───────────────────────────────────────
+   Surfaces per-indexer + per-direct-feed RSS poll state on the
+   Indexers tab (Off / Idle / ✓ N items / ✗ Error). Same neutral
+   palette as the .badge family but pill-shaped + smaller so the
+   table rows don't grow taller. */
+.rss-pill {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.rss-pill-off {
+    background: rgba(108, 112, 134, 0.18);
+    color: var(--text-dim);
+}
+
+.rss-pill-idle {
+    background: rgba(116, 199, 236, 0.16);
+    color: var(--blue, #74c7ec);
+}
+
+.rss-pill-ok {
+    background: rgba(166, 227, 161, 0.16);
+    color: var(--green, #a6e3a1);
+}
+
+.rss-pill-error {
+    background: rgba(243, 139, 168, 0.16);
+    color: var(--red, #f38ba8);
+}
+
+

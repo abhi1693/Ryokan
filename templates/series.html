@@ -15,7 +15,11 @@
 
 <div class="detail-header">
     <div class="detail-cover">
-        <img src="{{ detail.cover_url }}" alt="{{ detail.title_romaji }}" loading="lazy">
+        {# Decorative — the title renders as a visible <h1> in
+           .detail-info to the right. Empty alt avoids the alt-text
+           flash during lazy-load and stops screen readers from
+           announcing the title twice. #}
+        <img src="{{ detail.cover_url }}" alt="" loading="lazy">
     </div>
     <div class="detail-info">
         <h1 class="detail-title title-switcher">
@@ -203,22 +207,15 @@
                     <input type="checkbox" id="allow-upgrades" {% if allow_upgrades %}checked{% endif %} onchange="setAllowUpgrades(this.checked)">
                     Allow automatic upgrades when a higher-quality release is found
                 </label>
-                <span class="form-hint" id="allow-upgrades-status"></span>
                 {# Issue #28 PR E — PT upgrade opt-in. Indented under the
                    parent toggle since "PT upgrades" is a sub-decision of
-                   "upgrades at all," and disabled outright when the user
-                   has zero PT indexers configured (the toggle would do
-                   nothing in that case so it reads as a hint instead). #}
+                   "upgrades at all." #}
                 <label class="checkbox-label" style="margin-top:6px;margin-left:20px">
                     <input type="checkbox" id="allow-pt-upgrades"
                         {% if allow_pt_upgrades %}checked{% endif %}
-                        {% if !any_private_indexer %}disabled{% endif %}
                         onchange="setAllowPtUpgrades(this.checked)">
                     Allow upgrades from private trackers
                 </label>
-                <span class="form-hint" id="allow-pt-upgrades-status" style="margin-left:20px">
-                    Off by default. When off, the upgrade sweep won't grab a private-tracker release as the chosen upgrade for this series even if it's the top-scoring candidate. Initial grabs and manual searches aren't gated.
-                </span>
             </div>
         </div>
         {# #23 — Per-series search overrides. Both fields are blank by

@@ -321,7 +321,13 @@ pub async fn grab_release(
             let db = state.db.clone();
             let err_msg = e.clone();
             tokio::spawn(async move {
-                logger::error(&db, LogCategory::QBit, "Manual grab failed", &err_msg).await;
+                logger::error(
+                    &db,
+                    LogCategory::DownloadClient,
+                    "Manual grab failed",
+                    &err_msg,
+                )
+                .await;
             });
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e)
         })?;

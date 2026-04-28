@@ -96,6 +96,10 @@ use services::{
         handlers::settings::download_clients::settings_download_clients_delete,
         handlers::settings::download_clients::settings_download_clients_set_default,
         handlers::settings::download_clients::settings_download_clients_test,
+        handlers::settings::download_clients::settings_download_clients_section,
+        handlers::settings::download_clients::settings_download_clients_edit_form,
+        handlers::settings::download_clients::settings_download_clients_add_form,
+        handlers::settings::download_clients::settings_download_clients_status,
         handlers::settings::download_clients::settings_indexers_nyaa_pin,
         // Settings — autobrr API key rotation (issue #28 PR D)
         handlers::settings::autobrr_key::settings_autobrr_regenerate_key,
@@ -103,7 +107,9 @@ use services::{
         handlers::webhook::autobrr::webhook_autobrr,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
+        handlers::system::api_logs_export,
         handlers::system::api_logs_client,
+        handlers::system::api_force_external_sync,
         handlers::progress::poll_progress,
         handlers::system::api_rss_sync,
         handlers::system::api_rss_clear_history,
@@ -401,6 +407,25 @@ async fn main() {
     // single COUNT(*) probe and return.
     if let Err(e) = models::series_genres::backfill_from_metadata_cache_once(&db).await {
         tracing::warn!("series_genres backfill failed (filter dropdown may be empty): {e}");
+    }
+
+    // Boot-time recovery: any `scheduled_task_runs` row left at
+    // last_status='running' is necessarily stranded — the task that
+    // wrote it lived in a prior process incarnation that has since
+    // gone away. Mark them as 'error' with a user-facing detail so
+    // the System → Scheduled Tasks UI doesn't keep showing them as
+    // in-flight forever. See `recover_stuck_running` for the full
+    // backstory.
+    match models::scheduled_tasks::recover_stuck_running(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            target: "ryokan::scheduled_tasks",
+            "recovered {n} stuck 'running' scheduled-task row(s) at startup"
+        ),
+        Err(e) => tracing::warn!(
+            target: "ryokan::scheduled_tasks",
+            "stuck-task recovery failed (rows may stay at 'running'): {e}"
+        ),
     }
 
     // Password-recovery boot path (#22). When RYOKAN_RESET_AUTH=1 or
@@ -783,6 +808,22 @@ async fn main() {
             post(handlers::settings::download_clients::settings_download_clients_test),
         )
         .route(
+            "/api/download-clients/section",
+            get(handlers::settings::download_clients::settings_download_clients_section),
+        )
+        .route(
+            "/settings/download-clients/{id}/edit-form",
+            get(handlers::settings::download_clients::settings_download_clients_edit_form),
+        )
+        .route(
+            "/api/download-clients/add-form",
+            get(handlers::settings::download_clients::settings_download_clients_add_form),
+        )
+        .route(
+            "/api/download-clients/{id}/status",
+            get(handlers::settings::download_clients::settings_download_clients_status),
+        )
+        .route(
             "/settings/autobrr/regenerate-key",
             post(handlers::settings::autobrr_key::settings_autobrr_regenerate_key),
         )
@@ -860,6 +901,10 @@ async fn main() {
             post(handlers::system::api_force_upgrade_search),
         )
         .route(
+            "/api/tasks/external-sync",
+            post(handlers::system::api_force_external_sync),
+        )
+        .route(
             "/api/system/rebuild-anilist-cache",
             post(handlers::system::api_rebuild_cached_metadata),
         )
@@ -871,6 +916,7 @@ async fn main() {
         .route("/help", get(handlers::help::help_page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
+        .route("/api/logs/export", get(handlers::system::api_logs_export))
         .route("/api/logs/client", post(handlers::system::api_logs_client))
         .route(
             "/api/progress/{job_id}",
@@ -1549,10 +1595,18 @@ async fn main() {
                             "Re-classifying unknown / unclassified files",
                         )
                         .await;
+                        // Hold the process-wide lock so a Run-now
+                        // click during this 6h tick blocks instead
+                        // of interleaving and flipping the row's
+                        // status between two concurrent writes.
+                        let _guard = services::post_processing::LIBRARY_CLASSIFY_LOCK
+                            .lock()
+                            .await;
                         let report = services::post_processing::scan_library_for_unclassified(
                             &classify_state,
                         )
                         .await;
+                        drop(_guard);
                         let detail = format!(
                             "series={}, files_scanned={}, classified={}, needs_review={}",
                             report.series_scanned,
@@ -1823,12 +1877,22 @@ async fn main() {
 
                         let every = (cfg.external_sync_interval_minutes as i64).clamp(15, 10080);
 
+                        // Reflect link status in the task row so the
+                        // System → Scheduled Tasks UI shows "disabled"
+                        // when no account is connected. The supervised
+                        // loop still runs (so a fresh link picks up on
+                        // the next minute tick) but the row's enabled
+                        // flag is the right signal that this task is
+                        // dormant by design rather than off due to a
+                        // user toggle.
+                        let has_linked =
+                            services::external_sync::has_linked_account(&state.db).await;
                         let _ = models::scheduled_tasks::touch_definition(
                             &state.db,
                             "external_sync",
                             "External account sync",
                             &format!("Every {} minutes", every),
-                            true,
+                            has_linked,
                         )
                         .await;
 
@@ -1861,7 +1925,7 @@ async fn main() {
                         // after the user actually links — bad UX,
                         // and the comment that used to be here lied
                         // about it.
-                        if !services::external_sync::has_linked_account(&state.db).await {
+                        if !has_linked {
                             continue;
                         }
 

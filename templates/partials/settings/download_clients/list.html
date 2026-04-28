@@ -1,0 +1,127 @@
+{# Card grid + add tile + shared edit/add modal. Each card click
+   fetches the edit form into the modal body; the "+ Add" tile
+   fetches the add form into the same body. Save returns the
+   whole #dc-section partial so a successful save re-renders the
+   cards (with the modal hidden + reset for free).
+
+   Click handlers go through `onclick="openDcEditModal(...)"` /
+   `openDcAddModal()` instead of `<button hx-get hx-on>` because
+   `<button>` is restricted to phrasing content — putting the
+   `<dl>` + `<div>` card layout inside it makes the parser auto-
+   close the button before the inner blocks, which strands all
+   the hx-* attrs on an empty (invisible) element. The JS
+   functions use `htmx.ajax()` to fetch + swap, so we still get
+   the same wire flow without fighting HTML semantics. #}
+<div id="dc-section" class="dc-section">
+    {# Pre-compute flags before the for-loop consumes `rows` —
+       askama IntoIterator semantics. #}
+    {% let first_client = rows.is_empty() %}
+    {% let show_empty_state = rows.is_empty() %}
+    <div class="dc-card-grid">
+        {% if show_empty_state %}
+        <div class="dc-empty">
+            <p class="form-hint" style="margin: 0">No download clients configured yet. Add one to start grabbing.</p>
+        </div>
+        {% endif %}
+
+        {% for row in rows %}
+        <article class="dc-card" id="dc-card-{{ row.id }}">
+            <div class="dc-card-body"
+                 role="button"
+                 tabindex="0"
+                 data-dc-id="{{ row.id }}"
+                 data-dc-name="{{ row.name }}"
+                 onclick="openDcEditModal(this.dataset.dcId, this.dataset.dcName)"
+                 onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDcEditModal(this.dataset.dcId, this.dataset.dcName); }"
+                 aria-label="Edit {{ row.name }}">
+                <div class="dc-card-header">
+                    <div class="dc-card-title">
+                        <strong class="dc-card-name">{{ row.name }}</strong>
+                        {% if row.is_default %}<span class="dc-default-pill" title="This client receives every grab without an explicit indexer pin">Default</span>{% endif %}
+                    </div>
+                    {# Status pill — placeholder loads then HTMX swap-on-load
+                       replaces with the probed version, or a static Disabled
+                       pill for disabled rows. #}
+                    {% if !row.enabled %}
+                    <span class="dc-status-pill dc-status-pill-disabled">Disabled</span>
+                    {% else %}
+                    <span class="dc-status-pill dc-status-pill-loading"
+                          hx-get="/api/download-clients/{{ row.id }}/status"
+                          hx-trigger="load"
+                          hx-swap="outerHTML">Probing&hellip;</span>
+                    {% endif %}
+                </div>
+                <dl class="dc-card-meta">
+                    <div class="dc-card-meta-row">
+                        <dt>URL</dt>
+                        <dd><code>{{ row.url }}</code></dd>
+                    </div>
+                    {% if !row.label.is_empty() %}
+                    <div class="dc-card-meta-row">
+                        <dt>{% if row.kind == "qbittorrent" %}Category{% else %}Label{% endif %}</dt>
+                        <dd><code>{{ row.label }}</code></dd>
+                    </div>
+                    {% endif %}
+                    {% if !row.download_path.is_empty() %}
+                    <div class="dc-card-meta-row">
+                        <dt>Path</dt>
+                        <dd><code>{{ row.download_path }}</code></dd>
+                    </div>
+                    {% endif %}
+                </dl>
+            </div>
+            {# Corner × delete — always visible (the user wants the action
+               discoverable without hovering). Stop-propagation on the form
+               so a click on the × doesn't bubble up to the dc-card-body
+               click handler and open the edit modal alongside the
+               delete confirm. #}
+            <div class="dc-card-actions" onclick="event.stopPropagation()">
+                <form method="post" action="/settings/download-clients/delete"
+                      hx-post="/settings/download-clients/delete"
+                      hx-target="#dc-section"
+                      hx-swap="outerHTML"
+                      data-ryokan-confirm-title="Delete download client?"
+                      data-ryokan-confirm-body="Remove '{{ row.name }}' from Ryokan. Any indexers pinned to it (and the Nyaa pin if set) will fall back to the default client at grab time."
+                      data-ryokan-confirm-yes="Delete"
+                      data-ryokan-confirm-no="Cancel"
+                      data-ryokan-confirm-danger="1"
+                      style="margin:0">
+                    <input type="hidden" name="id" value="{{ row.id }}">
+                    <button type="submit" class="btn btn-icon-danger" title="Delete {{ row.name }}" aria-label="Delete {{ row.name }}">×</button>
+                </form>
+            </div>
+        </article>
+        {% endfor %}
+
+        {# "+ Add download client" tile — same pattern as the per-card
+           click. Fetches the add form into the modal body via
+           openDcAddModal(). #}
+        <div class="dc-card dc-card-add"
+             role="button"
+             tabindex="0"
+             onclick="openDcAddModal()"
+             onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDcAddModal(); }">
+            <div class="dc-card-add-icon">+</div>
+            <div class="dc-card-add-label">Add download client</div>
+        </div>
+    </div>
+
+    {# Shared modal — body content is replaced by HTMX on each open
+       (Add or Edit). Initial render is the Add form so a section-
+       partial swap (after a successful save) leaves the modal at
+       display:none with the right body for the next Add click. #}
+    <div class="modal-backdrop" id="dc-modal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="dc-modal-title">
+        <div class="modal" style="max-width: 640px">
+            <div class="modal-header">
+                <h3 id="dc-modal-title">Add download client</h3>
+                <button class="btn-icon" type="button" onclick="closeDownloadClientModal()" aria-label="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div id="dc-modal-body">
+{%~ include "partials/settings/download_clients/add_form_body.html" ~%}
+            </div>
+        </div>
+    </div>
+</div>

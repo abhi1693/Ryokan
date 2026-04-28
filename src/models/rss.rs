@@ -253,13 +253,37 @@ pub async fn recent_decisions(
     db: &SqlitePool,
     limit: i64,
 ) -> Result<Vec<RssDecision>, sqlx::Error> {
-    let rows: Vec<RssDecisionRow> = sqlx::query_as(
-        r#"SELECT id, created_at, title, series_title, group_name, decision, reason, source, is_batch
-           FROM rss_seen ORDER BY id DESC LIMIT ?"#,
-    )
-    .bind(limit)
-    .fetch_all(db)
-    .await?;
+    recent_decisions_paginated(db, limit, None).await
+}
+
+/// Cursor-paginated variant of [`recent_decisions`]. Pass
+/// `Some(before_id)` to fetch entries with `id < before_id`. Used by
+/// the System → RSS tab's "Older →" pagination link (Phase 7 PR F).
+/// Same row shape as `recent_decisions` so the template renders both
+/// the first-page and the older-page paths through one loop.
+pub async fn recent_decisions_paginated(
+    db: &SqlitePool,
+    limit: i64,
+    before_id: Option<i64>,
+) -> Result<Vec<RssDecision>, sqlx::Error> {
+    let rows: Vec<RssDecisionRow> = if let Some(before) = before_id {
+        sqlx::query_as(
+            r#"SELECT id, created_at, title, series_title, group_name, decision, reason, source, is_batch
+               FROM rss_seen WHERE id < ? ORDER BY id DESC LIMIT ?"#,
+        )
+        .bind(before)
+        .bind(limit)
+        .fetch_all(db)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"SELECT id, created_at, title, series_title, group_name, decision, reason, source, is_batch
+               FROM rss_seen ORDER BY id DESC LIMIT ?"#,
+        )
+        .bind(limit)
+        .fetch_all(db)
+        .await?
+    };
 
     Ok(rows
         .into_iter()
@@ -452,6 +476,56 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].title, "Title 4");
         assert_eq!(rows[2].title, "Title 2");
+    }
+
+    #[tokio::test]
+    async fn recent_decisions_paginated_skips_entries_at_or_above_cursor() {
+        // Cursor semantics: `before_id = N` returns rows with `id < N`,
+        // not `id <= N`. Pin so a regression that flips the comparison
+        // (and double-counts the boundary row across pages) fails here.
+        let db = in_memory_pool().await;
+        for i in 0..6 {
+            record_decision(
+                &db,
+                record(&format!("k:{i}"), &format!("Title {i}"), "grabbed"),
+            )
+            .await
+            .unwrap();
+        }
+        let first_page = recent_decisions_paginated(&db, 3, None).await.unwrap();
+        assert_eq!(first_page.len(), 3);
+        assert_eq!(first_page[0].title, "Title 5");
+        assert_eq!(first_page[2].title, "Title 3");
+
+        // Use the last row's id as the next-page cursor (the
+        // `+1`-truncate trick the handler uses).
+        let cursor = first_page.last().unwrap().id;
+        let second_page = recent_decisions_paginated(&db, 3, Some(cursor))
+            .await
+            .unwrap();
+        assert_eq!(second_page.len(), 3);
+        assert_eq!(second_page[0].title, "Title 2");
+        assert!(
+            !second_page.iter().any(|r| r.title == "Title 3"),
+            "boundary row at the cursor must NOT appear on the next page; got {second_page:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_decisions_paginated_returns_empty_when_cursor_past_oldest() {
+        let db = in_memory_pool().await;
+        record_decision(&db, record("only", "Only", "grabbed"))
+            .await
+            .unwrap();
+        let only = recent_decisions_paginated(&db, 10, None).await.unwrap();
+        let cursor = only[0].id;
+        let past = recent_decisions_paginated(&db, 10, Some(cursor))
+            .await
+            .unwrap();
+        assert!(
+            past.is_empty(),
+            "cursor at the oldest row's id must return empty page (no `id < cursor`); got {past:?}"
+        );
     }
 
     #[tokio::test]

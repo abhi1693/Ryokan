@@ -22,7 +22,7 @@
         Scheduled Tasks
     </a>
     <a href="/system?tab=review" class="system-tab {% if tab == "review" %}active{% endif %}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
         Needs Review
     </a>
     <a href="/system?tab=scoring" class="system-tab {% if tab == "scoring" %}active{% endif %}">
@@ -74,6 +74,18 @@
             <input type="checkbox" id="poll-toggle" checked>
             <span class="log-poll-label">Live</span>
         </label>
+        {# Download presets — each link triggers a server-rendered TSV
+           dump. Anchor tags (not buttons) so the browser handles the
+           Content-Disposition: attachment header natively without JS. #}
+        <div class="log-download-menu">
+            <button class="btn btn-ghost btn-sm" type="button" onclick="document.getElementById('log-download-options').classList.toggle('open')" title="Download logs">Download ▾</button>
+            <div class="log-download-options" id="log-download-options">
+                <a class="log-download-option" href="/api/logs/export?range=today">Today</a>
+                <a class="log-download-option" href="/api/logs/export?range=7d">Last 7 days</a>
+                <a class="log-download-option" href="/api/logs/export?range=30d">Last 30 days</a>
+                <a class="log-download-option" href="/api/logs/export?range=all">All</a>
+            </div>
+        </div>
         <button class="btn btn-ghost btn-sm" onclick="clearLogs()" title="Clear all logs">Clear</button>
     </div>
 </div>
@@ -108,6 +120,30 @@
     <div class="logs-empty">No log entries matching filters.</div>
     {% endif %}
 </div>
+
+{# Cursor-based pagination. `log_older_id` is the id of the oldest
+   visible row when there's more history beyond this page; `None`
+   on the last page. `log_before_id` is the current page's cursor;
+   `None` on the first/newest page (so the "Newest" link only
+   renders when the user has navigated backwards). Both controls
+   propagate the active filter state via query params so paginating
+   doesn't reset the filter dropdowns. #}
+{# `|urlencode` on every interpolated filter value: `filter_search` is
+   user-controlled (the "Filter messages..." input), and a search like
+   `foo & bar` would otherwise produce an href the browser parses as a
+   new query parameter starting at `& bar`, breaking pagination
+   silently. The same applies to category / level for any future
+   non-ascii or `&`-bearing values. #}
+{% if log_older_id.is_some() || log_before_id.is_some() %}
+<div class="logs-pagination">
+    {% if log_before_id.is_some() %}
+    <a class="btn btn-ghost btn-sm" href="/system?tab=logs{% if !filter_level.is_empty() %}&level={{ filter_level|urlencode }}{% endif %}{% if !filter_category.is_empty() %}&category={{ filter_category|urlencode }}{% endif %}{% if !filter_search.is_empty() %}&search={{ filter_search|urlencode }}{% endif %}">← Newest</a>
+    {% endif %}
+    {% if let Some(older) = log_older_id %}
+    <a class="btn btn-ghost btn-sm" href="/system?tab=logs&before_id={{ older }}{% if !filter_level.is_empty() %}&level={{ filter_level|urlencode }}{% endif %}{% if !filter_category.is_empty() %}&category={{ filter_category|urlencode }}{% endif %}{% if !filter_search.is_empty() %}&search={{ filter_search|urlencode }}{% endif %}">Older →</a>
+    {% endif %}
+</div>
+{% endif %}
 
 {% else if tab == "rss" %}
 <div class="rss-panel">
@@ -175,15 +211,35 @@
             </table>
         </div>
         {% endif %}
+        {# Cursor pagination — same shape as the Logs tab. The
+           pagination strip only renders when at least one direction
+           is reachable. #}
+        {% if rss_older_id.is_some() || rss_before_id.is_some() %}
+        <div class="logs-pagination">
+            {% if rss_before_id.is_some() %}
+            <a class="btn btn-ghost btn-sm" href="/system?tab=rss">← Newest</a>
+            {% endif %}
+            {% if let Some(older) = rss_older_id %}
+            <a class="btn btn-ghost btn-sm" href="/system?tab=rss&before_id={{ older }}">Older →</a>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
 </div>
 
 {% else if tab == "tasks" %}
 <div class="rss-panel">
     <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Scheduled tasks</h3>
-        </div>
+        {# The redundant "Scheduled tasks" h3 was dropped — the System
+           tab the user clicked is labeled "Scheduled Tasks" already,
+           and there's nothing else in the section header to anchor.
+           Section gets a one-liner hint instead so the page has a
+           reason to start where it does. #}
+        <p class="form-hint" style="margin:0 0 12px">
+            Background jobs Ryokan schedules. Cadence + last run state for each.
+            Use <strong>Run now</strong> to trigger a job out-of-band — useful for
+            picking up new metadata or RSS items immediately after a settings change.
+        </p>
         {% if scheduled_tasks.is_empty() %}
         <div class="logs-empty">No scheduled task definitions registered yet.</div>
         {% else %}
@@ -211,8 +267,14 @@
                         <td>{{ task.schedule_label }}</td>
                         <td>{% if task.enabled %}<span class="log-badge log-badge-info">enabled</span>{% else %}<span class="log-badge log-badge-warn">disabled</span>{% endif %}</td>
                         <td>{% if task.last_status == "ok" %}<span class="log-badge log-badge-info">ok</span>{% else if task.last_status == "warn" %}<span class="log-badge log-badge-warn">warn</span>{% else if task.last_status == "error" %}<span class="log-badge log-badge-error">error</span>{% else if task.last_status == "running" %}<span class="log-badge log-badge-debug">running</span>{% else %}<span class="log-badge">{{ task.last_status }}</span>{% endif %}</td>
-                        <td>{% if let Some(started) = task.last_started_at %}<span data-ts="{{ started }}">{{ started }}</span>{% else %}—{% endif %}</td>
-                        <td>{% if let Some(finished) = task.last_finished_at %}<span data-ts="{{ finished }}">{{ finished }}</span>{% else %}—{% endif %}</td>
+                        {# Render the absolute timestamp directly (no
+                           data-ts) so the time formatter doesn't flash
+                           the relative-time replacement on page load.
+                           For run-state info the exact time is more
+                           useful than "5m ago" anyway — users want to
+                           correlate with other events. #}
+                        <td>{% if let Some(started) = task.last_started_at %}<span class="task-time">{{ started }}</span>{% else %}—{% endif %}</td>
+                        <td>{% if let Some(finished) = task.last_finished_at %}<span class="task-time">{{ finished }}</span>{% else %}—{% endif %}</td>
                         <td class="task-detail-cell"><div class="task-detail-text">{{ task.last_detail }}</div></td>
                         <td><button type="button" class="btn btn-secondary btn-sm task-run-btn" onclick="forceRunTask(this, '{{ task.task_key }}')">Run now</button></td>
                     </tr>
@@ -226,19 +288,19 @@
 {% else if tab == "review" %}
 <div class="rss-panel">
     <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Needs Review</h3>
-        </div>
-        <p class="cf-section-desc">
-            Episodes where Ryokan couldn't pick a source/resolution with confidence. Pick a source/resolution and hit Apply to pin a manual classification right here, or open the series for the full episode context.
-        </p>
-        {% if review_entries.is_empty() %}
-        <div class="logs-empty">
+        {# Empty state always rendered, hidden when there are entries.
+           After a successful bulk apply that empties the table, JS
+           reveals this in place of the table — a full page reload
+           would clobber the success toast mid-display. Server stays
+           the source of truth for the copy. #}
+        <div class="logs-empty" id="review-empty-state" {% if !review_entries.is_empty() %}hidden{% endif %}>
             <p>No episodes currently flagged for review.</p>
             <p class="form-hint">This view fills up when the classifier lands on a low-confidence verdict: either no single layer was strong enough, or two strong layers disagreed. Manual overrides and post-download ffprobe checks usually keep it empty.</p>
         </div>
-        {% else %}
-        <div id="review-bulk-bar" class="review-bulk-bar" hidden>
+        {% if !review_entries.is_empty() %}
+        {# Bulk bar always visible — rows are pre-selected by default,
+           so the bar is the primary action surface from page load. #}
+        <div id="review-bulk-bar" class="review-bulk-bar">
             <span class="review-bulk-count"><span id="review-bulk-count-n">0</span> selected</span>
             <select id="review-bulk-source" class="folder-select">
                 <option value="bluray_bdmv">BD-RAW</option>
@@ -266,7 +328,7 @@
                     <tr>
                         <th style="text-align:center;padding:8px 4px;border-bottom:1px solid var(--border);width:36px">
                             <label class="checkbox-row" style="margin:0;display:inline-flex">
-                                <input type="checkbox" id="review-select-all" aria-label="Select all">
+                                <input type="checkbox" id="review-select-all" aria-label="Select all" checked>
                             </label>
                         </th>
                         <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Series</th>
@@ -274,7 +336,6 @@
                         <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Current tag</th>
                         <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Release</th>
                         <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border)">Confidence</th>
-                        <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border)">Override</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -285,7 +346,7 @@
                         data-current-web-kind="{{ entry.web_kind }}">
                         <td style="text-align:center;padding:8px 4px;border-bottom:1px solid var(--border)">
                             <label class="checkbox-row" style="margin:0;display:inline-flex">
-                                <input type="checkbox" class="review-row-check" aria-label="Select row">
+                                <input type="checkbox" class="review-row-check" aria-label="Select row" checked>
                             </label>
                         </td>
                         <td style="padding:8px 12px;border-bottom:1px solid var(--border)">
@@ -293,7 +354,17 @@
                                 {% if !entry.cover_url.is_empty() %}
                                 <img src="{{ entry.cover_url }}" alt="" loading="lazy" style="width:32px;height:46px;object-fit:cover;border-radius:2px">
                                 {% endif %}
-                                <span>{{ entry.series_title }}</span>
+                                {# Title-switcher pattern (matches library cards
+                                   + relations cards). The active variant is
+                                   shown via the html[data-title-language]
+                                   attribute selector in base.css; default
+                                   fallback is English-then-romaji-then-the
+                                   server-side `series_title` field. #}
+                                <p class="title-switcher" style="margin:0">
+                                    <span class="title-option" data-title-lang="english">{% if !entry.series_title_english.is_empty() %}{{ entry.series_title_english }}{% else if !entry.series_title_romaji.is_empty() %}{{ entry.series_title_romaji }}{% else if !entry.series_title_native.is_empty() %}{{ entry.series_title_native }}{% else %}{{ entry.series_title }}{% endif %}</span>
+                                    <span class="title-option" data-title-lang="romaji">{% if !entry.series_title_romaji.is_empty() %}{{ entry.series_title_romaji }}{% else if !entry.series_title_english.is_empty() %}{{ entry.series_title_english }}{% else if !entry.series_title_native.is_empty() %}{{ entry.series_title_native }}{% else %}{{ entry.series_title }}{% endif %}</span>
+                                    <span class="title-option" data-title-lang="native">{% if !entry.series_title_native.is_empty() %}{{ entry.series_title_native }}{% else if !entry.series_title_romaji.is_empty() %}{{ entry.series_title_romaji }}{% else if !entry.series_title_english.is_empty() %}{{ entry.series_title_english }}{% else %}{{ entry.series_title }}{% endif %}</span>
+                                </p>
                             </a>
                         </td>
                         <td style="padding:8px 12px;border-bottom:1px solid var(--border)">{{ entry.episode_number }}</td>
@@ -308,30 +379,6 @@
                         </td>
                         <td style="padding:8px 12px;border-bottom:1px solid var(--border);text-align:right">
                             {{ "{:.0}%"|format(entry.classification_confidence * 100.0) }}
-                        </td>
-                        <td style="padding:8px 12px;border-bottom:1px solid var(--border);text-align:right">
-                            <div style="display:inline-flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-                                <select class="folder-select review-source">
-                                    <option value="bluray_bdmv">BD-RAW</option>
-                                    <option value="bluray_remux">BD-Remux</option>
-                                    <option value="bluray">BD</option>
-                                    <option value="web">WEB</option>
-                                    <option value="webrip">WEBRIP</option>
-                                    <option value="dvd">DVD</option>
-                                    <option value="hdtv">HDTV</option>
-                                    <option value="tv">TV</option>
-                                </select>
-                                <select class="folder-select review-resolution">
-                                    <option value="2160p">2160p</option>
-                                    <option value="1080p">1080p</option>
-                                    <option value="720p">720p</option>
-                                    <option value="576p">576p</option>
-                                    <option value="480p">480p</option>
-                                </select>
-                                <button class="btn btn-grab" type="button" onclick="applyReviewOverride(this)">Apply</button>
-                                <a class="btn btn-grab" href="/series/{{ entry.series_id }}">Open</a>
-                            </div>
-                            <div class="review-status form-hint" style="display:none;text-align:right;margin-top:4px"></div>
                         </td>
                     </tr>
                     {% endfor %}

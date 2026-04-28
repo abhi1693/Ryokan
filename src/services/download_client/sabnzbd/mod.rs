@@ -116,6 +116,48 @@ use super::{
 /// the BT impls give their wire clients.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Same shape as the BT impls' helpers — prepend `http://` for
+/// scheme-less local addresses, `https://` for everything else.
+/// Without this, a user typing `localhost:8085` (matching the qBit /
+/// Deluge / Transmission UX) would land in reqwest as scheme=
+/// `localhost`, path=`8085` and the HTTP request builder would
+/// reject the eventual `/api` URL with a cryptic builder error.
+fn normalize_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let is_local = lower.starts_with("localhost")
+        || lower.starts_with("127.")
+        || lower.starts_with("10.")
+        || lower.starts_with("192.168.")
+        || lower.starts_with("172.16.")
+        || lower.starts_with("172.17.")
+        || lower.starts_with("172.18.")
+        || lower.starts_with("172.19.")
+        || lower.starts_with("172.20.")
+        || lower.starts_with("172.21.")
+        || lower.starts_with("172.22.")
+        || lower.starts_with("172.23.")
+        || lower.starts_with("172.24.")
+        || lower.starts_with("172.25.")
+        || lower.starts_with("172.26.")
+        || lower.starts_with("172.27.")
+        || lower.starts_with("172.28.")
+        || lower.starts_with("172.29.")
+        || lower.starts_with("172.30.")
+        || lower.starts_with("172.31.");
+    if is_local {
+        format!("http://{}", trimmed)
+    } else {
+        format!("https://{}", trimmed)
+    }
+}
+
 pub struct SabClient {
     /// Base URL — `http://host:port` or `http://host:port/sabnzbd`.
     /// The URL builder normalizes both shapes; trailing slash
@@ -141,7 +183,7 @@ impl SabClient {
             .build()
             .unwrap_or_else(|_| Client::new());
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: normalize_base_url(base_url),
             api_key: api_key.to_string(),
             category: category.to_string(),
             http,
@@ -227,7 +269,15 @@ impl DownloadClient for SabClient {
             .json()
             .await
             .map_err(|e| format!("SAB version parse failed: {e}"))?;
-        Ok(format!("SABnzbd {}", body.version))
+        // Return just the version string, without the "SABnzbd "
+        // prefix. The status pill on the Settings → Download Clients
+        // tab prepends the client kind label itself, so the prefix
+        // would render as "SABnzbd SABnzbd 4.5.5"; the toast on the
+        // Test-connection button concatenates "Connected: <version>"
+        // and reads more naturally without the kind doubling either.
+        // qBit / Deluge / Transmission / rtorrent all return raw
+        // version strings already; this brings SAB in line.
+        Ok(body.version)
     }
 
     async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
@@ -430,7 +480,10 @@ impl DownloadClient for SabClient {
         if body.status {
             return Ok(());
         }
-        // Fallback: history.
+        // Fallback: history. Mirror the queue branch and always send
+        // `del_files` explicitly — SAB's documented default is 0, but
+        // omitting the param leaves us at the mercy of any reverse
+        // proxy / future SAB version that fills in a different default.
         let mut q: Vec<(&str, &str)> = vec![
             ("mode", "history"),
             ("name", "delete"),
@@ -438,6 +491,8 @@ impl DownloadClient for SabClient {
         ];
         if delete_files {
             q.push(("del_files", one));
+        } else {
+            q.push(("del_files", zero));
         }
         let resp = self
             .http

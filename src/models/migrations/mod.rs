@@ -2517,6 +2517,53 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Phase 7 PR E — Nyaa-specific RSS opt-out. Default 0 so existing
+    // installs keep polling Nyaa; user flips on when they only want
+    // indexer-RSS / direct-RSS feeds polled. Distinct from
+    // `rss_master_enabled` (which kills the whole sync) and
+    // `rss_enabled` (which retains its v1 semantics — Nyaa-only flag).
+    sqlx::query("ALTER TABLE config ADD COLUMN disable_nyaa_rss INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
+    // 2026-04-28 — `LogCategory::QBit` → `LogCategory::DownloadClient`
+    // rename. The variant covered every torrent client (and SAB) since
+    // the multi-client refactor, but the persisted wire string was
+    // still `qbit`, so System → Logs filtered to "qBittorrent" was
+    // showing Deluge / Transmission / rTorrent / SAB rows too. Rewrite
+    // existing rows in place; the new code persists the new string,
+    // so the UPDATE is a one-shot. Gated through the schema_migrations
+    // ledger so it doesn't run a per-boot table scan over the logs
+    // table (which is bounded by cleanup but still grows between
+    // rotations). Failure to apply is non-fatal — old rows stay under
+    // the legacy filter and `from_str` still accepts "qbit" as a
+    // backward-compat alias.
+    {
+        use crate::models::group_source_map::{
+            ensure_schema_migrations_table, mark_migration_applied, migration_already_applied,
+        };
+        const ID: &str = "logs_category_qbit_to_download_client_v1";
+        ensure_schema_migrations_table(db).await.ok();
+        if !migration_already_applied(db, ID).await.unwrap_or(false) {
+            // Run the UPDATE + ledger insert in one transaction so a
+            // crash mid-migration doesn't leave the rows half-rewritten
+            // with the ledger marked applied. SQLite's default journal
+            // mode is fine here — this is one UPDATE + one INSERT.
+            if let Ok(mut tx) = db.begin().await {
+                let upd = sqlx::query(
+                    "UPDATE logs SET category = 'download_client' WHERE category = 'qbit'",
+                )
+                .execute(&mut *tx)
+                .await;
+                if upd.is_ok() {
+                    let _ = mark_migration_applied(&mut tx, ID).await;
+                    let _ = tx.commit().await;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

@@ -480,6 +480,28 @@ mod tests {
         );
     }
 
+    /// Regression for the 2026-04-28 AniList outage where AL returned a
+    /// 403 with a JSON body announcing the API was "temporarily disabled
+    /// due to severe stability issues." The body has no Cloudflare
+    /// markers and the GraphQL message contains no rate-limit keywords,
+    /// so the classifier must route this to `Unavailable` (caller may
+    /// MAL-fallback) rather than `RateLimited` (caller defers, no
+    /// fallback). Misclassifying this as RateLimited would silently
+    /// prevent the metadata sweep from substituting MAL data and
+    /// leave every series stranded on its previously-cached row for
+    /// the duration of the outage.
+    #[test]
+    fn classify_403_disabled_outage_message_is_unavailable() {
+        let body = r#"{"errors":[{"message":"The AniList API has been temporarily disabled due to severe stability issues. Please check the announcements channel in the official AniList Discord for more information.","status":403,"locations":[{"line":1,"column":1}]}],"data":null}"#;
+        let (kind, msg) = classify_anilist_failure(reqwest::StatusCode::FORBIDDEN, body);
+        assert_eq!(kind, AniListFailureKind::Unavailable);
+        assert!(
+            !is_rate_limit_error(&msg),
+            "AL outage must not be classified as throttle: {}",
+            msg
+        );
+    }
+
     #[test]
     fn classify_404_is_not_found() {
         let (kind, _msg) = classify_anilist_failure(

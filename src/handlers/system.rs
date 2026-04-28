@@ -19,6 +19,61 @@ use crate::models::{
 };
 use crate::services::{logger, metadata_sync, post_processing, rss as rss_service, upgrade};
 
+/// Wrap a handler body in a detached `tokio::spawn` so the work runs
+/// to completion even when the client navigates away mid-flight.
+///
+/// Without this, dropping the request future cancels the body's
+/// `.await` chain in place and the `scheduled_task_runs` row stays at
+/// `last_status = 'running'` until the next process restart — a click-
+/// then-walk-away on Run-now / Sync now / etc. used to corrupt the
+/// scheduled-tasks audit trail. Tokio's `tokio::spawn` decouples the
+/// task lifetime from the JoinHandle lifetime: dropping the handle
+/// (when the request future is dropped) leaves the spawned task
+/// running on the runtime, so `mark_finished` always fires.
+///
+/// One-layer (vs. the three-layer pattern in
+/// `api_rebuild_cached_metadata`): a body panic surfaces as
+/// `Err(JoinError::Panicked)` and `mark_finished` is missed, leaving
+/// the row stuck at running until the next process restart's
+/// `scheduled_tasks::recover_stuck_running` boot pass cleans it up.
+/// Acceptable trade-off for the periodic-refresh / cleanup /
+/// library-classify / etc. family because none of those wrap
+/// user-input parsing or speculative I/O with a realistic panic
+/// site. Use the three-layer shape in `api_rebuild_cached_metadata`
+/// if a new handler does.
+async fn detached_task<F, T>(future: F) -> Result<T, (StatusCode, String)>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::spawn(future).await {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            // Log loudly on the panic path so the operator has a
+            // breadcrumb in the process logs beyond the eventual
+            // `recover_stuck_running` line at next boot. Without
+            // this, a panic in a spawn body is silent until the
+            // next restart's recovery pass — the row stays at
+            // 'running' for the rest of the current process
+            // lifetime and System → Scheduled Tasks shows no
+            // failure.
+            if e.is_panic() {
+                tracing::error!(
+                    target: "ryokan::system",
+                    "detached scheduled task panicked: {} \
+                     (row will stay 'running' until the next process restart, \
+                     where boot-time recover_stuck_running flips it to 'error')",
+                    e
+                );
+            }
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("scheduled task failed to join: {}", e),
+            ))
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "system.html")]
 struct SystemTemplate {
@@ -35,6 +90,20 @@ struct SystemTemplate {
     filter_level: String,
     filter_category: String,
     filter_search: String,
+    /// Current page's cursor (the `before_id` query param value, or
+    /// `None` for the first/newest page). Used in the template to
+    /// render the "Newest" reset link conditionally.
+    log_before_id: Option<i64>,
+    /// Cursor for the "Older →" link, set to the `id` of the oldest
+    /// entry on the current page. `None` when the page is the last
+    /// (or when there are no entries at all).
+    log_older_id: Option<i64>,
+    /// Mirrors `log_before_id` for the RSS tab — the active cursor
+    /// the user navigated to (drives the "← Newest" link).
+    rss_before_id: Option<i64>,
+    /// Mirrors `log_older_id` for the RSS tab — the next-page cursor
+    /// when there's more history beyond the current page.
+    rss_older_id: Option<i64>,
     categories: Vec<(&'static str, &'static str)>,
     rss_enabled: bool,
     rss_interval_minutes: i32,
@@ -56,6 +125,11 @@ pub struct SystemQuery {
     search: Option<String>,
     message: Option<String>,
     error: Option<String>,
+    /// Cursor for "Older →" pagination on the logs tab. When set,
+    /// the query fetches entries with `id < before_id`. Omitted on
+    /// the first page so the user always lands on the newest
+    /// entries.
+    before_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +158,32 @@ pub(crate) fn normalize_system_tab_for_test(tab: Option<String>) -> String {
     normalize_system_tab(tab)
 }
 
+/// Apply the `+1-fetch` cursor pagination contract: the model fetched
+/// `page_size + 1` rows, this helper truncates the extra one and
+/// returns its now-last entry's id as the cursor for the next page.
+/// `None` means "no older page" — either the dataset was smaller
+/// than `page_size + 1`, or the model returned exactly `page_size`
+/// (no extra row, no next page).
+///
+/// The strict `> page_size` (not `>=`) is the load-bearing
+/// invariant: a `>=` here would return a non-empty cursor on the
+/// last page, the user would click "Older" and see an empty page.
+/// Pinned by `truncate_to_page_returns_none_at_exact_page_size`
+/// and `truncate_to_page_returns_some_when_extra_row_present`.
+fn truncate_to_page<T, F: Fn(&T) -> i64>(
+    mut entries: Vec<T>,
+    page_size: usize,
+    id_of: F,
+) -> (Vec<T>, Option<i64>) {
+    let older_id = if entries.len() > page_size {
+        entries.truncate(page_size);
+        entries.last().map(&id_of)
+    } else {
+        None
+    };
+    (entries, older_id)
+}
+
 pub async fn system_page(
     State(state): State<AppState>,
     Query(params): Query<SystemQuery>,
@@ -98,6 +198,7 @@ pub async fn system_page(
     // these six queries sequentially — the wall time was the sum of all
     // RTTs. With `tokio::join!` each future races on its own pool
     // connection and the handler waits on the slowest one only.
+    let logs_before_id = params.before_id;
     let logs_fut = async {
         if tab == "logs" {
             log::query(
@@ -114,8 +215,12 @@ pub async fn system_page(
                     } else {
                         Some(filter_search.clone())
                     },
-                    limit: 200,
-                    before_id: None,
+                    // Fetch one extra row so the template can tell
+                    // whether there's an "Older" page to link to
+                    // (without a separate COUNT query). Drop the
+                    // extra below before passing to the template.
+                    limit: 201,
+                    before_id: logs_before_id,
                 },
             )
             .await
@@ -124,9 +229,13 @@ pub async fn system_page(
             Vec::new()
         }
     };
+    let rss_before_id = params.before_id;
     let rss_recent_fut = async {
         if tab == "rss" {
-            rss::recent_decisions(&state.db, 500)
+            // Same +1 trick the logs query uses: fetch one extra row
+            // so we can tell whether "Older →" should render without
+            // a separate COUNT query. Truncated below.
+            rss::recent_decisions_paginated(&state.db, 201, rss_before_id)
                 .await
                 .unwrap_or_default()
         } else {
@@ -206,7 +315,8 @@ pub async fn system_page(
         ("rss", LogCategory::Rss.label()),
         ("anilist", LogCategory::AniList.label()),
         ("jikan", LogCategory::Jikan.label()),
-        ("qbit", LogCategory::QBit.label()),
+        ("kitsu", LogCategory::Kitsu.label()),
+        ("download_client", LogCategory::DownloadClient.label()),
         ("jellyfin", LogCategory::Jellyfin.label()),
         ("media", LogCategory::Media.label()),
         ("library", LogCategory::Library.label()),
@@ -220,6 +330,13 @@ pub async fn system_page(
         .as_ref()
         .map(|c| c.title_language.clone())
         .unwrap_or_else(|| "english".to_string());
+    // Pagination cursor handling: the query asked for `limit + 1` so
+    // we can detect whether an "Older" page exists without a separate
+    // COUNT. If we got the extra row, drop it and stash the oldest
+    // visible row's id as the `before_id` for the next page; if we
+    // got fewer than the limit, this is the last page.
+    let (logs, log_older_id) = truncate_to_page(logs, 200, |e| e.id);
+    let (rss_recent, rss_older_id) = truncate_to_page(rss_recent, 200, |e| e.id);
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -234,6 +351,10 @@ pub async fn system_page(
         filter_level,
         filter_category,
         filter_search,
+        log_before_id: logs_before_id,
+        log_older_id,
+        rss_before_id,
+        rss_older_id,
         categories,
         rss_enabled,
         rss_interval_minutes,
@@ -326,6 +447,10 @@ pub async fn debug_settings_submit(
         filter_level: "info".to_string(),
         filter_category: String::new(),
         filter_search: String::new(),
+        log_before_id: None,
+        log_older_id: None,
+        rss_before_id: None,
+        rss_older_id: None,
         categories: vec![
             ("search", LogCategory::Search.label()),
             ("grab", LogCategory::Grab.label()),
@@ -333,7 +458,8 @@ pub async fn debug_settings_submit(
             ("nyaa", LogCategory::Nyaa.label()),
             ("anilist", LogCategory::AniList.label()),
             ("jikan", LogCategory::Jikan.label()),
-            ("qbit", LogCategory::QBit.label()),
+            ("kitsu", LogCategory::Kitsu.label()),
+            ("download_client", LogCategory::DownloadClient.label()),
             ("jellyfin", LogCategory::Jellyfin.label()),
             ("media", LogCategory::Media.label()),
             ("library", LogCategory::Library.label()),
@@ -543,45 +669,48 @@ pub async fn api_rebuild_cached_metadata(
 pub async fn api_anibridge_reload(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    logger::info(
-        &state.db,
-        LogCategory::System,
-        "Anibridge mappings reload requested",
-        "",
-    )
-    .await;
-    let _ = scheduled_tasks::mark_started(
-        &state.db,
-        "anibridge_refresh",
-        "Manual anibridge mappings refresh",
-    )
-    .await;
+    detached_task(async move {
+        logger::info(
+            &state.db,
+            LogCategory::System,
+            "Anibridge mappings reload requested",
+            "",
+        )
+        .await;
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "anibridge_refresh",
+            "Manual anibridge mappings refresh",
+        )
+        .await;
 
-    if crate::services::anibridge::reload().await {
-        let _ = scheduled_tasks::mark_finished(
-            &state.db,
-            "anibridge_refresh",
-            "ok",
-            "Mappings refreshed",
-        )
-        .await;
-        Ok(Json(serde_json::json!({
-            "ok": true,
-            "message": "Anibridge mappings reloaded successfully",
-        })))
-    } else {
-        let _ = scheduled_tasks::mark_finished(
-            &state.db,
-            "anibridge_refresh",
-            "error",
-            "Failed to download mappings",
-        )
-        .await;
-        Err((
-            axum::http::StatusCode::BAD_GATEWAY,
-            "Failed to reload anibridge mappings".to_string(),
-        ))
-    }
+        if crate::services::anibridge::reload().await {
+            let _ = scheduled_tasks::mark_finished(
+                &state.db,
+                "anibridge_refresh",
+                "ok",
+                "Mappings refreshed",
+            )
+            .await;
+            Ok(Json(serde_json::json!({
+                "ok": true,
+                "message": "Anibridge mappings reloaded successfully",
+            })))
+        } else {
+            let _ = scheduled_tasks::mark_finished(
+                &state.db,
+                "anibridge_refresh",
+                "error",
+                "Failed to download mappings",
+            )
+            .await;
+            Err((
+                axum::http::StatusCode::BAD_GATEWAY,
+                "Failed to reload anibridge mappings".to_string(),
+            ))
+        }
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -604,6 +733,99 @@ pub async fn api_logs_clear(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// Query for the log-export endpoint. `range` selects a quick preset
+/// or `all` for everything. Date-range support could land later via
+/// explicit `since` / `until` ISO timestamps; the preset form covers
+/// the common cases (recent debugging, weekly snapshot for support).
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct LogExportQuery {
+    /// `today` / `7d` / `30d` / `all`. Anything else coerces to `all`
+    /// so a typo can't return an empty file.
+    #[serde(default)]
+    pub range: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/logs/export",
+    tag = "System",
+    summary = "Download logs as a tab-separated text file",
+    description = "Returns the full log table (or a date-bounded subset) as a downloadable plain-text file. \
+                   `range` selects a quick preset: `today` (since midnight UTC), `7d` (last 7 days), `30d` \
+                   (last 30 days), or `all` (no date filter). Format: tab-separated columns \
+                   `timestamp\\tlevel\\tcategory\\tmessage\\tdetail` with a header row, one entry per line. \
+                   Suitable for grep / awk / pasting into a bug report.",
+    params(
+        ("range" = Option<String>, Query, description = "today / 7d / 30d / all"),
+    ),
+    responses(
+        (status = 200, description = "Plain-text log dump (Content-Disposition: attachment)"),
+        (status = 500, description = "Database error"),
+    ),
+)]
+pub async fn api_logs_export(
+    State(state): State<AppState>,
+    Query(q): Query<LogExportQuery>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use axum::response::IntoResponse;
+
+    // Map the range preset to a SQL date filter. SQLite's
+    // `datetime('now', '-N days')` keeps the cutoff comparison cheap
+    // and lets the index on `timestamp` do its job.
+    let (since_clause, since_label): (&str, &str) = match q.range.as_str() {
+        "today" => ("timestamp >= datetime('now', 'start of day')", "today"),
+        "7d" => ("timestamp >= datetime('now', '-7 days')", "7d"),
+        "30d" => ("timestamp >= datetime('now', '-30 days')", "30d"),
+        // Anything else (including empty / malformed) falls through
+        // to the unbounded "all" — better to return more data than
+        // none on a typo.
+        _ => ("1=1", "all"),
+    };
+
+    let sql = format!(
+        "SELECT timestamp, level, category, message, detail \
+         FROM logs WHERE {since_clause} ORDER BY id ASC"
+    );
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(&sql)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Tab-separated with a header row. Embedded tabs / newlines / CRs
+    // in the message or detail body are escaped to spaces so each entry
+    // stays on a single line — matters for grep / awk consumption. CR
+    // is in the escape set defensively: tracing output realistically
+    // never contains one, but a panic message or external-service
+    // error round-tripped through `logger::*` could, and a bare \r
+    // makes some line-oriented tools treat it as a record separator.
+    let mut body = String::with_capacity(rows.len() * 128);
+    body.push_str("timestamp\tlevel\tcategory\tmessage\tdetail\n");
+    for (ts, level, category, message, detail) in &rows {
+        let m = message.replace(['\t', '\n', '\r'], " ");
+        let d = detail.replace(['\t', '\n', '\r'], " ");
+        body.push_str(&format!("{ts}\t{level}\t{category}\t{m}\t{d}\n"));
+    }
+
+    // Dated filename so a user downloading multiple snapshots doesn't
+    // overwrite earlier ones. Use the chrono UTC date — local-time
+    // formatting would be misleading since the timestamps inside the
+    // file are SQLite-default UTC.
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    let filename = format!("ryokan-logs-{date}-{since_label}.tsv");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/tab-separated-values; charset=utf-8"),
+    );
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    if let Ok(val) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    Ok((headers, body).into_response())
 }
 
 /// Payload for the client-side log ingestion endpoint. Every in-app toast
@@ -731,29 +953,34 @@ pub async fn api_logs_client(
 pub async fn api_rss_sync(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(&state.db, "rss_sync", "Manual RSS sync started").await;
-    match rss_service::sync_once(&state, "manual").await {
-        Ok(summary) => {
-            let _ =
-                scheduled_tasks::mark_finished(&state.db, "rss_sync", "ok", &summary.detail).await;
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "message": summary.detail,
-                "summary": summary,
-            })))
+    detached_task(async move {
+        let _ =
+            scheduled_tasks::mark_started(&state.db, "rss_sync", "Manual RSS sync started").await;
+        match rss_service::sync_once(&state, "manual").await {
+            Ok(summary) => {
+                let _ =
+                    scheduled_tasks::mark_finished(&state.db, "rss_sync", "ok", &summary.detail)
+                        .await;
+                Ok(Json(serde_json::json!({
+                    "ok": true,
+                    "message": summary.detail,
+                    "summary": summary,
+                })))
+            }
+            Err(err) => {
+                let _ = scheduled_tasks::mark_finished(&state.db, "rss_sync", "error", &err).await;
+                Err((
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    serde_json::json!({
+                        "ok": false,
+                        "message": err,
+                    })
+                    .to_string(),
+                ))
+            }
         }
-        Err(err) => {
-            let _ = scheduled_tasks::mark_finished(&state.db, "rss_sync", "error", &err).await;
-            Err((
-                axum::http::StatusCode::BAD_GATEWAY,
-                serde_json::json!({
-                    "ok": false,
-                    "message": err,
-                })
-                .to_string(),
-            ))
-        }
-    }
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -799,20 +1026,24 @@ pub async fn api_rss_clear_history(
 pub async fn api_force_metadata_refresh(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(
-        &state.db,
-        "metadata_refresh",
-        "Manual metadata refresh started",
-    )
-    .await;
-    let (refreshed, failed) = metadata_sync::refresh_all_series_metadata(&state.db).await;
-    let status = if failed > 0 { "warn" } else { "ok" };
-    let detail = format!("refreshed={}, failed={}", refreshed, failed);
-    let _ = scheduled_tasks::mark_finished(&state.db, "metadata_refresh", status, &detail).await;
-    Ok(Json(serde_json::json!({
-        "ok": failed == 0,
-        "message": format!("Metadata refresh complete. Refreshed: {}. Failed: {}.", refreshed, failed),
-    })))
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "metadata_refresh",
+            "Manual metadata refresh started",
+        )
+        .await;
+        let (refreshed, failed) = metadata_sync::refresh_all_series_metadata(&state.db).await;
+        let status = if failed > 0 { "warn" } else { "ok" };
+        let detail = format!("refreshed={}, failed={}", refreshed, failed);
+        let _ =
+            scheduled_tasks::mark_finished(&state.db, "metadata_refresh", status, &detail).await;
+        Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
+            "ok": failed == 0,
+            "message": format!("Metadata refresh complete. Refreshed: {}. Failed: {}.", refreshed, failed),
+        })))
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -828,25 +1059,108 @@ pub async fn api_force_metadata_refresh(
 pub async fn api_force_cleanup(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ = scheduled_tasks::mark_started(&state.db, "cleanup", "Manual cleanup started").await;
-    let mut errors = Vec::new();
-    if let Err(e) = crate::models::log::cleanup(&state.db, 30).await {
-        errors.push(format!("logs: {}", e));
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(&state.db, "cleanup", "Manual cleanup started").await;
+        let mut errors = Vec::new();
+        if let Err(e) = crate::models::log::cleanup(&state.db, 30).await {
+            errors.push(format!("logs: {}", e));
+        }
+        if let Err(e) = rss::cleanup_old_decisions(&state.db, 30).await {
+            errors.push(format!("rss: {}", e));
+        }
+        let status = if errors.is_empty() { "ok" } else { "warn" };
+        let detail = if errors.is_empty() {
+            "Cleanup completed".to_string()
+        } else {
+            errors.join("; ")
+        };
+        let _ = scheduled_tasks::mark_finished(&state.db, "cleanup", status, &detail).await;
+        Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
+            "ok": errors.is_empty(),
+            "message": detail,
+        })))
+    })
+    .await?
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/tasks/external-sync",
+    tag = "System",
+    summary = "Trigger external watch-list sync",
+    description = "Manually trigger a watch-list sync against the linked AL/MAL account. Wraps `external_sync::tick_once_or_busy` so a click while a supervised tick is in flight returns 409 instead of queueing. Returns the success path's summary (`series_added` / `series_updated` / `series_removed`) when the sync completes synchronously. Used by the System → Scheduled Tasks page's Run-now button — the OAuth-flow sync-now path at `/settings/oauth/sync-now` is a different shape (background-spawned with progress polling) and is not interchangeable.",
+    responses(
+        (status = 200, description = "Sync completed", body = serde_json::Value),
+        (status = 400, description = "No external account is linked"),
+        (status = 409, description = "Sync is already running"),
+    ),
+)]
+pub async fn api_force_external_sync(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use crate::services::external_sync;
+
+    // Bail early when no account is linked — the user otherwise gets
+    // a confusing "no-op success" toast since `tick_once_or_busy`
+    // returns Ok(empty summary) on the no-account branch. Pre-spawn:
+    // `has_linked_account` is one fast indexed query, no point burning
+    // a `tokio::spawn` round-trip just to bounce on the no-account
+    // path.
+    let has_linked = external_sync::has_linked_account(&state.db).await;
+    if !has_linked {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "ok": false,
+                "message": "No external account is linked. Connect AL or MAL in Settings → Connections first.",
+            })
+            .to_string(),
+        ));
     }
-    if let Err(e) = rss::cleanup_old_decisions(&state.db, 30).await {
-        errors.push(format!("rss: {}", e));
-    }
-    let status = if errors.is_empty() { "ok" } else { "warn" };
-    let detail = if errors.is_empty() {
-        "Cleanup completed".to_string()
-    } else {
-        errors.join("; ")
-    };
-    let _ = scheduled_tasks::mark_finished(&state.db, "cleanup", status, &detail).await;
-    Ok(Json(serde_json::json!({
-        "ok": errors.is_empty(),
-        "message": detail,
-    })))
+
+    // Detach the actual sync from the request future. `tick_once_or_busy`
+    // can take 30s+ on a large list with the per-entry merge step, so a
+    // user who clicks Run-now and tabs away should still see the row
+    // exit `running` once the sync completes.
+    //
+    // mark_started is deferred until we know we actually have a tick to run
+    // (i.e. tick_once_or_busy didn't immediately bounce on the in-flight
+    // lock). Otherwise a Run-now click during a supervised tick would
+    // momentarily clobber `last_started_at` on the row before the busy
+    // error path's mark_finished overwrote it again, which would surface
+    // as a stale-then-correct flash on the next page load.
+    detached_task(async move {
+        match external_sync::tick_once_or_busy(&state).await {
+            Ok(summary) => {
+                let _ = scheduled_tasks::mark_started(
+                    &state.db,
+                    "external_sync",
+                    "Manual watch-list sync started",
+                )
+                .await;
+                let _ = scheduled_tasks::mark_finished(
+                    &state.db,
+                    "external_sync",
+                    "ok",
+                    "Sync complete",
+                )
+                .await;
+                Ok(Json(serde_json::json!({
+                    "ok": true,
+                    "message": format!("Sync complete: {summary}"),
+                })))
+            }
+            Err(err) => Err((
+                axum::http::StatusCode::CONFLICT,
+                serde_json::json!({
+                    "ok": false,
+                    "message": err,
+                })
+                .to_string(),
+            )),
+        }
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -862,17 +1176,27 @@ pub async fn api_force_cleanup(
 pub async fn api_force_post_processing(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ =
-        scheduled_tasks::mark_started(&state.db, "post_processing", "Manual post-processing run")
-            .await;
-    post_processing::run_once(&state).await;
-    let _ =
-        scheduled_tasks::mark_finished(&state.db, "post_processing", "ok", "Manual run completed")
-            .await;
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "message": "Post-processing run completed",
-    })))
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "post_processing",
+            "Manual post-processing run",
+        )
+        .await;
+        post_processing::run_once(&state).await;
+        let _ = scheduled_tasks::mark_finished(
+            &state.db,
+            "post_processing",
+            "ok",
+            "Manual run completed",
+        )
+        .await;
+        Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
+            "ok": true,
+            "message": "Post-processing run completed",
+        })))
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -885,23 +1209,55 @@ pub async fn api_force_post_processing(
         (status = 200, description = "Library classify report", body = serde_json::Value),
     ),
 )]
-pub async fn api_force_library_classify(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let report = post_processing::scan_library_for_unclassified(&state).await;
-    let message = format!(
-        "Library classify scan complete. Series scanned: {}. Files scanned: {}. Classified: {}. Needs review: {}.",
-        report.series_scanned,
-        report.files_scanned,
-        report.files_classified,
-        report.files_needing_review,
-    );
-    Json(serde_json::json!({
-        "ok": true,
-        "message": message,
-        "series_scanned": report.series_scanned,
-        "files_scanned": report.files_scanned,
-        "files_classified": report.files_classified,
-        "files_needing_review": report.files_needing_review,
-    }))
+pub async fn api_force_library_classify(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    detached_task(async move {
+        // try_lock the process-wide LIBRARY_CLASSIFY_LOCK so a
+        // Run-now click during the supervised 6h tick (which also
+        // holds the lock) returns a friendly busy message instead
+        // of interleaving and flipping the scheduled-tasks row's
+        // status between the two writers. Same shape as
+        // `tick_once_or_busy` for external_sync.
+        let _guard = match post_processing::LIBRARY_CLASSIFY_LOCK.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    serde_json::json!({
+                        "ok": false,
+                        "message": "Library classify is already running.",
+                    })
+                    .to_string(),
+                ));
+            }
+        };
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "library_classify",
+            "Manual library classify run",
+        )
+        .await;
+        let report = post_processing::scan_library_for_unclassified(&state).await;
+        let message = format!(
+            "Library classify scan complete. Series scanned: {}. Files scanned: {}. Classified: {}. Needs review: {}.",
+            report.series_scanned,
+            report.files_scanned,
+            report.files_classified,
+            report.files_needing_review,
+        );
+        let _ =
+            scheduled_tasks::mark_finished(&state.db, "library_classify", "ok", &message).await;
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "message": message,
+            "series_scanned": report.series_scanned,
+            "files_scanned": report.files_scanned,
+            "files_classified": report.files_classified,
+            "files_needing_review": report.files_needing_review,
+        })))
+    })
+    .await?
 }
 
 #[utoipa::path(
@@ -918,28 +1274,38 @@ pub async fn api_force_library_classify(State(state): State<AppState>) -> Json<s
 pub async fn api_force_upgrade_search(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let _ =
-        scheduled_tasks::mark_started(&state.db, "upgrade_search", "Manual upgrade search started")
-            .await;
-    match upgrade::run_once(&state).await {
-        Ok(summary) => {
-            let _ =
-                scheduled_tasks::mark_finished(&state.db, "upgrade_search", "ok", &summary.detail)
+    detached_task(async move {
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "upgrade_search",
+            "Manual upgrade search started",
+        )
+        .await;
+        match upgrade::run_once(&state).await {
+            Ok(summary) => {
+                let _ = scheduled_tasks::mark_finished(
+                    &state.db,
+                    "upgrade_search",
+                    "ok",
+                    &summary.detail,
+                )
+                .await;
+                Ok(Json(serde_json::json!({
+                    "ok": true,
+                    "message": summary.detail,
+                    "series_checked": summary.series_checked,
+                    "episodes_checked": summary.episodes_checked,
+                    "upgrades_grabbed": summary.upgrades_grabbed,
+                })))
+            }
+            Err(err) => {
+                let _ = scheduled_tasks::mark_finished(&state.db, "upgrade_search", "error", &err)
                     .await;
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "message": summary.detail,
-                "series_checked": summary.series_checked,
-                "episodes_checked": summary.episodes_checked,
-                "upgrades_grabbed": summary.upgrades_grabbed,
-            })))
+                Err((axum::http::StatusCode::BAD_GATEWAY, err))
+            }
         }
-        Err(err) => {
-            let _ =
-                scheduled_tasks::mark_finished(&state.db, "upgrade_search", "error", &err).await;
-            Err((axum::http::StatusCode::BAD_GATEWAY, err))
-        }
-    }
+    })
+    .await?
 }
 
 /// Wrapper for the `/api/system/tasks` response so OpenAPI / Swagger
@@ -1416,7 +1782,9 @@ mod endpoint_tests {
         // handler wraps the report into the expected JSON shape.
         let db = in_memory_pool().await;
         let state = build_test_app_state(db, None);
-        let resp = api_force_library_classify(axum::extract::State(state)).await;
+        let resp = api_force_library_classify(axum::extract::State(state))
+            .await
+            .expect("library classify spawn should succeed");
         assert_eq!(resp.0["ok"], true);
         assert_eq!(resp.0["series_scanned"], 0);
         assert_eq!(resp.0["files_scanned"], 0);
@@ -1453,5 +1821,225 @@ mod endpoint_tests {
                 .unwrap()
                 .contains("No quality cutoff")
         );
+    }
+
+    // ── api_logs_export ──────────────────────────────────────────────
+
+    async fn read_response_body(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        String::from_utf8(bytes.to_vec()).expect("body is utf-8")
+    }
+
+    #[tokio::test]
+    async fn api_logs_export_returns_tab_separated_with_header_row() {
+        let db = in_memory_pool().await;
+        log::insert(
+            &db,
+            log::LogLevel::Warn,
+            log::LogCategory::System,
+            "test event",
+            "with detail",
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+
+        let resp = api_logs_export(
+            axum::extract::State(state),
+            axum::extract::Query(LogExportQuery {
+                range: "all".to_string(),
+            }),
+        )
+        .await
+        .expect("export ok")
+        .into_response();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("tab-separated-values"),
+            "Content-Type must be tab-separated-values; got {ct}"
+        );
+        let cd = resp
+            .headers()
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            cd.starts_with("attachment; filename=\"ryokan-logs-"),
+            "Content-Disposition must trigger a download with a dated filename; got {cd}"
+        );
+        let body = read_response_body(resp).await;
+        assert!(
+            body.starts_with("timestamp\tlevel\tcategory\tmessage\tdetail\n"),
+            "first line must be the TSV header row; got: {body}"
+        );
+        // Newline-terminated header + at least one data row.
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2, "expected header + 1 entry; got {lines:?}");
+        assert!(
+            lines[1].contains("\twarn\tsystem\ttest event\twith detail"),
+            "data row should round-trip the inserted entry; got: {}",
+            lines[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn api_logs_export_unknown_range_falls_back_to_all() {
+        // A typo in the `range` query param shouldn't return an empty
+        // file — that would silently lose data. Fall through to the
+        // unbounded "all" branch.
+        let db = in_memory_pool().await;
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::System,
+            "should appear",
+            "",
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+
+        let resp = api_logs_export(
+            axum::extract::State(state),
+            axum::extract::Query(LogExportQuery {
+                range: "yesterdayyy".to_string(),
+            }),
+        )
+        .await
+        .expect("export ok")
+        .into_response();
+        let body = read_response_body(resp).await;
+        assert!(
+            body.contains("should appear"),
+            "unknown range must fall through to `all` rather than returning an empty body; got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_logs_export_today_range_excludes_old_entries() {
+        // Insert a row with an explicit timestamp from 8 days ago,
+        // verify the `today` range filter excludes it.
+        let db = in_memory_pool().await;
+        sqlx::query(
+            "INSERT INTO logs (timestamp, level, category, message, detail) \
+             VALUES (datetime('now', '-8 days'), 'info', 'system', 'old entry', '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::System,
+            "fresh entry",
+            "",
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+
+        let resp = api_logs_export(
+            axum::extract::State(state),
+            axum::extract::Query(LogExportQuery {
+                range: "today".to_string(),
+            }),
+        )
+        .await
+        .expect("export ok")
+        .into_response();
+        let body = read_response_body(resp).await;
+        assert!(body.contains("fresh entry"));
+        assert!(
+            !body.contains("old entry"),
+            "today range must exclude entries older than midnight UTC; got: {body}"
+        );
+    }
+
+    // ── truncate_to_page (PR 132 review follow-up) ──────────────────
+    //
+    // The handler's `+1`-fetch cursor logic is shared between the
+    // logs and RSS tabs. The model-level tests pin the `id < cursor`
+    // contract (`recent_decisions_paginated_skips_entries_at_or_above_cursor`)
+    // but the handler-side "is there an older page?" decision lives
+    // here. A regression where the comparison flips to `>=` would
+    // emit a non-empty cursor on the last page → user clicks Older
+    // → empty page → confused. These three tests pin the boundaries.
+
+    #[derive(Clone)]
+    struct Row {
+        id: i64,
+    }
+
+    #[test]
+    fn truncate_to_page_returns_none_at_exact_page_size() {
+        // Model returned exactly `page_size` rows — no extra row,
+        // therefore no older page. Cursor must be None so the
+        // template skips the "Older →" link.
+        let entries: Vec<Row> = (1..=200).map(|id| Row { id }).collect();
+        let (kept, older) = truncate_to_page(entries, 200, |r| r.id);
+        assert_eq!(kept.len(), 200);
+        assert_eq!(
+            older, None,
+            "200 rows on a page-size of 200 → no older page (no `+1` extra fetched)"
+        );
+    }
+
+    #[test]
+    fn truncate_to_page_returns_some_when_extra_row_present() {
+        // Model returned page_size + 1 (the canonical "more pages"
+        // signal). Truncate to page_size, return the now-last row's
+        // id as the next cursor.
+        let entries: Vec<Row> = (1..=201).map(|id| Row { id }).collect();
+        let (kept, older) = truncate_to_page(entries, 200, |r| r.id);
+        assert_eq!(kept.len(), 200);
+        assert_eq!(
+            older,
+            Some(200),
+            "201 rows on a page-size of 200 → cursor is the 200th row's id (the new boundary for `id < cursor`)"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_force_external_sync_no_account_returns_friendly_message() {
+        // The Run-now button on the Scheduled Tasks tab hits this
+        // endpoint. With no AL/MAL account linked, the underlying
+        // `tick_once_or_busy` returns Ok(empty summary) — confusing
+        // for the user since the toast would say "Sync complete." Pin
+        // the explicit 400 + "no account linked" message so future
+        // refactors can't silently regress to the no-op-success shape.
+        // Status (vs body) is what `system.js` keys "Task failed" toast
+        // off of (`r.ok`), so a green-toast regression would surface
+        // here as the wrong status.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let resp = api_force_external_sync(axum::extract::State(state)).await;
+        let (status, body) = resp.expect_err("no-account branch must surface as Err");
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains("No external account is linked"),
+            "no-account message must surface the precise remediation; got: {body}"
+        );
+    }
+
+    #[test]
+    fn truncate_to_page_returns_none_for_short_page() {
+        // Empty / partial page → no older page either.
+        let (kept, older) = truncate_to_page::<Row, _>(vec![], 200, |r| r.id);
+        assert_eq!(kept.len(), 0);
+        assert_eq!(older, None);
+
+        let entries: Vec<Row> = (1..=42).map(|id| Row { id }).collect();
+        let (kept, older) = truncate_to_page(entries, 200, |r| r.id);
+        assert_eq!(kept.len(), 42);
+        assert_eq!(older, None);
     }
 }

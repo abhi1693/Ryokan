@@ -668,7 +668,7 @@ async fn run_auto_search_targets_with_upgrades(
                     Err(e) => {
                         logger::error(
                             &state.db,
-                            LogCategory::QBit,
+                            LogCategory::DownloadClient,
                             &format!("Failed to add torrent for {}", label),
                             &e,
                         )

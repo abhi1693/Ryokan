@@ -1,5 +1,22 @@
 // ── Logs tab ────────────────────────────────────────────────────────────
 
+// Click-outside-to-close for the log-download dropdown. The .open
+// toggle on the trigger button is enough to show the menu; this
+// listener handles dismissal — clicking anywhere outside the menu
+// (or on a menu item, which navigates) closes it.
+document.addEventListener('click', function (ev) {
+    const menu = document.getElementById('log-download-options');
+    if (!menu || !menu.classList.contains('open')) return;
+    // The trigger button is inside .log-download-menu — let its
+    // own click open + immediately re-toggle (don't fight it). For
+    // option clicks, the navigation closes the menu naturally; for
+    // any other click, dismiss.
+    if (ev.target.closest('.log-download-menu') && !ev.target.closest('.log-download-option')) {
+        return;
+    }
+    menu.classList.remove('open');
+});
+
 let pollTimer = null;
 // Initial "latest seen" log id is read from the first rendered row's
 // data-id attribute (server-side Askama writes one on every <tr>) so the
@@ -133,12 +150,27 @@ function runRssSync(btn) {
     btn.disabled = true;
     result.textContent = 'Syncing...';
     window.ryokanToast({kind: 'info', title: 'RSS sync running', body: 'Checking the feed for new episodes.'});
-    fetch('/api/rss/sync', { method: 'POST', headers: {'Content-Type': 'application/json'} })
+    // AbortController + pagehide/beforeunload listeners so a user who
+    // tabs out mid-sync doesn't see a misleading "RSS sync failed:
+    // NetworkError" toast (and have it persisted to /api/logs/client).
+    // The server-side work continues regardless thanks to the
+    // detached_task spawn-detach in api_rss_sync.
+    const controller = new AbortController();
+    const onLeaving = () => controller.abort();
+    window.addEventListener('beforeunload', onLeaving, { once: true });
+    window.addEventListener('pagehide', onLeaving, { once: true });
+    fetch('/api/rss/sync', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        signal: controller.signal,
+    })
         .then(async r => {
             const data = await r.json();
             if (!r.ok) throw new Error(data.message || 'RSS sync failed');
             result.textContent = data.message || 'RSS sync finished.';
-            window.ryokanToast({
+            // Queue across the reload so the toast survives the
+            // navigation that re-renders the RSS decisions table.
+            window.ryokanQueueToast({
                 kind: 'success',
                 title: 'RSS sync complete',
                 body: data.message || 'Feed checked.',
@@ -146,6 +178,7 @@ function runRssSync(btn) {
             setTimeout(() => window.location.reload(), 600);
         })
         .catch(err => {
+            if (controller.signal.aborted) return;
             result.textContent = err.message;
             window.ryokanToast({
                 kind: 'error',
@@ -153,7 +186,14 @@ function runRssSync(btn) {
                 body: err && err.message ? err.message : 'Unknown error',
             });
         })
-        .finally(() => { btn.disabled = false; });
+        .finally(() => {
+            // Listeners self-remove on first fire via {once: true}; if
+            // the fetch settled normally without navigation, they
+            // stay registered until the next pagehide / beforeunload
+            // fires (one-shot, no leak). The btn re-enable is the
+            // only thing this needs to do.
+            btn.disabled = false;
+        });
 }
 
 // ── Scheduled tasks tab ─────────────────────────────────────────────────
@@ -162,10 +202,18 @@ function forceRunTask(btn, taskKey) {
     const endpoints = {
         rss_sync: '/api/rss/sync',
         metadata_refresh: '/api/tasks/metadata-refresh',
+        // The rebuild handler `api_rebuild_cached_metadata` writes a
+        // `metadata_rebuild` scheduled-tasks row, so once the user has
+        // ever clicked Rebuild on the Debug tab the task shows up in
+        // the Scheduled Tasks list with a Run-now button. Map it
+        // through to the same endpoint so re-runs work from there too.
+        metadata_rebuild: '/api/system/rebuild-anilist-cache',
         cleanup: '/api/tasks/cleanup',
         post_processing: '/api/tasks/post-processing',
+        library_classify: '/api/tasks/library-classify',
         upgrade_search: '/api/tasks/upgrade-search',
         anibridge_refresh: '/api/system/reload-anibridge',
+        external_sync: '/api/tasks/external-sync',
     };
     const url = endpoints[taskKey];
     if (!url) {
@@ -177,23 +225,35 @@ function forceRunTask(btn, taskKey) {
     }
     btn.disabled = true;
     btn.textContent = 'Running...';
-    fetch(url, { method: 'POST' })
+    // AbortController + pagehide/beforeunload listeners so tab-out
+    // doesn't surface a misleading "Task error: NetworkError" toast.
+    // Server-side work continues thanks to the `detached_task`
+    // spawn-detach in each handler — the in-flight fetch being
+    // cancelled is just the browser unwinding its connection.
+    const controller = new AbortController();
+    const onLeaving = () => controller.abort();
+    window.addEventListener('beforeunload', onLeaving, { once: true });
+    window.addEventListener('pagehide', onLeaving, { once: true });
+    fetch(url, { method: 'POST', signal: controller.signal })
         .then(r => r.json().then(data => ({ ok: r.ok, data })).catch(() => ({ ok: r.ok, data: null })))
         .then(({ ok, data }) => {
+            // Queue across the reload — `location.reload()` below
+            // tears down the DOM and a non-queued toast disappears
+            // before the user can read it.
             if (data && data.message) {
-                window.ryokanToast({
+                window.ryokanQueueToast({
                     kind: ok ? 'success' : 'error',
                     title: ok ? 'Task complete' : 'Task failed',
                     body: data.message,
                 });
             } else if (!ok) {
-                window.ryokanToast({
+                window.ryokanQueueToast({
                     kind: 'error',
                     title: 'Task failed',
                     body: 'The task did not report a reason.',
                 });
             } else {
-                window.ryokanToast({
+                window.ryokanQueueToast({
                     kind: 'success',
                     title: 'Task complete',
                     body: taskKey + ' finished.',
@@ -202,13 +262,19 @@ function forceRunTask(btn, taskKey) {
             location.reload();
         })
         .catch(err => {
+            if (controller.signal.aborted) return;
             window.ryokanToast({
                 kind: 'error',
                 title: 'Task error',
                 body: err && err.message ? err.message : String(err),
             });
         })
-        .finally(() => { btn.disabled = false; btn.textContent = 'Run now'; });
+        .finally(() => {
+            // Listeners self-remove on first fire via {once: true};
+            // see runRssSync for the rationale.
+            btn.disabled = false;
+            btn.textContent = 'Run now';
+        });
 }
 
 // ── Debug tab ───────────────────────────────────────────────────────────

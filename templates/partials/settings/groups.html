@@ -3,6 +3,9 @@
         <p class="form-hint">Maps release groups to their known source. Used by Layer 3 of the classification pipeline when the filename alone doesn't carry source keywords (e.g. SubsPlease is WEB, VCB-Studio is BD). Seeded rows are restored on startup; user-edited rows are preserved.</p>
 
         {% if !suggestions.is_empty() %}
+        {# Suggested mappings — promoted to the top so the user sees
+           what's actionable without scrolling past the (long)
+           current-entries table. Phase 7 PR G. #}
         <h3 class="settings-subheading">Suggested Mappings ({{ suggestions.len() }})</h3>
         <p class="form-hint">Inferred from your manual classification overrides. When you've pinned multiple episodes from the same release group to the same source, Ryokan surfaces it here so you can teach the identity table.</p>
         <div class="table-scroll-wrap">
@@ -20,11 +23,11 @@
                 {% for s in suggestions %}
                 <tr>
                     <td>{{ s.group_name }}</td>
-                    <td>{{ s.source.as_str() }}</td>
+                    <td><span class="log-badge tag-src-{{ s.source.as_str()|lowercase }}">{{ s.source.as_str() }}</span></td>
                     <td>{{ s.episode_count }} episode{% if s.episode_count != 1 %}s{% endif %}</td>
                     <td>
                         {% if let Some(existing) = s.existing_source %}
-                        <span class="tag tag-res" title="Accepting will overwrite the existing mapping">conflicts: {{ existing.as_str() }}</span>
+                        <span class="log-badge tag-src-{{ existing.as_str()|lowercase }}" title="Accepting will overwrite the existing mapping">conflicts: {{ existing.as_str() }}</span>
                         {% else %}
                         <span class="form-hint">(new)</span>
                         {% endif %}
@@ -44,6 +47,48 @@
         </table>
         </div>
         {% endif %}
+
+        {# Current entries comes BEFORE the Add form (Phase 7 PR G).
+           The previous layout sandwiched the Add form between the
+           Suggestions and Current Entries tables, breaking the
+           visual flow + hiding the bulk of the data behind a long
+           scroll. Now the data is the prominent content; Add lives
+           at the bottom where it doesn't interrupt scanning. #}
+        <h3 class="settings-subheading">Current Entries ({{ groups.len() }})</h3>
+        <div class="table-scroll-wrap">
+        <table class="group-source-table">
+            <thead>
+                <tr>
+                    <th>Group</th>
+                    <th>Source</th>
+                    <th>Conf.</th>
+                    <th>Notes</th>
+                    <th>Kind</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for group in groups %}
+                <tr>
+                    <td>{{ group.group_name }}</td>
+                    <td><span class="log-badge tag-src-{{ group.source.as_str()|lowercase }}">{{ group.source.as_str() }}</span></td>
+                    <td>{{ group.confidence }}</td>
+                    <td>{{ group.notes }}</td>
+                    <td>{% if group.is_user_edit %}<span class="log-badge tag-origin-user">user</span>{% else %}<span class="log-badge tag-origin-seed">seed</span>{% endif %}</td>
+                    <td>
+                        <form method="post" action="/settings/groups/delete" class="group-delete-form"
+                              hx-post="/settings/groups/delete"
+                              hx-target="closest tr"
+                              hx-swap="outerHTML">
+                            <input type="hidden" name="group_name" value="{{ group.group_name }}">
+                            <button type="submit" class="btn btn-danger">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
 
         <h3 class="settings-subheading">Add or Update Group</h3>
         <form method="post" action="/settings/groups" class="settings-form group-upsert-form">
@@ -73,40 +118,4 @@
             </div>
             <button type="submit" class="btn btn-primary">Save Group</button>
         </form>
-
-        <h3 class="settings-subheading">Current Entries ({{ groups.len() }})</h3>
-        <div class="table-scroll-wrap">
-        <table class="group-source-table">
-            <thead>
-                <tr>
-                    <th>Group</th>
-                    <th>Source</th>
-                    <th>Conf.</th>
-                    <th>Notes</th>
-                    <th>Kind</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for group in groups %}
-                <tr>
-                    <td>{{ group.group_name }}</td>
-                    <td>{{ group.source.as_str() }}</td>
-                    <td>{{ group.confidence }}</td>
-                    <td>{{ group.notes }}</td>
-                    <td>{% if group.is_user_edit %}User{% else %}Seed{% endif %}</td>
-                    <td>
-                        <form method="post" action="/settings/groups/delete" class="group-delete-form"
-                              hx-post="/settings/groups/delete"
-                              hx-target="closest tr"
-                              hx-swap="outerHTML">
-                            <input type="hidden" name="group_name" value="{{ group.group_name }}">
-                            <button type="submit" class="btn btn-danger">Delete</button>
-                        </form>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        </div>
     </fieldset>

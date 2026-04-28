@@ -24,7 +24,7 @@ pub fn set_min_db_log_level(level: LogLevel) {
 ///
 /// Usage:
 ///   logger::info(&db, LogCategory::Nyaa, "Search completed", "Found 42 results for 'Dandadan'").await;
-///   logger::error(&db, LogCategory::QBit, "Connection failed", &err.to_string()).await;
+///   logger::error(&db, LogCategory::DownloadClient, "Connection failed", &err.to_string()).await;
 pub async fn log(
     db: &SqlitePool,
     level: LogLevel,

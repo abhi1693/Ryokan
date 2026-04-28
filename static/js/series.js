@@ -1262,9 +1262,7 @@ function setAllowUpgrades(allow) {
     const dbId = parseInt(SD.dbId);
     if (!dbId) return;
     const checkbox = document.getElementById('allow-upgrades');
-    const status = document.getElementById('allow-upgrades-status');
     if (checkbox) checkbox.disabled = true;
-    if (status) status.textContent = 'Saving…';
 
     fetch('/api/library/allow-upgrades', {
         method: 'POST',
@@ -1278,31 +1276,32 @@ function setAllowUpgrades(allow) {
         return data;
     })
     .then(_ => {
-        if (status) status.textContent = allow ? 'Upgrades enabled' : 'Upgrades paused for this series';
         if (checkbox) checkbox.disabled = false;
     })
     .catch(err => {
-        if (status) status.textContent = err.message || 'Failed to update upgrades toggle';
         if (checkbox) {
             checkbox.checked = !allow;
             checkbox.disabled = false;
         }
+        if (window.ryokanToast) window.ryokanToast({
+            kind: 'error',
+            category: 'library',
+            title: 'Upgrades toggle failed',
+            body: err && err.message ? err.message : 'Failed to update upgrades toggle',
+        });
     });
 }
 
 // Issue #28 PR E — toggle the per-series PT upgrade opt-in.
-// Mirror of setAllowUpgrades; lives on the same page, hits the
-// parallel /api/library/allow-pt-upgrades endpoint, reverts the
-// checkbox state on failure so the UI never lies about what's
-// persisted.
+// Mirror of setAllowUpgrades; hits the parallel /api/library/allow-pt-upgrades
+// endpoint and reverts the checkbox state on failure so the UI
+// never lies about what's persisted. Server-side persists a Library
+// log row on success; an error toast covers the failure path.
 function setAllowPtUpgrades(allow) {
     const dbId = parseInt(SD.dbId);
     if (!dbId) return;
     const checkbox = document.getElementById('allow-pt-upgrades');
-    const status = document.getElementById('allow-pt-upgrades-status');
     if (checkbox) checkbox.disabled = true;
-    const originalHint = status ? status.textContent : '';
-    if (status) status.textContent = 'Saving…';
 
     fetch('/api/library/allow-pt-upgrades', {
         method: 'POST',
@@ -1316,20 +1315,19 @@ function setAllowPtUpgrades(allow) {
         return data;
     })
     .then(_ => {
-        if (status) status.textContent = allow
-            ? 'PT-sourced upgrades enabled for this series.'
-            : 'PT-sourced upgrades disabled — sweep will skip private-tracker candidates.';
         if (checkbox) checkbox.disabled = false;
     })
     .catch(err => {
-        if (status) status.textContent = err.message || 'Failed to update PT-upgrades toggle';
         if (checkbox) {
             checkbox.checked = !allow;
             checkbox.disabled = false;
         }
-        // Restore original hint after a beat so a transient error
-        // doesn't permanently mask the default copy.
-        setTimeout(() => { if (status && originalHint) status.textContent = originalHint; }, 4000);
+        if (window.ryokanToast) window.ryokanToast({
+            kind: 'error',
+            category: 'library',
+            title: 'PT-upgrades toggle failed',
+            body: err && err.message ? err.message : 'Failed to update PT-upgrades toggle',
+        });
     });
 }
 

@@ -8,11 +8,87 @@ use crate::services::{anilist, artwork, jikan, kitsu, logger};
 
 const MAX_RELATION_TREE_NODES: usize = 64;
 
+/// `true` when `detail` is the canonical AL row for `tracked` — used to
+/// decide whether to replace the stored `anilist_id` column with
+/// `detail.id`. Strict: anything other than an exact AL-id match (or a
+/// MAL-only tracked series) keeps the existing `tracked.anilist_id`
+/// untouched so the next refresh tries AL again instead of locking the
+/// row into a fallback provider's id space. See `is_trustworthy_write`
+/// for the looser "write this data" gate.
 fn is_authoritative_detail(tracked: &series::Series, detail: &anilist::AnimeDetail) -> bool {
     if tracked.anilist_id <= 0 {
         return true;
     }
     detail.id > 0 && detail.id == tracked.anilist_id
+}
+
+/// Map a fetched `detail` to the `LogCategory` of the provider that
+/// produced it, so per-series success / fallback log rows show up
+/// under the correct System → Logs filter.
+///
+///   - `detail.id < 0`  → Jikan (the negative `-mal_id` sentinel that
+///     `services::jikan::*` stamps on every response).
+///   - `detail.id > 0 && detail.id == tracked.anilist_id` → AniList
+///     (canonical AL response for an AL-tracked series).
+///   - everything else (positive id that doesn't equal the tracked
+///     anilist_id, or any positive id when tracked has no AL id) →
+///     Kitsu, since Kitsu's `to_anime_detail` stamps its own positive
+///     id space which can't collide with AL or MAL.
+///
+/// Without this dispatch, every metadata-related log row was filed
+/// under `LogCategory::AniList` even when AL was the unhealthy
+/// provider and Jikan / Kitsu carried the load — making the System →
+/// Logs Jikan/Kitsu filters dead-letter dropdowns and obscuring which
+/// provider was actually responsible for each line during an outage.
+///
+/// **Caller invariant**: `tracked.anilist_id` must be non-zero. The
+/// external-sync normalize pipeline uses `0` as an *intermediate*
+/// sentinel during the MAL→AL merge, but by the time the metadata
+/// sweep reads `tracked.anilist_id` it's been resolved to either a
+/// positive AL id or a negative MAL fallback marker. A zero here
+/// would mis-route an AL canonical response to Kitsu, so the
+/// debug_assert in this function pins the contract.
+fn provider_category_for_detail(
+    tracked: &series::Series,
+    detail: &anilist::AnimeDetail,
+) -> LogCategory {
+    debug_assert!(
+        tracked.anilist_id != 0,
+        "provider_category_for_detail requires a resolved tracked.anilist_id \
+         (positive AL id or negative MAL sentinel); got 0, which is the \
+         external-sync intermediate state and should never reach the \
+         metadata sweep"
+    );
+    if detail.id < 0 {
+        LogCategory::Jikan
+    } else if detail.id > 0 && detail.id == tracked.anilist_id {
+        LogCategory::AniList
+    } else {
+        LogCategory::Kitsu
+    }
+}
+
+/// `true` when `detail` is *trustworthy enough to write* to the row
+/// (core metadata, relations, episode cache), even if it isn't the
+/// canonical AL detail. Looser than `is_authoritative_detail` because
+/// it treats Jikan's negative-id fallback (`detail.id = -mal_id`) as
+/// trustworthy — `mal_id` is an exact lookup, not a fuzzy title match,
+/// so the data is correct just from a different provider.
+///
+/// Used so the periodic refresh writes MAL data through during an AL
+/// outage instead of taking the "Preserving cached AniList relations"
+/// branch and pinning every series to whatever stale row was last
+/// written before AL went down.
+///
+/// Kitsu's title-fuzz fallback returns a positive id from Kitsu's own
+/// id space that won't equal `tracked.anilist_id`, so the function
+/// correctly rejects those — that's the sequel-mismatch defense the
+/// `is_authoritative_detail` check was built around, preserved here.
+fn is_trustworthy_write(tracked: &series::Series, detail: &anilist::AnimeDetail) -> bool {
+    if is_authoritative_detail(tracked, detail) {
+        return true;
+    }
+    detail.id < 0
 }
 
 fn title_candidates_for_series(tracked: &series::Series) -> Vec<String> {
@@ -475,6 +551,7 @@ async fn refresh_series_metadata_inner(
 ) -> Result<anilist::AnimeDetail, String> {
     let detail = fetch_live_detail(tracked, force_mal_fallback).await?;
     let authoritative_detail = is_authoritative_detail(tracked, &detail);
+    let trustworthy_write = is_trustworthy_write(tracked, &detail);
 
     let force_kitsu_fallback = config::get_config(db)
         .await
@@ -483,13 +560,17 @@ async fn refresh_series_metadata_inner(
         .map(|cfg| cfg.force_kitsu_fallback)
         .unwrap_or(false);
 
+    // Strict: only replace the row's `anilist_id` column when we got
+    // the canonical AL detail back. MAL fallbacks (negative `detail.id`)
+    // and Kitsu title-fuzz mismatches both leave the existing
+    // `tracked.anilist_id` in place so the next refresh tries AL again.
     let stored_anilist_id = if authoritative_detail {
         detail.id
     } else {
         tracked.anilist_id
     };
 
-    if authoritative_detail || allow_degraded_cache_rebuild {
+    if trustworthy_write || allow_degraded_cache_rebuild {
         let primary_title = if !detail.title_english.trim().is_empty() {
             &detail.title_english
         } else {
@@ -584,7 +665,7 @@ async fn refresh_series_metadata_inner(
         if !authoritative_detail {
             logger::info(
                 db,
-                LogCategory::AniList,
+                provider_category_for_detail(tracked, &detail),
                 &format!(
                     "Rebuilt cached metadata from fallback source for {}",
                     tracked.title
@@ -652,6 +733,16 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
     // itself takes 0.5–2s for a typical entry), which empirically
     // stays under the rate limit on a small library.
     const INTER_SERIES_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+    // Hard ceiling on total cooldown waits across all retry rounds for
+    // a single sweep. Without this, a sustained AL outage where
+    // concurrent callers (library page renders, RSS-driven scoring,
+    // transitive relation walks) keep observing 5xx responses
+    // re-arms the cooldown every ~60s — faster than the poll
+    // interval clears it — so the inner wait loop spins forever and
+    // the manual `metadata_rebuild` task row stays at status='running'
+    // until the process restarts. Mirrors the matching cap in
+    // `hydrate_relation_tree`.
+    const MAX_COOLDOWN_WAIT_TOTAL: std::time::Duration = std::time::Duration::from_secs(300);
 
     let sweep_label = if rebuild_artifacts {
         "Cached metadata rebuild"
@@ -715,7 +806,7 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
                 if rebuild_artifacts {
                     logger::info(
                         db,
-                        LogCategory::AniList,
+                        provider_category_for_detail(&tracked, &detail),
                         &format!("Rebuilt cached metadata for {}", tracked.title),
                         &format!(
                             "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
@@ -750,8 +841,25 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
 
     // ── Retry rounds for deferred series ─────────────────────────────────
     let mut round = 0;
+    let mut total_cooldown_wait = std::time::Duration::ZERO;
     while !deferred.is_empty() && round < MAX_RETRY_ROUNDS {
         if anilist::anilist_cooldown_active() {
+            let remaining_budget = MAX_COOLDOWN_WAIT_TOTAL.saturating_sub(total_cooldown_wait);
+            if remaining_budget.is_zero() {
+                logger::warn(
+                    db,
+                    LogCategory::AniList,
+                    &format!(
+                        "{}: cooldown wait budget exhausted with {} series still deferred; \
+                         marking remaining as failed",
+                        sweep_label,
+                        deferred.len()
+                    ),
+                    "",
+                )
+                .await;
+                break;
+            }
             logger::info(
                 db,
                 LogCategory::AniList,
@@ -764,9 +872,14 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
                 "",
             )
             .await;
+            let wait_start = std::time::Instant::now();
             while anilist::anilist_cooldown_active() {
+                if wait_start.elapsed() >= remaining_budget {
+                    break;
+                }
                 tokio::time::sleep(COOLDOWN_POLL_INTERVAL).await;
             }
+            total_cooldown_wait += wait_start.elapsed();
         }
 
         let to_retry = std::mem::take(&mut deferred);
@@ -780,7 +893,7 @@ async fn run_metadata_sweep(db: &SqlitePool, rebuild_artifacts: bool) -> (usize,
                     if rebuild_artifacts {
                         logger::info(
                             db,
-                            LogCategory::AniList,
+                            provider_category_for_detail(&tracked, &detail),
                             &format!("Rebuilt cached metadata for {}", tracked.title),
                             &format!(
                                 "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
@@ -968,6 +1081,98 @@ mod tests {
         let tracked = series_fixture(1234);
         let detail = detail_fixture(0);
         assert!(!is_authoritative_detail(&tracked, &detail));
+    }
+
+    // ── is_trustworthy_write ─────────────────────────────────────────
+
+    /// Regression for the 2026-04-28 AL outage. When AL is Unavailable
+    /// and Jikan succeeds, `fetch_live_detail` returns an `AnimeDetail`
+    /// whose id is the negative MAL sentinel (`-mal_id`).
+    /// `is_authoritative_detail` correctly rejects these (so the row's
+    /// `anilist_id` column doesn't get clobbered with the negative
+    /// sentinel), but the looser `is_trustworthy_write` accepts them
+    /// so the periodic refresh writes the MAL data through instead of
+    /// leaving the user's row pinned to whatever stale data was
+    /// written before AL went down.
+    #[test]
+    fn negative_id_jikan_fallback_is_trustworthy_for_write() {
+        let tracked = series_fixture(1234);
+        // Detail from a Jikan fallback during AL outage — id = -mal_id.
+        let detail = detail_fixture(-5678);
+        // Strict authoritative check still rejects (the row's anilist_id
+        // column should NOT be overwritten with -5678).
+        assert!(!is_authoritative_detail(&tracked, &detail));
+        // But the looser write gate accepts it so the data lands in
+        // metadata_cache + relations + episode rows.
+        assert!(
+            is_trustworthy_write(&tracked, &detail),
+            "MAL fallback (exact mal_id lookup, not fuzzy) must be \
+             trustworthy enough to overwrite stale AL data on a refresh"
+        );
+    }
+
+    // ── provider_category_for_detail ─────────────────────────────────
+
+    #[test]
+    fn provider_category_routes_negative_id_to_jikan() {
+        // -mal_id sentinel from a Jikan/MAL fallback during AL outage.
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(-5678);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::Jikan
+        );
+    }
+
+    #[test]
+    fn provider_category_routes_matching_positive_id_to_anilist() {
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(1234);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::AniList
+        );
+    }
+
+    #[test]
+    fn provider_category_routes_mismatched_positive_id_to_kitsu() {
+        // Kitsu's title-fuzz / by-mal-id paths stamp Kitsu's own id
+        // space — positive but not equal to tracked.anilist_id.
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(9999);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::Kitsu
+        );
+    }
+
+    #[test]
+    fn provider_category_for_mal_only_series_uses_jikan() {
+        // MAL-only tracked series (anilist_id <= 0) with the matching
+        // negative sentinel back from Jikan still routes to Jikan.
+        let tracked = series_fixture(-12345);
+        let detail = detail_fixture(-12345);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::Jikan
+        );
+    }
+
+    /// Kitsu's title-fuzz fallback (the multi-query path used when the
+    /// series has no MAL id) returns a positive id from Kitsu's own id
+    /// space. If that id differs from tracked.anilist_id, the match
+    /// could be a sequel — silently overwriting the row's metadata
+    /// would corrupt it. Both gates must reject this case.
+    #[test]
+    fn kitsu_title_fuzz_mismatched_id_is_not_trustworthy() {
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(9999); // positive but mismatched
+        assert!(!is_authoritative_detail(&tracked, &detail));
+        assert!(
+            !is_trustworthy_write(&tracked, &detail),
+            "positive id ≠ tracked.anilist_id is a Kitsu sequel-match \
+             risk — must not overwrite the row"
+        );
     }
 
     // ── title_candidates_for_series ──────────────────────────────────

@@ -1,0 +1,9 @@
+{# Probed status pill — returned by GET /api/download-clients/{id}/status.
+   The card renders an empty `Probing...` placeholder pill that hits this
+   endpoint via `hx-trigger="load"`; the response replaces the placeholder
+   in place via outerHTML. Always 200 so HTMX swaps even on error. #}
+{% if let Some(version) = version %}
+<span class="dc-status-pill dc-status-pill-ok" title="Connected">{{ kind_label }} {{ version }}</span>
+{% else %}
+<span class="dc-status-pill dc-status-pill-err" title="{{ error }}">Unreachable</span>
+{% endif %}

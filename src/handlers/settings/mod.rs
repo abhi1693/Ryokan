@@ -170,13 +170,14 @@ struct SettingsTemplate {
     /// they bypass the picker).
     indexer_seed: Option<&'static crate::services::indexer_catalog::SeededIndexer>,
     /// Multi-client refactor — every configured download client
-    /// for the Connections tab list. Sorted default-first then
+    /// for the Download Clients tab list. Sorted default-first then
     /// case-insensitive by name (see `models::download_clients::list_all`).
     download_clients: Vec<crate::models::download_clients::DownloadClientRow>,
-    /// Prefill for the Edit Download Client form when
-    /// `?tab=integrations&edit_id=N` is set. Mirrors the
-    /// `indexer_edit` pattern. `None` renders the bare Add form.
-    download_client_edit: Option<crate::models::download_clients::DownloadClientRow>,
+    /// Multi-RSS PR G/H — user-supplied direct RSS feeds (e.g.
+    /// SubsPlease per-quality feeds) rendered on the Indexers tab
+    /// alongside the torznab/newznab indexer rows. Empty until the
+    /// user adds one via the bottom-of-tab form.
+    direct_rss_feeds: Vec<crate::models::direct_rss_feeds::DirectRssFeed>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -359,6 +360,10 @@ pub struct SettingsForm {
     title_language: String,
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
+    /// Phase 7 PR E — Nyaa-specific RSS opt-out. Lives in the General
+    /// tab next to `rss_enabled` / `rss_interval_minutes`. Checkbox →
+    /// `Some(_)` when checked, `None` when not.
+    disable_nyaa_rss: Option<String>,
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
     /// #1.3.0 — opt-in: trigger auto-search when a series's
@@ -501,6 +506,12 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
         // surface scaffolded; CRUD form lands in PR B alongside
         // the TorznabIndexer impl that needs caps probing on save.
         Some("indexers") => "indexers".to_string(),
+        // Phase 7 follow-up — the multi-client picker was promoted
+        // out of the Connections tab into its own page so the cards
+        // grid + add slot has the full width and isn't wedged below
+        // the bulk Save Settings button (HTML5 forbids nested forms,
+        // so the picker has always lived outside the bulk form).
+        Some("downloads") => "downloads".to_string(),
         _ => "integrations".to_string(),
     }
 }
@@ -631,6 +642,7 @@ async fn build_settings_template(
         external_account_res,
         indexers_res,
         download_clients_res,
+        direct_rss_feeds_res,
     ) = tokio::join!(
         config::get_config(&state.db),
         load_groups(&state.db),
@@ -639,6 +651,7 @@ async fn build_settings_template(
         crate::models::external_accounts::get_current(&state.db),
         crate::models::indexers::list_all(&state.db),
         crate::models::download_clients::list_all(&state.db),
+        crate::models::direct_rss_feeds::list_all(&state.db),
     );
     let cfg = cfg_res.ok().flatten().unwrap_or_default();
     // A decrypt failure (tampered blob, key rotation without migration)
@@ -693,10 +706,7 @@ async fn build_settings_template(
         None
     };
     let download_clients = download_clients_res.unwrap_or_default();
-    let download_client_edit = match edit_id {
-        Some(id) => download_clients.iter().find(|r| r.id == id).cloned(),
-        None => None,
-    };
+    let direct_rss_feeds = direct_rss_feeds_res.unwrap_or_default();
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -717,7 +727,7 @@ async fn build_settings_template(
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
         indexer_seed,
         download_clients,
-        download_client_edit,
+        direct_rss_feeds,
     }
 }
 
@@ -850,6 +860,7 @@ pub async fn settings_submit(
             .as_ref()
             .map(|cfg| cfg.rss_master_enabled)
             .unwrap_or(true),
+        disable_nyaa_rss: form.disable_nyaa_rss.is_some(),
         force_kitsu_fallback: current_force_kitsu_fallback,
         post_processing_enabled: form.post_processing_enabled.is_some(),
         post_processing_mode: match form.post_processing_mode.as_str() {
@@ -1009,6 +1020,9 @@ pub async fn settings_submit(
         let download_clients = crate::models::download_clients::list_all(&state.db)
             .await
             .unwrap_or_default();
+        let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
+            .await
+            .unwrap_or_default();
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
@@ -1029,7 +1043,7 @@ pub async fn settings_submit(
             indexer_catalog: crate::services::indexer_catalog::SEEDED,
             indexer_seed: None,
             download_clients,
-            download_client_edit: None,
+            direct_rss_feeds,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1113,6 +1127,9 @@ pub async fn settings_submit(
     let download_clients = crate::models::download_clients::list_all(&state.db)
         .await
         .unwrap_or_default();
+    let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
+        .await
+        .unwrap_or_default();
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
@@ -1138,7 +1155,7 @@ pub async fn settings_submit(
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
         indexer_seed: None,
         download_clients,
-        download_client_edit: None,
+        direct_rss_feeds,
     };
     Html(template.render().unwrap_or_default())
 }

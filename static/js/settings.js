@@ -130,6 +130,99 @@ function closeCfEditorModal() {
     });
 })();
 
+// ── Settings → Download Clients shared add/edit modal ──────────────
+// One modal serves both flows. Per-card click → openDcEditModal(id,
+// name); "+ Add" tile → openDcAddModal(). Each routes through
+// htmx.ajax() to fetch the right form body into `#dc-modal-body`
+// AND opens the modal immediately (no wait for the round-trip — the
+// modal shows a brief loading-flash on the body until the swap lands).
+// After a successful save the form's hx-target="#dc-section" causes
+// the server's section-partial response to replace the entire
+// section, including the modal, at display:none with the Add form
+// back in body — closing + resetting in one shot. No manual
+// `hx-on::after-request="closeModal()"` needed (and removed because
+// `<button>` containing block content was getting auto-closed by
+// the parser, breaking the inline JS hooks anyway — the click
+// handlers live on `<div role="button">` now).
+function openDownloadClientModal(title) {
+    const modal = document.getElementById('dc-modal');
+    if (!modal) return;
+    if (typeof title === 'string' && title.length > 0) {
+        const titleEl = document.getElementById('dc-modal-title');
+        if (titleEl) titleEl.textContent = title;
+    }
+    modal.style.display = 'flex';
+    // Focus first text/url input in the freshly-swapped body for
+    // keyboard ergonomics. querySelector matches in DOM order so
+    // the Name field wins on both Add and Edit forms.
+    const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
+}
+function closeDownloadClientModal() {
+    const modal = document.getElementById('dc-modal');
+    if (modal) modal.style.display = 'none';
+}
+function openDcEditModal(id, name) {
+    openDownloadClientModal('Editing ' + (name || 'download client'));
+    if (window.htmx) {
+        window.htmx.ajax(
+            'GET',
+            '/settings/download-clients/' + encodeURIComponent(id) + '/edit-form',
+            { target: '#dc-modal-body', swap: 'innerHTML' }
+        );
+    }
+}
+function openDcAddModal() {
+    openDownloadClientModal('Add download client');
+    if (window.htmx) {
+        window.htmx.ajax(
+            'GET',
+            '/api/download-clients/add-form',
+            { target: '#dc-modal-body', swap: 'innerHTML' }
+        );
+    }
+}
+// Test-connection result — server fires `ryokan-dc-test-result` via
+// HX-Trigger header (empty response body, so the modal footer's button
+// row doesn't grow to fit the message). Convert to a toast that
+// surfaces at the top of the viewport regardless of message length.
+document.body.addEventListener('ryokan-dc-test-result', function (ev) {
+    const detail = ev.detail || {};
+    window.ryokanToast({
+        kind: detail.ok ? 'success' : 'error',
+        title: detail.ok ? 'Connection OK' : 'Connection failed',
+        body: detail.message || '',
+    });
+});
+// Backdrop-click + Escape dismissal. Re-bound on every section swap
+// because the modal element is replaced when #dc-section re-renders;
+// htmx fires `htmx:afterSwap` on the swap target, so we listen there
+// once at module scope and re-attach the per-modal listeners.
+(function() {
+    function bindDownloadClientModal() {
+        const modal = document.getElementById('dc-modal');
+        if (!modal) return;
+        if (modal.dataset.bound === '1') return;
+        modal.dataset.bound = '1';
+        modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) closeDownloadClientModal();
+        });
+    }
+    bindDownloadClientModal();
+    document.body.addEventListener('htmx:afterSwap', function(ev) {
+        if (ev.target && ev.target.id === 'dc-section') {
+            bindDownloadClientModal();
+        }
+    });
+    document.addEventListener('keydown', function(ev) {
+        const modal = document.getElementById('dc-modal');
+        if (!modal) return;
+        if (ev.key === 'Escape' && modal.style.display !== 'none') {
+            closeDownloadClientModal();
+        }
+    });
+})();
+
 // #11.4 — CF export selector. Radios pick the mode, checkboxes pick the
 // ids, then two actions: download the file (via the existing GET endpoint)
 // or copy the pretty-printed JSON to the clipboard (same endpoint, fetch

@@ -12,6 +12,7 @@
                     <th>URL</th>
                     <th>Private</th>
                     <th>Status</th>
+                    <th>RSS</th>
                     <th></th>
                 </tr>
             </thead>
@@ -24,6 +25,23 @@
                     <td><code>{{ idx.url }}</code></td>
                     <td>{% if idx.is_private_tracker %}Yes{% else %}No{% endif %}</td>
                     <td>{% if idx.enabled %}Enabled{% else %}Disabled{% endif %}</td>
+                    <td>
+                        {# Multi-RSS PR 1 — surface the per-indexer
+                           rss_enabled flag inline. The poll-result
+                           fields land on this same cell so the user
+                           can see "Off" / "Idle" / "✓ N items" / "✗
+                           Error" at a glance instead of digging into
+                           the edit form. #}
+                        {% if !idx.rss_enabled %}
+                        <span class="rss-pill rss-pill-off" title="RSS auto-sync disabled for this indexer">Off</span>
+                        {% else if !idx.rss_last_poll_error.is_empty() %}
+                        <span class="rss-pill rss-pill-error" title="{{ idx.rss_last_poll_error }}">✗ Error</span>
+                        {% else if let Some(_) = idx.rss_last_polled_at %}
+                        <span class="rss-pill rss-pill-ok" title="Last poll returned {{ idx.rss_last_item_count }} item{% if idx.rss_last_item_count == 1 %}{% else %}s{% endif %}">✓ {{ idx.rss_last_item_count }} items</span>
+                        {% else %}
+                        <span class="rss-pill rss-pill-idle" title="Enabled but not yet polled — first sync runs on the next interval">Idle</span>
+                        {% endif %}
+                    </td>
                     <td>
                         <a href="/settings?tab=indexers&edit_id={{ idx.id }}" class="btn btn-small">Edit</a>
                         <form method="post" action="/settings/indexers/delete" style="display:inline"
@@ -128,6 +146,14 @@
                     <input type="checkbox" name="is_private_tracker" {% if edit.is_private_tracker %}checked{% endif %}>
                     Private tracker
                 </label>
+            </div>
+
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="rss_enabled" {% if edit.rss_enabled %}checked{% endif %}>
+                    Enable RSS auto-sync
+                </label>
+                <span class="form-hint">When on, the master RSS sync polls this indexer's RSS feed for newly-uploaded releases on every interval (cadence on the General tab). Off keeps the indexer reachable for manual searches but skips it on the auto-sync. PT trackers usually want this on so new uploads grab promptly.</span>
             </div>
 
             <div class="form-group">
@@ -246,6 +272,18 @@
             </div>
 
             <div class="form-group">
+                <label class="checkbox-label">
+                    {# PT trackers default-on for RSS — they're the
+                       primary use case for the auto-sync (new
+                       uploads, freeleech windows, etc.). Public
+                       trackers default off. #}
+                    <input type="checkbox" name="rss_enabled" {% if seed.is_private_tracker %}checked{% endif %}>
+                    Enable RSS auto-sync
+                </label>
+                <span class="form-hint">When on, the master RSS sync polls this indexer's RSS feed on every interval. Off keeps the indexer reachable for manual searches but skips it on the auto-sync.</span>
+            </div>
+
+            <div class="form-group">
                 <label for="indexer-add-dc">Download Client</label>
                 <select id="indexer-add-dc" name="download_client_id">
                     <option value="">(use default)</option>
@@ -314,6 +352,109 @@
                 </select>
             </div>
             <button type="submit" class="btn btn-primary">Save Nyaa pin</button>
+        </form>
+    </fieldset>
+    {% endif %}
+
+    {# Multi-RSS PR G/H — user-supplied direct RSS feeds (e.g.
+       SubsPlease's per-quality feeds). Distinct from the per-indexer
+       RSS toggle above: those poll torznab/newznab indexers via
+       their RSS endpoint and route through their indexer-level
+       seed rules; direct feeds are arbitrary URLs that bypass the
+       indexer registry entirely. Same hidden-during-edit-flow
+       gating as Nyaa + autobrr so the user isn't distracted while
+       editing one indexer. #}
+    {% if indexer_edit.is_none() && indexer_seed.is_none() %}
+    <fieldset class="settings-form">
+        <legend>Direct RSS feeds</legend>
+        <p class="form-hint" style="margin: 0 0 12px;">
+            User-supplied RSS URLs that don't go through Prowlarr / Jackett. The release-group RSS feeds from SubsPlease are the canonical use case — paste the per-quality feed URL and Ryokan picks up new episodes on every sync interval.
+        </p>
+
+        {% if !direct_rss_feeds.is_empty() %}
+        <div class="table-scroll-wrap" style="margin-bottom: 14px;">
+        <table class="indexers-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>URL</th>
+                    <th>Status</th>
+                    <th>Pin</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for feed in direct_rss_feeds %}
+                <tr>
+                    <td>{{ feed.name }}</td>
+                    <td><code>{{ feed.url }}</code></td>
+                    <td>
+                        {% if !feed.enabled %}
+                        <span class="rss-pill rss-pill-off" title="Auto-sync disabled for this feed">Disabled</span>
+                        {% else if !feed.last_poll_error.is_empty() %}
+                        <span class="rss-pill rss-pill-error" title="{{ feed.last_poll_error }}">✗ Error</span>
+                        {% else if let Some(_) = feed.last_polled_at %}
+                        <span class="rss-pill rss-pill-ok" title="Last poll returned {{ feed.last_item_count }} item{% if feed.last_item_count == 1 %}{% else %}s{% endif %}{% if !feed.detected_protocol.is_empty() %} · {{ feed.detected_protocol }}{% endif %}">✓ {{ feed.last_item_count }} items</span>
+                        {% else %}
+                        <span class="rss-pill rss-pill-idle" title="Enabled but not yet polled">Idle</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if let Some(pin) = feed.download_client_id %}
+                        {% for dc in download_clients %}{% if dc.id == *pin %}{{ dc.name }}{% endif %}{% endfor %}
+                        {% else %}
+                        <span class="form-hint">(default)</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <form method="post" action="/settings/direct-rss-feeds/delete" style="display:inline"
+                              hx-post="/settings/direct-rss-feeds/delete"
+                              hx-target="closest tr"
+                              hx-swap="outerHTML"
+                              data-ryokan-confirm-title="Delete RSS feed?"
+                              data-ryokan-confirm-body="Remove '{{ feed.name }}' from Ryokan. The audit trail of which items were grabbed from this feed is preserved (rss_seen rows aren't cascaded)."
+                              data-ryokan-confirm-yes="Delete"
+                              data-ryokan-confirm-no="Cancel"
+                              data-ryokan-confirm-danger="1">
+                            <input type="hidden" name="id" value="{{ feed.id }}">
+                            <button type="submit" class="btn btn-danger btn-small">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+        {% endif %}
+
+        <h3 class="settings-subheading" style="margin-top: 0;">Add direct RSS feed</h3>
+        <form method="post" action="/settings/direct-rss-feeds/upsert" class="settings-form settings-subform">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="rss-add-name">Name</label>
+                    <input id="rss-add-name" type="text" name="name" required maxlength="100" placeholder="e.g. SubsPlease 1080p">
+                </div>
+                <div class="form-group">
+                    <label for="rss-add-url">RSS URL</label>
+                    <input id="rss-add-url" type="url" name="url" required placeholder="https://subsplease.org/rss/?r=1080">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="rss-add-timeout">Request Timeout (seconds)</label>
+                <input id="rss-add-timeout" type="number" name="request_timeout_secs" min="1" max="600" placeholder="(use default)">
+                <span class="form-hint">Per-feed override. Blank uses the default RSS timeout.</span>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" checked>
+                    Enabled
+                </label>
+                <span class="form-hint">When on, this feed is polled on every RSS sync interval. Toggle off to keep the row but stop polling.</span>
+            </div>
+            <p class="form-hint" style="margin: 4px 0 12px;">
+                After saving, Ryokan will detect the feed's protocol (torrent / usenet) on the first successful poll. Until then, no download-client pin is enforced. Use the Nyaa search section above to pick a per-protocol default.
+            </p>
+            <button type="submit" class="btn btn-primary">Add RSS feed</button>
         </form>
     </fieldset>
     {% endif %}
