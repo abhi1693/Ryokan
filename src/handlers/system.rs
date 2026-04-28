@@ -103,6 +103,32 @@ pub(crate) fn normalize_system_tab_for_test(tab: Option<String>) -> String {
     normalize_system_tab(tab)
 }
 
+/// Apply the `+1-fetch` cursor pagination contract: the model fetched
+/// `page_size + 1` rows, this helper truncates the extra one and
+/// returns its now-last entry's id as the cursor for the next page.
+/// `None` means "no older page" — either the dataset was smaller
+/// than `page_size + 1`, or the model returned exactly `page_size`
+/// (no extra row, no next page).
+///
+/// The strict `> page_size` (not `>=`) is the load-bearing
+/// invariant: a `>=` here would return a non-empty cursor on the
+/// last page, the user would click "Older" and see an empty page.
+/// Pinned by `truncate_to_page_returns_none_at_exact_page_size`
+/// and `truncate_to_page_returns_some_when_extra_row_present`.
+fn truncate_to_page<T, F: Fn(&T) -> i64>(
+    mut entries: Vec<T>,
+    page_size: usize,
+    id_of: F,
+) -> (Vec<T>, Option<i64>) {
+    let older_id = if entries.len() > page_size {
+        entries.truncate(page_size);
+        entries.last().map(&id_of)
+    } else {
+        None
+    };
+    (entries, older_id)
+}
+
 pub async fn system_page(
     State(state): State<AppState>,
     Query(params): Query<SystemQuery>,
@@ -253,27 +279,8 @@ pub async fn system_page(
     // COUNT. If we got the extra row, drop it and stash the oldest
     // visible row's id as the `before_id` for the next page; if we
     // got fewer than the limit, this is the last page.
-    let (logs, log_older_id) = {
-        let mut entries = logs;
-        let log_older_id = if entries.len() > 200 {
-            entries.truncate(200);
-            entries.last().map(|e| e.id)
-        } else {
-            None
-        };
-        (entries, log_older_id)
-    };
-    // Same +1-truncate trick for the RSS tab (Phase 7 PR F).
-    let (rss_recent, rss_older_id) = {
-        let mut entries = rss_recent;
-        let rss_older_id = if entries.len() > 200 {
-            entries.truncate(200);
-            entries.last().map(|e| e.id)
-        } else {
-            None
-        };
-        (entries, rss_older_id)
-    };
+    let (logs, log_older_id) = truncate_to_page(logs, 200, |e| e.id);
+    let (rss_recent, rss_older_id) = truncate_to_page(rss_recent, 200, |e| e.id);
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -727,14 +734,18 @@ pub async fn api_logs_export(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Tab-separated with a header row. Embedded tabs / newlines in the
-    // message or detail body are escaped to spaces so each entry stays
-    // on a single line — matters for grep / awk consumption.
+    // Tab-separated with a header row. Embedded tabs / newlines / CRs
+    // in the message or detail body are escaped to spaces so each entry
+    // stays on a single line — matters for grep / awk consumption. CR
+    // is in the escape set defensively: tracing output realistically
+    // never contains one, but a panic message or external-service
+    // error round-tripped through `logger::*` could, and a bare \r
+    // makes some line-oriented tools treat it as a record separator.
     let mut body = String::with_capacity(rows.len() * 128);
     body.push_str("timestamp\tlevel\tcategory\tmessage\tdetail\n");
     for (ts, level, category, message, detail) in &rows {
-        let m = message.replace(['\t', '\n'], " ");
-        let d = detail.replace(['\t', '\n'], " ");
+        let m = message.replace(['\t', '\n', '\r'], " ");
+        let d = detail.replace(['\t', '\n', '\r'], " ");
         body.push_str(&format!("{ts}\t{level}\t{category}\t{m}\t{d}\n"));
     }
 
@@ -1745,5 +1756,62 @@ mod endpoint_tests {
             !body.contains("old entry"),
             "today range must exclude entries older than midnight UTC; got: {body}"
         );
+    }
+
+    // ── truncate_to_page (PR 132 review follow-up) ──────────────────
+    //
+    // The handler's `+1`-fetch cursor logic is shared between the
+    // logs and RSS tabs. The model-level tests pin the `id < cursor`
+    // contract (`recent_decisions_paginated_skips_entries_at_or_above_cursor`)
+    // but the handler-side "is there an older page?" decision lives
+    // here. A regression where the comparison flips to `>=` would
+    // emit a non-empty cursor on the last page → user clicks Older
+    // → empty page → confused. These three tests pin the boundaries.
+
+    #[derive(Clone)]
+    struct Row {
+        id: i64,
+    }
+
+    #[test]
+    fn truncate_to_page_returns_none_at_exact_page_size() {
+        // Model returned exactly `page_size` rows — no extra row,
+        // therefore no older page. Cursor must be None so the
+        // template skips the "Older →" link.
+        let entries: Vec<Row> = (1..=200).map(|id| Row { id }).collect();
+        let (kept, older) = truncate_to_page(entries, 200, |r| r.id);
+        assert_eq!(kept.len(), 200);
+        assert_eq!(
+            older, None,
+            "200 rows on a page-size of 200 → no older page (no `+1` extra fetched)"
+        );
+    }
+
+    #[test]
+    fn truncate_to_page_returns_some_when_extra_row_present() {
+        // Model returned page_size + 1 (the canonical "more pages"
+        // signal). Truncate to page_size, return the now-last row's
+        // id as the next cursor.
+        let entries: Vec<Row> = (1..=201).map(|id| Row { id }).collect();
+        let (kept, older) = truncate_to_page(entries, 200, |r| r.id);
+        assert_eq!(kept.len(), 200);
+        assert_eq!(
+            older,
+            Some(200),
+            "201 rows on a page-size of 200 → cursor is the 200th row's id (the new boundary for `id < cursor`)"
+        );
+    }
+
+    #[test]
+    fn truncate_to_page_returns_none_for_short_page() {
+        // Empty / partial page → no older page either.
+        let (kept, older) = truncate_to_page::<Row, _>(vec![], 200, |r| r.id);
+        assert_eq!(kept.len(), 0);
+        assert_eq!(older, None);
+
+        let entries: Vec<Row> = (1..=42).map(|id| Row { id }).collect();
+        let (kept, older) = truncate_to_page(entries, 200, |r| r.id);
+        assert_eq!(kept.len(), 42);
+        assert_eq!(older, None);
     }
 }

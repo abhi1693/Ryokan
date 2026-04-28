@@ -128,13 +128,19 @@
    renders when the user has navigated backwards). Both controls
    propagate the active filter state via query params so paginating
    doesn't reset the filter dropdowns. #}
+{# `|urlencode` on every interpolated filter value: `filter_search` is
+   user-controlled (the "Filter messages..." input), and a search like
+   `foo & bar` would otherwise produce an href the browser parses as a
+   new query parameter starting at `& bar`, breaking pagination
+   silently. The same applies to category / level for any future
+   non-ascii or `&`-bearing values. #}
 {% if log_older_id.is_some() || log_before_id.is_some() %}
 <div class="logs-pagination">
     {% if log_before_id.is_some() %}
-    <a class="btn btn-ghost btn-sm" href="/system?tab=logs{% if !filter_level.is_empty() %}&level={{ filter_level }}{% endif %}{% if !filter_category.is_empty() %}&category={{ filter_category }}{% endif %}{% if !filter_search.is_empty() %}&search={{ filter_search }}{% endif %}">← Newest</a>
+    <a class="btn btn-ghost btn-sm" href="/system?tab=logs{% if !filter_level.is_empty() %}&level={{ filter_level|urlencode }}{% endif %}{% if !filter_category.is_empty() %}&category={{ filter_category|urlencode }}{% endif %}{% if !filter_search.is_empty() %}&search={{ filter_search|urlencode }}{% endif %}">← Newest</a>
     {% endif %}
     {% if let Some(older) = log_older_id %}
-    <a class="btn btn-ghost btn-sm" href="/system?tab=logs&before_id={{ older }}{% if !filter_level.is_empty() %}&level={{ filter_level }}{% endif %}{% if !filter_category.is_empty() %}&category={{ filter_category }}{% endif %}{% if !filter_search.is_empty() %}&search={{ filter_search }}{% endif %}">Older →</a>
+    <a class="btn btn-ghost btn-sm" href="/system?tab=logs&before_id={{ older }}{% if !filter_level.is_empty() %}&level={{ filter_level|urlencode }}{% endif %}{% if !filter_category.is_empty() %}&category={{ filter_category|urlencode }}{% endif %}{% if !filter_search.is_empty() %}&search={{ filter_search|urlencode }}{% endif %}">Older →</a>
     {% endif %}
 </div>
 {% endif %}
