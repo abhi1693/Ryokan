@@ -1,25 +1,16 @@
-{# Inline edit form fragment — replaces a card in #dc-section
-   when the user clicks Edit. Save POSTs to /upsert; on HTMX
-   success the response is the whole section partial which
-   re-renders all cards. Cancel re-fetches the section to
-   restore the unmodified card. #}
-<article class="dc-card dc-card-editing" id="dc-card-{{ row.id }}">
-    <form method="post" action="/settings/download-clients/upsert"
-          class="dc-edit-form"
-          hx-post="/settings/download-clients/upsert"
-          hx-target="#dc-section"
-          hx-swap="outerHTML">
-        <input type="hidden" name="id" value="{{ row.id }}">
-        <header class="dc-card-edit-header">
-            <strong>Editing {{ row.name }}</strong>
-            <div class="dc-card-edit-actions">
-                <button type="submit" class="btn btn-primary btn-small">Save</button>
-                <button type="button" class="btn btn-secondary btn-small"
-                        hx-get="/api/download-clients/section"
-                        hx-target="#dc-section"
-                        hx-swap="outerHTML">Cancel</button>
-            </div>
-        </header>
+{# Modal body for the Edit flow. Returned by `GET /settings/
+   download-clients/{id}/edit-form` and swapped into
+   `#dc-modal-body` (innerHTML) when the user clicks a card.
+   Same shape as add_form_body.html but pre-filled and carries
+   a hidden `id` so the upsert path runs as UPDATE not INSERT. #}
+<form method="post" action="/settings/download-clients/upsert"
+      class="dc-modal-form"
+      hx-post="/settings/download-clients/upsert"
+      hx-target="#dc-section"
+      hx-swap="outerHTML"
+      hx-on::after-request="if (event.detail.successful) closeDownloadClientModal()">
+    <input type="hidden" name="id" value="{{ row.id }}">
+    <div class="modal-body">
         <div class="form-row">
             <div class="form-group">
                 <label for="dc-edit-name-{{ row.id }}">Name</label>
@@ -56,12 +47,12 @@
             <div class="form-group">
                 <label for="dc-edit-label-{{ row.id }}">Category / label</label>
                 <input id="dc-edit-label-{{ row.id }}" type="text" name="label" value="{{ row.label }}" placeholder="anime">
-                <span class="form-hint">qBit calls this a "category", the others call it a "label". Ryokan tags every torrent it adds with this value and filters by it when listing.</span>
+                <span class="form-hint">qBit calls this a "category", the others call it a "label".</span>
             </div>
             <div class="form-group">
-                <label for="dc-edit-download-path-{{ row.id }}">Download path (as seen by Ryokan)</label>
+                <label for="dc-edit-download-path-{{ row.id }}">Download path (as Ryokan sees it)</label>
                 <input id="dc-edit-download-path-{{ row.id }}" type="text" name="download_path" value="{{ row.download_path }}" placeholder="/downloads">
-                <span class="form-hint">Where the client's completed downloads are accessible to Ryokan. Leave blank if Ryokan and the client see the exact same paths.</span>
+                <span class="form-hint">Leave blank if Ryokan and the client see the exact same paths.</span>
             </div>
         </div>
         <div class="form-row">
@@ -80,14 +71,16 @@
                 <span class="form-hint">Receives every grab without an explicit pin. Exactly one row holds this flag at a time.</span>
             </div>
         </div>
-        <div class="settings-inline-actions">
-            <button type="button" class="btn btn-secondary"
-                    hx-post="/api/download-clients/test"
-                    hx-include="closest form"
-                    hx-target="next .dc-test-result"
-                    hx-swap="innerHTML"
-                    hx-disabled-elt="this">Test connection</button>
-            <span class="dc-test-result form-hint" aria-live="polite"></span>
-        </div>
-    </form>
-</article>
+    </div>
+    <div class="modal-footer">
+        <button type="button" class="btn btn-secondary"
+                hx-post="/api/download-clients/test"
+                hx-include="closest form"
+                hx-target="next .dc-test-result"
+                hx-swap="innerHTML"
+                hx-disabled-elt="this">Test connection</button>
+        <span class="dc-test-result form-hint" aria-live="polite" style="margin-right:auto"></span>
+        <button type="button" class="btn btn-secondary" onclick="closeDownloadClientModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save changes</button>
+    </div>
+</form>

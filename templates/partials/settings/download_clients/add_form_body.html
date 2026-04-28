@@ -1,0 +1,85 @@
+{# Modal body for the Add flow. Returned by `GET /api/download-
+   clients/add-form` and also rendered server-side on initial
+   section render so the modal opens fast on first click without
+   waiting for a fetch. The HTMX target on the click handlers is
+   `#dc-modal-body innerHTML`, so this is the entire content of
+   that div (no header, no backdrop). #}
+<form method="post" action="/settings/download-clients/upsert"
+      class="dc-modal-form"
+      hx-post="/settings/download-clients/upsert"
+      hx-target="#dc-section"
+      hx-swap="outerHTML"
+      hx-on::after-request="if (event.detail.successful) closeDownloadClientModal()">
+    <div class="modal-body">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-add-name">Name</label>
+                <input id="dc-add-name" type="text" name="name" required maxlength="100" placeholder="e.g. Local qBit">
+            </div>
+            <div class="form-group">
+                <label for="dc-add-kind">Kind</label>
+                <select id="dc-add-kind" name="kind">
+                    <option value="qbittorrent" selected>qBittorrent</option>
+                    <option value="deluge">Deluge</option>
+                    <option value="transmission">Transmission</option>
+                    <option value="rtorrent">rTorrent</option>
+                    <option value="sabnzbd">SABnzbd (Usenet)</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="dc-add-url">URL</label>
+            <input id="dc-add-url" type="url" name="url" required placeholder="http://localhost:8080">
+            <span class="form-hint">For Deluge / Transmission / rTorrent, point at the Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-add-username">Username</label>
+                <input id="dc-add-username" type="text" name="username" autocomplete="off">
+                <span class="form-hint">Deluge ignores the username and uses password only; leave blank.</span>
+            </div>
+            <div class="form-group">
+                <label for="dc-add-password">Password</label>
+                <input id="dc-add-password" type="password" name="password" autocomplete="new-password">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dc-add-label">Category / label</label>
+                <input id="dc-add-label" type="text" name="label" placeholder="anime">
+                <span class="form-hint">qBit calls this a "category", the others call it a "label". Ryokan tags every torrent it adds with this value and filters by it when listing.</span>
+            </div>
+            <div class="form-group">
+                <label for="dc-add-download-path">Download path (as Ryokan sees it)</label>
+                <input id="dc-add-download-path" type="text" name="download_path" placeholder="/downloads">
+                <span class="form-hint">Where the client's completed downloads are accessible to Ryokan. Leave blank if Ryokan and the client see the exact same paths.</span>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" checked>
+                    Enabled
+                </label>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_default" {% if first_client %}checked{% endif %}>
+                    Default client
+                </label>
+                <span class="form-hint">Receives every grab without an explicit pin.</span>
+            </div>
+        </div>
+    </div>
+    <div class="modal-footer">
+        <button type="button" class="btn btn-secondary"
+                hx-post="/api/download-clients/test"
+                hx-include="closest form"
+                hx-target="next .dc-test-result"
+                hx-swap="innerHTML"
+                hx-disabled-elt="this">Test connection</button>
+        <span class="dc-test-result form-hint" aria-live="polite" style="margin-right:auto"></span>
+        <button type="button" class="btn btn-secondary" onclick="closeDownloadClientModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Add</button>
+    </div>
+</form>

@@ -1,13 +1,11 @@
-{# Card grid + add tile + edit modal. The whole section is the
-   target of every state-changing HTMX action (upsert / delete /
-   set-default succeed → server returns this partial → swaps in
-   place). Per-card click triggers an inline edit; the trailing
-   "+ Add" tile opens a modal. #}
+{# Card grid + add tile + shared edit/add modal. Each card click
+   fetches the edit form into the modal body; the "+ Add" tile
+   fetches the add form into the same body. Save returns the
+   whole #dc-section partial so a successful save re-renders the
+   cards (with the modal hidden + reset for free). #}
 <div id="dc-section" class="dc-section">
-    {# Stash these up-front: the `{% for row in rows %}` below
-       consumes `rows` (askama's IntoIterator semantics), and we
-       need the same flags later for the empty-state CTA + the
-       modal's first-client default-checkbox pre-tick. #}
+    {# Pre-compute flags before the for-loop consumes `rows` —
+       askama IntoIterator semantics. #}
     {% let first_client = rows.is_empty() %}
     {% let show_empty_state = rows.is_empty() %}
     <div class="dc-card-grid">
@@ -19,33 +17,35 @@
 
         {% for row in rows %}
         <article class="dc-card" id="dc-card-{{ row.id }}">
-            {# Whole card body is the click target — opens the inline
-               edit form. Using a button (not <a>) so HTMX can swap
-               cleanly without a no-JS fallback URL navigation that
-               wouldn't render the same edit form anyway. #}
+            {# Whole-card click target. Fetches the edit form into
+               the shared modal body and opens the modal. The
+               `data-dc-name` attribute carries the row name through
+               to the modal title without needing a server-side
+               populated header. #}
             <button type="button" class="dc-card-body"
+                    data-dc-name="{{ row.name }}"
                     hx-get="/settings/download-clients/{{ row.id }}/edit-form"
-                    hx-target="#dc-card-{{ row.id }}"
-                    hx-swap="outerHTML"
+                    hx-target="#dc-modal-body"
+                    hx-swap="innerHTML"
+                    hx-on::after-request="if (event.detail.successful) openDownloadClientModal('Editing ' + this.dataset.dcName)"
                     aria-label="Edit {{ row.name }}">
                 <div class="dc-card-header">
-                    <strong class="dc-card-name">{{ row.name }}</strong>
-                    {# Status badge replaces the per-kind badge. The
-                       kind itself moves to a small subtitle below the
-                       name. Three states: Default (green, also
-                       implies enabled), Enabled (green), Disabled
-                       (gray). The default flag implies enabled at
-                       the model layer (insert/update) so the order
-                       of checks matches the user-visible priority. #}
+                    <div class="dc-card-title">
+                        <strong class="dc-card-name">{{ row.name }}</strong>
+                        {% if row.is_default %}<span class="dc-default-pill" title="This client receives every grab without an explicit indexer pin">Default</span>{% endif %}
+                    </div>
+                    {# Status pill — placeholder loads then HTMX swap-
+                       on-load replaces with the probed version, or
+                       a static Disabled pill for disabled rows. #}
                     {% if !row.enabled %}
-                    <span class="dc-status-badge dc-status-disabled">Disabled</span>
-                    {% else if row.is_default %}
-                    <span class="dc-status-badge dc-status-default">Default</span>
+                    <span class="dc-status-pill dc-status-pill-disabled">Disabled</span>
                     {% else %}
-                    <span class="dc-status-badge dc-status-enabled">Enabled</span>
+                    <span class="dc-status-pill dc-status-pill-loading"
+                          hx-get="/api/download-clients/{{ row.id }}/status"
+                          hx-trigger="load"
+                          hx-swap="outerHTML">Probing&hellip;</span>
                     {% endif %}
                 </div>
-                <div class="dc-card-subtitle">{{ crate::handlers::settings::download_clients::kind_label(row.kind.as_str()) }}</div>
                 <dl class="dc-card-meta">
                     <div class="dc-card-meta-row">
                         <dt>URL</dt>
@@ -65,9 +65,10 @@
                     {% endif %}
                 </dl>
             </button>
-            {# Corner × delete button — sits outside the click target
-               so a delete click doesn't also trigger edit. Same
-               .btn-icon-danger primitive the CF cards use. #}
+            {# Corner × delete — always visible (the user wants the
+               action discoverable without hovering, and the visual
+               weight is small enough not to compete). Same primitive
+               as CF cards' delete. #}
             <div class="dc-card-actions">
                 <form method="post" action="/settings/download-clients/delete"
                       hx-post="/settings/download-clients/delete"
@@ -86,113 +87,38 @@
         </article>
         {% endfor %}
 
-        {# Trailing "+ Add" tile — same shape as cf-card-add. Opens
-           the add modal (rendered once at the section-root level
-           below) instead of expanding inline. #}
-        <button type="button" class="dc-card dc-card-add" onclick="openDownloadClientAddModal()">
+        {# "+ Add download client" tile — fetches the add form into
+           the modal body and opens the modal. Symmetrical with the
+           per-card edit click so the modal body is always
+           authoritative for whichever flow opened it. #}
+        <button type="button" class="dc-card dc-card-add"
+                hx-get="/api/download-clients/add-form"
+                hx-target="#dc-modal-body"
+                hx-swap="innerHTML"
+                hx-on::after-request="if (event.detail.successful) openDownloadClientModal('Add download client')">
             <div class="dc-card-add-icon">+</div>
             <div class="dc-card-add-label">Add download client</div>
         </button>
     </div>
 
-    {# Add modal — server-rendered into the section once, JS toggles
-       display on click. Lives inside #dc-section so the section
-       partial swap on save also re-emits a fresh empty modal
-       (form reset comes for free). The form's `hx-on::htmx:after-
-       request` closes the modal after a 2xx. #}
-    <div class="modal-backdrop" id="dc-add-modal" style="display:none"
-         role="dialog" aria-modal="true" aria-labelledby="dc-add-modal-title">
+    {# Shared modal — body content is swapped in by HTMX on each
+       open (Add or Edit). Initial render is the Add form so the
+       modal is functional even if the user opens it from a stale
+       client (e.g. cached page). After a successful save the
+       section re-renders, which resets this whole modal back to
+       the Add form at display:none — no manual cleanup needed. #}
+    <div class="modal-backdrop" id="dc-modal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="dc-modal-title">
         <div class="modal" style="max-width: 640px">
             <div class="modal-header">
-                <h3 id="dc-add-modal-title">Add download client</h3>
-                <button class="btn-icon" type="button" onclick="closeDownloadClientAddModal()" aria-label="Close">
+                <h3 id="dc-modal-title">Add download client</h3>
+                <button class="btn-icon" type="button" onclick="closeDownloadClientModal()" aria-label="Close">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
                 </button>
             </div>
-            <form method="post" action="/settings/download-clients/upsert"
-                  class="dc-modal-form"
-                  hx-post="/settings/download-clients/upsert"
-                  hx-target="#dc-section"
-                  hx-swap="outerHTML"
-                  hx-on::after-request="if (event.detail.successful) closeDownloadClientAddModal()">
-                <div class="modal-body">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="dc-add-name">Name</label>
-                            <input id="dc-add-name" type="text" name="name" required maxlength="100" placeholder="e.g. Local qBit">
-                        </div>
-                        <div class="form-group">
-                            <label for="dc-add-kind">Kind</label>
-                            <select id="dc-add-kind" name="kind">
-                                <option value="qbittorrent" selected>qBittorrent</option>
-                                <option value="deluge">Deluge</option>
-                                <option value="transmission">Transmission</option>
-                                <option value="rtorrent">rTorrent</option>
-                                <option value="sabnzbd">SABnzbd (Usenet)</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label for="dc-add-url">URL</label>
-                        <input id="dc-add-url" type="url" name="url" required placeholder="http://localhost:8080">
-                        <span class="form-hint">For Deluge / Transmission / rTorrent, point at the Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="dc-add-username">Username</label>
-                            <input id="dc-add-username" type="text" name="username" autocomplete="off">
-                            <span class="form-hint">Deluge ignores the username and uses password only; leave blank.</span>
-                        </div>
-                        <div class="form-group">
-                            <label for="dc-add-password">Password</label>
-                            <input id="dc-add-password" type="password" name="password" autocomplete="new-password">
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="dc-add-label">Category / label</label>
-                            <input id="dc-add-label" type="text" name="label" placeholder="anime">
-                            <span class="form-hint">qBit calls this a "category", the others call it a "label". Ryokan tags every torrent it adds with this value and filters by it when listing.</span>
-                        </div>
-                        <div class="form-group">
-                            <label for="dc-add-download-path">Download path (as Ryokan sees it)</label>
-                            <input id="dc-add-download-path" type="text" name="download_path" placeholder="/downloads">
-                            <span class="form-hint">Where the client's completed downloads are accessible to Ryokan. Leave blank if Ryokan and the client see the exact same paths.</span>
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label class="checkbox-label">
-                                <input type="checkbox" name="enabled" checked>
-                                Enabled
-                            </label>
-                        </div>
-                        <div class="form-group">
-                            <label class="checkbox-label">
-                                {# First-row default-check — without it, the
-                                   first-ever client lands not-default and
-                                   grabs surface "no download client
-                                   configured" until the user manually flips
-                                   the flag. #}
-                                <input type="checkbox" name="is_default" {% if first_client %}checked{% endif %}>
-                                Default client
-                            </label>
-                            <span class="form-hint">Receives every grab without an explicit pin.</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary"
-                            hx-post="/api/download-clients/test"
-                            hx-include="closest form"
-                            hx-target="next .dc-test-result"
-                            hx-swap="innerHTML"
-                            hx-disabled-elt="this">Test connection</button>
-                    <span class="dc-test-result form-hint" aria-live="polite" style="margin-right:auto"></span>
-                    <button type="button" class="btn btn-secondary" onclick="closeDownloadClientAddModal()">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Add</button>
-                </div>
-            </form>
+            <div id="dc-modal-body">
+{%~ include "partials/settings/download_clients/add_form_body.html" ~%}
+            </div>
         </div>
     </div>
 </div>

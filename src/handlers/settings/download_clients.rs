@@ -75,12 +75,14 @@ impl DownloadClientsListPartial {
     }
 }
 
-/// Inline edit form for one card. Returned by `GET
-/// /settings/download-clients/{id}/edit-form`; replaces the
-/// card's `<article>` in place via `hx-target="#dc-card-{id}"
-/// hx-swap="outerHTML"`.
+/// Edit form body — the inner content of the shared modal when
+/// the user is editing an existing row. Returned by `GET
+/// /settings/download-clients/{id}/edit-form`; swapped into
+/// `#dc-modal-body` (innerHTML) when the user clicks a card. The
+/// surrounding modal-backdrop / modal-header come from the
+/// section partial; this is just the form.
 #[derive(Template)]
-#[template(path = "partials/settings/download_clients/edit_form.html")]
+#[template(path = "partials/settings/download_clients/edit_form_body.html")]
 struct DownloadClientEditFormPartial {
     row: DownloadClientRow,
 }
@@ -91,11 +93,47 @@ impl DownloadClientEditFormPartial {
     }
 }
 
-// Add-form / add-button partial endpoints used to power the
-// inline collapsible add slot. The picker shifted to a modal +
-// add-tile shape; the modal markup is server-rendered into the
-// section partial directly so JS just toggles display:none. No
-// separate fetch endpoints needed any more.
+/// Add form body — symmetric with the edit form but for fresh
+/// inserts. Returned by `GET /api/download-clients/add-form`;
+/// swapped into `#dc-modal-body` when the user clicks the "+
+/// Add download client" tile. `first_client` pre-checks the
+/// "default" checkbox so the very first row lands as default
+/// (an empty default config surfaces "no download client
+/// configured" at grab-routing time, which is a worse default).
+#[derive(Template)]
+#[template(path = "partials/settings/download_clients/add_form_body.html")]
+struct DownloadClientAddFormPartial {
+    first_client: bool,
+}
+
+impl DownloadClientAddFormPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
+/// Status pill — probed live via the cached client's `test()`. Lives
+/// on each card and loads via `hx-trigger="load"`. Always 200 so
+/// HTMX swaps the pill in even on error (the failure pill carries
+/// the error message in its title attribute).
+#[derive(Template)]
+#[template(path = "partials/settings/download_clients/status_pill.html")]
+struct DownloadClientStatusPillPartial {
+    /// `Some(version)` on success — combined with `kind_label`
+    /// to render "qBittorrent 5.1.4". `None` on error.
+    version: Option<String>,
+    /// Tooltip on failure (`title=`); ignored on success.
+    error: String,
+    /// Pre-formatted kind label so the template doesn't need
+    /// to call the helper itself.
+    kind_label: &'static str,
+}
+
+impl DownloadClientStatusPillPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
 
 /// Helper — load the current rows and render the section partial.
 /// Used by the success path of every state-changing endpoint plus
@@ -484,8 +522,8 @@ pub async fn settings_download_clients_section(State(state): State<AppState>) ->
     get,
     path = "/settings/download-clients/{id}/edit-form",
     tag = "Settings",
-    summary = "Render the inline edit form for one download client",
-    description = "Returns the edit_form.html fragment for the targeted row, prefilled with current values. Replaces the row's `<article>` in place via `hx-target=\"#dc-card-{id}\" hx-swap=\"outerHTML\"`. Returns 404 when the row no longer exists (e.g. concurrent delete from another tab).",
+    summary = "Render the edit form body for one download client",
+    description = "Returns the edit_form_body.html fragment for the targeted row, prefilled with current values. Swapped into the shared modal body (`#dc-modal-body`) when the user clicks a card. Returns 404 when the row no longer exists (e.g. concurrent delete from another tab).",
     responses(
         (status = 200, description = "HTML fragment"),
         (status = 404, description = "Row not found"),
@@ -500,6 +538,76 @@ pub async fn settings_download_clients_edit_form(
         Ok(None) => (StatusCode::NOT_FOUND, "Download client not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/download-clients/add-form",
+    tag = "Settings",
+    summary = "Render the add form body",
+    description = "Returns the add_form_body.html fragment swapped into the shared modal body (`#dc-modal-body`) when the user clicks the \"+ Add download client\" tile. The default-checkbox is pre-checked when no clients exist yet — first-row default is required or grabs surface \"no download client configured\" at routing time.",
+    responses(
+        (status = 200, description = "HTML fragment"),
+    ),
+)]
+pub async fn settings_download_clients_add_form(State(state): State<AppState>) -> Response {
+    let first_client = list_all(&state.db)
+        .await
+        .map(|rows| rows.is_empty())
+        .unwrap_or(false);
+    DownloadClientAddFormPartial { first_client }.into_html_ok()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/download-clients/{id}/status",
+    tag = "Settings",
+    summary = "Probe live status (version) for one download client",
+    description = "Calls the cached client's `test()` and returns a small status pill (`<span>`) carrying either the `kind version` text on success or `Unreachable` (with the error in `title=`) on failure. Each card on the Download Clients tab loads this on render via `hx-trigger=\"load\"`. Always 200 so HTMX swaps the pill in even on probe failure — the failure pill is the response, not the absence of one. Returns the not-in-pool pill (\"Unknown\") for ids the rebuild_clients_cache step skipped (disabled rows or unsupported kinds).",
+    responses(
+        (status = 200, description = "Status pill HTML fragment"),
+    ),
+)]
+pub async fn settings_download_clients_status(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Response {
+    // Look up the kind label first so even the "not in pool" path
+    // can still say "qBittorrent" instead of "Unknown" — disabled
+    // rows render with the right kind even though no probe runs.
+    let row = get_by_id(&state.db, id).await.ok().flatten();
+    let kind_label = row
+        .as_ref()
+        .map(|r| kind_label(&r.kind))
+        .unwrap_or("Client");
+
+    // Pull the cached `Arc<dyn DownloadClient>` out of the pool
+    // under the read lock and clone it; release the lock before
+    // running the network probe so a slow client can't stall a
+    // sibling card's render. Pool is rebuilt on every CRUD so a
+    // freshly-edited row's probe runs against the new credentials
+    // without a process restart.
+    let pool = state.download_clients.read().await.clone();
+    let client = pool.clients.get(&id).cloned();
+    drop(pool);
+
+    let (version, error) = match client {
+        Some(c) => match c.test().await {
+            Ok(v) => (Some(v), String::new()),
+            Err(e) => (None, e),
+        },
+        None => (
+            None,
+            "Client not in active pool (disabled or invalid kind)".into(),
+        ),
+    };
+
+    DownloadClientStatusPillPartial {
+        version,
+        error,
+        kind_label,
+    }
+    .into_html_ok()
 }
 
 /// Form payload for the small "Pin Nyaa to client" selector on

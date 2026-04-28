@@ -130,36 +130,30 @@ function closeCfEditorModal() {
     });
 })();
 
-// ── Settings → Download Clients add modal ──────────────────────────
-// The "+ Add download client" tile in the picker grid opens a modal
-// instead of an inline collapsible form. The modal markup is server-
-// rendered once inside #dc-section, so a successful save (which
-// returns the whole section partial) re-emits a fresh empty modal at
-// display:none — no manual reset needed in the success path. Cancel /
-// backdrop / Escape close without resetting; openDownloadClientAddModal
-// resets on open so a previously-filled-then-cancelled form doesn't
-// leak stale values into the next open.
-function openDownloadClientAddModal() {
-    const modal = document.getElementById('dc-add-modal');
+// ── Settings → Download Clients shared add/edit modal ──────────────
+// One modal serves both flows. Per-card click and "+ Add" tile each
+// HTMX-fetch the right form body into `#dc-modal-body`, then call
+// `openDownloadClientModal(title)` from `hx-on::after-request` to
+// reveal the modal once the body is in place. After a successful
+// save the server returns the section partial which re-renders
+// the modal at display:none with the Add form back in body — no
+// manual reset needed in the success path.
+function openDownloadClientModal(title) {
+    const modal = document.getElementById('dc-modal');
     if (!modal) return;
-    const form = modal.querySelector('form');
-    if (form) {
-        form.reset();
-        // form.reset() restores the server-rendered "checked"
-        // defaults — the `is_default` checkbox is checked when
-        // rows.is_empty(), so a fresh-on-empty installation gets
-        // the right default-flag pre-selection back after a
-        // cancel-and-reopen.
+    if (typeof title === 'string' && title.length > 0) {
+        const titleEl = document.getElementById('dc-modal-title');
+        if (titleEl) titleEl.textContent = title;
     }
-    // Clear any leftover Test-result text from a previous session.
-    const testResult = modal.querySelector('.dc-test-result');
-    if (testResult) testResult.textContent = '';
     modal.style.display = 'flex';
-    const nameEl = document.getElementById('dc-add-name');
-    if (nameEl) nameEl.focus();
+    // Focus first text/url input in the freshly-swapped body for
+    // keyboard ergonomics. querySelector matches in DOM order so
+    // the Name field wins on both Add and Edit forms.
+    const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
 }
-function closeDownloadClientAddModal() {
-    const modal = document.getElementById('dc-add-modal');
+function closeDownloadClientModal() {
+    const modal = document.getElementById('dc-modal');
     if (modal) modal.style.display = 'none';
 }
 // Backdrop-click + Escape dismissal. Re-bound on every section swap
@@ -168,12 +162,12 @@ function closeDownloadClientAddModal() {
 // once at module scope and re-attach the per-modal listeners.
 (function() {
     function bindDownloadClientModal() {
-        const modal = document.getElementById('dc-add-modal');
+        const modal = document.getElementById('dc-modal');
         if (!modal) return;
         if (modal.dataset.bound === '1') return;
         modal.dataset.bound = '1';
         modal.addEventListener('click', function(ev) {
-            if (ev.target === modal) closeDownloadClientAddModal();
+            if (ev.target === modal) closeDownloadClientModal();
         });
     }
     bindDownloadClientModal();
@@ -183,10 +177,10 @@ function closeDownloadClientAddModal() {
         }
     });
     document.addEventListener('keydown', function(ev) {
-        const modal = document.getElementById('dc-add-modal');
+        const modal = document.getElementById('dc-modal');
         if (!modal) return;
         if (ev.key === 'Escape' && modal.style.display !== 'none') {
-            closeDownloadClientAddModal();
+            closeDownloadClientModal();
         }
     });
 })();
