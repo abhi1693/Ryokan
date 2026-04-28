@@ -2517,6 +2517,16 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Phase 7 PR E — Nyaa-specific RSS opt-out. Default 0 so existing
+    // installs keep polling Nyaa; user flips on when they only want
+    // indexer-RSS / direct-RSS feeds polled. Distinct from
+    // `rss_master_enabled` (which kills the whole sync) and
+    // `rss_enabled` (which retains its v1 semantics — Nyaa-only flag).
+    sqlx::query("ALTER TABLE config ADD COLUMN disable_nyaa_rss INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

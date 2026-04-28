@@ -359,6 +359,10 @@ pub struct SettingsForm {
     title_language: String,
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
+    /// Phase 7 PR E — Nyaa-specific RSS opt-out. Lives in the General
+    /// tab next to `rss_enabled` / `rss_interval_minutes`. Checkbox →
+    /// `Some(_)` when checked, `None` when not.
+    disable_nyaa_rss: Option<String>,
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
     /// #1.3.0 — opt-in: trigger auto-search when a series's
@@ -850,6 +854,7 @@ pub async fn settings_submit(
             .as_ref()
             .map(|cfg| cfg.rss_master_enabled)
             .unwrap_or(true),
+        disable_nyaa_rss: form.disable_nyaa_rss.is_some(),
         force_kitsu_fallback: current_force_kitsu_fallback,
         post_processing_enabled: form.post_processing_enabled.is_some(),
         post_processing_mode: match form.post_processing_mode.as_str() {

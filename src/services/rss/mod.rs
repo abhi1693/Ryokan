@@ -470,9 +470,11 @@ async fn fetch_all_sources(
     let mut items: Vec<RssItem> = Vec::new();
 
     // 1. Nyaa — gate on `cfg.rss_enabled` (legacy v1 flag, plan
-    //    decision #8 keeps its semantics). The master flag has
-    //    already been honored at the sync_once_inner top.
-    if cfg.rss_enabled {
+    //    decision #8 keeps its semantics) AND `!cfg.disable_nyaa_rss`
+    //    (Phase 7 PR E — Nyaa-specific opt-out for users who only
+    //    want indexer-RSS / direct-RSS feeds polled). Master flag
+    //    has already been honored at the sync_once_inner top.
+    if cfg.rss_enabled && !cfg.disable_nyaa_rss {
         match fetch_feeds(cfg.allow_non_english, has_music_series).await {
             Ok(nyaa_items) => items.extend(nyaa_items),
             Err(err) => {

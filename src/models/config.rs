@@ -81,6 +81,14 @@ pub struct Config {
     /// from `rss_enabled`, which retains its v1 semantics
     /// (Nyaa-only flag) — see plan decision #8.
     pub rss_master_enabled: bool,
+    /// Phase 7 PR E — opt-out for Nyaa-specific RSS polling without
+    /// disabling indexer-RSS (torznab/newznab) feeds. The user has
+    /// other indexers configured and only wants those polled —
+    /// before this flag, the only way to skip Nyaa was to disable
+    /// `rss_enabled` entirely, which also killed the legacy v1 path
+    /// the user might still want for non-Nyaa work. Default `false`
+    /// so existing installs keep polling Nyaa.
+    pub disable_nyaa_rss: bool,
     pub force_kitsu_fallback: bool,
     pub post_processing_enabled: bool,
     pub post_processing_mode: String,
@@ -192,6 +200,7 @@ impl Default for Config {
             rss_enabled: false,
             rss_interval_minutes: 5,
             rss_master_enabled: true,
+            disable_nyaa_rss: false,
             force_kitsu_fallback: false,
             post_processing_enabled: false,
             post_processing_mode: "hardlink".to_string(),
@@ -255,6 +264,7 @@ struct ConfigRow {
     rss_enabled: i64,
     rss_interval_minutes: i64,
     rss_master_enabled: i64,
+    disable_nyaa_rss: i64,
     force_kitsu_fallback: i64,
     post_processing_enabled: i64,
     post_processing_mode: String,
@@ -296,7 +306,7 @@ pub async fn get_title_language(db: &SqlitePool) -> String {
 /// Get the singleton config row.
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id FROM config WHERE id = 1",
+        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -339,6 +349,7 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         rss_enabled: r.rss_enabled != 0,
         rss_interval_minutes: r.rss_interval_minutes as i32,
         rss_master_enabled: r.rss_master_enabled != 0,
+        disable_nyaa_rss: r.disable_nyaa_rss != 0,
         force_kitsu_fallback: r.force_kitsu_fallback != 0,
         post_processing_enabled: r.post_processing_enabled != 0,
         post_processing_mode: r.post_processing_mode,
@@ -366,8 +377,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             active_client = excluded.active_client,
             qbit_url = excluded.qbit_url,
@@ -406,6 +417,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             rss_enabled = excluded.rss_enabled,
             rss_interval_minutes = excluded.rss_interval_minutes,
             rss_master_enabled = excluded.rss_master_enabled,
+            disable_nyaa_rss = excluded.disable_nyaa_rss,
             force_kitsu_fallback = excluded.force_kitsu_fallback,
             post_processing_enabled = excluded.post_processing_enabled,
             post_processing_mode = excluded.post_processing_mode,
@@ -464,6 +476,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(if config.rss_enabled { 1_i64 } else { 0_i64 })
     .bind(config.rss_interval_minutes as i64)
     .bind(if config.rss_master_enabled { 1_i64 } else { 0_i64 })
+    .bind(if config.disable_nyaa_rss { 1_i64 } else { 0_i64 })
     .bind(if config.force_kitsu_fallback { 1_i64 } else { 0_i64 })
     .bind(if config.post_processing_enabled { 1_i64 } else { 0_i64 })
     .bind(&config.post_processing_mode)

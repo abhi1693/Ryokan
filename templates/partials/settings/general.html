@@ -21,6 +21,13 @@
                 <input type="number" min="1" max="60" name="rss_interval_minutes" id="rss_interval_minutes" value="{{ config.rss_interval_minutes }}">
                 <span class="form-hint">Used by the background RSS poller. Manual sync is available on the System page.</span>
             </div>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="disable_nyaa_rss" id="disable_nyaa_rss" {% if config.disable_nyaa_rss %}checked{% endif %}>
+                    <span>Skip the Nyaa RSS feed</span>
+                </label>
+                <span class="form-hint">When checked, the background RSS poller skips Nyaa entirely. Indexer-RSS feeds (torznab/newznab) and direct RSS feeds you've configured still run on the same interval. Use this if you only want releases from your configured indexers, not from Nyaa's public feed.</span>
+            </div>
         </fieldset>
 
         <fieldset>
