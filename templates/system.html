@@ -22,7 +22,7 @@
         Scheduled Tasks
     </a>
     <a href="/system?tab=review" class="system-tab {% if tab == "review" %}active{% endif %}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
         Needs Review
     </a>
     <a href="/system?tab=scoring" class="system-tab {% if tab == "scoring" %}active{% endif %}">
@@ -288,19 +288,19 @@
 {% else if tab == "review" %}
 <div class="rss-panel">
     <div class="cf-section">
-        <div class="cf-section-header">
-            <h3>Needs Review</h3>
-        </div>
-        <p class="cf-section-desc">
-            Episodes where Ryokan couldn't pick a source/resolution with confidence. Pick a source/resolution and hit Apply to pin a manual classification right here, or open the series for the full episode context.
-        </p>
-        {% if review_entries.is_empty() %}
-        <div class="logs-empty">
+        {# Empty state always rendered, hidden when there are entries.
+           After a successful bulk apply that empties the table, JS
+           reveals this in place of the table — a full page reload
+           would clobber the success toast mid-display. Server stays
+           the source of truth for the copy. #}
+        <div class="logs-empty" id="review-empty-state" {% if !review_entries.is_empty() %}hidden{% endif %}>
             <p>No episodes currently flagged for review.</p>
             <p class="form-hint">This view fills up when the classifier lands on a low-confidence verdict: either no single layer was strong enough, or two strong layers disagreed. Manual overrides and post-download ffprobe checks usually keep it empty.</p>
         </div>
-        {% else %}
-        <div id="review-bulk-bar" class="review-bulk-bar" hidden>
+        {% if !review_entries.is_empty() %}
+        {# Bulk bar always visible — rows are pre-selected by default,
+           so the bar is the primary action surface from page load. #}
+        <div id="review-bulk-bar" class="review-bulk-bar">
             <span class="review-bulk-count"><span id="review-bulk-count-n">0</span> selected</span>
             <select id="review-bulk-source" class="folder-select">
                 <option value="bluray_bdmv">BD-RAW</option>
@@ -328,7 +328,7 @@
                     <tr>
                         <th style="text-align:center;padding:8px 4px;border-bottom:1px solid var(--border);width:36px">
                             <label class="checkbox-row" style="margin:0;display:inline-flex">
-                                <input type="checkbox" id="review-select-all" aria-label="Select all">
+                                <input type="checkbox" id="review-select-all" aria-label="Select all" checked>
                             </label>
                         </th>
                         <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Series</th>
@@ -336,7 +336,6 @@
                         <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Current tag</th>
                         <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)">Release</th>
                         <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border)">Confidence</th>
-                        <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border)">Override</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -347,7 +346,7 @@
                         data-current-web-kind="{{ entry.web_kind }}">
                         <td style="text-align:center;padding:8px 4px;border-bottom:1px solid var(--border)">
                             <label class="checkbox-row" style="margin:0;display:inline-flex">
-                                <input type="checkbox" class="review-row-check" aria-label="Select row">
+                                <input type="checkbox" class="review-row-check" aria-label="Select row" checked>
                             </label>
                         </td>
                         <td style="padding:8px 12px;border-bottom:1px solid var(--border)">
@@ -380,39 +379,6 @@
                         </td>
                         <td style="padding:8px 12px;border-bottom:1px solid var(--border);text-align:right">
                             {{ "{:.0}%"|format(entry.classification_confidence * 100.0) }}
-                        </td>
-                        <td style="padding:8px 12px;border-bottom:1px solid var(--border);text-align:right">
-                            {# Stacked vertically: source select → resolution
-                               select → Apply + Open as a single inline pair.
-                               Previously the four controls used `flex-wrap`
-                               which let Apply wrap onto one line and Open
-                               drop to the next, looking unintentional.
-                               The button-pair stays as a tight `<div>` so
-                               those two are pinned next to each other. #}
-                            <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
-                                <select class="folder-select review-source">
-                                    <option value="bluray_bdmv">BD-RAW</option>
-                                    <option value="bluray_remux">BD-Remux</option>
-                                    <option value="bluray">BD</option>
-                                    <option value="web">WEB</option>
-                                    <option value="webrip">WEBRIP</option>
-                                    <option value="dvd">DVD</option>
-                                    <option value="hdtv">HDTV</option>
-                                    <option value="tv">TV</option>
-                                </select>
-                                <select class="folder-select review-resolution">
-                                    <option value="2160p">2160p</option>
-                                    <option value="1080p">1080p</option>
-                                    <option value="720p">720p</option>
-                                    <option value="576p">576p</option>
-                                    <option value="480p">480p</option>
-                                </select>
-                                <div style="display:inline-flex;gap:6px">
-                                    <button class="btn btn-grab" type="button" onclick="applyReviewOverride(this)">Apply</button>
-                                    <a class="btn btn-grab" href="/series/{{ entry.series_id }}">Open</a>
-                                </div>
-                            </div>
-                            <div class="review-status form-hint" style="display:none;text-align:right;margin-top:4px"></div>
                         </td>
                     </tr>
                     {% endfor %}
