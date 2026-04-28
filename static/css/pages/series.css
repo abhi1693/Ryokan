@@ -750,7 +750,22 @@
 .relation-card-meta {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
+    /* `nowrap` + `overflow:hidden` instead of the prior `wrap` keeps
+     * every card's meta row at a single line. Combined with the
+     * cover's fixed `aspect-ratio: 85/115` and the title's
+     * `-webkit-line-clamp: 2 + min-height: 2.7em`, this pins the
+     * total card height so the relations row reads as a uniform
+     * grid. Long combinations (long format + 3-digit episode count)
+     * clip at the right edge — acceptable, since the format word is
+     * already a category hint and the episode count is the
+     * higher-signal datum.
+     *
+     * `min-height: 18px` covers the inverse case: cards with no
+     * episode count (TBA / unaired) render only one tag and would
+     * otherwise sit slightly shorter without the reservation. */
+    flex-wrap: nowrap;
+    overflow: hidden;
+    min-height: 18px;
     gap: 6px;
     font-size: 11px;
     color: var(--text-dim);

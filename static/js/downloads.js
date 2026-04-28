@@ -100,6 +100,10 @@ function renderQueue(torrents) {
         } else {
             html += `<button class="btn btn-ghost btn-sm" onclick="pauseTorrent('${escapeHtml(t.hash)}')" title="Pause"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>`;
         }
+        // Copy infohash button — matches the template at downloads.html line 54.
+        // Without this, the post-fetch JS render dropped the button, so it
+        // visibly flashed away on page load when loadQueue() ran immediately.
+        html += `<button class="btn btn-ghost btn-sm" onclick="ryokanCopy('${escapeHtml(t.hash)}', this)" title="Copy infohash"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>`;
         html += `<button class="btn btn-ghost btn-sm" onclick="deleteTorrent('${escapeHtml(t.hash)}')" title="Remove"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>`;
         html += `</td></tr>`;
     }
@@ -147,9 +151,13 @@ function deleteTorrent(hash) {
 }
 
 // Only start the queue poller when the queue tab is rendered.
+// Skip the immediate loadQueue() — the server-rendered queue table
+// is already correct on first paint, so an immediate JS render just
+// causes a visible flash (any markup divergence between the template
+// and `renderQueue()` flickers as the JS render overwrites the
+// container). The 5s interval handles live updates from there.
 if (document.getElementById('queue-container')) {
     setInterval(loadQueue, 5000);
-    loadQueue();
 }
 
 // ── History tab ─────────────────────────────────────────────────────────
