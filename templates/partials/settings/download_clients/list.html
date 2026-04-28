@@ -1,86 +1,198 @@
-{# Card list + collapsible add slot. The whole section is the
-   target of every HTMX action (upsert / delete / set-default
-   succeed → server returns this partial → swaps the section in
-   place). Inline edit goes a level deeper: per-card edit
-   buttons swap the card itself with edit_form.html, then save
-   triggers a full section re-render to refresh sibling cards
-   (e.g. the "default" badge moves between rows). #}
+{# Card grid + add tile + edit modal. The whole section is the
+   target of every state-changing HTMX action (upsert / delete /
+   set-default succeed → server returns this partial → swaps in
+   place). Per-card click triggers an inline edit; the trailing
+   "+ Add" tile opens a modal. #}
 <div id="dc-section" class="dc-section">
-    {% if rows.is_empty() %}
-    <div class="dc-empty">
-        <p class="form-hint" style="margin: 0 0 12px;">No download clients configured yet. Add one to start grabbing.</p>
-    </div>
-    {% else %}
+    {# Stash these up-front: the `{% for row in rows %}` below
+       consumes `rows` (askama's IntoIterator semantics), and we
+       need the same flags later for the empty-state CTA + the
+       modal's first-client default-checkbox pre-tick. #}
+    {% let first_client = rows.is_empty() %}
+    {% let show_empty_state = rows.is_empty() %}
     <div class="dc-card-grid">
+        {% if show_empty_state %}
+        <div class="dc-empty">
+            <p class="form-hint" style="margin: 0">No download clients configured yet. Add one to start grabbing.</p>
+        </div>
+        {% endif %}
+
         {% for row in rows %}
         <article class="dc-card" id="dc-card-{{ row.id }}">
-            <header class="dc-card-header">
-                <div class="dc-card-title">
-                    <span class="dc-card-kind-badge dc-kind-{{ row.kind }}">{{ crate::handlers::settings::download_clients::kind_label(row.kind.as_str()) }}</span>
+            {# Whole card body is the click target — opens the inline
+               edit form. Using a button (not <a>) so HTMX can swap
+               cleanly without a no-JS fallback URL navigation that
+               wouldn't render the same edit form anyway. #}
+            <button type="button" class="dc-card-body"
+                    hx-get="/settings/download-clients/{{ row.id }}/edit-form"
+                    hx-target="#dc-card-{{ row.id }}"
+                    hx-swap="outerHTML"
+                    aria-label="Edit {{ row.name }}">
+                <div class="dc-card-header">
                     <strong class="dc-card-name">{{ row.name }}</strong>
-                    {% if row.is_default %}<span class="badge badge-success dc-default-badge">default</span>{% endif %}
-                    {% if !row.enabled %}<span class="badge dc-disabled-badge">disabled</span>{% endif %}
-                </div>
-                <div class="dc-card-actions">
-                    <button type="button" class="btn btn-small"
-                            hx-get="/settings/download-clients/{{ row.id }}/edit-form"
-                            hx-target="#dc-card-{{ row.id }}"
-                            hx-swap="outerHTML">Edit</button>
-                    {% if !row.is_default %}
-                    <form method="post" action="/settings/download-clients/set-default" style="display:inline"
-                          hx-post="/settings/download-clients/set-default"
-                          hx-target="#dc-section"
-                          hx-swap="outerHTML">
-                        <input type="hidden" name="id" value="{{ row.id }}">
-                        <button type="submit" class="btn btn-secondary btn-small">Set default</button>
-                    </form>
+                    {# Status badge replaces the per-kind badge. The
+                       kind itself moves to a small subtitle below the
+                       name. Three states: Default (green, also
+                       implies enabled), Enabled (green), Disabled
+                       (gray). The default flag implies enabled at
+                       the model layer (insert/update) so the order
+                       of checks matches the user-visible priority. #}
+                    {% if !row.enabled %}
+                    <span class="dc-status-badge dc-status-disabled">Disabled</span>
+                    {% else if row.is_default %}
+                    <span class="dc-status-badge dc-status-default">Default</span>
+                    {% else %}
+                    <span class="dc-status-badge dc-status-enabled">Enabled</span>
                     {% endif %}
-                    <form method="post" action="/settings/download-clients/delete" style="display:inline"
-                          hx-post="/settings/download-clients/delete"
-                          hx-target="#dc-section"
-                          hx-swap="outerHTML"
-                          data-ryokan-confirm-title="Delete download client?"
-                          data-ryokan-confirm-body="Remove '{{ row.name }}' from Ryokan. Any indexers pinned to it (and the Nyaa pin if set) will fall back to the default client at grab time."
-                          data-ryokan-confirm-yes="Delete"
-                          data-ryokan-confirm-no="Cancel"
-                          data-ryokan-confirm-danger="1">
-                        <input type="hidden" name="id" value="{{ row.id }}">
-                        <button type="submit" class="btn btn-danger btn-small">Delete</button>
-                    </form>
                 </div>
-            </header>
-            <dl class="dc-card-meta">
-                <div class="dc-card-meta-row">
-                    <dt>URL</dt>
-                    <dd><code>{{ row.url }}</code></dd>
-                </div>
-                {% if !row.label.is_empty() %}
-                <div class="dc-card-meta-row">
-                    <dt>{% if row.kind == "qbittorrent" %}Category{% else %}Label{% endif %}</dt>
-                    <dd><code>{{ row.label }}</code></dd>
-                </div>
-                {% endif %}
-                {% if !row.download_path.is_empty() %}
-                <div class="dc-card-meta-row">
-                    <dt>Download path</dt>
-                    <dd><code>{{ row.download_path }}</code></dd>
-                </div>
-                {% endif %}
-            </dl>
+                <div class="dc-card-subtitle">{{ crate::handlers::settings::download_clients::kind_label(row.kind.as_str()) }}</div>
+                <dl class="dc-card-meta">
+                    <div class="dc-card-meta-row">
+                        <dt>URL</dt>
+                        <dd><code>{{ row.url }}</code></dd>
+                    </div>
+                    {% if !row.label.is_empty() %}
+                    <div class="dc-card-meta-row">
+                        <dt>{% if row.kind == "qbittorrent" %}Category{% else %}Label{% endif %}</dt>
+                        <dd><code>{{ row.label }}</code></dd>
+                    </div>
+                    {% endif %}
+                    {% if !row.download_path.is_empty() %}
+                    <div class="dc-card-meta-row">
+                        <dt>Path</dt>
+                        <dd><code>{{ row.download_path }}</code></dd>
+                    </div>
+                    {% endif %}
+                </dl>
+            </button>
+            {# Corner × delete button — sits outside the click target
+               so a delete click doesn't also trigger edit. Same
+               .btn-icon-danger primitive the CF cards use. #}
+            <div class="dc-card-actions">
+                <form method="post" action="/settings/download-clients/delete"
+                      hx-post="/settings/download-clients/delete"
+                      hx-target="#dc-section"
+                      hx-swap="outerHTML"
+                      data-ryokan-confirm-title="Delete download client?"
+                      data-ryokan-confirm-body="Remove '{{ row.name }}' from Ryokan. Any indexers pinned to it (and the Nyaa pin if set) will fall back to the default client at grab time."
+                      data-ryokan-confirm-yes="Delete"
+                      data-ryokan-confirm-no="Cancel"
+                      data-ryokan-confirm-danger="1"
+                      style="margin:0">
+                    <input type="hidden" name="id" value="{{ row.id }}">
+                    <button type="submit" class="btn btn-icon-danger" title="Delete {{ row.name }}" aria-label="Delete {{ row.name }}">×</button>
+                </form>
+            </div>
         </article>
         {% endfor %}
-    </div>
-    {% endif %}
 
-    {# Collapsible add slot. Default state is the "+ Add" button;
-       click swaps in the add form (which itself carries Cancel
-       and Save buttons that swap back). Lives inside #dc-section
-       so a successful save (which returns the whole section)
-       resets the slot to the button automatically. #}
-    <div id="dc-add-slot" class="dc-add-slot">
-        <button type="button" class="btn btn-primary"
-                hx-get="/settings/download-clients/add-form"
-                hx-target="#dc-add-slot"
-                hx-swap="outerHTML">+ Add download client</button>
+        {# Trailing "+ Add" tile — same shape as cf-card-add. Opens
+           the add modal (rendered once at the section-root level
+           below) instead of expanding inline. #}
+        <button type="button" class="dc-card dc-card-add" onclick="openDownloadClientAddModal()">
+            <div class="dc-card-add-icon">+</div>
+            <div class="dc-card-add-label">Add download client</div>
+        </button>
+    </div>
+
+    {# Add modal — server-rendered into the section once, JS toggles
+       display on click. Lives inside #dc-section so the section
+       partial swap on save also re-emits a fresh empty modal
+       (form reset comes for free). The form's `hx-on::htmx:after-
+       request` closes the modal after a 2xx. #}
+    <div class="modal-backdrop" id="dc-add-modal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="dc-add-modal-title">
+        <div class="modal" style="max-width: 640px">
+            <div class="modal-header">
+                <h3 id="dc-add-modal-title">Add download client</h3>
+                <button class="btn-icon" type="button" onclick="closeDownloadClientAddModal()" aria-label="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <form method="post" action="/settings/download-clients/upsert"
+                  class="dc-modal-form"
+                  hx-post="/settings/download-clients/upsert"
+                  hx-target="#dc-section"
+                  hx-swap="outerHTML"
+                  hx-on::after-request="if (event.detail.successful) closeDownloadClientAddModal()">
+                <div class="modal-body">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="dc-add-name">Name</label>
+                            <input id="dc-add-name" type="text" name="name" required maxlength="100" placeholder="e.g. Local qBit">
+                        </div>
+                        <div class="form-group">
+                            <label for="dc-add-kind">Kind</label>
+                            <select id="dc-add-kind" name="kind">
+                                <option value="qbittorrent" selected>qBittorrent</option>
+                                <option value="deluge">Deluge</option>
+                                <option value="transmission">Transmission</option>
+                                <option value="rtorrent">rTorrent</option>
+                                <option value="sabnzbd">SABnzbd (Usenet)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="dc-add-url">URL</label>
+                        <input id="dc-add-url" type="url" name="url" required placeholder="http://localhost:8080">
+                        <span class="form-hint">For Deluge / Transmission / rTorrent, point at the Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="dc-add-username">Username</label>
+                            <input id="dc-add-username" type="text" name="username" autocomplete="off">
+                            <span class="form-hint">Deluge ignores the username and uses password only; leave blank.</span>
+                        </div>
+                        <div class="form-group">
+                            <label for="dc-add-password">Password</label>
+                            <input id="dc-add-password" type="password" name="password" autocomplete="new-password">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="dc-add-label">Category / label</label>
+                            <input id="dc-add-label" type="text" name="label" placeholder="anime">
+                            <span class="form-hint">qBit calls this a "category", the others call it a "label". Ryokan tags every torrent it adds with this value and filters by it when listing.</span>
+                        </div>
+                        <div class="form-group">
+                            <label for="dc-add-download-path">Download path (as Ryokan sees it)</label>
+                            <input id="dc-add-download-path" type="text" name="download_path" placeholder="/downloads">
+                            <span class="form-hint">Where the client's completed downloads are accessible to Ryokan. Leave blank if Ryokan and the client see the exact same paths.</span>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="enabled" checked>
+                                Enabled
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                {# First-row default-check — without it, the
+                                   first-ever client lands not-default and
+                                   grabs surface "no download client
+                                   configured" until the user manually flips
+                                   the flag. #}
+                                <input type="checkbox" name="is_default" {% if first_client %}checked{% endif %}>
+                                Default client
+                            </label>
+                            <span class="form-hint">Receives every grab without an explicit pin.</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary"
+                            hx-post="/api/download-clients/test"
+                            hx-include="closest form"
+                            hx-target="next .dc-test-result"
+                            hx-swap="innerHTML"
+                            hx-disabled-elt="this">Test connection</button>
+                    <span class="dc-test-result form-hint" aria-live="polite" style="margin-right:auto"></span>
+                    <button type="button" class="btn btn-secondary" onclick="closeDownloadClientAddModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add</button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>

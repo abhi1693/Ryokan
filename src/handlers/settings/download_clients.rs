@@ -91,36 +91,11 @@ impl DownloadClientEditFormPartial {
     }
 }
 
-/// Inline add form. Returned by `GET
-/// /settings/download-clients/add-form`; replaces `#dc-add-slot`
-/// when the user clicks "+ Add download client". `first_client`
-/// pre-checks the "default" checkbox so the very first row is
-/// guaranteed to land as default (empty default = grabs surface
-/// "no download client configured" at routing time).
-#[derive(Template)]
-#[template(path = "partials/settings/download_clients/add_form.html")]
-struct DownloadClientAddFormPartial {
-    first_client: bool,
-}
-
-impl DownloadClientAddFormPartial {
-    fn into_html_ok(self) -> Response {
-        Html(self.render().unwrap_or_default()).into_response()
-    }
-}
-
-/// Default state of the add slot — just the "+ Add" button.
-/// Returned by `GET /settings/download-clients/add-button` when
-/// the user clicks Cancel inside the open add form.
-#[derive(Template)]
-#[template(path = "partials/settings/download_clients/add_button.html")]
-struct DownloadClientAddButtonPartial;
-
-impl DownloadClientAddButtonPartial {
-    fn into_html_ok(self) -> Response {
-        Html(self.render().unwrap_or_default()).into_response()
-    }
-}
+// Add-form / add-button partial endpoints used to power the
+// inline collapsible add slot. The picker shifted to a modal +
+// add-tile shape; the modal markup is server-rendered into the
+// section partial directly so JS just toggles display:none. No
+// separate fetch endpoints needed any more.
 
 /// Helper — load the current rows and render the section partial.
 /// Used by the success path of every state-changing endpoint plus
@@ -525,38 +500,6 @@ pub async fn settings_download_clients_edit_form(
         Ok(None) => (StatusCode::NOT_FOUND, "Download client not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
-}
-
-#[utoipa::path(
-    get,
-    path = "/settings/download-clients/add-form",
-    tag = "Settings",
-    summary = "Render the inline add form",
-    description = "Returns the add_form.html fragment that replaces #dc-add-slot when the user clicks \"+ Add download client\". The form's Cancel button hits `/settings/download-clients/add-button` to restore the slot. The default-checkbox is pre-checked when no clients exist yet (the very first row must be default or grabs surface \"no download client configured\" at routing time).",
-    responses(
-        (status = 200, description = "HTML fragment"),
-    ),
-)]
-pub async fn settings_download_clients_add_form(State(state): State<AppState>) -> Response {
-    let first_client = list_all(&state.db)
-        .await
-        .map(|rows| rows.is_empty())
-        .unwrap_or(false);
-    DownloadClientAddFormPartial { first_client }.into_html_ok()
-}
-
-#[utoipa::path(
-    get,
-    path = "/settings/download-clients/add-button",
-    tag = "Settings",
-    summary = "Render the collapsed add slot button",
-    description = "Returns the default \"+ Add download client\" button that #dc-add-slot collapses back to. Used by the Cancel button inside the open add form.",
-    responses(
-        (status = 200, description = "HTML fragment"),
-    ),
-)]
-pub async fn settings_download_clients_add_button() -> Response {
-    DownloadClientAddButtonPartial.into_html_ok()
 }
 
 /// Form payload for the small "Pin Nyaa to client" selector on

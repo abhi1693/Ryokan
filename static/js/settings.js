@@ -130,6 +130,67 @@ function closeCfEditorModal() {
     });
 })();
 
+// ── Settings → Download Clients add modal ──────────────────────────
+// The "+ Add download client" tile in the picker grid opens a modal
+// instead of an inline collapsible form. The modal markup is server-
+// rendered once inside #dc-section, so a successful save (which
+// returns the whole section partial) re-emits a fresh empty modal at
+// display:none — no manual reset needed in the success path. Cancel /
+// backdrop / Escape close without resetting; openDownloadClientAddModal
+// resets on open so a previously-filled-then-cancelled form doesn't
+// leak stale values into the next open.
+function openDownloadClientAddModal() {
+    const modal = document.getElementById('dc-add-modal');
+    if (!modal) return;
+    const form = modal.querySelector('form');
+    if (form) {
+        form.reset();
+        // form.reset() restores the server-rendered "checked"
+        // defaults — the `is_default` checkbox is checked when
+        // rows.is_empty(), so a fresh-on-empty installation gets
+        // the right default-flag pre-selection back after a
+        // cancel-and-reopen.
+    }
+    // Clear any leftover Test-result text from a previous session.
+    const testResult = modal.querySelector('.dc-test-result');
+    if (testResult) testResult.textContent = '';
+    modal.style.display = 'flex';
+    const nameEl = document.getElementById('dc-add-name');
+    if (nameEl) nameEl.focus();
+}
+function closeDownloadClientAddModal() {
+    const modal = document.getElementById('dc-add-modal');
+    if (modal) modal.style.display = 'none';
+}
+// Backdrop-click + Escape dismissal. Re-bound on every section swap
+// because the modal element is replaced when #dc-section re-renders;
+// htmx fires `htmx:afterSwap` on the swap target, so we listen there
+// once at module scope and re-attach the per-modal listeners.
+(function() {
+    function bindDownloadClientModal() {
+        const modal = document.getElementById('dc-add-modal');
+        if (!modal) return;
+        if (modal.dataset.bound === '1') return;
+        modal.dataset.bound = '1';
+        modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) closeDownloadClientAddModal();
+        });
+    }
+    bindDownloadClientModal();
+    document.body.addEventListener('htmx:afterSwap', function(ev) {
+        if (ev.target && ev.target.id === 'dc-section') {
+            bindDownloadClientModal();
+        }
+    });
+    document.addEventListener('keydown', function(ev) {
+        const modal = document.getElementById('dc-add-modal');
+        if (!modal) return;
+        if (ev.key === 'Escape' && modal.style.display !== 'none') {
+            closeDownloadClientAddModal();
+        }
+    });
+})();
+
 // #11.4 — CF export selector. Radios pick the mode, checkboxes pick the
 // ids, then two actions: download the file (via the existing GET endpoint)
 // or copy the pretty-printed JSON to the clipboard (same endpoint, fetch

@@ -834,103 +834,103 @@ fieldset legend {
 }
 
 /* ── Settings → Download Clients tab ─────────────────────────────
-   Card-based picker that replaced the plain table + always-visible
-   add form. Each row is a self-contained card with inline HTMX
-   edit; the add form lives in a collapsible slot below the grid. */
+   Card-based picker. Each card is a clickable button that swaps to
+   an inline edit form; the trailing "+ Add download client" tile
+   opens a modal so the form has full-width focus instead of pushing
+   the picker grid downward. */
 .dc-page {
     margin-top: 4px;
 }
 
 .dc-card-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 14px;
-    margin-bottom: 20px;
 }
 
 .dc-card {
+    position: relative;
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 14px 16px;
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, background 0.15s;
+    min-height: 140px;
 }
 
-.dc-card:hover {
-    border-color: var(--accent);
+.dc-card:hover { border-color: var(--accent); background: var(--bg); }
+
+/* Whole-card click target. The body is a real <button> so
+   keyboard users get focus + Enter/Space activation for free.
+   Stripped of the default button chrome so it reads as a plain
+   card surface. */
+.dc-card-body {
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+    flex: 1 1 auto;
+    border-radius: inherit;
 }
 
-/* Editing variant spans the full grid width so the form has room
-   for two-column form-rows. The grid's auto-fill collapses around
-   it cleanly. */
-.dc-card-editing {
-    grid-column: 1 / -1;
-    border-color: var(--accent);
-    background: var(--bg);
-}
+.dc-card-body:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .dc-card-header {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
     gap: 10px;
-    flex-wrap: wrap;
-}
-
-.dc-card-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    min-width: 0;
+    /* Reserve space on the right for the corner × delete button so
+       a long client name doesn't collide with the action area. The
+       × is positioned absolutely (top:13px right:10px), 20×20px;
+       padding-right protects 28px of bleed. */
+    padding-right: 28px;
 }
 
 .dc-card-name {
     font-size: 15px;
+    font-weight: 600;
     color: var(--text-bright);
     word-break: break-word;
+    line-height: 1.3;
 }
 
-.dc-card-actions {
-    display: flex;
-    gap: 6px;
-    flex-shrink: 0;
-}
-
-/* Per-kind badge — neutral background tint with a colored accent
-   so qBit / Deluge / Transmission / rTorrent / SAB are visually
-   distinguishable at a glance. Colors keyed off the project's
-   palette tokens; falls through to the default badge when an
-   unknown kind sneaks in. */
-.dc-card-kind-badge {
+/* Status badge — replaces the previous per-kind colored badge. The
+   user wanted at-a-glance status, not at-a-glance protocol; the
+   kind moved to a small subtitle below the name. */
+.dc-status-badge {
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.5px;
     text-transform: uppercase;
     padding: 3px 8px;
     border-radius: 999px;
-    background: rgba(203, 166, 247, 0.16);
-    color: var(--accent);
     flex-shrink: 0;
+    white-space: nowrap;
 }
 
-.dc-kind-qbittorrent { background: rgba(116, 199, 236, 0.18); color: var(--blue, #74c7ec); }
-.dc-kind-deluge      { background: rgba(166, 227, 161, 0.18); color: var(--green, #a6e3a1); }
-.dc-kind-transmission{ background: rgba(250, 179, 135, 0.18); color: var(--peach, #fab387); }
-.dc-kind-rtorrent    { background: rgba(243, 139, 168, 0.18); color: var(--red, #f38ba8); }
-.dc-kind-sabnzbd     { background: rgba(249, 226, 175, 0.18); color: var(--yellow, #f9e2af); }
+.dc-status-default  { background: rgba(166, 227, 161, 0.18); color: var(--green, #a6e3a1); }
+.dc-status-enabled  { background: rgba(116, 199, 236, 0.16); color: var(--blue, #74c7ec); }
+.dc-status-disabled { background: rgba(108, 112, 134, 0.18); color: var(--text-dim); }
 
-.dc-default-badge {
-    flex-shrink: 0;
-}
-
-.dc-disabled-badge {
-    background: rgba(108, 112, 134, 0.18);
+/* Subtitle line — shows the client kind as small dim text below
+   the name. Replaces the colored kind badge; the protocol stays
+   visible without competing with the status badge for attention. */
+.dc-card-subtitle {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
     color: var(--text-dim);
-    flex-shrink: 0;
+    margin-top: -4px;
 }
 
 .dc-card-meta {
@@ -939,6 +939,7 @@ fieldset legend {
     gap: 4px;
     margin: 0;
     font-size: 13px;
+    margin-top: auto;
 }
 
 .dc-card-meta-row {
@@ -952,7 +953,7 @@ fieldset legend {
     font-weight: 500;
     color: var(--text-dim);
     flex-shrink: 0;
-    min-width: 100px;
+    min-width: 64px;
 }
 
 .dc-card-meta-row dd {
@@ -969,36 +970,81 @@ fieldset legend {
     font-size: inherit;
 }
 
-/* Empty-state card shown when no clients are configured yet. */
+/* Corner delete — same primitive the CF cards use. Hidden until
+   the card is hovered or focused so the picker reads cleanly at
+   rest; revealed on hover so the action stays one click away. */
+.dc-card-actions {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.dc-card:hover .dc-card-actions,
+.dc-card:focus-within .dc-card-actions {
+    opacity: 1;
+}
+
+/* Editing variant spans the full grid width so the inline edit
+   form has room for two-column form-rows. */
+.dc-card-editing {
+    grid-column: 1 / -1;
+    border-color: var(--accent);
+    background: var(--bg);
+}
+
+/* Empty-state spans the grid so it doesn't sit awkwardly in a
+   single track when the user has no clients yet. */
 .dc-empty {
+    grid-column: 1 / -1;
     padding: 18px 20px;
     background: var(--bg-elevated);
     border: 1px dashed var(--border);
     border-radius: var(--radius);
-    margin-bottom: 16px;
     text-align: center;
 }
 
-.dc-add-slot {
-    margin-top: 4px;
-}
-
-/* Open variant — the inline add form. Mirrors .dc-card-editing
-   so add and edit feel like the same surface. */
-.dc-add-slot-open {
-    padding: 14px 16px;
-    background: var(--bg);
-    border: 1px solid var(--accent);
+/* Add tile — same dashed-border affordance as .cf-card-add. */
+.dc-card-add {
+    appearance: none;
+    background: var(--bg-elevated);
+    border: 1px dashed var(--border);
     border-radius: var(--radius);
+    color: var(--text-dim);
+    cursor: pointer;
+    text-align: center;
+    padding: 14px 16px;
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    font: inherit;
 }
 
-.dc-add-slot-open .dc-edit-form {
-    margin: 0;
+.dc-card-add:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.04);
 }
 
-/* Header row inside the open edit / add form. Same visual rhythm
-   as .dc-card-header so the swap doesn't reflow the surrounding
-   layout. */
+.dc-card-add-icon {
+    font-size: 28px;
+    font-weight: 300;
+    line-height: 1;
+    margin-bottom: 6px;
+}
+
+.dc-card-add-label {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+/* Inline edit form — the in-card edit shape. Same form-row +
+   form-group rhythm as the rest of Settings. */
+.dc-card-editing .dc-edit-form { padding: 16px 18px; }
 .dc-card-edit-header {
     display: flex;
     justify-content: space-between;
@@ -1009,9 +1055,36 @@ fieldset legend {
     border-bottom: 1px solid var(--border);
 }
 
+/* Save / Cancel button group inside the inline edit form. Distinct
+   class from .dc-card-actions (the corner × on the display card)
+   so the inline-flow buttons aren't absolutely-positioned + hidden-
+   until-hover. */
+.dc-card-edit-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
 .dc-edit-form .form-group { margin-bottom: 14px; }
 .dc-edit-form .form-row   { display: flex; gap: 16px; }
 .dc-edit-form .form-row .form-group { flex: 1; min-width: 0; }
+
+/* Modal-footer reuse — the modal CSS file doesn't define
+   .modal-footer; the CF editor inlines the styles. Defining it
+   here so the download-client modal (and any future modal) gets
+   a consistent footer layout without inline-style noise. */
+.modal-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 24px;
+    border-top: 1px solid var(--border);
+}
+
+.dc-modal-form { display: flex; flex-direction: column; min-height: 0; }
+.dc-modal-form .modal-body { padding: 20px 24px; }
+.dc-modal-form .form-group { margin-bottom: 14px; }
+.dc-modal-form .form-row   { display: flex; gap: 16px; }
+.dc-modal-form .form-row .form-group { flex: 1; min-width: 0; }
 
 /* ── Multi-RSS status pills ───────────────────────────────────────
    Surfaces per-indexer + per-direct-feed RSS poll state on the
