@@ -8,13 +8,16 @@
 //! mutating any DB row.
 
 use axum::{
-    Form, Json,
+    Form,
     extract::State,
+    http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
+use axum_htmx::HxRequest;
 use serde::Deserialize;
 
 use crate::AppState;
+use crate::handlers::settings::ConnectionTestResultPartial;
 use crate::models::download_clients::{DownloadClientForm, delete, insert, set_default, update};
 use crate::models::log::LogCategory;
 use crate::services::download_client::{
@@ -160,8 +163,9 @@ pub async fn settings_download_clients_upsert(
 )]
 pub async fn settings_download_clients_delete(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<DownloadClientIdForm>,
-) -> Redirect {
+) -> Response {
     let display_name = crate::models::download_clients::get_by_id(&state.db, form.id)
         .await
         .ok()
@@ -183,9 +187,16 @@ pub async fn settings_download_clients_delete(
             )
             .await;
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
-            let msg = urlencoding::encode(&format!("Download client '{display_name}' deleted"))
-                .into_owned();
-            Redirect::to(&format!("/settings?tab=integrations&msg={msg}"))
+            // HTMX migration (issue #129) — empty 200 lets the row form's
+            // `hx-target="closest tr" hx-swap="outerHTML"` remove the row
+            // from the table without a full page reload.
+            if is_htmx {
+                StatusCode::OK.into_response()
+            } else {
+                let msg = urlencoding::encode(&format!("Download client '{display_name}' deleted"))
+                    .into_owned();
+                Redirect::to(&format!("/settings?tab=integrations&msg={msg}")).into_response()
+            }
         }
         Err(e) => {
             logger::error(
@@ -195,7 +206,11 @@ pub async fn settings_download_clients_delete(
                 &e.to_string(),
             )
             .await;
-            Redirect::to("/settings?tab=integrations&err=Delete+failed")
+            if is_htmx {
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            } else {
+                Redirect::to("/settings?tab=integrations&err=Delete+failed").into_response()
+            }
         }
     }
 }
@@ -254,11 +269,18 @@ pub async fn settings_download_clients_set_default(
     }
 }
 
-/// JSON form for the inline "Test connection" button on the
+/// Form payload for the inline "Test connection" button on the
 /// Connections → Downloads add/edit form. Doesn't touch the DB.
+/// `#[serde(default)]` on every field — the surrounding upsert form
+/// has more inputs than this endpoint cares about (id, name,
+/// is_default, enabled, …) and `hx-include="closest form"` will pull
+/// all of them. Serde drops unknown fields by default, so the extras
+/// are silently ignored.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct DownloadClientTestForm {
+    #[serde(default)]
     pub kind: String,
+    #[serde(default)]
     pub url: String,
     #[serde(default)]
     pub username: String,
@@ -273,23 +295,26 @@ pub struct DownloadClientTestForm {
     path = "/api/download-clients/test",
     tag = "System",
     summary = "Test a download client configuration",
-    description = "Instantiates the requested client kind with the provided credentials and runs its `test()` method. Doesn't persist anything. The Connections → Downloads add/edit form calls this before saving so the user gets immediate feedback on bad URLs / wrong passwords / missing categories.",
+    description = "Instantiates the requested client kind with the provided credentials and runs \
+                   its `test()` method. Doesn't persist anything. The Connections → Downloads \
+                   add/edit form calls this before saving so the user gets immediate feedback on \
+                   bad URLs / wrong passwords / missing categories. Phase 1.5 grab-bag (issue \
+                   #129) — returns an HTML fragment for HTMX swap into the test-result span; \
+                   always 200 so HTMX renders both success and failure (default error policy in \
+                   2.x is skip-the-swap on 4xx/5xx).",
     request_body = DownloadClientTestForm,
     responses(
-        (status = 200, description = "Connection successful", body = serde_json::Value),
-        (status = 400, description = "Unknown client kind"),
-        (status = 502, description = "Connection failed"),
+        (status = 200, description = "Result rendered as an HTML fragment (success or failure)"),
     ),
 )]
-pub async fn settings_download_clients_test(
-    Json(form): Json<DownloadClientTestForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+pub async fn settings_download_clients_test(Form(form): Form<DownloadClientTestForm>) -> Response {
     let url = form.url.trim();
     if url.is_empty() {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"ok": false, "message": "URL required"})),
-        ));
+        return ConnectionTestResultPartial {
+            ok: false,
+            message: "URL required".to_string(),
+        }
+        .into_html_ok();
     }
     let client: std::sync::Arc<dyn DownloadClient> = match form.kind.as_str() {
         KIND_QBITTORRENT => std::sync::Arc::new(qbittorrent::QbitClient::new(
@@ -322,26 +347,25 @@ pub async fn settings_download_clients_test(
             form.label.trim(),
         )),
         other => {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "message": format!("Unknown client kind: {other}"),
-                })),
-            ));
+            return ConnectionTestResultPartial {
+                ok: false,
+                message: format!("Unknown client kind: {other}"),
+            }
+            .into_html_ok();
         }
     };
 
-    match client.test().await {
-        Ok(version) => Ok(Json(serde_json::json!({
-            "ok": true,
-            "message": format!("Connected; {version}"),
-        }))),
-        Err(err) => Err((
-            axum::http::StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"ok": false, "message": err})),
-        )),
-    }
+    let result = match client.test().await {
+        Ok(version) => ConnectionTestResultPartial {
+            ok: true,
+            message: format!("Connected; {version}"),
+        },
+        Err(err) => ConnectionTestResultPartial {
+            ok: false,
+            message: err,
+        },
+    };
+    result.into_html_ok()
 }
 
 /// Form payload for the small "Pin Nyaa to client" selector on
@@ -590,6 +614,7 @@ mod tests {
         let state = build_test_app_state(db, None);
         let _ = settings_download_clients_delete(
             State(state.clone()),
+            axum_htmx::HxRequest(false),
             Form(DownloadClientIdForm { id }),
         )
         .await;

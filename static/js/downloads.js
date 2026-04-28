@@ -168,15 +168,9 @@ function filterHistory() {
 }
 
 // ── Blocklist tab ───────────────────────────────────────────────────────
-
-function removeFromBlocklist(id) {
-    fetch('/api/downloads/blocklist/remove', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})})
-        .then(r => r.json())
-        .then(data => {
-            if (data.ok) {
-                const row = document.getElementById('blocklist-row-' + id);
-                if (row) row.remove();
-            }
-        })
-        .catch(err => console.error('Failed to remove:', err));
-}
+// HTMX migration (issue #129) — removeFromBlocklist() removed; the
+// row form's `hx-post` + `hx-target="closest tr"` + `hx-swap="outerHTML"`
+// fires the request and strips the row in one declarative shot. The
+// `data-ryokan-confirm-*` attrs route through the htmx:confirm bridge
+// in base.js so cancelling leaves the row alone (same pattern as
+// Phase 1 settings deletes).

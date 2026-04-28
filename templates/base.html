@@ -165,6 +165,23 @@
          window.ryokanToast({kind, title, body, duration}). -->
     <div class="ryokan-toast-stack" id="ryokan-toast-stack" aria-live="polite" aria-atomic="false"></div>
 
+    {# HTMX migration (issue #129, Phase 0) — vendored htmx 2.0.9 core
+       + SSE extension. Loaded but NOT yet driving any behavior. Phase 1+
+       wires `hx-*` attributes per-form/per-tab; Phase 0 only ships the
+       foundation so subsequent phases can land cleanly. Must load before
+       base.js so any custom JS that references `htmx.*` (Phase 4 SSE
+       progress, etc.) sees the global on first paint.
+
+       NOTE: a prior version of this file added `hx-boost="true"` to
+       <body>. That was reverted because boost swaps the entire body
+       and leaves the <head> block-css from `{% block page_css %}` from
+       the prior page intact, so per-page CSS (series.css, settings.css,
+       etc.) doesn't load on a boosted nav and pages render unstyled.
+       Re-introducing boost requires either `hx-target="main"` +
+       `htmx-ext-head-support` or a fundamentally different approach;
+       deferred to its own carefully-scoped phase. #}
+    <script src="/static/vendor/htmx-2.0.9.min.js" defer></script>
+    <script src="/static/vendor/htmx-ext-sse-2.2.4.min.js" defer></script>
     <script src="/static/js/base.js" defer></script>
 </body>
 </html>

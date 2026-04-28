@@ -7,12 +7,37 @@
 //! same request flow shape: form-extract → validate → DB write → log → JSON
 //! response.
 
-use axum::{extract::State, response::Json};
+use askama::Template;
+use axum::{
+    Form,
+    extract::State,
+    http::StatusCode,
+    response::{Html, IntoResponse, Json, Response},
+};
+use axum_htmx::HxRequest;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, grabbed_torrents, monitoring, series};
 use crate::services::{logger, media, metadata_sync, monitoring as monitoring_service};
+
+/// Per-episode monitor button — used as both an in-loop include in
+/// `templates/series.html` (the parent loop provides `id` and `ep`)
+/// and as the standalone HTMX swap response from `set_episode_monitoring`.
+/// The two contexts share field names (`id` for the series row id and
+/// `ep.number` / `ep.monitored`) so the same partial template compiles
+/// in both call sites without divergence.
+#[derive(Template)]
+#[template(path = "partials/series/episode_monitor_button.html")]
+struct EpisodeMonitorButtonPartial {
+    id: i64,
+    ep: EpisodeMonitorButtonContext,
+}
+
+struct EpisodeMonitorButtonContext {
+    number: i32,
+    monitored: bool,
+}
 
 use super::reconcile::reconcile_all_fallback_entries;
 use super::search::{AutoSearchQuery, auto_search_series};
@@ -620,8 +645,9 @@ pub async fn set_monitoring(
 )]
 pub async fn set_episode_monitoring(
     State(state): State<AppState>,
-    Json(form): Json<SetEpisodeMonitoringForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetEpisodeMonitoringForm>,
+) -> Result<Response, (StatusCode, String)> {
     monitoring::set_episode_monitored(
         &state.db,
         form.series_id,
@@ -629,12 +655,32 @@ pub async fn set_episode_monitoring(
         form.monitored,
     )
     .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "episode_number": form.episode_number,
-        "monitored": form.monitored,
-    })))
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // HTMX migration (issue #129) — the per-episode monitor button on
+    // the series detail page uses `hx-target="this" hx-swap="outerHTML"`,
+    // so the response body must be the swapped button HTML. The partial
+    // shares the same template file as the in-loop include so both call
+    // sites stay in sync. JSON-on-non-HTMX path preserves the existing
+    // API contract for any future programmatic caller.
+    if is_htmx {
+        let html = EpisodeMonitorButtonPartial {
+            id: form.series_id,
+            ep: EpisodeMonitorButtonContext {
+                number: form.episode_number,
+                monitored: form.monitored,
+            },
+        }
+        .render()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Html(html).into_response())
+    } else {
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "episode_number": form.episode_number,
+            "monitored": form.monitored,
+        }))
+        .into_response())
+    }
 }
 
 /// Toggle the per-series upgrade opt-in. Phase 4 feature — when the user
@@ -1251,6 +1297,16 @@ mod tests {
             }
         }
 
+        // For handlers that return `Response` (HTMX-aware ones that
+        // branch on `HxRequest`), parse the body bytes as JSON. Used
+        // by the non-HTMX path tests where the handler returns JSON.
+        async fn response_json(resp: axum::response::Response) -> serde_json::Value {
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("read response body");
+            serde_json::from_slice(&body).expect("parse response body as JSON")
+        }
+
         // ─── set_folder ──────────────────────────────────────────
 
         #[tokio::test]
@@ -1458,12 +1514,54 @@ mod tests {
                     episode_number: 5,
                     monitored,
                 };
-                let body: serde_json::Value =
-                    ok_json(set_episode_monitoring(State(state.clone()), AxumJson(form)).await)
-                        .await;
+                let response =
+                    set_episode_monitoring(State(state.clone()), HxRequest(false), Form(form))
+                        .await
+                        .expect("set_episode_monitoring");
+                let body: serde_json::Value = response_json(response).await;
                 assert_eq!(body["monitored"], monitored);
                 assert_eq!(body["episode_number"], 5);
             }
+        }
+
+        /// HTMX migration (issue #129) — when the request carries
+        /// `HX-Request: true`, the handler returns the rendered button
+        /// HTML instead of the JSON envelope. The button's class +
+        /// hx-vals reflect the NEW state so the next click toggles
+        /// in the opposite direction.
+        #[tokio::test]
+        async fn set_episode_monitoring_returns_button_html_for_htmx_request() {
+            let db = in_memory_pool().await;
+            let series_id = seed_series(&db, 31, "Show").await;
+            let state = build_test_app_state(db, None);
+            let form = super::super::SetEpisodeMonitoringForm {
+                series_id,
+                episode_number: 7,
+                monitored: true,
+            };
+            let response =
+                set_episode_monitoring(State(state.clone()), HxRequest(true), Form(form))
+                    .await
+                    .expect("set_episode_monitoring");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            let html = std::str::from_utf8(&body).expect("utf8");
+            // Class reflects the NEW state.
+            assert!(
+                html.contains("ep-mon-yes"),
+                "monitored=true response must render the yes-state class; got: {html}"
+            );
+            assert!(
+                !html.contains("ep-mon-no"),
+                "monitored=true response must NOT render the no-state class; got: {html}"
+            );
+            // hx-vals carries the OPPOSITE state for the next click.
+            assert!(
+                html.contains(r#""monitored": false"#),
+                "next-click should toggle to monitored=false; got: {html}"
+            );
         }
 
         // ─── set_allow_upgrades ──────────────────────────────────

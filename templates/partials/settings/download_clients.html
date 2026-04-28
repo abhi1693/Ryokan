@@ -33,10 +33,13 @@
                     {% if !dc.is_default %}
                     <form method="post" action="/settings/download-clients/set-default" style="display:inline">
                         <input type="hidden" name="id" value="{{ dc.id }}">
-                        <button type="submit" class="btn btn-small">Set default</button>
+                        <button type="submit" class="btn btn-secondary btn-small">Set default</button>
                     </form>
                     {% endif %}
                     <form method="post" action="/settings/download-clients/delete" style="display:inline"
+                          hx-post="/settings/download-clients/delete"
+                          hx-target="closest tr"
+                          hx-swap="outerHTML"
                           data-ryokan-confirm-title="Delete download client?"
                           data-ryokan-confirm-body="Remove '{{ dc.name }}' from Ryokan. Any indexers pinned to it (and the Nyaa pin if set) will fall back to the default client at grab time."
                           data-ryokan-confirm-yes="Delete"
@@ -123,8 +126,13 @@
         </div>
         <div class="settings-inline-actions">
             <button type="submit" class="btn btn-primary">Save changes</button>
-            <button type="button" class="btn btn-secondary" onclick="testDownloadClient(this)">Test connection</button>
-            <span class="dc-test-result form-hint"></span>
+            <button type="button" class="btn btn-secondary"
+                    hx-post="/api/download-clients/test"
+                    hx-include="closest form"
+                    hx-target="next .dc-test-result"
+                    hx-swap="innerHTML"
+                    hx-disabled-elt="this">Test connection</button>
+            <span class="dc-test-result form-hint" aria-live="polite"></span>
         </div>
     </form>
     {% else %}
@@ -191,8 +199,13 @@
         </div>
         <div class="settings-inline-actions">
             <button type="submit" class="btn btn-primary">Add client</button>
-            <button type="button" class="btn btn-secondary" onclick="testDownloadClient(this)">Test connection</button>
-            <span class="dc-test-result form-hint"></span>
+            <button type="button" class="btn btn-secondary"
+                    hx-post="/api/download-clients/test"
+                    hx-include="closest form"
+                    hx-target="next .dc-test-result"
+                    hx-swap="innerHTML"
+                    hx-disabled-elt="this">Test connection</button>
+            <span class="dc-test-result form-hint" aria-live="polite"></span>
         </div>
     </form>
     {% endif %}

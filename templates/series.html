@@ -217,11 +217,7 @@
                     Allow upgrades from private trackers
                 </label>
                 <span class="form-hint" id="allow-pt-upgrades-status" style="margin-left:20px">
-                    {% if !any_private_indexer %}
-                    No private-tracker indexers configured. Add one in Settings; Indexers and mark it private to enable this toggle.
-                    {% else %}
                     Off by default. When off, the upgrade sweep won't grab a private-tracker release as the chosen upgrade for this series even if it's the top-scoring candidate. Initial grabs and manual searches aren't gated.
-                    {% endif %}
                 </span>
             </div>
         </div>
@@ -362,11 +358,7 @@
                     <td class="ep-col-monitor">
                         {% if is_tracked %}
                         {% if let Some(id) = db_id %}
-                        <button class="ep-mon-btn {% if ep.monitored %}ep-mon-yes{% else %}ep-mon-no{% endif %}" type="button"
-                            onclick="toggleEpisodeMonitor({{ id }}, {{ ep.number }}, {{ ep.monitored }}, this)"
-                            title="{% if ep.monitored %}Monitored — click to unmonitor{% else %}Not monitored — click to monitor{% endif %}">
-                            {% if ep.monitored %}Yes{% else %}No{% endif %}
-                        </button>
+                        {%~ include "partials/series/episode_monitor_button.html" ~%}
                         {% endif %}
                         {% else %}
                         <span class="ep-action-placeholder">—</span>

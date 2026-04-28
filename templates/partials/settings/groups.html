@@ -96,7 +96,10 @@
                     <td>{{ group.notes }}</td>
                     <td>{% if group.is_user_edit %}User{% else %}Seed{% endif %}</td>
                     <td>
-                        <form method="post" action="/settings/groups/delete" class="group-delete-form">
+                        <form method="post" action="/settings/groups/delete" class="group-delete-form"
+                              hx-post="/settings/groups/delete"
+                              hx-target="closest tr"
+                              hx-swap="outerHTML">
                             <input type="hidden" name="group_name" value="{{ group.group_name }}">
                             <button type="submit" class="btn btn-danger">Delete</button>
                         </form>

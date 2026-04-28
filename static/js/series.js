@@ -52,30 +52,10 @@ function toggleMonitorAll(dbId, currentlyAllMonitored) {
 // Legacy alias used in older code paths.
 function monitorAll(dbId) { toggleMonitorAll(dbId, false); }
 
-function toggleEpisodeMonitor(dbId, epNum, currentlyMonitored, btn) {
-    const newState = !currentlyMonitored;
-    btn.disabled = true;
-    fetch('/api/library/episode-monitoring', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, episode_number: epNum, monitored: newState })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed');
-        btn.textContent = newState ? 'Yes' : 'No';
-        btn.className = 'ep-mon-btn ' + (newState ? 'ep-mon-yes' : 'ep-mon-no');
-        btn.title = newState ? 'Monitored — click to unmonitor' : 'Not monitored — click to monitor';
-        btn.onclick = function() { toggleEpisodeMonitor(dbId, epNum, newState, btn); };
-    })
-    .catch(err => {
-        console.error('Failed to toggle episode monitoring:', err);
-    })
-    .finally(() => {
-        btn.disabled = false;
-    });
-}
+// HTMX migration (issue #129) — toggleEpisodeMonitor() removed; the
+// per-episode monitor button now uses `hx-post` directly. The handler
+// at `/api/library/episode-monitoring` returns the swapped button HTML
+// for HX-Request, JSON otherwise (preserving the API contract).
 
 let _currentEpNum = null;
 
