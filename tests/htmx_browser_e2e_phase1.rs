@@ -256,7 +256,7 @@ async fn download_clients_delete_default_auto_promotes_next() {
     };
 
     let result = async {
-        open_settings(&client, addr, &token, "integrations").await?;
+        open_settings(&client, addr, &token, "downloads").await?;
         click_delete_for(&client, "Phase1Test-DcA").await?;
         wait_for_confirm_modal(&client, Duration::from_secs(2)).await?;
         client
@@ -266,26 +266,28 @@ async fn download_clients_delete_default_auto_promotes_next() {
             .await?;
         wait_for_row_removed(&client, "Phase1Test-DcA", Duration::from_secs(3)).await?;
         assert_dom_contains(&client, "Phase1Test-DcB").await?;
-        assert_htmx_handled_in_place(&client, &format!("http://{addr}/settings?tab=integrations"))
+        assert_htmx_handled_in_place(&client, &format!("http://{addr}/settings?tab=downloads"))
             .await?;
-        // Reload to re-render the default badges (the row swap alone
-        // doesn't repaint sibling rows; auto-promotion is observable
+        // Reload to re-render the default badges (the card swap alone
+        // doesn't repaint sibling cards; auto-promotion is observable
         // in the DOM only after a fresh page load).
         let base = format!("http://{addr}");
         client
-            .goto(&format!("{base}/settings?tab=integrations"))
+            .goto(&format!("{base}/settings?tab=downloads"))
             .await?;
         // DOM-side verification of the auto-promote (the DB-side
         // assertion below confirms B's `is_default = 1`, but a
         // template regression that doesn't re-render the badge would
-        // pass the DB check and silently break the UI).
+        // pass the DB check and silently break the UI). Picker switched
+        // from <tr> rows to <article class="dc-card"> in the
+        // download-clients-tab redesign — match the card element.
         let badge_on_survivor: bool = client
             .execute(
                 r#"
-                const tr = Array.from(document.querySelectorAll('tr'))
-                    .find(r => r.textContent.includes('Phase1Test-DcB'));
-                if (!tr) return false;
-                return tr.textContent.toLowerCase().includes('default');
+                const card = Array.from(document.querySelectorAll('article.dc-card'))
+                    .find(c => c.textContent.includes('Phase1Test-DcB'));
+                if (!card) return false;
+                return card.textContent.toLowerCase().includes('default');
                 "#,
                 vec![],
             )
@@ -294,7 +296,7 @@ async fn download_clients_delete_default_auto_promotes_next() {
             .unwrap_or(false);
         if !badge_on_survivor {
             return Err(
-                "surviving DC row does not show the `default` badge after auto-promote — \
+                "surviving DC card does not show the `default` badge after auto-promote — \
                  template render path didn't reflect the DB change?"
                     .into(),
             );
