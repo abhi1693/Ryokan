@@ -76,7 +76,6 @@ use services::{
         handlers::downloads::api_blocklist_remove,
         // System
         handlers::settings::api_health,
-        handlers::settings::qbit_test,
         handlers::settings::jellyfin_test,
         handlers::settings::jellyfin_refresh,
         // Settings — Custom Formats
@@ -155,7 +154,6 @@ use services::{
         handlers::downloads::TorrentActionForm,
         handlers::downloads::TorrentDeleteForm,
         handlers::downloads::BlocklistRemoveForm,
-        handlers::settings::QbitTestForm,
         handlers::settings::JellyfinTestForm,
         handlers::settings::download_clients::DownloadClientUpsertForm,
         handlers::settings::download_clients::DownloadClientIdForm,
@@ -823,7 +821,6 @@ async fn main() {
             "/api/custom-formats/test",
             post(handlers::settings::custom_formats::settings_custom_formats_test),
         )
-        .route("/api/qbit/test", post(handlers::settings::qbit_test))
         .route(
             "/api/jellyfin/test",
             post(handlers::settings::jellyfin_test),

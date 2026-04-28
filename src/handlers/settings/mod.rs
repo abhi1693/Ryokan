@@ -12,11 +12,7 @@ use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, custom_formats as cf_model, group_source_map};
 use crate::services::{
-    custom_formats as cf_service,
-    download_client::{DownloadClient, qbittorrent::QbitClient},
-    jellyfin::JellyfinClient,
-    logger,
-    source::Source,
+    custom_formats as cf_service, jellyfin::JellyfinClient, logger, source::Source,
 };
 
 pub mod autobrr_key;
@@ -390,14 +386,6 @@ pub struct SettingsForm {
     /// `grab_preview_mode`.
     #[serde(default)]
     external_sync_interval_minutes: Option<i32>,
-}
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct QbitTestForm {
-    qbit_url: String,
-    qbit_user: String,
-    qbit_pass: String,
-    qbit_category: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -1265,39 +1253,6 @@ pub async fn settings_groups_delete(
                 Redirect::to("/settings?tab=groups").into_response()
             }
         }
-    }
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/qbit/test",
-    tag = "System",
-    summary = "Test qBittorrent connection",
-    description = "Test connectivity to a qBittorrent instance with the provided credentials.",
-    request_body = QbitTestForm,
-    responses(
-        (status = 200, description = "Connection successful", body = serde_json::Value),
-        (status = 502, description = "Connection failed"),
-    ),
-)]
-pub async fn qbit_test(
-    Json(form): Json<QbitTestForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client: std::sync::Arc<dyn DownloadClient> = std::sync::Arc::new(QbitClient::new(
-        form.qbit_url.trim(),
-        form.qbit_user.trim(),
-        &form.qbit_pass,
-        form.qbit_category.as_deref().unwrap_or(""),
-    ));
-
-    match client.test().await {
-        Ok(version) => Ok(Json(
-            serde_json::json!({"ok": true, "message": format!("Connected to qBittorrent {}", version)}),
-        )),
-        Err(err) => Err((
-            axum::http::StatusCode::BAD_GATEWAY,
-            serde_json::json!({"ok": false, "message": err}).to_string(),
-        )),
     }
 }
 

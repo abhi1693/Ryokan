@@ -410,34 +410,6 @@ function buildCfImportResolvePayload(form) {
     return true;
 }
 
-function testQbit(btn) {
-    const result = document.getElementById('qbit-test-result');
-    const payload = {
-        qbit_url: document.getElementById('qbit_url').value,
-        qbit_user: document.getElementById('qbit_user').value,
-        qbit_pass: document.getElementById('qbit_pass').value,
-        qbit_category: document.getElementById('qbit_category').value,
-    };
-    btn.disabled = true;
-    result.textContent = 'Testing...';
-    fetch('/api/qbit/test', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    })
-    .then(async r => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.message || 'Connection failed');
-        result.textContent = data.message;
-    })
-    .catch(err => {
-        result.textContent = err.message;
-    })
-    .finally(() => {
-        btn.disabled = false;
-    });
-}
-
 // HTMX migration (issue #129, Phase 1.5 grab-bag) — testDownloadClient,
 // testJellyfin, refreshJellyfin all removed. The buttons now use
 // `hx-post` + `hx-include="closest form"` + `hx-target="next .dc-test-result"`
