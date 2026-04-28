@@ -181,6 +181,12 @@ function forceRunTask(btn, taskKey) {
     const endpoints = {
         rss_sync: '/api/rss/sync',
         metadata_refresh: '/api/tasks/metadata-refresh',
+        // The rebuild handler `api_rebuild_cached_metadata` writes a
+        // `metadata_rebuild` scheduled-tasks row, so once the user has
+        // ever clicked Rebuild on the Debug tab the task shows up in
+        // the Scheduled Tasks list with a Run-now button. Map it
+        // through to the same endpoint so re-runs work from there too.
+        metadata_rebuild: '/api/system/rebuild-anilist-cache',
         cleanup: '/api/tasks/cleanup',
         post_processing: '/api/tasks/post-processing',
         library_classify: '/api/tasks/library-classify',
