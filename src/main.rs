@@ -103,6 +103,7 @@ use services::{
         handlers::webhook::autobrr::webhook_autobrr,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
+        handlers::system::api_logs_export,
         handlers::system::api_logs_client,
         handlers::progress::poll_progress,
         handlers::system::api_rss_sync,
@@ -871,6 +872,7 @@ async fn main() {
         .route("/help", get(handlers::help::help_page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
+        .route("/api/logs/export", get(handlers::system::api_logs_export))
         .route("/api/logs/client", post(handlers::system::api_logs_client))
         .route(
             "/api/progress/{job_id}",

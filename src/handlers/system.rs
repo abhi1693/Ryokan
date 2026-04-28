@@ -35,6 +35,14 @@ struct SystemTemplate {
     filter_level: String,
     filter_category: String,
     filter_search: String,
+    /// Current page's cursor (the `before_id` query param value, or
+    /// `None` for the first/newest page). Used in the template to
+    /// render the "Newest" reset link conditionally.
+    log_before_id: Option<i64>,
+    /// Cursor for the "Older →" link, set to the `id` of the oldest
+    /// entry on the current page. `None` when the page is the last
+    /// (or when there are no entries at all).
+    log_older_id: Option<i64>,
     categories: Vec<(&'static str, &'static str)>,
     rss_enabled: bool,
     rss_interval_minutes: i32,
@@ -56,6 +64,11 @@ pub struct SystemQuery {
     search: Option<String>,
     message: Option<String>,
     error: Option<String>,
+    /// Cursor for "Older →" pagination on the logs tab. When set,
+    /// the query fetches entries with `id < before_id`. Omitted on
+    /// the first page so the user always lands on the newest
+    /// entries.
+    before_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +111,7 @@ pub async fn system_page(
     // these six queries sequentially — the wall time was the sum of all
     // RTTs. With `tokio::join!` each future races on its own pool
     // connection and the handler waits on the slowest one only.
+    let logs_before_id = params.before_id;
     let logs_fut = async {
         if tab == "logs" {
             log::query(
@@ -114,8 +128,12 @@ pub async fn system_page(
                     } else {
                         Some(filter_search.clone())
                     },
-                    limit: 200,
-                    before_id: None,
+                    // Fetch one extra row so the template can tell
+                    // whether there's an "Older" page to link to
+                    // (without a separate COUNT query). Drop the
+                    // extra below before passing to the template.
+                    limit: 201,
+                    before_id: logs_before_id,
                 },
             )
             .await
@@ -220,6 +238,21 @@ pub async fn system_page(
         .as_ref()
         .map(|c| c.title_language.clone())
         .unwrap_or_else(|| "english".to_string());
+    // Pagination cursor handling: the query asked for `limit + 1` so
+    // we can detect whether an "Older" page exists without a separate
+    // COUNT. If we got the extra row, drop it and stash the oldest
+    // visible row's id as the `before_id` for the next page; if we
+    // got fewer than the limit, this is the last page.
+    let (logs, log_older_id) = {
+        let mut entries = logs;
+        let log_older_id = if entries.len() > 200 {
+            entries.truncate(200);
+            entries.last().map(|e| e.id)
+        } else {
+            None
+        };
+        (entries, log_older_id)
+    };
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -234,6 +267,8 @@ pub async fn system_page(
         filter_level,
         filter_category,
         filter_search,
+        log_before_id: logs_before_id,
+        log_older_id,
         categories,
         rss_enabled,
         rss_interval_minutes,
@@ -326,6 +361,8 @@ pub async fn debug_settings_submit(
         filter_level: "info".to_string(),
         filter_category: String::new(),
         filter_search: String::new(),
+        log_before_id: None,
+        log_older_id: None,
         categories: vec![
             ("search", LogCategory::Search.label()),
             ("grab", LogCategory::Grab.label()),
@@ -604,6 +641,95 @@ pub async fn api_logs_clear(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// Query for the log-export endpoint. `range` selects a quick preset
+/// or `all` for everything. Date-range support could land later via
+/// explicit `since` / `until` ISO timestamps; the preset form covers
+/// the common cases (recent debugging, weekly snapshot for support).
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct LogExportQuery {
+    /// `today` / `7d` / `30d` / `all`. Anything else coerces to `all`
+    /// so a typo can't return an empty file.
+    #[serde(default)]
+    pub range: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/logs/export",
+    tag = "System",
+    summary = "Download logs as a tab-separated text file",
+    description = "Returns the full log table (or a date-bounded subset) as a downloadable plain-text file. \
+                   `range` selects a quick preset: `today` (since midnight UTC), `7d` (last 7 days), `30d` \
+                   (last 30 days), or `all` (no date filter). Format: tab-separated columns \
+                   `timestamp\\tlevel\\tcategory\\tmessage\\tdetail` with a header row, one entry per line. \
+                   Suitable for grep / awk / pasting into a bug report.",
+    params(
+        ("range" = Option<String>, Query, description = "today / 7d / 30d / all"),
+    ),
+    responses(
+        (status = 200, description = "Plain-text log dump (Content-Disposition: attachment)"),
+        (status = 500, description = "Database error"),
+    ),
+)]
+pub async fn api_logs_export(
+    State(state): State<AppState>,
+    Query(q): Query<LogExportQuery>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use axum::response::IntoResponse;
+
+    // Map the range preset to a SQL date filter. SQLite's
+    // `datetime('now', '-N days')` keeps the cutoff comparison cheap
+    // and lets the index on `timestamp` do its job.
+    let (since_clause, since_label): (&str, &str) = match q.range.as_str() {
+        "today" => ("timestamp >= datetime('now', 'start of day')", "today"),
+        "7d" => ("timestamp >= datetime('now', '-7 days')", "7d"),
+        "30d" => ("timestamp >= datetime('now', '-30 days')", "30d"),
+        // Anything else (including empty / malformed) falls through
+        // to the unbounded "all" — better to return more data than
+        // none on a typo.
+        _ => ("1=1", "all"),
+    };
+
+    let sql = format!(
+        "SELECT timestamp, level, category, message, detail \
+         FROM logs WHERE {since_clause} ORDER BY id ASC"
+    );
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(&sql)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Tab-separated with a header row. Embedded tabs / newlines in the
+    // message or detail body are escaped to spaces so each entry stays
+    // on a single line — matters for grep / awk consumption.
+    let mut body = String::with_capacity(rows.len() * 128);
+    body.push_str("timestamp\tlevel\tcategory\tmessage\tdetail\n");
+    for (ts, level, category, message, detail) in &rows {
+        let m = message.replace(['\t', '\n'], " ");
+        let d = detail.replace(['\t', '\n'], " ");
+        body.push_str(&format!("{ts}\t{level}\t{category}\t{m}\t{d}\n"));
+    }
+
+    // Dated filename so a user downloading multiple snapshots doesn't
+    // overwrite earlier ones. Use the chrono UTC date — local-time
+    // formatting would be misleading since the timestamps inside the
+    // file are SQLite-default UTC.
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    let filename = format!("ryokan-logs-{date}-{since_label}.tsv");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/tab-separated-values; charset=utf-8"),
+    );
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    if let Ok(val) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    Ok((headers, body).into_response())
 }
 
 /// Payload for the client-side log ingestion endpoint. Every in-app toast
@@ -1452,6 +1578,147 @@ mod endpoint_tests {
                 .as_str()
                 .unwrap()
                 .contains("No quality cutoff")
+        );
+    }
+
+    // ── api_logs_export ──────────────────────────────────────────────
+
+    async fn read_response_body(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        String::from_utf8(bytes.to_vec()).expect("body is utf-8")
+    }
+
+    #[tokio::test]
+    async fn api_logs_export_returns_tab_separated_with_header_row() {
+        let db = in_memory_pool().await;
+        log::insert(
+            &db,
+            log::LogLevel::Warn,
+            log::LogCategory::System,
+            "test event",
+            "with detail",
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+
+        let resp = api_logs_export(
+            axum::extract::State(state),
+            axum::extract::Query(LogExportQuery {
+                range: "all".to_string(),
+            }),
+        )
+        .await
+        .expect("export ok")
+        .into_response();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("tab-separated-values"),
+            "Content-Type must be tab-separated-values; got {ct}"
+        );
+        let cd = resp
+            .headers()
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            cd.starts_with("attachment; filename=\"ryokan-logs-"),
+            "Content-Disposition must trigger a download with a dated filename; got {cd}"
+        );
+        let body = read_response_body(resp).await;
+        assert!(
+            body.starts_with("timestamp\tlevel\tcategory\tmessage\tdetail\n"),
+            "first line must be the TSV header row; got: {body}"
+        );
+        // Newline-terminated header + at least one data row.
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2, "expected header + 1 entry; got {lines:?}");
+        assert!(
+            lines[1].contains("\twarn\tsystem\ttest event\twith detail"),
+            "data row should round-trip the inserted entry; got: {}",
+            lines[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn api_logs_export_unknown_range_falls_back_to_all() {
+        // A typo in the `range` query param shouldn't return an empty
+        // file — that would silently lose data. Fall through to the
+        // unbounded "all" branch.
+        let db = in_memory_pool().await;
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::System,
+            "should appear",
+            "",
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+
+        let resp = api_logs_export(
+            axum::extract::State(state),
+            axum::extract::Query(LogExportQuery {
+                range: "yesterdayyy".to_string(),
+            }),
+        )
+        .await
+        .expect("export ok")
+        .into_response();
+        let body = read_response_body(resp).await;
+        assert!(
+            body.contains("should appear"),
+            "unknown range must fall through to `all` rather than returning an empty body; got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_logs_export_today_range_excludes_old_entries() {
+        // Insert a row with an explicit timestamp from 8 days ago,
+        // verify the `today` range filter excludes it.
+        let db = in_memory_pool().await;
+        sqlx::query(
+            "INSERT INTO logs (timestamp, level, category, message, detail) \
+             VALUES (datetime('now', '-8 days'), 'info', 'system', 'old entry', '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        log::insert(
+            &db,
+            log::LogLevel::Info,
+            log::LogCategory::System,
+            "fresh entry",
+            "",
+        )
+        .await
+        .unwrap();
+        let state = build_test_app_state(db, None);
+
+        let resp = api_logs_export(
+            axum::extract::State(state),
+            axum::extract::Query(LogExportQuery {
+                range: "today".to_string(),
+            }),
+        )
+        .await
+        .expect("export ok")
+        .into_response();
+        let body = read_response_body(resp).await;
+        assert!(body.contains("fresh entry"));
+        assert!(
+            !body.contains("old entry"),
+            "today range must exclude entries older than midnight UTC; got: {body}"
         );
     }
 }

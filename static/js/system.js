@@ -1,5 +1,22 @@
 // ── Logs tab ────────────────────────────────────────────────────────────
 
+// Click-outside-to-close for the log-download dropdown. The .open
+// toggle on the trigger button is enough to show the menu; this
+// listener handles dismissal — clicking anywhere outside the menu
+// (or on a menu item, which navigates) closes it.
+document.addEventListener('click', function (ev) {
+    const menu = document.getElementById('log-download-options');
+    if (!menu || !menu.classList.contains('open')) return;
+    // The trigger button is inside .log-download-menu — let its
+    // own click open + immediately re-toggle (don't fight it). For
+    // option clicks, the navigation closes the menu naturally; for
+    // any other click, dismiss.
+    if (ev.target.closest('.log-download-menu') && !ev.target.closest('.log-download-option')) {
+        return;
+    }
+    menu.classList.remove('open');
+});
+
 let pollTimer = null;
 // Initial "latest seen" log id is read from the first rendered row's
 // data-id attribute (server-side Askama writes one on every <tr>) so the
