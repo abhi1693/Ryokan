@@ -229,6 +229,7 @@ pub(super) mod test_helpers {
             score_breakdown: Vec::new(),
             upload_date: String::new(),
             indexer_id: None,
+            indexer_name: String::new(),
         }
     }
 

@@ -69,6 +69,14 @@ function escapeHtml(s) {
 function renderQueue(torrents) {
     const container = document.getElementById('queue-container');
     if (!container) return;
+    // Capture scroll before the wholesale innerHTML replace below.
+    // Without this, the 5s queue poll yanks the user back to the top
+    // of the page mid-scroll because replacing the container's
+    // children temporarily collapses its height to 0, scroll-anchoring
+    // can't keep the prior anchor, and the document scroll position
+    // resets. Restore after the swap.
+    const prevScrollX = window.scrollX;
+    const prevScrollY = window.scrollY;
     if (!torrents || torrents.length === 0) {
         container.innerHTML = '<div class="logs-empty">No active downloads.</div>';
         return;
@@ -110,6 +118,10 @@ function renderQueue(torrents) {
     }
     html += '</tbody></table></div>';
     container.innerHTML = html;
+    // Restore the pre-swap scroll position. window.scrollTo with
+    // {behavior: 'instant'} skips the smooth-scroll animation so a
+    // poll tick doesn't visibly jiggle the page.
+    window.scrollTo({left: prevScrollX, top: prevScrollY, behavior: 'instant'});
 }
 
 function loadQueue() {

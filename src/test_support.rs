@@ -76,14 +76,21 @@ pub fn build_test_app_state(
     // shape and don't care about ids.
     let mut clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>> =
         std::collections::HashMap::new();
-    let mut default_id = None;
+    let mut default_torrent_id = None;
     if let Some(c) = download_client {
         clients.insert(1, c);
-        default_id = Some(1);
+        // Test fixtures inject a torrent client by default — the
+        // existing dyn DownloadClient mocks don't distinguish protocol
+        // and every grab-flavored test case is torrent-shaped. A
+        // future usenet-specific test fixture should pass its own
+        // pre-built pool through `build_test_app_state_with_pool` (or
+        // similar).
+        default_torrent_id = Some(1);
     }
     let pool = crate::DownloadClientPool {
         clients,
-        default_id,
+        default_torrent_id,
+        default_usenet_id: None,
     };
     let download_clients: crate::DownloadClientsCache = Arc::new(RwLock::new(Arc::new(pool)));
     AppState {
@@ -482,6 +489,22 @@ mod e2e {
             .route(
                 "/settings/indexers/delete",
                 post(crate::handlers::settings::indexers::settings_indexers_delete),
+            )
+            .route(
+                "/settings/indexers/upsert",
+                post(crate::handlers::settings::indexers::settings_indexers_upsert),
+            )
+            .route(
+                "/settings/indexers/section",
+                axum::routing::get(crate::handlers::settings::indexers::settings_indexers_section),
+            )
+            .route(
+                "/settings/indexers/add-form",
+                axum::routing::get(crate::handlers::settings::indexers::settings_indexers_add_form),
+            )
+            .route(
+                "/settings/indexers/{id}/edit-form",
+                axum::routing::get(crate::handlers::settings::indexers::settings_indexers_edit_form),
             )
             .route(
                 "/settings/download-clients/delete",

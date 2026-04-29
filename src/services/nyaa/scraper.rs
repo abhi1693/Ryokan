@@ -208,6 +208,7 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
             score_breakdown: Vec::new(),
             upload_date: upload_date.clone(),
             indexer_id: None,
+            indexer_name: String::new(),
         };
 
         let (total, breakdown) =
@@ -505,6 +506,7 @@ pub(super) fn parse_view_page(
         // Callers on this path (SeaDex-bypass) get an empty string.
         upload_date: String::new(),
         indexer_id: None,
+        indexer_name: String::new(),
     };
 
     let (total, breakdown) =
@@ -981,6 +983,7 @@ mod tests {
             score_breakdown: Vec::new(),
             upload_date: String::new(),
             indexer_id: None,
+            indexer_name: String::new(),
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;
@@ -1025,6 +1028,7 @@ mod tests {
             score_breakdown: Vec::new(),
             upload_date: String::new(),
             indexer_id: None,
+            indexer_name: String::new(),
         }];
 
         enrich_results_with_group_map(&pool, &mut results).await;

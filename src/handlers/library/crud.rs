@@ -311,31 +311,44 @@ pub async fn remove_series(
         };
 
         if !hashes.is_empty() {
-            let client_opt = state.default_download_client().await;
-            if let Some(client) = client_opt {
-                for (_id, hash) in &hashes {
-                    if hash.is_empty() {
-                        continue;
-                    }
-                    // Issue #28 PR C — preserve PT seed rules across
-                    // series removal. A user wiping a series from the
-                    // library typically wants ratio policies honored
-                    // (their PT account's ratio is downstream of
-                    // every grab). The grabbed_torrents row gets
-                    // deleted below regardless via
-                    // delete_all_for_series, so the upgrade sweep
-                    // can't re-grab the same hash.
-                    if grabbed_torrents::respects_seed_rules(&state.db, hash).await {
-                        torrents_removed += 1; // counted as "handled"
-                        continue;
-                    }
-                    match client.delete(hash, true).await {
-                        Ok(()) => torrents_removed += 1,
-                        Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
-                    }
+            // Per-grab client routing: a series can have grabs across
+            // multiple clients (e.g. early SAB Usenet rip plus later
+            // qBit BD upgrade). Each grab's `download_client_id`
+            // points at the client that holds it; route per-grab so
+            // a SAB nzo_id doesn't get sent to qBit's `delete` (or
+            // vice versa) and silently leave the original behind.
+            let default_client = state.default_download_client().await;
+            for (_id, hash, dc_id) in &hashes {
+                if hash.is_empty() {
+                    continue;
                 }
-            } else {
-                torrent_failures.push("Download client not configured".to_string());
+                // Issue #28 PR C — preserve PT seed rules across
+                // series removal. A user wiping a series from the
+                // library typically wants ratio policies honored
+                // (their PT account's ratio is downstream of
+                // every grab). The grabbed_torrents row gets
+                // deleted below regardless via
+                // delete_all_for_series, so the upgrade sweep
+                // can't re-grab the same hash.
+                if grabbed_torrents::respects_seed_rules(&state.db, hash).await {
+                    torrents_removed += 1; // counted as "handled"
+                    continue;
+                }
+                let client_for_grab = match dc_id {
+                    Some(id) => match state.client_by_id(*id).await {
+                        Some(c) => Some(c),
+                        None => default_client.clone(),
+                    },
+                    None => default_client.clone(),
+                };
+                let Some(client) = client_for_grab else {
+                    torrent_failures.push("Download client not configured".to_string());
+                    continue;
+                };
+                match client.delete(hash, true).await {
+                    Ok(()) => torrents_removed += 1,
+                    Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
+                }
             }
         }
 

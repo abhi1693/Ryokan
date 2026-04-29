@@ -399,7 +399,8 @@
 }
 
 .cf-section input[type="number"],
-.settings-form input[type="number"] {
+.settings-form input[type="number"],
+.dc-modal-form input[type="number"] {
     appearance: textfield;
     -moz-appearance: textfield;
 }
@@ -407,7 +408,9 @@
 .cf-section input[type="number"]::-webkit-outer-spin-button,
 .cf-section input[type="number"]::-webkit-inner-spin-button,
 .settings-form input[type="number"]::-webkit-outer-spin-button,
-.settings-form input[type="number"]::-webkit-inner-spin-button {
+.settings-form input[type="number"]::-webkit-inner-spin-button,
+.dc-modal-form input[type="number"]::-webkit-outer-spin-button,
+.dc-modal-form input[type="number"]::-webkit-inner-spin-button {
     -webkit-appearance: none;
     appearance: none;
     margin: 0;

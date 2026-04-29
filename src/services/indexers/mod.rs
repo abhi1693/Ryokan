@@ -116,6 +116,14 @@ pub struct Release {
     /// Snapshot of the indexer's priority at search time so a
     /// later DB edit can't change attribution retroactively.
     pub indexer_priority: i32,
+    /// Snapshot of the indexer's display name at search time.
+    /// Same retroactive-edit reasoning as `indexer_priority` —
+    /// a later rename of the indexer row in Settings shouldn't
+    /// rewrite the name on past Release records that callers
+    /// kept around. Surfaces through `into_search_result` to
+    /// drive the "Indexer" column on the interactive search UI.
+    #[serde(default)]
+    pub indexer_name: String,
     pub title: String,
     /// Stable per-release identifier from the torznab `<guid>`
     /// element. Used as a dedup key when [`info_hash`] is empty.
@@ -523,6 +531,7 @@ impl Release {
         let resolution = extract_resolution_from_title(&self.title);
         let is_batch = detect_batch_from_title(&self.title);
         let indexer_id = self.indexer_id;
+        let indexer_name = self.indexer_name;
         crate::services::nyaa::SearchResult {
             title: self.title,
             link: self.link.clone(),
@@ -558,6 +567,7 @@ impl Release {
             // dormant — nothing surfaces the source indexer to the
             // grab path.
             indexer_id: Some(indexer_id),
+            indexer_name,
         }
     }
 }
@@ -727,6 +737,7 @@ mod tests {
         Release {
             indexer_id,
             indexer_priority: priority,
+            indexer_name: format!("Indexer{indexer_id}"),
             title: title.to_string(),
             guid: guid.to_string(),
             link: String::new(),
@@ -741,6 +752,38 @@ mod tests {
             upload_volume_factor: None,
             extra: HashMap::new(),
         }
+    }
+
+    // ── into_search_result ───────────────────────────────────────────
+
+    /// The interactive-search "Indexer" column in the UI keys off
+    /// `SearchResult::indexer_name`. Without this propagation,
+    /// torznab/newznab fan-out results would land with empty
+    /// `indexer_name` and the column would render "Nyaa" for every
+    /// row regardless of where the result actually came from —
+    /// exactly the symptom the user reported before this fix.
+    #[test]
+    fn into_search_result_propagates_indexer_name() {
+        let r = release(7, 25, "abc", "g1", "[nekoBT] Show - 01", 10);
+        let sr = r.into_search_result();
+        assert_eq!(
+            sr.indexer_name, "Indexer7",
+            "indexer_name must round-trip through into_search_result()"
+        );
+        assert_eq!(sr.indexer_id, Some(7));
+    }
+
+    /// Counterpart: a Release with an empty indexer_name (defensive
+    /// — shouldn't happen in production but the field is `String`,
+    /// not `NonEmptyString`) produces an empty SearchResult name,
+    /// which the UI then renders as "Nyaa" via its `|| 'Nyaa'`
+    /// fallback. Both paths must work.
+    #[test]
+    fn into_search_result_handles_empty_indexer_name() {
+        let mut r = release(7, 25, "abc", "g1", "Show - 01", 10);
+        r.indexer_name = String::new();
+        let sr = r.into_search_result();
+        assert!(sr.indexer_name.is_empty());
     }
 
     // ── dedup_for_auto_search ────────────────────────────────────────

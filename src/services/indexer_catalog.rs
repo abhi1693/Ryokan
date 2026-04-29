@@ -165,17 +165,23 @@ pub const SEEDED: &[SeededIndexer] = &[
         url_placeholder: "https://prowlarr.local/{N}/api",
         is_generic: false,
     },
+    // NZBGeek — paid newznab Usenet indexer. Carries anime as a
+    // side effect of being a general-purpose Usenet source, but
+    // it's the most widely-used paid indexer in the *arr ecosystem
+    // and shipping a curated entry saves users a Prowlarr trip
+    // for the URL pattern. `default_min_seeders` is 0 because
+    // Usenet has no peer concept — the field is torrent-only.
     SeededIndexer {
-        slug: "anidex",
-        display_name: "AniDex",
-        blurb: "Public anime tracker",
+        slug: "nzbgeek",
+        display_name: "NZBGeek",
+        blurb: "Usenet indexer (paid)",
         notes: "",
         is_private_tracker: false,
-        default_priority: 35,
-        default_min_seeders: 2,
+        default_priority: 30,
+        default_min_seeders: 0,
         default_seed_ratio: None,
         default_seed_time_minutes: None,
-        default_kind: "torznab",
+        default_kind: "newznab",
         url_placeholder: "https://prowlarr.local/{N}/api",
         is_generic: false,
     },
@@ -193,12 +199,10 @@ pub const SEEDED: &[SeededIndexer] = &[
         url_placeholder: "https://prowlarr.local/{N}/api",
         is_generic: true,
     },
-    // Newznab seed kept for general-purpose Usenet indexers
-    // (NzbGeek, NZB.cat, NZBPlanet, etc.). AnimeTosho's
-    // newznab mirror was dropped from the catalog because the
-    // site's shutting down in May 2026; the remaining newznab
-    // sources carry anime as a side effect of being
-    // general-purpose, not as a curated focus.
+    // Generic newznab fall-through for indexers not in the
+    // curated list (NZB.cat, NZBPlanet, DrunkenSlug, …). AnimeTosho's
+    // newznab mirror was dropped from the catalog because the site's
+    // shutting down in May 2026.
     SeededIndexer {
         slug: "generic-newznab",
         display_name: "Generic Newznab",

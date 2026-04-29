@@ -255,6 +255,17 @@ impl SabClient {
 #[async_trait]
 impl DownloadClient for SabClient {
     async fn test(&self) -> Result<String, String> {
+        // Two-step probe: `mode=version` is a PUBLIC SAB endpoint and
+        // returns 200 even with a missing/wrong API key, so it can't
+        // surface auth issues. `mode=queue` requires the API key, so
+        // following the version probe with a queue probe catches a
+        // bad/missing key at Test-connection time instead of at
+        // first-grab time. Without this, users would see a green
+        // "Connected: 4.5.5" pill, then their first NZB grab would
+        // fail with `SAB add returned HTTP 403 Forbidden` — the
+        // exact symptom the SAB-on-NZBGeek-paired-with-Prowlarr
+        // setup hits when the password / api_key field on the
+        // download_clients row is empty or wrong.
         let resp = self
             .http
             .get(self.endpoint())
@@ -269,15 +280,47 @@ impl DownloadClient for SabClient {
             .json()
             .await
             .map_err(|e| format!("SAB version parse failed: {e}"))?;
+        let version = body.version;
+
+        // Auth probe — fail with a clear message when the API key is
+        // missing/invalid. Only the status code matters; queue body
+        // shape isn't parsed.
+        let auth_resp = self
+            .http
+            .get(self.endpoint())
+            .query(&self.make_query(&[("mode", "queue"), ("start", "0"), ("limit", "1")]))
+            .send()
+            .await
+            .map_err(|e| format!("SAB queue probe failed: {e}"))?;
+        if auth_resp.status().as_u16() == 401 || auth_resp.status().as_u16() == 403 {
+            // SAB returns plain text on 403 ("API Key Required" /
+            // "API Key Incorrect"); surface it so the user knows
+            // exactly which field to fix on the download-clients row.
+            let detail = auth_resp.text().await.unwrap_or_default();
+            let trimmed = detail.trim();
+            return Err(if trimmed.is_empty() {
+                "SAB API key missing or invalid. Set the API Key field on the SABnzbd download-client row.".to_string()
+            } else {
+                format!(
+                    "SAB API key missing or invalid: {}. Set the API Key field on the SABnzbd download-client row.",
+                    trimmed
+                )
+            });
+        }
+        if !auth_resp.status().is_success() {
+            return Err(format!(
+                "SAB queue probe returned HTTP {}",
+                auth_resp.status()
+            ));
+        }
+
         // Return just the version string, without the "SABnzbd "
         // prefix. The status pill on the Settings → Download Clients
         // tab prepends the client kind label itself, so the prefix
         // would render as "SABnzbd SABnzbd 4.5.5"; the toast on the
         // Test-connection button concatenates "Connected: <version>"
         // and reads more naturally without the kind doubling either.
-        // qBit / Deluge / Transmission / rtorrent all return raw
-        // version strings already; this brings SAB in line.
-        Ok(body.version)
+        Ok(version)
     }
 
     async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
@@ -308,17 +351,60 @@ impl DownloadClient for SabClient {
             .await
             .map_err(|e| format!("SAB request failed: {e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("SAB add returned HTTP {}", resp.status()));
+            // 401/403 specifically — capture SAB's plain-text body so
+            // the user sees `API Key Required` / `API Key Incorrect`
+            // instead of the bare HTTP status. Other status codes
+            // surface the status alone since SAB's body for those
+            // (5xx, 502 Bad Gateway from a fronting proxy, etc.)
+            // isn't usefully diagnostic. The Test-connection probe
+            // now catches API-key issues at config time, but this
+            // path stays robust for users who upgraded a working
+            // setup and somehow lost their key.
+            let status = resp.status();
+            let detail = if matches!(status.as_u16(), 401 | 403) {
+                resp.text().await.unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let trimmed = detail.trim();
+            if trimmed.is_empty() {
+                return Err(format!("SAB add returned HTTP {status}"));
+            }
+            return Err(format!("SAB add returned HTTP {status}: {trimmed}"));
         }
-        let body: AddUrlResponse = resp
-            .json()
+        // SAB sometimes returns 200 with an HTML page (not JSON) when
+        // the API key is missing — varies by version + URL_BASE
+        // config, and the user-pasted-NZB-Key-instead-of-API-Key
+        // case is the most common footgun. Read the body as bytes
+        // once so we can fall back to a substring check on the
+        // well-known "API Key" warning if JSON parsing fails.
+        // Without this the user got an opaque parse error instead of
+        // an actionable hint.
+        let body_bytes = resp
+            .bytes()
             .await
-            .map_err(|e| format!("SAB addurl parse failed: {e}"))?;
+            .map_err(|e| format!("SAB addurl read body failed: {e}"))?;
+        let body: AddUrlResponse = match serde_json::from_slice(&body_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                let body_text = std::str::from_utf8(&body_bytes).unwrap_or_default();
+                if body_text.to_ascii_lowercase().contains("api key") {
+                    return Err(format!(
+                        "SAB rejected addurl: API key missing. Set the API Key field on the SABnzbd download-client row (Settings → Connections → Downloads → click the SAB row). Use SAB's full API Key (not the NZB Key — Ryokan needs queue access too). Find it in SABnzbd → Config → General → Security → API Key. SAB body: {}",
+                        body_text.trim()
+                    ));
+                }
+                return Err(format!("SAB addurl parse failed: {e}"));
+            }
+        };
         if !body.status {
-            return Err(format!(
-                "SAB rejected addurl: {}",
-                body.error.unwrap_or_else(|| "no error provided".into())
-            ));
+            let raw_error = body.error.unwrap_or_else(|| "no error provided".into());
+            if raw_error.to_ascii_lowercase().contains("api key") {
+                return Err(format!(
+                    "SAB rejected addurl: API key missing or invalid. Use the full API Key (not the NZB Key) from SABnzbd → Config → General → Security. SAB error: {raw_error}"
+                ));
+            }
+            return Err(format!("SAB rejected addurl: {raw_error}"));
         }
         if let Some(id) = body.nzo_ids.into_iter().next() {
             return Ok((AddOutcome::Added, id));
@@ -362,9 +448,40 @@ impl DownloadClient for SabClient {
     async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
         let queue = self.fetch_queue().await?;
         let history = self.fetch_history().await?;
-        let mut out: Vec<DownloadItem> =
-            Vec::with_capacity(queue.slots.len() + history.slots.len());
-        for slot in queue.slots.into_iter().filter(|s| s.cat == self.category) {
+        let queue_total = queue.slots.len();
+        let history_total = history.slots.len();
+        let mut out: Vec<DownloadItem> = Vec::with_capacity(queue_total + history_total);
+
+        // Category-match policy:
+        //   - Empty `self.category` → no filter; pass everything
+        //     through. The user didn't pin a category in Ryokan's
+        //     SAB row, so the trade-off "see all SAB activity vs
+        //     never see anything" picks visibility.
+        //   - Non-empty `self.category` → match SAB's slot category
+        //     case-insensitively, AND also accept slots whose
+        //     reported category is empty (SAB sometimes drops the
+        //     category on jobs added with a cat= parameter that
+        //     doesn't correspond to a configured category in SAB's
+        //     UI; the addurl call still succeeds but the resulting
+        //     slot reports `cat=""`). Without this, jobs Ryokan
+        //     just queued via `add_torrent` would silently fail
+        //     the filter and the reconcile loop would mark them
+        //     removed at the 30s grace window. The trade-off is
+        //     accepting cross-tool noise (jobs added by another
+        //     SAB caller with no category) — acceptable for a
+        //     single-user homelab; revisit if Ryokan grows multi-
+        //     user.
+        let configured = self.category.trim();
+        let want_lower = configured.to_ascii_lowercase();
+        let category_matches = |slot_cat: &str| -> bool {
+            if configured.is_empty() {
+                return true;
+            }
+            let s = slot_cat.trim();
+            s.is_empty() || s.eq_ignore_ascii_case(&want_lower)
+        };
+
+        for slot in queue.slots.into_iter().filter(|s| category_matches(&s.cat)) {
             out.push(DownloadItem {
                 hash: slot.nzo_id,
                 name: slot.filename,
@@ -387,7 +504,7 @@ impl DownloadClient for SabClient {
         for slot in history
             .slots
             .into_iter()
-            .filter(|s| s.category == self.category)
+            .filter(|s| category_matches(&s.category))
         {
             out.push(DownloadItem {
                 hash: slot.nzo_id,
@@ -403,6 +520,22 @@ impl DownloadClient for SabClient {
                 state_kind: Self::map_state(&slot.status, true),
             });
         }
+
+        // Diagnostic trace so a user reporting "Ryokan can't see my
+        // SAB jobs" has something to grep for in System → Logs. Two
+        // useful counts: how many slots SAB returned in total, and
+        // how many survived the category filter. A "slots=N matched=0"
+        // line points the user (or future-me) directly at the
+        // category-config mismatch — easier than digging through the
+        // SAB UI to spot it.
+        tracing::debug!(
+            "sab list_scoped: configured_category={:?} queue_slots={} history_slots={} matched={}",
+            configured,
+            queue_total,
+            history_total,
+            out.len()
+        );
+
         Ok(out)
     }
 
@@ -456,19 +589,31 @@ impl DownloadClient for SabClient {
     }
 
     async fn delete(&self, info_hash: &str, delete_files: bool) -> Result<(), String> {
-        // SAB delete is split between queue and history — try queue
-        // first (covers in-flight), then history (covers completed).
-        // `del_files=1` removes the unpacked output directory on
-        // history deletes; queue deletes always remove the partial.
-        let mut q: Vec<(&str, &str)> =
-            vec![("mode", "queue"), ("name", "delete"), ("value", info_hash)];
+        // SAB delete is split between queue and history. Critically,
+        // `mode=queue&name=delete` returns `status: true`
+        // unconditionally — `_handle_queue` calls `report(output)`
+        // after `remove_multiple` even if the nzo_id wasn't in the
+        // queue at all (live-checked against SAB 4.x source). So if
+        // we tried queue first, every completed-and-imported job
+        // (which lives in history, not queue) would "succeed" against
+        // the queue endpoint and never hit history with `del_files=1`,
+        // leaving the unpacked storage dir behind.
+        //
+        // Fix: try history first (covers post-import deletes — the
+        // common case), fall back to queue only if history reports
+        // not-found. Same shape Sonarr / Radarr's SAB clients use.
+        // `del_files=1` removes the unpacked output dir on history;
+        // queue delete removes the partial download.
         let one = "1";
         let zero = "0";
-        if delete_files {
-            q.push(("del_files", one));
-        } else {
-            q.push(("del_files", zero));
-        }
+        let del_value = if delete_files { one } else { zero };
+
+        let mut q: Vec<(&str, &str)> = vec![
+            ("mode", "history"),
+            ("name", "delete"),
+            ("value", info_hash),
+            ("del_files", del_value),
+        ];
         let resp = self
             .http
             .get(self.endpoint())
@@ -480,20 +625,14 @@ impl DownloadClient for SabClient {
         if body.status {
             return Ok(());
         }
-        // Fallback: history. Mirror the queue branch and always send
-        // `del_files` explicitly — SAB's documented default is 0, but
-        // omitting the param leaves us at the mercy of any reverse
-        // proxy / future SAB version that fills in a different default.
-        let mut q: Vec<(&str, &str)> = vec![
-            ("mode", "history"),
+
+        // History didn't find it — try queue (covers in-flight cancel).
+        q = vec![
+            ("mode", "queue"),
             ("name", "delete"),
             ("value", info_hash),
+            ("del_files", del_value),
         ];
-        if delete_files {
-            q.push(("del_files", one));
-        } else {
-            q.push(("del_files", zero));
-        }
         let resp = self
             .http
             .get(self.endpoint())
@@ -570,15 +709,39 @@ impl SabClient {
         if !resp.status().is_success() {
             return Err(format!("SAB add returned HTTP {}", resp.status()));
         }
-        let body: AddUrlResponse = resp
-            .json()
+        // SAB sometimes returns 200 with an HTML page (not JSON) when
+        // the API key is missing — varies by version + URL_BASE
+        // config, and the user-pasted-NZB-Key-instead-of-API-Key
+        // case is the most common footgun. Read the body as bytes
+        // once so we can fall back to a substring check on the
+        // well-known "API Key" warning if JSON parsing fails.
+        // Without this the user got an opaque parse error instead of
+        // an actionable hint.
+        let body_bytes = resp
+            .bytes()
             .await
-            .map_err(|e| format!("SAB addurl parse failed: {e}"))?;
+            .map_err(|e| format!("SAB addurl read body failed: {e}"))?;
+        let body: AddUrlResponse = match serde_json::from_slice(&body_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                let body_text = std::str::from_utf8(&body_bytes).unwrap_or_default();
+                if body_text.to_ascii_lowercase().contains("api key") {
+                    return Err(format!(
+                        "SAB rejected addurl: API key missing. Set the API Key field on the SABnzbd download-client row (Settings → Connections → Downloads → click the SAB row). Use SAB's full API Key (not the NZB Key — Ryokan needs queue access too). Find it in SABnzbd → Config → General → Security → API Key. SAB body: {}",
+                        body_text.trim()
+                    ));
+                }
+                return Err(format!("SAB addurl parse failed: {e}"));
+            }
+        };
         if !body.status {
-            return Err(format!(
-                "SAB rejected addurl: {}",
-                body.error.unwrap_or_else(|| "no error provided".into())
-            ));
+            let raw_error = body.error.unwrap_or_else(|| "no error provided".into());
+            if raw_error.to_ascii_lowercase().contains("api key") {
+                return Err(format!(
+                    "SAB rejected addurl: API key missing or invalid. Use the full API Key (not the NZB Key) from SABnzbd → Config → General → Security. SAB error: {raw_error}"
+                ));
+            }
+            return Err(format!("SAB rejected addurl: {raw_error}"));
         }
         if let Some(id) = body.nzo_ids.into_iter().next() {
             Ok((AddOutcome::Added, id))

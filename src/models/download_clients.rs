@@ -56,6 +56,25 @@ pub struct DownloadClientForm<'a> {
 const SELECT_COLS: &str = "id, name, kind, url, username, password, label, \
                            download_path, enabled, is_default";
 
+/// Wire-protocol family for a download-client kind. Mirrors
+/// `services::download_client::protocol_for_client_kind` — duplicated
+/// at the model layer because services depends on models, so we can't
+/// reach upward without a circular dep. Keep the two in sync; both
+/// derive from the same finite set of known kinds.
+///
+/// Drives the per-protocol uniqueness invariant for `is_default`: at
+/// most one torrent client AND at most one usenet client may carry
+/// the flag at any time. Indexers without an explicit pin route to
+/// the default of their own protocol (torznab → torrent default,
+/// newznab → usenet default).
+pub fn protocol_for_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "qbittorrent" | "deluge" | "transmission" | "rtorrent" => Some("torrent"),
+        "sabnzbd" => Some("usenet"),
+        _ => None,
+    }
+}
+
 fn map_row(r: sqlx::sqlite::SqliteRow) -> DownloadClientRow {
     DownloadClientRow {
         id: r.get("id"),
@@ -109,28 +128,61 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<DownloadClient
     Ok(row.map(map_row))
 }
 
-/// The current default client, if any. NULL when no client has
-/// been added yet (fresh install) or when a manual DB edit
-/// cleared every `is_default = 1`.
+/// The current default client (any protocol), if any. NULL when
+/// no client has been added yet (fresh install) or when a manual
+/// DB edit cleared every `is_default = 1`. With the per-protocol
+/// invariant the result is non-deterministic when both a torrent
+/// and a usenet default exist — callers that care about protocol
+/// should use [`get_default_for_protocol`] instead.
 pub async fn get_default(db: &SqlitePool) -> Result<Option<DownloadClientRow>, sqlx::Error> {
     let row = sqlx::query(&format!(
-        "SELECT {SELECT_COLS} FROM download_clients WHERE is_default = 1 LIMIT 1"
+        "SELECT {SELECT_COLS} FROM download_clients WHERE is_default = 1 ORDER BY id LIMIT 1"
     ))
     .fetch_optional(db)
     .await?;
     Ok(row.map(map_row))
 }
 
-/// Insert a new row. If `form.is_default` is true, the existing
-/// default (if any) is cleared in the same transaction so the
-/// invariant "exactly one row has is_default = 1" stays
-/// recoverable. Returns the new row's id.
+/// The current default client for the given protocol (`"torrent"`
+/// or `"usenet"`), if any. Returns NULL when nothing of that
+/// protocol is configured or marked default. The pool builder uses
+/// this on rebuild to populate `default_torrent_id` /
+/// `default_usenet_id` independently.
+pub async fn get_default_for_protocol(
+    db: &SqlitePool,
+    protocol: &str,
+) -> Result<Option<DownloadClientRow>, sqlx::Error> {
+    let kinds: &[&str] = match protocol {
+        "torrent" => &["qbittorrent", "deluge", "transmission", "rtorrent"],
+        "usenet" => &["sabnzbd"],
+        _ => return Ok(None),
+    };
+    let placeholders = vec!["?"; kinds.len()].join(", ");
+    let sql = format!(
+        "SELECT {SELECT_COLS} FROM download_clients \
+         WHERE is_default = 1 AND kind IN ({placeholders}) \
+         ORDER BY id LIMIT 1"
+    );
+    let mut q = sqlx::query(&sql);
+    for k in kinds {
+        q = q.bind(*k);
+    }
+    let row = q.fetch_optional(db).await?;
+    Ok(row.map(map_row))
+}
+
+/// Insert a new row. If `form.is_default` is true, every other
+/// row OF THE SAME PROTOCOL gets its `is_default` cleared in the
+/// same transaction so the invariant "exactly one row of each
+/// protocol has is_default = 1" stays recoverable. Cross-protocol
+/// defaults coexist (one torrent + one usenet default at a time)
+/// so a torznab indexer with no pin routes to the torrent default
+/// and a newznab indexer routes to the usenet default. Returns
+/// the new row's id.
 pub async fn insert(db: &SqlitePool, form: DownloadClientForm<'_>) -> Result<i64, sqlx::Error> {
     let mut tx = db.begin().await?;
     if form.is_default {
-        sqlx::query("UPDATE download_clients SET is_default = 0 WHERE is_default = 1")
-            .execute(&mut *tx)
-            .await?;
+        clear_other_defaults_in_protocol(&mut tx, form.kind, None).await?;
     }
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO download_clients
@@ -163,10 +215,7 @@ pub async fn update(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     if form.is_default {
-        sqlx::query("UPDATE download_clients SET is_default = 0 WHERE is_default = 1 AND id != ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        clear_other_defaults_in_protocol(&mut tx, form.kind, Some(id)).await?;
     }
     sqlx::query(
         "UPDATE download_clients
@@ -216,18 +265,16 @@ pub async fn update(
 /// is on their own to add a new one.
 pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
-    // Read the deleted row's default-flag BEFORE the row is gone so
-    // we know whether to promote a replacement after the DELETE
-    // commits. None means "row didn't exist anymore" (race with a
-    // parallel delete); skip the promotion check entirely in that
-    // case — the surviving rows already have whatever default state
-    // the other transaction left them in.
-    let was_default =
-        sqlx::query_scalar::<_, i64>("SELECT is_default FROM download_clients WHERE id = ?")
+    // Read the deleted row's (default-flag, kind) BEFORE the row is
+    // gone so we know whether (and within which protocol) to promote
+    // a replacement after the DELETE commits. None means "row didn't
+    // exist anymore" (race with a parallel delete); skip the
+    // promotion check entirely in that case.
+    let row: Option<(i64, String)> =
+        sqlx::query_as("SELECT is_default, kind FROM download_clients WHERE id = ?")
             .bind(id)
             .fetch_optional(&mut *tx)
-            .await?
-            .map(|i| i != 0);
+            .await?;
     sqlx::query("UPDATE indexers SET download_client_id = NULL WHERE download_client_id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -248,40 +295,65 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    // Auto-promote: only when the row we just deleted was the default.
-    // Pick the lowest remaining id; SQL returns NULL when the table
-    // is empty, in which case `bind(None)` is a no-op DELETE-WHERE-NULL
-    // shape — the UPDATE simply matches zero rows. No promotion
-    // happens when there's nothing to promote.
-    if was_default == Some(true) {
-        let next_default: Option<i64> = sqlx::query_scalar("SELECT MIN(id) FROM download_clients")
-            .fetch_one(&mut *tx)
-            .await?;
-        if let Some(next_id) = next_default {
-            sqlx::query(
-                "UPDATE download_clients SET is_default = 1, updated_at = strftime('%s','now') WHERE id = ?",
-            )
-            .bind(next_id)
-            .execute(&mut *tx)
-            .await?;
+    // Auto-promote: only when the row we just deleted was the default
+    // AND its protocol still has a surviving row. Picking by min(id)
+    // is deterministic (oldest survivor wins) and scoped per-protocol
+    // so deleting a torrent default doesn't grab a usenet row (or
+    // vice versa). When no row of the same protocol survives, there's
+    // nothing to promote — the user is on their own to add another
+    // client of that protocol.
+    if let Some((flag, kind)) = row
+        && flag != 0
+    {
+        let kinds: &[&str] = match protocol_for_kind(&kind) {
+            Some("torrent") => &["qbittorrent", "deluge", "transmission", "rtorrent"],
+            Some("usenet") => &["sabnzbd"],
+            _ => &[],
+        };
+        if !kinds.is_empty() {
+            let placeholders = vec!["?"; kinds.len()].join(", ");
+            let sql =
+                format!("SELECT MIN(id) FROM download_clients WHERE kind IN ({placeholders})");
+            let mut q = sqlx::query_scalar::<_, Option<i64>>(&sql);
+            for k in kinds {
+                q = q.bind(*k);
+            }
+            let next_default: Option<i64> = q.fetch_one(&mut *tx).await?;
+            if let Some(next_id) = next_default {
+                sqlx::query(
+                    "UPDATE download_clients SET is_default = 1, updated_at = strftime('%s','now') WHERE id = ?",
+                )
+                .bind(next_id)
+                .execute(&mut *tx)
+                .await?;
+            }
         }
     }
     tx.commit().await?;
     Ok(())
 }
 
-/// Mark `id` as the default and clear every other row's flag.
-/// Idempotent at the `is_default` value level (a re-call on an
-/// already-default row leaves the flag at 1); `updated_at` is
-/// bumped on every call regardless. Tighten the second UPDATE to
-/// `WHERE is_default = 0` if a strict no-op-on-repeat semantics is
-/// ever needed for an audit-log trigger.
+/// Mark `id` as the default for its own protocol (torrent or
+/// usenet) and clear every other same-protocol row's flag. The
+/// other-protocol default is left alone so a one-click "Set
+/// default" on a SAB row doesn't quietly clear the torrent
+/// default at the same time. Idempotent at the `is_default` value
+/// level (a re-call on an already-default row leaves the flag at
+/// 1); `updated_at` is bumped on every call regardless.
 pub async fn set_default(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
-    sqlx::query("UPDATE download_clients SET is_default = 0 WHERE is_default = 1 AND id != ?")
+    // Look up the row's kind to scope the clear by protocol.
+    // Missing row (concurrent delete) → bail without touching
+    // anything; the caller's UPDATE below would be a no-op too.
+    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM download_clients WHERE id = ?")
         .bind(id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+    let Some(kind) = kind else {
+        tx.commit().await?;
+        return Ok(());
+    };
+    clear_other_defaults_in_protocol(&mut tx, &kind, Some(id)).await?;
     sqlx::query(
         "UPDATE download_clients SET is_default = 1, updated_at = strftime('%s','now') WHERE id = ?",
     )
@@ -289,6 +361,43 @@ pub async fn set_default(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// Clear `is_default` on every row that shares `kind`'s protocol,
+/// optionally excluding `keep_id` (used on the upsert path so the
+/// just-flagged row doesn't get cleared by its own protocol-mates
+/// loop). Unknown kinds (mapped to None by `protocol_for_kind`)
+/// are no-ops — `protocol_for_client_kind`'s permissive contract.
+async fn clear_other_defaults_in_protocol(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    kind: &str,
+    keep_id: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    let kinds: &[&str] = match protocol_for_kind(kind) {
+        Some("torrent") => &["qbittorrent", "deluge", "transmission", "rtorrent"],
+        Some("usenet") => &["sabnzbd"],
+        _ => return Ok(()),
+    };
+    let placeholders = vec!["?"; kinds.len()].join(", ");
+    let sql = match keep_id {
+        Some(_) => format!(
+            "UPDATE download_clients SET is_default = 0 \
+             WHERE is_default = 1 AND kind IN ({placeholders}) AND id != ?"
+        ),
+        None => format!(
+            "UPDATE download_clients SET is_default = 0 \
+             WHERE is_default = 1 AND kind IN ({placeholders})"
+        ),
+    };
+    let mut q = sqlx::query(&sql);
+    for k in kinds {
+        q = q.bind(*k);
+    }
+    if let Some(id) = keep_id {
+        q = q.bind(id);
+    }
+    q.execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -633,5 +742,130 @@ mod tests {
         let rows = list_all(&db).await.unwrap();
         assert!(rows.is_empty());
         assert!(get_default(&db).await.unwrap().is_none());
+    }
+
+    /// Per-protocol default invariant: a torrent default and a usenet
+    /// default coexist because they route disjoint indexer kinds.
+    /// Marking a SAB row as default must NOT clear the torrent default,
+    /// and vice versa. Counterpart of the legacy "exactly one default"
+    /// test that the prior code shape enforced.
+    #[tokio::test]
+    async fn torrent_and_usenet_defaults_coexist() {
+        let db = in_memory_pool().await;
+        // Add a default qBit (torrent).
+        let mut t = form("qBit", "qbittorrent", "http://qbit");
+        t.is_default = true;
+        let qbit_id = insert(&db, t).await.unwrap();
+        // Add a default SAB (usenet).
+        let mut u = form("SAB", "sabnzbd", "http://sab");
+        u.is_default = true;
+        let sab_id = insert(&db, u).await.unwrap();
+
+        // Both rows should still be default — different protocols.
+        let qbit_row = get_by_id(&db, qbit_id).await.unwrap().unwrap();
+        let sab_row = get_by_id(&db, sab_id).await.unwrap().unwrap();
+        assert!(
+            qbit_row.is_default,
+            "torrent default must survive marking a usenet row default"
+        );
+        assert!(
+            sab_row.is_default,
+            "usenet default must survive marking a torrent row default"
+        );
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM download_clients WHERE is_default = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            count, 2,
+            "exactly two rows carry is_default = 1 (one per protocol)"
+        );
+    }
+
+    /// Marking a second torrent client as default DOES clear the prior
+    /// torrent default (same-protocol invariant). Same-protocol unique-
+    /// ness is the only mutex; cross-protocol entries are independent.
+    #[tokio::test]
+    async fn second_torrent_default_clears_prior_torrent_default() {
+        let db = in_memory_pool().await;
+        let mut a = form("qBit", "qbittorrent", "http://qbit");
+        a.is_default = true;
+        let qbit_id = insert(&db, a).await.unwrap();
+        let mut b = form("Deluge", "deluge", "http://deluge");
+        b.is_default = true;
+        let deluge_id = insert(&db, b).await.unwrap();
+
+        let qbit_row = get_by_id(&db, qbit_id).await.unwrap().unwrap();
+        let deluge_row = get_by_id(&db, deluge_id).await.unwrap().unwrap();
+        assert!(
+            !qbit_row.is_default,
+            "prior torrent default must be cleared"
+        );
+        assert!(deluge_row.is_default, "new torrent default must take over");
+    }
+
+    /// `get_default_for_protocol` returns the right row per protocol
+    /// when both protocol families have a default configured.
+    #[tokio::test]
+    async fn get_default_for_protocol_returns_per_protocol_row() {
+        let db = in_memory_pool().await;
+        let mut t = form("qBit", "qbittorrent", "http://qbit");
+        t.is_default = true;
+        let qbit_id = insert(&db, t).await.unwrap();
+        let mut u = form("SAB", "sabnzbd", "http://sab");
+        u.is_default = true;
+        let sab_id = insert(&db, u).await.unwrap();
+
+        let torrent_default = get_default_for_protocol(&db, "torrent")
+            .await
+            .unwrap()
+            .expect("torrent default must resolve");
+        assert_eq!(torrent_default.id, qbit_id);
+
+        let usenet_default = get_default_for_protocol(&db, "usenet")
+            .await
+            .unwrap()
+            .expect("usenet default must resolve");
+        assert_eq!(usenet_default.id, sab_id);
+    }
+
+    /// Auto-promote on delete is per-protocol: deleting the torrent
+    /// default elects another torrent row, not a usenet survivor (which
+    /// would silently route torznab grabs through SAB and trip the
+    /// protocol guard at add time).
+    #[tokio::test]
+    async fn delete_torrent_default_promotes_torrent_survivor_not_usenet() {
+        let db = in_memory_pool().await;
+        // Surviving usenet first so its id is < the torrent survivor;
+        // a naive lowest-id-overall promotion would pick this row.
+        let mut u = form("SAB", "sabnzbd", "http://sab");
+        u.is_default = true;
+        let sab_id = insert(&db, u).await.unwrap();
+        let mut t = form("qBitDefault", "qbittorrent", "http://qbit-default");
+        t.is_default = true;
+        let qbit_default_id = insert(&db, t).await.unwrap();
+        let qbit_survivor_id = insert(&db, form("qBitSurvivor", "deluge", "http://deluge"))
+            .await
+            .unwrap();
+
+        delete(&db, qbit_default_id).await.unwrap();
+
+        let promoted = get_default_for_protocol(&db, "torrent")
+            .await
+            .unwrap()
+            .expect("a torrent survivor must be promoted");
+        assert_eq!(
+            promoted.id, qbit_survivor_id,
+            "torrent default must auto-promote to a torrent row, not the usenet row"
+        );
+        // SAB must remain the usenet default — its protocol wasn't
+        // touched by the delete.
+        let usenet_default = get_default_for_protocol(&db, "usenet")
+            .await
+            .unwrap()
+            .expect("usenet default must remain after a torrent delete");
+        assert_eq!(usenet_default.id, sab_id);
     }
 }

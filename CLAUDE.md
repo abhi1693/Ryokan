@@ -14,8 +14,9 @@ Release scoring combines Sonarr-style **Custom Formats** (TRaSH-Guides-compatibl
 cargo build              # build (debug)
 cargo build --release    # build (release)
 cargo run                # run locally (creates data/ryokan.db, listens on 0.0.0.0:8978)
-cargo test               # run all tests
-cargo test <test_name>   # run a single test
+cargo nextest run --workspace --features test-support  # canonical local-test entry point. ~2-3× faster than `cargo test`, parallel-by-default with stable per-test reporting. cargo-nextest is installed locally; default to it for iterative work. `cargo test` still runs (CI uses it for `--locked`), but nextest is preferred.
+cargo nextest run --workspace --features test-support <test_name>  # single-test filter — same syntax as `cargo test <test_name>`
+cargo test --workspace --features test-support  # CI-shape fallback / when you specifically need cargo test (doc tests, locked-deps, etc.)
 cargo clippy             # lint
 docker compose up -d --build  # build and run in Docker
 ```

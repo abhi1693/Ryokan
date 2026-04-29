@@ -229,7 +229,7 @@ impl Indexer for TorznabIndexer {
 
         let url = self.build_url("tvsearch", &params);
         let body = self.fetch(&url).await?;
-        let parsed = parse_search_response(&body, self.id, self.priority)?;
+        let parsed = parse_search_response(&body, self.id, self.priority, &self.name)?;
         let releases = match parsed {
             Ok(rs) => rs,
             Err(e) => return Err(format_torznab_error(&e)),
@@ -421,6 +421,7 @@ mod tests {
         Release {
             indexer_id: 7,
             indexer_priority: 25,
+            indexer_name: "TestIndexer".to_string(),
             title: "Show".to_string(),
             guid: "g".to_string(),
             link: String::new(),

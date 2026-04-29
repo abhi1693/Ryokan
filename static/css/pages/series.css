@@ -953,7 +953,16 @@
 }
 
 .modal-ep {
-    max-width: 1100px;
+    /* Interactive search has 8 columns (Score / Release / Indexer /
+       Group / Quality / Size / Seeds / Grab) and the Release title
+       can be 60+ chars before truncation. Stretch to ~96vw on a
+       desktop screen so the Grab button stays reachable without
+       horizontal scrolling on a typical 1080p+ viewport, and cap at
+       1600px so an ultrawide doesn't get an absurdly stretched
+       modal. The earlier 1320px cap left a long title wrapping on
+       a 1920px viewport, which then forced horizontal scroll
+       inside `.is-modal-scroll` to reach Grab. */
+    max-width: min(96vw, 1600px);
     width: 100%;
 }
 
@@ -1122,7 +1131,7 @@
 .interactive-search-table th {
     text-align: left;
     padding: 7px 10px;
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.4px;
@@ -1154,6 +1163,16 @@
 
 .interactive-search-table .col-quality { width: 120px; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
 
+/* Indexer attribution column. Narrow enough to fit a typical
+   tracker name ("nekoBT", "AnimeBytes") without word-wrap, wide
+   enough that the longer Generic Newznab fallback ("Generic
+   Newznab") still fits on one line. Nyaa-direct results render
+   "Nyaa" in this column when `indexer_name` is empty. Font size
+   intentionally unset so it inherits 12px from the table — the
+   header used to render larger than its siblings when this was
+   `font-size: 12px` AND the parent th rule was 10px. */
+.interactive-search-table .col-indexer { width: 110px; white-space: nowrap; }
+
 /* Release-title link in each row. Matches the manual search page's
    `.col-name a:hover` treatment so hovering a row makes it obvious
    the title opens the Nyaa view page. Without this, the inline
@@ -1170,9 +1189,17 @@
 }
 
 .is-modal-scroll {
+    /* Both axes of overflow — the table can outgrow the modal on
+       both axes (vertical: many rows; horizontal: long release
+       titles + 8 columns push past the modal-body's inner width
+       on smaller viewports). Without `overflow-x: auto` the table
+       gets clipped at the modal's right edge and the Grab button
+       becomes unreachable; with it, the user can scroll horizontally
+       as a safety net even when the modal-ep max-width can't fit
+       the table at the current viewport. */
     overflow-y: auto;
+    overflow-x: auto;
     max-height: 480px;
-    
     padding-top: 0;
     padding-bottom: 0;
 }

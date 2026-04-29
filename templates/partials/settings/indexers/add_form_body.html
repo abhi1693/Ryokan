@@ -1,0 +1,164 @@
+{# Modal body for the Add flow. Returned by `GET /settings/
+   indexers/add-form?template=<slug>` and swapped into
+   `#indexer-modal-body` (innerHTML) when the user clicks one of
+   the catalog seed cards. `seed = None` (no template / unknown
+   slug) renders a blank Add form. #}
+<form method="post" action="/settings/indexers/upsert"
+      class="dc-modal-form"
+      hx-post="/settings/indexers/upsert"
+      hx-target="#indexer-section"
+      hx-swap="outerHTML">
+    {% if let Some(seed) = seed %}
+    {% if !seed.notes.is_empty() %}
+    <div class="indexer-seed-notes" style="margin: 0 24px 12px;">
+        <strong>{{ seed.display_name }}:</strong> {{ seed.notes }}
+    </div>
+    {% endif %}
+    {% endif %}
+    <div class="modal-body">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="indexer-add-name">Name</label>
+                <input id="indexer-add-name" type="text" name="name" required maxlength="100"
+                       value="{% if let Some(seed) = seed %}{{ seed.display_name }}{% endif %}"
+                       placeholder="e.g. Prowlarr">
+            </div>
+            <div class="form-group">
+                <label for="indexer-add-kind">Kind</label>
+                {# `data-indexer-kind-select` — wire-up for the kind-aware
+                   hint helper in static/js/settings.js. Same pattern as
+                   the DC modal's `data-dc-kind-select`. Swaps the API
+                   Key hint copy and the URL placeholder when the user
+                   flips between torznab and newznab. #}
+                <select id="indexer-add-kind" name="kind" data-indexer-kind-select>
+                    {% if let Some(seed) = seed %}
+                    <option value="torznab" {% if seed.default_kind == "torznab" %}selected{% endif %}>torznab</option>
+                    <option value="newznab" {% if seed.default_kind == "newznab" %}selected{% endif %}>newznab</option>
+                    {% else %}
+                    <option value="torznab" selected>torznab</option>
+                    <option value="newznab">newznab</option>
+                    {% endif %}
+                </select>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="indexer-add-url">URL</label>
+            <input id="indexer-add-url" type="url" name="url" required
+                   placeholder="{% if let Some(seed) = seed %}{{ seed.url_placeholder }}{% else %}https://prowlarr.local/{N}/api{% endif %}"
+                   data-indexer-url-input>
+        </div>
+
+        <div class="form-group">
+            <label for="indexer-add-key">API Key</label>
+            <input id="indexer-add-key" type="text" name="api_key" autocomplete="off"
+                   placeholder="from Prowlarr Settings &rarr; General">
+            <span class="form-hint" data-indexer-api-key-hint>Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label for="indexer-add-priority">Priority</label>
+                <input id="indexer-add-priority" type="number" name="priority"
+                       value="{% if let Some(seed) = seed %}{{ seed.default_priority }}{% else %}25{% endif %}"
+                       min="1" max="50">
+                <span class="form-hint">Lower = preferred. Range 1-50.</span>
+            </div>
+            <div class="form-group">
+                <label for="indexer-add-min-seeders">Min Seeders</label>
+                <input id="indexer-add-min-seeders" type="number" name="min_seeders"
+                       value="{% if let Some(seed) = seed %}{{ seed.default_min_seeders }}{% else %}1{% endif %}"
+                       min="0">
+                <span class="form-hint">Releases below this floor are dropped before scoring.</span>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="indexer-add-timeout">Request Timeout (seconds)</label>
+            <input id="indexer-add-timeout" type="number" name="request_timeout_secs" min="1" max="600" placeholder="30">
+            <span class="form-hint">Per-indexer override. Blank uses the default (30s).</span>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label for="indexer-add-ratio">Seed Ratio</label>
+                <input id="indexer-add-ratio" type="number" name="seed_ratio" step="0.1" min="0"
+                       value="{% if let Some(seed) = seed %}{% if let Some(r) = seed.default_seed_ratio %}{{ r }}{% endif %}{% endif %}"
+                       placeholder="(client default)">
+                <span class="form-hint">Per-torrent seed ratio passed to the download client at add time.</span>
+            </div>
+            <div class="form-group">
+                <label for="indexer-add-seed-time">Seed Time (minutes)</label>
+                <input id="indexer-add-seed-time" type="number" name="seed_time_minutes" min="0"
+                       value="{% if let Some(seed) = seed %}{% if let Some(m) = seed.default_seed_time_minutes %}{{ m }}{% endif %}{% endif %}"
+                       placeholder="(client default)">
+                <span class="form-hint">Per-torrent minimum seed time.</span>
+            </div>
+        </div>
+
+        {# `enabled` checkbox dropped — UX decision: disabling an
+           indexer via a hidden flag is rarely the right action; users
+           who don't want results from an indexer just delete the row.
+           Hidden input pins `enabled=on` so the upsert handler's
+           `is_some()` check still resolves true and the resulting row
+           lands in `services::indexers::list_enabled`'s WHERE-filter.
+           Kept the column in the schema (services::indexers and the
+           cache builder still WHERE-filter on it) — only removing the
+           UI surface. #}
+        <input type="hidden" name="enabled" value="on">
+
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" name="is_private_tracker"
+                       {% if let Some(seed) = seed %}{% if seed.is_private_tracker %}checked{% endif %}{% endif %}>
+                Private tracker
+            </label>
+            <span class="form-hint">Marks this indexer as PT for the per-series upgrade opt-in.</span>
+        </div>
+
+        <div class="form-group">
+            <label class="checkbox-label">
+                {# PT trackers default-on for RSS — they're the
+                   primary use case for the auto-sync (new uploads,
+                   freeleech windows, etc.). Public trackers default
+                   off. #}
+                <input type="checkbox" name="rss_enabled"
+                       {% if let Some(seed) = seed %}{% if seed.is_private_tracker %}checked{% endif %}{% endif %}>
+                Enable RSS auto-sync
+            </label>
+            <span class="form-hint">When enabled, RSS sync will poll this indexer's RSS feed for newly-uploaded releases on every interval.</span>
+        </div>
+
+        <div class="form-group">
+            <label for="indexer-add-dc">Download Client</label>
+            <select id="indexer-add-dc" name="download_client_id">
+                <option value="">(use default)</option>
+                {% for dc in download_clients %}
+                <option value="{{ dc.id }}"
+                    data-protocol="{% if dc.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %}">
+                    {{ dc.name }}{% if dc.is_default %} (default){% endif %}
+                </option>
+                {% endfor %}
+            </select>
+            <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag. Torznab indexers can only be pinned to torrent clients; newznab indexers to usenet clients (SABnzbd).</span>
+        </div>
+    </div>
+    <div class="modal-footer">
+        {# Test button — works for unsaved configurations via the
+           stateless `/api/indexers/test` endpoint. `hx-include`
+           pulls every form field so kind / url / api_key flow
+           through; the JSON envelope is converted to a toast in
+           static/js/settings.js's `ryokan-indexer-test-result`
+           listener so the modal footer doesn't grow with the
+           result text. #}
+        <button type="button" class="btn btn-secondary"
+                hx-post="/api/indexers/test"
+                hx-include="closest form"
+                hx-swap="none"
+                hx-disabled-elt="this"
+                onclick="ryokanWaitForIndexerTest(this)">Test</button>
+        <span style="margin-right:auto"></span>
+        <button type="button" class="btn btn-secondary" onclick="closeIndexerModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Add Indexer</button>
+    </div>
+</form>

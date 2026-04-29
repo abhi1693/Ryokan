@@ -510,7 +510,8 @@ mod tests {
         clients.insert(2, pinned_client.clone());
         let pool = crate::DownloadClientPool {
             clients,
-            default_id: Some(1),
+            default_torrent_id: Some(1),
+            default_usenet_id: None,
         };
         let state = build_test_app_state(db.clone(), None);
         // Override the pool — `build_test_app_state` left it empty

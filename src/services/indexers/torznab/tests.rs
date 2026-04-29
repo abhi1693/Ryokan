@@ -80,7 +80,7 @@ const SEARCH_RESPONSE_BASIC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
 #[test]
 fn search_response_extracts_basic_release_fields() {
-    let result = parse_search_response(SEARCH_RESPONSE_BASIC, 7, 25)
+    let result = parse_search_response(SEARCH_RESPONSE_BASIC, 7, 25, "TestIndexer")
         .expect("parse must succeed")
         .expect("body must not be an error");
     assert_eq!(result.len(), 1);
@@ -106,7 +106,7 @@ fn search_response_promotes_enclosure_url_over_link() {
     // The enclosure URL is the canonical download path per spec;
     // <link> is sometimes a comments-page URL. Prefer enclosure.
     let xml = SEARCH_RESPONSE_BASIC;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(
@@ -127,7 +127,7 @@ fn search_response_falls_back_to_size_from_enclosure_when_no_size_attr() {
   <enclosure url="u" length="500000000" type="application/x-bittorrent"/>
   <torznab:attr name="seeders" value="10"/>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(result[0].size_bytes, 500_000_000);
@@ -145,7 +145,7 @@ fn search_response_derives_leechers_from_peers_when_missing() {
   <torznab:attr name="seeders" value="40"/>
   <torznab:attr name="peers" value="50"/>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(
@@ -162,7 +162,7 @@ fn search_response_skips_items_with_empty_title() {
 <item><title></title><guid>g1</guid></item>
 <item><title>Real Title</title><guid>g2</guid></item>
 </channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(result.len(), 1, "title-less items must drop");
@@ -177,7 +177,7 @@ fn search_response_decodes_xml_entities_in_title() {
   <title>Show &amp; Friends</title>
   <guid>g1</guid>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(result[0].title, "Show & Friends");
@@ -191,7 +191,7 @@ fn search_response_handles_cdata_wrapped_title() {
   <title><![CDATA[Show & <Friends>]]></title>
   <guid>g1</guid>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(result[0].title, "Show & <Friends>");
@@ -203,7 +203,8 @@ fn search_response_returns_inner_err_for_torznab_error_body() {
     // caller can branch on the torznab error code.
     let err_xml = r#"<?xml version="1.0"?>
 <error code="100" description="Bad API Key"/>"#;
-    let result = parse_search_response(err_xml, 1, 25).expect("outer parse must not fail");
+    let result =
+        parse_search_response(err_xml, 1, 25, "TestIndexer").expect("outer parse must not fail");
     let err = match result {
         Err(e) => e,
         Ok(_) => panic!("error body must surface as Err"),
@@ -215,7 +216,7 @@ fn search_response_returns_inner_err_for_torznab_error_body() {
 fn search_response_empty_channel_returns_empty_releases_not_error() {
     let xml = r#"<?xml version="1.0"?>
 <rss version="2.0"><channel><title>Empty</title></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert!(result.is_empty());
@@ -238,7 +239,7 @@ fn search_response_carries_multiple_categories_when_release_is_double_tagged() {
   <torznab:attr name="category" value="5070"/>
   <torznab:attr name="seeders" value="10"/>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(result[0].categories.len(), 2, "both cats must surface");
@@ -259,7 +260,7 @@ fn search_response_collects_unrecognized_attrs_into_extra() {
   <torznab:attr name="seeders" value="5"/>
   <torznab:attr name="customField" value="indexer-specific-data"/>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(
@@ -280,7 +281,7 @@ fn search_response_pubdate_parses_to_unix_timestamp() {
   <guid>g1</guid>
   <pubDate>Thu, 01 Jan 1970 00:00:00 +0000</pubDate>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(result[0].publish_date, 0, "epoch should round-trip to 0");
@@ -297,7 +298,7 @@ fn search_response_pubdate_handles_positive_timezone_offset() {
   <guid>g1</guid>
   <pubDate>Thu, 01 Jan 1970 05:00:00 +0500</pubDate>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(
@@ -319,7 +320,7 @@ fn search_response_pubdate_handles_negative_timezone_offset() {
   <guid>g1</guid>
   <pubDate>Wed, 31 Dec 1969 19:00:00 -0500</pubDate>
 </item></channel></rss>"#;
-    let result = parse_search_response(xml, 1, 25)
+    let result = parse_search_response(xml, 1, 25, "TestIndexer")
         .expect("parse")
         .expect("not error");
     assert_eq!(

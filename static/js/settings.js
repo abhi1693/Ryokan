@@ -194,6 +194,46 @@ document.body.addEventListener('ryokan-dc-test-result', function (ev) {
         body: detail.message || '',
     });
 });
+// Indexer Test result — same shape as the DC variant. Server fires
+// `ryokan-indexer-test-result` via HX-Trigger from /api/indexers/test.
+// Used by both the modal-footer Test button (Add and Edit) and the
+// per-card Test button on the configured-indexer cards.
+document.body.addEventListener('ryokan-indexer-test-result', function (ev) {
+    const detail = ev.detail || {};
+    window.ryokanToast({
+        kind: detail.ok ? 'success' : 'error',
+        category: 'indexer',
+        title: detail.ok ? 'Indexer reachable' : 'Indexer test failed',
+        body: detail.message || '',
+    });
+});
+// Companion to the modal-footer Test button. htmx's `hx-disabled-elt`
+// re-enables the button on htmx:afterRequest automatically, but we
+// also want the button text to flash "Testing…" while the request is
+// in flight so the user has visual feedback. No-op when called
+// outside an htmx context.
+window.ryokanWaitForIndexerTest = function (btn) {
+    if (!btn) return;
+    const original = btn.textContent;
+    btn.textContent = 'Testing…';
+    const restore = function () { btn.textContent = original; };
+    // htmx:afterRequest fires once per request. Use a one-shot
+    // listener scoped to this btn so concurrent Test clicks elsewhere
+    // don't restore each other prematurely.
+    const handler = function (ev) {
+        if (ev.target === btn) {
+            restore();
+            btn.removeEventListener('htmx:afterRequest', handler);
+        }
+    };
+    btn.addEventListener('htmx:afterRequest', handler);
+    // Safety net: if htmx swallows the event for some reason (e.g. the
+    // request errors out before sending), the disabled-elt timer
+    // restores the button after 6s.
+    setTimeout(function() {
+        if (btn.textContent === 'Testing…') restore();
+    }, 6000);
+};
 // Backdrop-click + Escape dismissal. Re-bound on every section swap
 // because the modal element is replaced when #dc-section re-renders;
 // htmx fires `htmx:afterSwap` on the swap target, so we listen there
@@ -222,6 +262,318 @@ document.body.addEventListener('ryokan-dc-test-result', function (ev) {
         }
     });
 })();
+
+// ── DC modal: kind-aware credential / hint relabel ────────────────
+//
+// The download_clients table has one schema (name, kind, url, username,
+// password, label, download_path) but five client kinds map onto it
+// differently — most notably SAB, where the `password` column carries
+// the API key and `username` is unused. The form templates carry the
+// raw column names + generic labels by default, then this helper
+// rewrites labels / hints / input types when the kind dropdown
+// changes so the UI accurately describes what each field means for
+// the currently-selected kind.
+//
+// Wired off `data-dc-*` markers so it works for both add_form_body
+// and edit_form_body without per-form duplication. Re-runs on:
+//   1. modal open (htmx:afterSwap into #dc-modal-body) — sets the
+//      initial state for an Edit form whose kind is already
+//      pre-selected.
+//   2. kind dropdown change — handles the user flipping kinds while
+//      composing the form.
+//
+// The DC_KIND_COPY map is the source of truth for per-kind copy.
+// Keep new kinds here in sync with `models::download_clients`'s
+// `protocol_for_kind` so the protocol-mismatch guard at save time
+// doesn't reject inputs the form description encouraged the user
+// to enter.
+const DC_KIND_COPY = {
+    qbittorrent: {
+        url_placeholder: 'http://localhost:8080',
+        url_hint: "Point at qBittorrent's Web UI base. Ryokan handles the API path internally.",
+        username_visible: true,
+        username_hint: "qBit's Web UI username (default is admin).",
+        password_label: 'Password',
+        password_type: 'password',
+        password_hint: "qBit's Web UI password. qBittorrent 4.6.1+ generates a random temporary password on first start. Pre-4.6.1's default password is 'adminadmin'.",
+        label_label: 'Category',
+        label_hint: "qBit category Ryokan tags every torrent with. Determines scoping (Ryokan only sees torrents in this category) AND the post-processing target directory if qBit's category-rule has one set.",
+    },
+    deluge: {
+        url_placeholder: 'http://localhost:8112',
+        url_hint: "Point at Deluge's Web UI base.",
+        username_visible: false,
+        username_hint: '',
+        password_label: 'Password',
+        password_type: 'password',
+        password_hint: "Deluge Web UI password. Deluge has no per-user auth at the API layer; the password is the only credential.",
+        label_label: 'Label',
+        label_hint: "Deluge's Label plugin tag. The plugin must be enabled; Ryokan auto-enables it on first connect when Label shows up in available_plugins but not enabled_plugins.",
+    },
+    transmission: {
+        url_placeholder: 'http://localhost:9091',
+        url_hint: "Point at Transmission's RPC endpoint base.",
+        username_visible: true,
+        username_hint: "Transmission HTTP Basic auth user (matches rpc-username in settings.json).",
+        password_label: 'Password',
+        password_type: 'password',
+        password_hint: "Transmission HTTP Basic auth password (matches rpc-password in settings.json).",
+        label_label: 'Label',
+        label_hint: "Transmission native label (4.x+). On 3.x and earlier Ryokan falls back to a save-path prefix for scoping.",
+    },
+    rtorrent: {
+        url_placeholder: 'http://localhost/RPC2',
+        url_hint: "Point at rtorrent's XML-RPC endpoint (typically /RPC2 under the SCGI / nginx proxy).",
+        username_visible: true,
+        username_hint: "HTTP Basic auth user if the RPC endpoint is fronted by nginx with auth_basic. Leave blank for unauthenticated RPC.",
+        password_label: 'Password',
+        password_type: 'password',
+        password_hint: "HTTP Basic auth password matching the username above.",
+        label_label: 'Label',
+        label_hint: "Sets the custom1 field on every added torrent (the ruTorrent label convention). Ryokan filters list_scoped by this tag.",
+    },
+    sabnzbd: {
+        url_placeholder: 'http://localhost:8080',
+        url_hint: "Point at SABnzbd's Web UI base. Ryokan appends /api. If your SAB has URL_BASE set (e.g. /sabnzbd), include it: http://host:8080/sabnzbd.",
+        username_visible: false,
+        username_hint: '',
+        password_label: 'API Key',
+        // text (not password) so the user can see what they pasted.
+        // API keys aren't really secrets in the way a user-chosen
+        // password is, and verifying the value visually is more
+        // useful here than masking it.
+        password_type: 'text',
+        password_hint: "SABnzbd's API key. Find it in SABnzbd → Config → General → Security → API Key.",
+        label_label: 'Category',
+        label_hint: "SAB category. Determines the post-processing target directory. Ryokan filters list_scoped by category so it only sees jobs it added.",
+    },
+};
+// Map a download-client kind to its protocol family. Mirrors
+// `models::download_clients::protocol_for_kind` on the server side;
+// keep them in sync if a new kind lands.
+function dcProtocolForKind(kind) {
+    if (kind === 'sabnzbd') return 'usenet';
+    return 'torrent';
+}
+function applyDcKindCopy(form, kind) {
+    if (!form) return;
+    const copy = DC_KIND_COPY[kind] || DC_KIND_COPY.qbittorrent;
+
+    // Per-protocol "first client" auto-check on the Default checkbox.
+    // The handler stamps `data-first-torrent` / `data-first-usenet`
+    // on the checkbox at render time so a kind flip can re-evaluate
+    // without a server round-trip. Only auto-check on KIND CHANGE
+    // (not on every relabel pass) so the user can uncheck the box
+    // and have the uncheck stick across other field edits — without
+    // this guard, every change to URL / username etc. would re-run
+    // the relabel and force-check the box back. The
+    // `dc-prev-kind` data attr tracks "what kind was previously
+    // selected" so we only flip the checkbox the moment the user
+    // changes the dropdown.
+    const defaultBox = form.querySelector('[data-dc-default-checkbox]');
+    if (defaultBox) {
+        const prevKind = form.dataset.dcPrevKind;
+        if (prevKind !== kind) {
+            const protocol = dcProtocolForKind(kind);
+            const flag = protocol === 'usenet' ? defaultBox.dataset.firstUsenet : defaultBox.dataset.firstTorrent;
+            defaultBox.checked = flag === '1';
+        }
+        form.dataset.dcPrevKind = kind;
+    }
+
+    const urlInput = form.querySelector('[data-dc-url-input]');
+    if (urlInput) urlInput.placeholder = copy.url_placeholder;
+    const urlHint = form.querySelector('[data-dc-url-hint]');
+    if (urlHint) urlHint.textContent = copy.url_hint;
+
+    const usernameGroup = form.querySelector('[data-dc-username-group]');
+    if (usernameGroup) {
+        usernameGroup.style.display = copy.username_visible ? '' : 'none';
+    }
+    const usernameHint = form.querySelector('[data-dc-username-hint]');
+    if (usernameHint) usernameHint.textContent = copy.username_hint;
+
+    const passwordLabel = form.querySelector('[data-dc-password-label]');
+    if (passwordLabel) passwordLabel.textContent = copy.password_label;
+    const passwordInput = form.querySelector('[data-dc-password-input]');
+    if (passwordInput) passwordInput.type = copy.password_type;
+    const passwordHint = form.querySelector('[data-dc-password-hint]');
+    if (passwordHint) {
+        if (copy.password_hint) {
+            passwordHint.textContent = copy.password_hint;
+            passwordHint.style.display = '';
+        } else {
+            passwordHint.textContent = '';
+            passwordHint.style.display = 'none';
+        }
+    }
+
+    const labelLabel = form.querySelector('[data-dc-label-label]');
+    if (labelLabel) labelLabel.textContent = copy.label_label;
+    const labelHint = form.querySelector('[data-dc-label-hint]');
+    if (labelHint) labelHint.textContent = copy.label_hint;
+}
+function bindDcKindCopyToForm(form) {
+    if (!form || form.dataset.dcKindBound === '1') return;
+    form.dataset.dcKindBound = '1';
+    const kindSelect = form.querySelector('[data-dc-kind-select]');
+    if (!kindSelect) return;
+    // Pre-seed `dc-prev-kind` to the CURRENT kind so the initial
+    // `applyDcKindCopy` pass skips the Default-checkbox toggle. The
+    // server already rendered the right initial state — for Add via
+    // `first_torrent_client` (kind defaults to qBit/torrent), for
+    // Edit via `row.is_default || first-of-protocol`. Without this
+    // pre-seed, the initial pass would clobber Edit's checkbox state
+    // (a user editing a non-default torrent client when another
+    // torrent client IS the default would see the box auto-checked,
+    // which is wrong).
+    form.dataset.dcPrevKind = kindSelect.value;
+    applyDcKindCopy(form, kindSelect.value);
+    kindSelect.addEventListener('change', function() {
+        applyDcKindCopy(form, kindSelect.value);
+    });
+}
+// htmx swaps the modal-body when an Edit/Add modal opens. Run the
+// relabel pass on every fresh body so the initial state matches the
+// pre-selected kind (Edit) or the qBittorrent default (Add).
+document.body.addEventListener('htmx:afterSettle', function(ev) {
+    if (ev.target && ev.target.id === 'dc-modal-body') {
+        const form = ev.target.querySelector('form');
+        if (form) bindDcKindCopyToForm(form);
+    }
+});
+// Initial load (the section partial pre-renders the Add form body so
+// the modal opens fast on first click — see download_clients/list.html
+// `{%~ include "...add_form_body.html" %}`). Apply the relabel pass
+// to that pre-rendered form too so the user sees correct copy if
+// they happen to change kind before any modal swap fires.
+window.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('#dc-modal-body form').forEach(bindDcKindCopyToForm);
+});
+
+// ── Settings → Indexers shared add/edit modal ─────────────────────
+// Mirrors the DC modal flow. Catalog seed cards →
+// `openIndexerAddModal(slug, name)` fetches the Add form pre-filled
+// with that seed's defaults; existing-indexer cards →
+// `openIndexerEditModal(id, name)` fetches the row's Edit form. Both
+// land in `#indexer-modal-body`. After a successful save the form's
+// hx-target="#indexer-section" causes the server's section-partial
+// response to replace the entire section, including the modal, at
+// display:none — closing + resetting in one shot.
+function openIndexerModal(title) {
+    const modal = document.getElementById('indexer-modal');
+    if (!modal) return;
+    if (typeof title === 'string' && title.length > 0) {
+        const titleEl = document.getElementById('indexer-modal-title');
+        if (titleEl) titleEl.textContent = title;
+    }
+    modal.style.display = 'flex';
+    // Focus first text/url input in the freshly-swapped body for
+    // keyboard ergonomics. Run after a microtask so the htmx.ajax
+    // call below has a chance to swap the body in first.
+    setTimeout(function() {
+        const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+        if (firstInput) firstInput.focus();
+    }, 50);
+}
+function closeIndexerModal() {
+    const modal = document.getElementById('indexer-modal');
+    if (modal) modal.style.display = 'none';
+}
+function openIndexerEditModal(id, name) {
+    openIndexerModal('Editing ' + (name || 'indexer'));
+    if (window.htmx) {
+        window.htmx.ajax(
+            'GET',
+            '/settings/indexers/' + encodeURIComponent(id) + '/edit-form',
+            { target: '#indexer-modal-body', swap: 'innerHTML' }
+        );
+    }
+}
+function openIndexerAddModal(slug, name) {
+    openIndexerModal('Add ' + (name || 'indexer'));
+    if (window.htmx) {
+        const url = slug
+            ? '/settings/indexers/add-form?template=' + encodeURIComponent(slug)
+            : '/settings/indexers/add-form';
+        window.htmx.ajax(
+            'GET',
+            url,
+            { target: '#indexer-modal-body', swap: 'innerHTML' }
+        );
+    }
+}
+// Backdrop-click + Escape dismissal. Re-bound on every section swap
+// because the modal element is replaced when #indexer-section
+// re-renders.
+(function() {
+    function bindIndexerModal() {
+        const modal = document.getElementById('indexer-modal');
+        if (!modal) return;
+        if (modal.dataset.bound === '1') return;
+        modal.dataset.bound = '1';
+        modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) closeIndexerModal();
+        });
+    }
+    bindIndexerModal();
+    document.body.addEventListener('htmx:afterSwap', function(ev) {
+        if (ev.target && ev.target.id === 'indexer-section') {
+            bindIndexerModal();
+        }
+    });
+    document.addEventListener('keydown', function(ev) {
+        const modal = document.getElementById('indexer-modal');
+        if (!modal) return;
+        if (ev.key === 'Escape' && modal.style.display !== 'none') {
+            closeIndexerModal();
+        }
+    });
+})();
+
+// ── Indexer modal: kind-aware hint relabel ────────────────────────
+//
+// Same shape as the DC modal's `applyDcKindCopy` but for the
+// indexer Add/Edit form. The protocol-specific hint under the API
+// Key field calls out the wire format ("torznab spec" vs "newznab
+// spec") and the URL placeholder follows Prowlarr's per-protocol
+// path conventions. Without this, both kinds shared the torznab-
+// only hint copy, which read incorrectly when the user picked
+// newznab.
+const INDEXER_KIND_COPY = {
+    torznab: {
+        url_placeholder: 'https://prowlarr.local/{N}/api',
+        api_key_hint: "Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them. Find this key in Prowlarr Settings → General (or Jackett's UI).",
+    },
+    newznab: {
+        url_placeholder: 'https://nzb.indexer.example/api',
+        api_key_hint: "Sent in the request URL per newznab spec; the same key Sonarr/Radarr/Prowlarr use against this indexer. For Prowlarr-fronted indexers, find it in Prowlarr Settings → General; for direct-to-indexer setups, find it on the indexer's site (e.g. NZBGeek → Profile → API Key).",
+    },
+};
+function applyIndexerKindCopy(form, kind) {
+    if (!form) return;
+    const copy = INDEXER_KIND_COPY[kind] || INDEXER_KIND_COPY.torznab;
+    const urlInput = form.querySelector('[data-indexer-url-input]');
+    if (urlInput) urlInput.placeholder = copy.url_placeholder;
+    const apiKeyHint = form.querySelector('[data-indexer-api-key-hint]');
+    if (apiKeyHint) apiKeyHint.textContent = copy.api_key_hint;
+}
+function bindIndexerKindCopyToForm(form) {
+    if (!form || form.dataset.indexerKindBound === '1') return;
+    form.dataset.indexerKindBound = '1';
+    const kindSelect = form.querySelector('[data-indexer-kind-select]');
+    if (!kindSelect) return;
+    applyIndexerKindCopy(form, kindSelect.value);
+    kindSelect.addEventListener('change', function() {
+        applyIndexerKindCopy(form, kindSelect.value);
+    });
+}
+document.body.addEventListener('htmx:afterSettle', function(ev) {
+    if (ev.target && ev.target.id === 'indexer-modal-body') {
+        const form = ev.target.querySelector('form');
+        if (form) bindIndexerKindCopyToForm(form);
+    }
+});
 
 // #11.4 — CF export selector. Radios pick the mode, checkboxes pick the
 // ids, then two actions: download the file (via the existing GET endpoint)

@@ -5,7 +5,7 @@
 
 use wiremock::MockServer;
 
-use crate::models::indexers::{Indexer as IndexerRow, KIND_TORZNAB};
+use crate::models::indexers::{Indexer as IndexerRow, KIND_NEWZNAB, KIND_TORZNAB};
 use crate::services::indexers::torznab::TorznabIndexer;
 
 pub const TEST_API_KEY: &str = "wiremock-key-01234567";
@@ -14,11 +14,25 @@ pub const TEST_API_KEY: &str = "wiremock-key-01234567";
 /// `TorznabIndexer` configured to talk to it. The base URL points
 /// at `<server>/api` so tests register `Mock`s on `path("/api")`.
 pub async fn new_fixture() -> (MockServer, TorznabIndexer) {
+    new_fixture_with_kind(KIND_TORZNAB, "Wiremock").await
+}
+
+/// Newznab variant — same wire format and same `TorznabIndexer`
+/// client (newznab is a strict subset of torznab without the
+/// torrent-specific attrs), but the row's `kind` column reads
+/// "newznab". Used by the indexer-name-propagation tests so the
+/// "Indexer" column on interactive search verifiably attributes
+/// usenet-side hits the same way it attributes torrent-side ones.
+pub async fn new_fixture_newznab() -> (MockServer, TorznabIndexer) {
+    new_fixture_with_kind(KIND_NEWZNAB, "WiremockUsenet").await
+}
+
+async fn new_fixture_with_kind(kind: &str, display_name: &str) -> (MockServer, TorznabIndexer) {
     let server = MockServer::start().await;
     let row = IndexerRow {
         id: 7,
-        name: "Wiremock".to_string(),
-        kind: KIND_TORZNAB.to_string(),
+        name: display_name.to_string(),
+        kind: kind.to_string(),
         url: format!("{}/api", server.uri()),
         api_key: TEST_API_KEY.to_string(),
         priority: 25,

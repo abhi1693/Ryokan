@@ -114,6 +114,20 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* Cross-document view transitions — opt every same-origin
+   navigation into the browser's built-in crossfade so back/forward
+   and direct link clicks stop flashing the empty page chrome
+   between renders. `navigation: auto` is the entire surface;
+   browsers that don't support cross-document transitions yet
+   (Firefox <141, Safari <18, anything pre-Chromium-126) ignore
+   the rule and get the prior hard-cut behavior. The same
+   `::view-transition-old` / `::view-transition-new` pseudo-element
+   tree powers htmx's `globalViewTransitions` config, so any future
+   tuning here applies to boosted swaps once `hx-boost` lands. */
+@view-transition {
+    navigation: auto;
+}
+
 body {
     background: var(--bg);
     color: var(--text);

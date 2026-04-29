@@ -139,52 +139,66 @@ pub async fn delete_episode_file(
                     .unwrap_or_default();
             let mut qbit_removed: Vec<String> = Vec::new();
             if !imported_grabs.is_empty() {
-                let client = state.default_download_client().await;
-                if let Some(client) = client {
-                    for grab in &imported_grabs {
-                        if grab.is_batch {
-                            continue;
+                // Per-grab client routing: each grab row stamps its
+                // `download_client_id` at grab time so a SAB grab
+                // doesn't get sent to a qBit `delete` (no-op since
+                // qBit doesn't know that nzo_id) and vice-versa.
+                // Legacy grab rows with NULL fall back to the
+                // torrent default.
+                let default_client = state.default_download_client().await;
+                for grab in &imported_grabs {
+                    if grab.is_batch {
+                        continue;
+                    }
+                    if grab.hash.is_empty() {
+                        continue;
+                    }
+                    // Issue #28 PR C — skip the client-side
+                    // delete for grabs from a PT indexer with
+                    // seed rules in effect; the client owns
+                    // when seeding ends. The grab row still
+                    // gets `mark_removed` so the upgrade sweep
+                    // doesn't re-grab.
+                    if grabbed_torrents::respects_seed_rules(&state.db, &grab.hash).await {
+                        logger::info(
+                            &state.db,
+                            LogCategory::DownloadClient,
+                            &format!(
+                                "Skipping client delete for {} (respect_seed_rules); client will stop on its own ratio policy",
+                                grab.torrent_name
+                            ),
+                            &grab.hash,
+                        )
+                        .await;
+                        let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
+                        continue;
+                    }
+                    let client_for_grab = match grab.download_client_id {
+                        Some(id) => match state.client_by_id(id).await {
+                            Some(c) => Some(c),
+                            None => default_client.clone(),
+                        },
+                        None => default_client.clone(),
+                    };
+                    let Some(client) = client_for_grab else {
+                        continue;
+                    };
+                    match client.delete(&grab.hash, true).await {
+                        Ok(()) => {
+                            qbit_removed.push(grab.torrent_name.clone());
+                            let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
                         }
-                        if grab.hash.is_empty() {
-                            continue;
-                        }
-                        // Issue #28 PR C — skip the client-side
-                        // delete for grabs from a PT indexer with
-                        // seed rules in effect; the client owns
-                        // when seeding ends. The grab row still
-                        // gets `mark_removed` so the upgrade sweep
-                        // doesn't re-grab.
-                        if grabbed_torrents::respects_seed_rules(&state.db, &grab.hash).await {
-                            logger::info(
+                        Err(e) => {
+                            logger::warn(
                                 &state.db,
                                 LogCategory::DownloadClient,
                                 &format!(
-                                    "Skipping client delete for {} (respect_seed_rules); client will stop on its own ratio policy",
-                                    grab.torrent_name
+                                    "Download client delete failed for episode {} torrent '{}' — continuing with file delete",
+                                    episode_number, grab.torrent_name
                                 ),
-                                &grab.hash,
+                                &e,
                             )
                             .await;
-                            let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
-                            continue;
-                        }
-                        match client.delete(&grab.hash, true).await {
-                            Ok(()) => {
-                                qbit_removed.push(grab.torrent_name.clone());
-                                let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
-                            }
-                            Err(e) => {
-                                logger::debug(
-                                    &state.db,
-                                    LogCategory::DownloadClient,
-                                    &format!(
-                                        "Download client delete failed for episode {} torrent '{}' — continuing with file delete",
-                                        episode_number, grab.torrent_name
-                                    ),
-                                    &e,
-                                )
-                                .await;
-                            }
                         }
                     }
                 }
@@ -347,26 +361,38 @@ pub async fn cancel_pending_episode(
         "cancel_pending_episode: matching grabs"
     );
 
-    let client = state.default_download_client().await;
+    // Per-grab client routing: each grab row's `download_client_id`
+    // points at the client that holds it. Legacy NULLs fall back to
+    // the torrent default so cancel still works on rows that pre-date
+    // the multi-client refactor.
+    let default_client = state.default_download_client().await;
 
     let mut removed_count = 0;
     let mut torrent_failures: Vec<String> = Vec::new();
     for grab in &pending {
-        if !grab.hash.is_empty()
-            && let Some(ref client) = client
-            && let Err(e) = client.delete(&grab.hash, true).await
-        {
-            torrent_failures.push(format!("{}: {}", grab.torrent_name, e));
-            logger::warn(
-                &state.db,
-                LogCategory::DownloadClient,
-                &format!(
-                    "Failed to remove pending torrent for S?E{:02} cancel: '{}'",
-                    episode_number, grab.torrent_name
-                ),
-                &e,
-            )
-            .await;
+        if !grab.hash.is_empty() {
+            let client_for_grab = match grab.download_client_id {
+                Some(id) => match state.client_by_id(id).await {
+                    Some(c) => Some(c),
+                    None => default_client.clone(),
+                },
+                None => default_client.clone(),
+            };
+            if let Some(client) = client_for_grab
+                && let Err(e) = client.delete(&grab.hash, true).await
+            {
+                torrent_failures.push(format!("{}: {}", grab.torrent_name, e));
+                logger::warn(
+                    &state.db,
+                    LogCategory::DownloadClient,
+                    &format!(
+                        "Failed to remove pending torrent for S?E{:02} cancel: '{}'",
+                        episode_number, grab.torrent_name
+                    ),
+                    &e,
+                )
+                .await;
+            }
         }
 
         if let Err(e) = grabbed_torrents::mark_removed(&state.db, grab.id).await {
@@ -491,42 +517,55 @@ pub async fn mark_episode_failed(
         grabbed_torrents::find_imported_for_episode(&state.db, series_id, episode_number).await
         && !old_grabs.is_empty()
     {
-        let client = { state.default_download_client().await };
-        if let Some(client) = client {
-            for old in &old_grabs {
-                if old.hash.is_empty() {
-                    continue;
-                }
-                // Issue #28 PR C — preserve PT seed rules across
-                // episode-replace. The old torrent has already
-                // imported successfully and is seeding to its
-                // per-tracker ratio/time policy; deleting it
-                // mid-seed could ding the user's tracker ratio.
-                if grabbed_torrents::respects_seed_rules(&state.db, &old.hash).await {
-                    crate::services::logger::info(
-                        &state.db,
-                        crate::models::log::LogCategory::DownloadClient,
-                        &format!(
-                            "Skipping client delete for replaced torrent {} (respect_seed_rules)",
-                            old.torrent_name
-                        ),
-                        &old.hash,
-                    )
-                    .await;
-                    continue;
-                }
-                if let Err(e) = client.delete(&old.hash, true).await {
-                    crate::services::logger::warn(
-                        &state.db,
-                        crate::models::log::LogCategory::DownloadClient,
-                        &format!(
-                            "Failed to remove old torrent for S?E{:02} replacement: '{}'",
-                            episode_number, old.torrent_name
-                        ),
-                        &e,
-                    )
-                    .await;
-                }
+        // Per-grab client routing: the old grab might be on SAB
+        // while the new replacement is being acquired through a
+        // torrent indexer (or vice versa). Sending the SAB nzo_id
+        // to qBit's `delete` would silently no-op and leave the
+        // old SAB job behind.
+        let default_client = state.default_download_client().await;
+        for old in &old_grabs {
+            if old.hash.is_empty() {
+                continue;
+            }
+            // Issue #28 PR C — preserve PT seed rules across
+            // episode-replace. The old torrent has already
+            // imported successfully and is seeding to its
+            // per-tracker ratio/time policy; deleting it
+            // mid-seed could ding the user's tracker ratio.
+            if grabbed_torrents::respects_seed_rules(&state.db, &old.hash).await {
+                crate::services::logger::info(
+                    &state.db,
+                    crate::models::log::LogCategory::DownloadClient,
+                    &format!(
+                        "Skipping client delete for replaced torrent {} (respect_seed_rules)",
+                        old.torrent_name
+                    ),
+                    &old.hash,
+                )
+                .await;
+                continue;
+            }
+            let client_for_grab = match old.download_client_id {
+                Some(id) => match state.client_by_id(id).await {
+                    Some(c) => Some(c),
+                    None => default_client.clone(),
+                },
+                None => default_client.clone(),
+            };
+            let Some(client) = client_for_grab else {
+                continue;
+            };
+            if let Err(e) = client.delete(&old.hash, true).await {
+                crate::services::logger::warn(
+                    &state.db,
+                    crate::models::log::LogCategory::DownloadClient,
+                    &format!(
+                        "Failed to remove old torrent for S?E{:02} replacement: '{}'",
+                        episode_number, old.torrent_name
+                    ),
+                    &e,
+                )
+                .await;
             }
         }
     }
@@ -594,24 +633,39 @@ pub async fn episode_download_progress(
             .await
             .unwrap_or_default();
 
-    let client = {
-        let client = state.default_download_client().await;
-        match client.as_ref() {
-            Some(c) => c.clone(),
-            None => return Ok(Json(Vec::new())),
+    // Fetch list_scoped from EVERY configured client and merge. The
+    // pre-fix code called `state.default_download_client()` which
+    // returns the torrent default specifically — fine for BT-only
+    // setups but wrong as soon as SAB enters the picture, since SAB
+    // grabs land on the usenet default and their `nzo_id` hashes
+    // never appear in qBit's `list_scoped`. Symptom: SAB grabs got
+    // marked "Torrent removed in download client" at the 30s stale
+    // mark even when the SAB job was happily completing.
+    //
+    // Fetching from all clients is cheap (one HTTP call per client
+    // per poll, typical homelab has 1-2 clients) and the merge
+    // doesn't collide because BT v1 infohashes (40-char hex) and
+    // SAB nzo_ids (SABnzbd_nzo_*) share no namespace.
+    let pool = state.download_clients.read().await.clone();
+    if pool.clients.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    let mut all_torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
+    for (client_id, client) in pool.clients.iter() {
+        match client.list_scoped().await {
+            Ok(t) => all_torrents.extend(t),
+            Err(err) => {
+                // One client unreachable shouldn't blank the progress
+                // surface for grabs on other clients. Log + continue.
+                tracing::debug!(
+                    "episode-progress poll: list_scoped failed for client #{}: {}",
+                    client_id,
+                    err
+                );
+            }
         }
-    };
-
-    let torrents = match client.list_scoped().await {
-        Ok(t) => t,
-        Err(err) => {
-            return Err((
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                format!("Download client unavailable: {err}"),
-            ));
-        }
-    };
-    let by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
+    }
+    let by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = all_torrents
         .iter()
         .map(|t| (t.hash.to_lowercase(), t))
         .collect();

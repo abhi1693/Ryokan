@@ -64,22 +64,39 @@ use services::{
 /// instances on every per-target search.
 pub type IndexerCache = Arc<RwLock<Arc<Vec<Arc<dyn Indexer>>>>>;
 
-/// Multi-client routing — pair of (id-keyed map of live trait
-/// impls, default client id). Both swap atomically when the
-/// cache is rebuilt by [`services::download_client::rebuild_clients_cache`]
-/// on Settings → Connections → Downloads edits. Lookup at grab
-/// time is a `HashMap::get` against the inner `Arc` — read lock
-/// releases before the dispatch.
+/// Multi-client routing — id-keyed map of live trait impls plus
+/// the per-protocol default ids. The whole struct swaps atomically
+/// when the cache is rebuilt by
+/// [`services::download_client::rebuild_clients_cache`] on
+/// Settings → Connections → Downloads edits. Lookup at grab time
+/// is a `HashMap::get` against the inner `Arc` — read lock releases
+/// before the dispatch.
 ///
-/// `default_id` is the row id of the `is_default = 1` row at
-/// build time. `None` when no client is configured (fresh
-/// install) or when every row was disabled. The pin-resolution
-/// helpers ([`AppState::client_for_indexer`] etc.) fall back to
-/// `default_id` when no pin matches.
+/// `default_torrent_id` and `default_usenet_id` are the row ids of
+/// the `is_default = 1` rows at build time, scoped per protocol.
+/// Each is `None` when no client of that protocol is configured
+/// (or when every row of that protocol was disabled). The pin-
+/// resolution helpers ([`AppState::client_for_indexer`] etc.) fall
+/// back to the matching protocol's default — a torznab indexer with
+/// no pin routes to `default_torrent_id`; a newznab indexer routes
+/// to `default_usenet_id`.
 #[derive(Default)]
 pub struct DownloadClientPool {
     pub clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>>,
-    pub default_id: Option<i64>,
+    pub default_torrent_id: Option<i64>,
+    pub default_usenet_id: Option<i64>,
+}
+
+impl DownloadClientPool {
+    /// The default-client id for the given wire protocol
+    /// (`"torrent"` / `"usenet"`). Anything else returns None.
+    pub fn default_for_protocol(&self, protocol: &str) -> Option<i64> {
+        match protocol {
+            "torrent" => self.default_torrent_id,
+            "usenet" => self.default_usenet_id,
+            _ => None,
+        }
+    }
 }
 
 /// Same swap-on-write shape as `IndexerCache` / `CompiledCfCache`
@@ -187,21 +204,37 @@ impl AppState {
     /// stamp it on `grabbed_torrents.download_client_id`.
     /// Post-processing routes per-grab through that id back to the
     /// owning client.
+    ///
+    /// Default-fallback is per-protocol: a torznab indexer with no
+    /// pin lands on `default_torrent_id`; a newznab indexer lands on
+    /// `default_usenet_id`. When the indexer's protocol can't be
+    /// derived (unknown kind, indexer not in the cache snapshot) —
+    /// or when no pin context is given at all — falls through to
+    /// the torrent default since every Ryokan-internal default-only
+    /// caller is torrent-shaped (Nyaa search, manual grabs, library
+    /// re-grab buttons).
     pub async fn client_for_indexer_with_id(
         &self,
         indexer_id: Option<i64>,
     ) -> Option<(Arc<dyn DownloadClient>, i64)> {
         let pool = self.download_clients.read().await.clone();
+        let mut protocol: &str = "torrent";
         if let Some(id) = indexer_id {
             let indexers = self.indexers.read().await.clone();
-            if let Some(idx) = indexers.iter().find(|i| i.id() == id)
-                && let Some(pinned) = idx.download_client_id()
-                && let Some(client) = pool.clients.get(&pinned)
-            {
-                return Some((client.clone(), pinned));
+            if let Some(idx) = indexers.iter().find(|i| i.id() == id) {
+                if let Some(pinned) = idx.download_client_id()
+                    && let Some(client) = pool.clients.get(&pinned)
+                {
+                    return Some((client.clone(), pinned));
+                }
+                if let Some(p) =
+                    crate::services::download_client::protocol_for_indexer_kind(idx.kind())
+                {
+                    protocol = p;
+                }
             }
         }
-        let default_id = pool.default_id?;
+        let default_id = pool.default_for_protocol(protocol)?;
         let client = pool.clients.get(&default_id)?.clone();
         Some((client, default_id))
     }
@@ -217,6 +250,9 @@ impl AppState {
 
     /// Same resolution as [`Self::client_for_nyaa`] but also returns
     /// the resolved `download_clients.id` for grab-row stamping.
+    /// Always falls back to the torrent default — Nyaa items are
+    /// magnets / .torrent URLs, so a usenet-default fallback would
+    /// just trip the protocol guard at add-time anyway.
     pub async fn client_for_nyaa_with_id(
         &self,
         nyaa_pin: Option<i64>,
@@ -227,7 +263,7 @@ impl AppState {
         {
             return Some((client.clone(), pinned));
         }
-        let default_id = pool.default_id?;
+        let default_id = pool.default_torrent_id?;
         let client = pool.clients.get(&default_id)?.clone();
         Some((client, default_id))
     }
@@ -243,10 +279,16 @@ impl AppState {
 
     /// Same resolution as [`Self::default_download_client`] but also
     /// returns the resolved id for grab-row stamping. Mirror of the
-    /// `_with_id` helpers above.
+    /// `_with_id` helpers above. Returns the **torrent** default —
+    /// every internal call site that hits this helper is torrent-
+    /// flavored (Nyaa search, manual grabs, library episode
+    /// re-grab, post-processing torrent lookup, RSS / upgrade
+    /// "is anything configured" gates). Usenet routing always goes
+    /// through the indexer's pin (or its protocol's per-pin default
+    /// via `client_for_indexer_with_id`).
     pub async fn default_download_client_with_id(&self) -> Option<(Arc<dyn DownloadClient>, i64)> {
         let pool = self.download_clients.read().await.clone();
-        let default_id = pool.default_id?;
+        let default_id = pool.default_torrent_id?;
         let client = pool.clients.get(&default_id)?.clone();
         Some((client, default_id))
     }

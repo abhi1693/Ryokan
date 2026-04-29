@@ -564,7 +564,15 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
         }
     };
     let mut clients: HashMap<i64, Arc<dyn DownloadClient>> = HashMap::new();
-    let mut default_id: Option<i64> = None;
+    // Per-protocol defaults — at most one of each. Captured during
+    // the row iteration below, then patched up post-loop with a
+    // lowest-id fallback per protocol so a manual DB edit that left
+    // a protocol without an explicit default still routes somewhere
+    // (matching the prior single-default behavior, just per-bucket).
+    let mut default_torrent_id: Option<i64> = None;
+    let mut default_usenet_id: Option<i64> = None;
+    let mut all_torrent_ids: Vec<i64> = Vec::new();
+    let mut all_usenet_ids: Vec<i64> = Vec::new();
     for row in rows {
         let client: Option<Arc<dyn DownloadClient>> = match row.kind.as_str() {
             "deluge" if !row.url.is_empty() => Some(Arc::new(deluge::DelugeClient::new(
@@ -616,31 +624,56 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
             }
         };
         if let Some(c) = client {
-            if row.is_default {
-                default_id = Some(row.id);
+            // Bucket by protocol so the per-protocol fallback below
+            // can pick a lowest-id replacement when no row of that
+            // protocol carries `is_default = 1`.
+            match protocol_for_client_kind(&row.kind) {
+                Some("torrent") => {
+                    all_torrent_ids.push(row.id);
+                    if row.is_default && default_torrent_id.is_none() {
+                        default_torrent_id = Some(row.id);
+                    }
+                }
+                Some("usenet") => {
+                    all_usenet_ids.push(row.id);
+                    if row.is_default && default_usenet_id.is_none() {
+                        default_usenet_id = Some(row.id);
+                    }
+                }
+                _ => {}
             }
             clients.insert(row.id, c);
         }
     }
-    // Fall-through: if the user marked a kind+URL combo as default
-    // but it failed to instantiate (or didn't mark anything as default
-    // after a manual DB edit), pick the lowest surviving row id so the
-    // grab path isn't surprised by a present-but-empty pool. Surface
-    // this in logs — when a user reports "I marked X as default but
-    // grabs are landing on Y" the warn line names the picked id and
-    // makes the diagnosis obvious.
-    if default_id.is_none() && !clients.is_empty() {
-        default_id = clients.keys().min().copied();
-        if let Some(picked) = default_id {
-            tracing::warn!(
-                "download_clients: no row marked is_default=1; \
-                 picking client id {picked} as fallback default"
-            );
-        }
+    // Per-protocol fall-through: if rows of a protocol exist but none
+    // carries `is_default = 1` (e.g. the user marked a kind+URL combo
+    // as default but it failed to instantiate, or a manual DB edit
+    // cleared every flag), pick the lowest surviving row id of that
+    // protocol so the grab path isn't surprised by a present-but-
+    // empty pool. Surface this in logs so a "I marked X as default
+    // but grabs are landing on Y" report has an obvious culprit.
+    if default_torrent_id.is_none()
+        && let Some(min) = all_torrent_ids.iter().min().copied()
+    {
+        default_torrent_id = Some(min);
+        tracing::warn!(
+            "download_clients: no torrent row marked is_default=1; \
+             picking client id {min} as fallback torrent default"
+        );
+    }
+    if default_usenet_id.is_none()
+        && let Some(min) = all_usenet_ids.iter().min().copied()
+    {
+        default_usenet_id = Some(min);
+        tracing::warn!(
+            "download_clients: no usenet row marked is_default=1; \
+             picking client id {min} as fallback usenet default"
+        );
     }
     let pool = Arc::new(DownloadClientPool {
         clients,
-        default_id,
+        default_torrent_id,
+        default_usenet_id,
     });
     *cache.write().await = pool;
 }

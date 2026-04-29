@@ -1,0 +1,169 @@
+{# Indexers section — mirrors the Download Clients card pattern.
+   Catalog seed cards (Add Indexer) on top, configured-indexer
+   cards below. Both surfaces open a shared modal: seed cards
+   fetch the Add form pre-filled with the seed's defaults; per-
+   indexer cards fetch the Edit form pre-filled with the row.
+
+   The whole section IS `#indexer-section` — the id sits on the
+   <fieldset> root, NOT on an inner <div>, so when an HTMX upsert
+   or delete returns this same partial via `hx-swap="outerHTML"`
+   the response replaces the fieldset 1:1. A previous version put
+   the id on an inner <div class="dc-section">; the outerHTML
+   swap then nested a fresh `<fieldset><legend>Indexers>` inside
+   the prior fieldset (the inner div was the swap target, but the
+   response was wrapped in the parent fieldset+legend), producing
+   a duplicate "Indexers" heading after the first save. The
+   `dc-section` class stays on the same node so the existing CSS
+   rules + the modal-rebind logic in `static/js/settings.js` that
+   listens for `htmx:afterSwap` on `#indexer-section` keep
+   working unchanged. #}
+<fieldset id="indexer-section" class="dc-section">
+    <legend>Indexers</legend>
+        <h3 class="settings-subheading" style="margin-top:0;">Add Indexer</h3>
+
+        {# Catalog grid — each tile opens the shared modal with the
+           matching seed pre-filled. The trailing "+ Add" tile opens
+           a blank Add form for users who want to skip the picker. #}
+        <div class="indexer-catalog-grid">
+            {% for seed in indexer_catalog %}
+            <div class="indexer-catalog-card{% if seed.is_generic %} indexer-catalog-card-generic{% endif %}"
+                 role="button"
+                 tabindex="0"
+                 data-indexer-slug="{{ seed.slug }}"
+                 data-indexer-name="{{ seed.display_name }}"
+                 onclick="openIndexerAddModal(this.dataset.indexerSlug, this.dataset.indexerName)"
+                 onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openIndexerAddModal(this.dataset.indexerSlug, this.dataset.indexerName); }"
+                 aria-label="Add {{ seed.display_name }} indexer">
+                <div class="indexer-catalog-card-header">
+                    <span class="indexer-catalog-card-name">{{ seed.display_name }}</span>
+                    {% if seed.is_private_tracker %}
+                    <span class="indexer-catalog-card-pill indexer-catalog-card-pill-private">PRIVATE</span>
+                    {% else if !seed.is_generic %}
+                    <span class="indexer-catalog-card-pill indexer-catalog-card-pill-public">PUBLIC</span>
+                    {% endif %}
+                </div>
+                <p class="indexer-catalog-card-blurb">{{ seed.blurb }}</p>
+            </div>
+            {% endfor %}
+        </div>
+
+        <h3 class="settings-subheading">Configured indexers</h3>
+
+        {# Existing-indexer cards — clickable body opens the Edit
+           modal; corner × deletes the row. Empty-state spans the
+           grid so the empty section reads as an instruction rather
+           than a blank panel. #}
+        <div class="dc-card-grid">
+            {% if indexers.is_empty() %}
+            <div class="dc-empty">
+                <p class="form-hint" style="margin: 0">No indexers configured yet. Pick a tile above to add one.</p>
+            </div>
+            {% endif %}
+
+            {% for idx in indexers %}
+            <article class="dc-card" id="indexer-card-{{ idx.id }}">
+                <div class="dc-card-body"
+                     role="button"
+                     tabindex="0"
+                     data-indexer-id="{{ idx.id }}"
+                     data-indexer-name="{{ idx.name }}"
+                     onclick="openIndexerEditModal(this.dataset.indexerId, this.dataset.indexerName)"
+                     onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openIndexerEditModal(this.dataset.indexerId, this.dataset.indexerName); }"
+                     aria-label="Edit {{ idx.name }}">
+                    <div class="dc-card-header">
+                        <div class="dc-card-title">
+                            <strong class="dc-card-name">{{ idx.name }}</strong>
+                            {% if idx.is_private_tracker %}
+                            <span class="dc-default-pill" style="background: rgba(243, 139, 168, 0.18); color: var(--red, #f38ba8);" title="Private tracker">PT</span>
+                            {% endif %}
+                        </div>
+                        {# Status pill — server-rendered from the row.
+                           Disabled wins over RSS state; otherwise the
+                           pill reflects the most recent RSS poll
+                           (off / error / ok / idle). Same taxonomy
+                           the old table used. #}
+                        {% if !idx.enabled %}
+                        <span class="dc-status-pill dc-status-pill-disabled">Disabled</span>
+                        {% else if !idx.rss_enabled %}
+                        <span class="dc-status-pill dc-status-pill-ok" title="Search-only — RSS auto-sync off for this indexer">Enabled</span>
+                        {% else if !idx.rss_last_poll_error.is_empty() %}
+                        <span class="dc-status-pill dc-status-pill-err" title="{{ idx.rss_last_poll_error }}">RSS error</span>
+                        {% else if let Some(_) = idx.rss_last_polled_at %}
+                        <span class="dc-status-pill dc-status-pill-ok" title="Last poll returned {{ idx.rss_last_item_count }} item{% if idx.rss_last_item_count == 1 %}{% else %}s{% endif %}">&#10003; RSS ({{ idx.rss_last_item_count }})</span>
+                        {% else %}
+                        <span class="dc-status-pill dc-status-pill-loading" title="RSS enabled but not yet polled — first sync runs on the next interval">RSS idle</span>
+                        {% endif %}
+                    </div>
+                    <dl class="dc-card-meta">
+                        <div class="dc-card-meta-row">
+                            <dt>Kind</dt>
+                            <dd>{{ idx.kind }}</dd>
+                        </div>
+                        <div class="dc-card-meta-row">
+                            <dt>URL</dt>
+                            <dd><code>{{ idx.url }}</code></dd>
+                        </div>
+                        <div class="dc-card-meta-row">
+                            <dt>Priority</dt>
+                            <dd>{{ idx.priority }}</dd>
+                        </div>
+                        {% if let Some(pin) = idx.download_client_id %}
+                        <div class="dc-card-meta-row">
+                            <dt>Client</dt>
+                            <dd>{% for dc in download_clients %}{% if dc.id == *pin %}{{ dc.name }}{% endif %}{% endfor %}</dd>
+                        </div>
+                        {% endif %}
+                    </dl>
+                </div>
+                <div class="dc-card-actions" onclick="event.stopPropagation()">
+                    {# Test button moved into the Edit modal only —
+                       a per-card Test surface added clutter (and was
+                       rendering as an oversized white button while
+                       the per-icon-button scaling was unsettled).
+                       Users who want to test an existing indexer
+                       click the card, which opens the Edit modal,
+                       which carries the Test button in its footer. #}
+                    <form method="post" action="/settings/indexers/delete"
+                          hx-post="/settings/indexers/delete"
+                          hx-target="#indexer-section"
+                          hx-swap="outerHTML"
+                          data-ryokan-confirm-title="Delete indexer?"
+                          data-ryokan-confirm-body="Remove '{{ idx.name }}' from Ryokan. Existing grab history is preserved with the indexer reference cleared. The deletion can't be undone; you'll need to re-add the row from scratch."
+                          data-ryokan-confirm-yes="Delete"
+                          data-ryokan-confirm-no="Cancel"
+                          data-ryokan-confirm-danger="1"
+                          style="margin:0">
+                        <input type="hidden" name="id" value="{{ idx.id }}">
+                        <button type="submit" class="btn btn-icon-danger" title="Delete {{ idx.name }}" aria-label="Delete {{ idx.name }}">×</button>
+                    </form>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+
+        {# Shared modal — body content is replaced by HTMX on each
+           open (Add or Edit). Initial render is the blank Add form
+           so a section-partial swap (after a successful save) leaves
+           the modal at display:none with the right body for the
+           next Add click. #}
+        <div class="modal-backdrop" id="indexer-modal" style="display:none"
+             role="dialog" aria-modal="true" aria-labelledby="indexer-modal-title">
+            <div class="modal" style="max-width: 720px">
+                <div class="modal-header">
+                    <h3 id="indexer-modal-title">Add indexer</h3>
+                    <button class="btn-icon" type="button" onclick="closeIndexerModal()" aria-label="Close">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                    </button>
+                </div>
+                {# Empty on initial render — `openIndexerAddModal` /
+                   `openIndexerEditModal` fetch the right body via
+                   htmx.ajax on first click. Different from the DC
+                   modal (which pre-renders the Add form) because we
+                   want catalog-card clicks to land on a seed-pre-
+                   filled body, and pre-rendering one specific
+                   variant in the section partial would still need
+                   a swap on every other click anyway. #}
+                <div id="indexer-modal-body"></div>
+            </div>
+        </div>
+</fieldset>

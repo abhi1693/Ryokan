@@ -53,6 +53,82 @@ pub(crate) fn is_video_file(name: &str) -> bool {
     )
 }
 
+/// Walk `root` recursively and synthesize `DownloadFile` entries for
+/// every video file found. Returns the names RELATIVE to `root` so
+/// the caller can compose `root + name` to get an absolute path
+/// matching the BT-shape `save_path + file.name` convention the
+/// import loop already uses. Used as a fallback when a download
+/// client's `get_files` returns empty for a completed torrent —
+/// notably SAB, whose `mode=get_files` API only works for queue
+/// items and returns nothing once a job moves to history.
+///
+/// All synthesized entries set `progress: 1.0` (anything visible
+/// on disk has finished downloading by definition) and `wanted:
+/// true`. Sizes come from `metadata.len()`, matching what
+/// `is_video_file`'s caller does post-import.
+///
+/// Recursion guard: hard-stops at `MAX_WALK_DEPTH = 4` so a
+/// pathological symlink loop or a deeply-nested archive can't hang
+/// the import path. Real-world SAB extractions are 1 directory
+/// deep (`<storage>/<filename.mkv>`); BT clients with multi-file
+/// torrents go 2-3 deep at most.
+pub(crate) fn walk_video_files(root: &Path) -> Vec<crate::services::download_client::DownloadFile> {
+    const MAX_WALK_DEPTH: u32 = 4;
+    let mut out = Vec::new();
+    fn recurse(
+        root: &Path,
+        cur: &Path,
+        depth: u32,
+        max_depth: u32,
+        out: &mut Vec<crate::services::download_client::DownloadFile>,
+    ) {
+        if depth > max_depth {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(cur) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() {
+                recurse(root, &path, depth + 1, max_depth, out);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let Some(name_str) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !is_video_file(name_str) {
+                continue;
+            }
+            // Build the path relative to `root` so the caller's
+            // `Path::new(&source_base).join(&file.name)` resolves
+            // back to the absolute path. `strip_prefix` always
+            // succeeds here because `path` is descended from `root`.
+            let rel = path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| name_str.to_string());
+            out.push(crate::services::download_client::DownloadFile {
+                name: rel,
+                size: metadata.len() as i64,
+                progress: 1.0,
+                wanted: true,
+            });
+        }
+    }
+    recurse(root, root, 0, MAX_WALK_DEPTH, &mut out);
+    out
+}
+
 /// Replace filesystem-unsafe characters in a filename component.
 pub(crate) fn sanitize_filename(s: &str) -> String {
     media::sanitize_folder_name(s)
@@ -330,7 +406,7 @@ async fn import_torrent(
     // routed `get_files` to the wrong client for any pinned grab.
     client: &std::sync::Arc<dyn DownloadClient>,
 ) -> Result<ImportOutcome, String> {
-    let files = client
+    let mut files = client
         .get_files(torrent_hash)
         .await
         .map_err(|e| format!("get torrent files: {}", e))?;
@@ -451,6 +527,47 @@ async fn import_torrent(
     // `enumerate()` applied to the untouched `files` vec yields the
     // same indices that `detect_sibling_entries_in_pack` recorded at
     // grab time.
+    // Determine the source base path. Prefer the torrent's own
+    // `save_path` (already translated by the caller via
+    // `translate_client_path` to host-view) over the configured
+    // per-client download path. Two reasons:
+    //   1. SAB's `save_path` is the per-job extracted directory
+    //      (e.g. `/downloads/complete/[Erai-raws].One.Piece-1158]/`).
+    //      Using that as source_base + filename lands at the actual
+    //      .mkv. Using per_client_download_path (the parent
+    //      `complete/` folder) would point at a non-existent file.
+    //   2. For BT clients with per-category save paths (Deluge
+    //      "Move completed on label", qBit per-category save paths)
+    //      each torrent reports its own `save_path` extending a
+    //      common base. Using save_path preserves the category
+    //      subdir; using per_client_download_path flattens it.
+    // Fall back to per_client_download_path only when save_path is
+    // empty (rare edge case — some clients may report empty
+    // save_path mid-metadata-fetch).
+    let per_client_download_path = crate::services::download_client::per_client_download_path(cfg);
+    let source_base = if !torrent_save_path.is_empty() {
+        torrent_save_path.to_string()
+    } else {
+        per_client_download_path.to_string()
+    };
+
+    // Some clients (notably SAB) don't expose a per-file API for
+    // completed jobs — `mode=get_files&value=<nzo_id>` only works
+    // while the slot is in the queue, returning an empty list once
+    // the job moves to history. Without a fallback, completed SAB
+    // imports got stuck in NotReady forever. When `get_files` came
+    // back empty AND the source directory exists locally, walk it
+    // for video files. Synthesizes `DownloadFile` entries with
+    // `progress: 1.0` (everything we see on disk has finished
+    // downloading by definition) so the rest of the import loop
+    // works unchanged.
+    if files.is_empty() {
+        let walk_root = Path::new(&source_base);
+        if walk_root.is_dir() {
+            files = walk_video_files(walk_root);
+        }
+    }
+
     let video_files: Vec<(usize, &crate::services::download_client::DownloadFile)> = files
         .iter()
         .enumerate()
@@ -478,33 +595,6 @@ async fn import_torrent(
         .await;
         return Ok(ImportOutcome::NotReady);
     }
-
-    // Determine the source base path. Pick the per-client download
-    // path the user configured in Settings ("where Ryokan can read
-    // this client's files"), falling back to whatever the client
-    // itself reported as `save_path` if no override is set. The
-    // override always wins because the client's own save_path is
-    // from its own filesystem namespace (container-internal for
-    // Docker, seedbox-internal for remote setups) and isn't
-    // reachable from Ryokan's process without translation.
-    //
-    // **Known limitation**: when the client uses per-category /
-    // per-label save paths (Deluge "Move completed on label", qBit
-    // per-category save paths), each torrent reports a different
-    // `save_path` extending a common base (`/downloads/anime` vs
-    // `/downloads/movies`). The single-field `<client>_download_path`
-    // can't preserve that subdir — every torrent lands under the
-    // same local base, flattening the category subdir. Covers the
-    // common case (one shared save dir) at the cost of the
-    // per-category case. Fixing would re-introduce the two-field
-    // remote-prefix design we abandoned in 4972624; follow-up issue
-    // if this bites a user.
-    let per_client_download_path = crate::services::download_client::per_client_download_path(cfg);
-    let source_base = if !per_client_download_path.is_empty() {
-        per_client_download_path.to_string()
-    } else {
-        torrent_save_path.to_string()
-    };
 
     // Lazily-loaded per-series context cache. The single-series case
     // fills exactly one entry; a multi-series routed batch fills one
@@ -889,7 +979,18 @@ async fn import_torrent(
                         )
                         .await;
                     } else {
-                        let _ = client.delete(&old_grab.hash, true).await;
+                        // Route the OLD grab's delete to the OLD
+                        // grab's client — not the NEW grab's client
+                        // bound above. A cross-protocol upgrade
+                        // (SAB→qBit or qBit→SAB) would otherwise
+                        // hit a client that doesn't know the old
+                        // hash and silently leave the old job behind.
+                        let old_client = match old_grab.download_client_id {
+                            Some(id) => state.client_by_id(id).await,
+                            None => None,
+                        };
+                        let target = old_client.as_ref().unwrap_or(client);
+                        let _ = target.delete(&old_grab.hash, true).await;
                     }
                 }
                 grabs_to_mark_replaced.insert(old_grab.id);
@@ -1288,9 +1389,24 @@ pub async fn run_once(state: &AppState) {
     // doesn't poison the others — its grabs just stay pending until
     // the next pass.
     use std::collections::HashSet;
-    let default_id_opt = {
+    // Capture both per-protocol defaults — an un-stamped pending grab
+    // could come from either side, and post-processing doesn't know
+    // the original indexer's protocol from the grab row alone, so it
+    // checks both. The grab will only match against `list_scoped()`
+    // on the client that actually has it, so naming both as candidates
+    // is harmless when only one applies.
+    let default_ids: Vec<i64> = {
         let pool = state.download_clients.read().await.clone();
-        pool.default_id
+        let mut v = Vec::new();
+        if let Some(id) = pool.default_torrent_id {
+            v.push(id);
+        }
+        if let Some(id) = pool.default_usenet_id
+            && !v.contains(&id)
+        {
+            v.push(id);
+        }
+        v
     };
 
     // Pre-pass: NULL the `download_client_id` stamp on any pending
@@ -1339,8 +1455,10 @@ pub async fn run_once(state: &AppState) {
     for grab in &pending {
         if let Some(id) = grab.download_client_id {
             needed_ids.insert(id);
-        } else if let Some(id) = default_id_opt {
-            needed_ids.insert(id);
+        } else {
+            for id in &default_ids {
+                needed_ids.insert(*id);
+            }
         }
     }
     if needed_ids.is_empty() {
@@ -1422,34 +1540,61 @@ pub async fn run_once(state: &AppState) {
     let mut any_imported = false;
 
     for grab in &pending {
-        // Resolve which client this grab landed on.
-        let resolved_id = grab.download_client_id.or(default_id_opt);
-        let Some(grab_client_id) = resolved_id else {
+        // Resolve which client this grab landed on. Stamped grabs
+        // land on exactly one id; un-stamped grabs (older history,
+        // orphan-cleanup just NULLed it) check each per-protocol
+        // default in turn and take the first that has the torrent.
+        // First-match-wins is safe because Ryokan never adds the
+        // same torrent to two clients — the duplicate-add detection
+        // in each impl rejects the second.
+        let candidate_ids: Vec<i64> = match grab.download_client_id {
+            Some(id) => vec![id],
+            None => default_ids.clone(),
+        };
+        let mut hit: Option<(
+            i64,
+            std::sync::Arc<dyn DownloadClient>,
+            crate::services::download_client::DownloadItem,
+        )> = None;
+        for cid in &candidate_ids {
+            let Some(client) = clients.get(cid).cloned() else {
+                continue;
+            };
+            let Some(by_hash) = by_hash_per_client.get(cid) else {
+                continue;
+            };
+            let Some(by_name) = by_name_per_client.get(cid) else {
+                continue;
+            };
+            let matched = if !grab.hash.is_empty() {
+                by_hash.get(&grab.hash.to_lowercase())
+            } else {
+                by_name.get(&grab.torrent_name.to_lowercase())
+            };
+            if let Some(t) = matched {
+                hit = Some((*cid, client, t.clone()));
+                break;
+            }
+        }
+        // Pick the first reachable candidate's id even on miss so the
+        // `unmatched-grab` branch below can speak about *some* client
+        // when emitting the "torrent not found" log line. Falls
+        // through to `continue` if nothing was reachable at all.
+        let Some(grab_client_id) = hit.as_ref().map(|(id, _, _)| *id).or_else(|| {
+            candidate_ids
+                .iter()
+                .find(|cid| clients.contains_key(cid))
+                .copied()
+        }) else {
             continue;
         };
         let Some(client) = clients.get(&grab_client_id).cloned() else {
-            // The client this grab routed to wasn't reachable on
-            // this pass — `list_scoped` failed transiently. Leave
-            // the grab pending so the next pass retries against
-            // the same client. The disabled / deleted case is
-            // already handled by the orphan-stamp pre-pass at the
-            // top of `run_once`, which NULLs the stamp before we
-            // even reach this loop.
+            // Pool changed mid-loop (shouldn't happen — pool is read
+            // once at the top of `run_once`), skip defensively.
             continue;
         };
-        let all_by_hash = match by_hash_per_client.get(&grab_client_id) {
-            Some(m) => m,
-            None => continue,
-        };
-        let all_by_name = match by_name_per_client.get(&grab_client_id) {
-            Some(m) => m,
-            None => continue,
-        };
-        let matched = if !grab.hash.is_empty() {
-            all_by_hash.get(&grab.hash.to_lowercase())
-        } else {
-            all_by_name.get(&grab.torrent_name.to_lowercase())
-        };
+        let matched: Option<&crate::services::download_client::DownloadItem> =
+            hit.as_ref().map(|(_, _, t)| t);
 
         let Some(torrent) = matched else {
             // Torrent not found in qBittorrent. If the grab is old enough
@@ -1688,17 +1833,25 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         .map_err(|_| ())?
         .unwrap_or_default();
 
-    let client = match state.default_download_client().await {
-        Some(c) => c,
-        None => return Ok(()),
-    };
-
-    let torrents = client.list_scoped().await.map_err(|_| ())?;
-    let by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
+    // Fan out across every configured client so SAB grabs surface
+    // here too. Prior implementation called `default_download_client`
+    // and missed every SAB grab, leaving Usenet completions stuck at
+    // "Importing…" forever when post-processing was disabled.
+    let pool = state.download_clients.read().await.clone();
+    if pool.clients.is_empty() {
+        return Ok(());
+    }
+    let mut all_torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
+    for c in pool.clients.values() {
+        if let Ok(items) = c.list_scoped().await {
+            all_torrents.extend(items);
+        }
+    }
+    let by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = all_torrents
         .iter()
         .map(|t| (t.hash.to_lowercase(), t))
         .collect();
-    let by_name: HashMap<String, &crate::services::download_client::DownloadItem> = torrents
+    let by_name: HashMap<String, &crate::services::download_client::DownloadItem> = all_torrents
         .iter()
         .map(|t| (t.name.to_lowercase(), t))
         .collect();

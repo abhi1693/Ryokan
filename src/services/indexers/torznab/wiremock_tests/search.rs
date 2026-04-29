@@ -4,7 +4,7 @@
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
-use super::fixture::{TEST_API_KEY, new_fixture};
+use super::fixture::{TEST_API_KEY, new_fixture, new_fixture_newznab};
 use crate::services::indexers::{Indexer, SearchQuery};
 
 const SEARCH_BODY: &str = r#"<?xml version="1.0"?>
@@ -50,6 +50,51 @@ async fn search_sends_tvsearch_with_anime_category_default() {
     assert_eq!(releases[0].title, "Synthetic.Show.S01E01");
     assert_eq!(releases[0].seeders, 20);
     assert_eq!(releases[0].indexer_id, 7, "stamps caller's id");
+    assert_eq!(
+        releases[0].indexer_name, "Wiremock",
+        "indexer_name must be stamped at parse time so it survives \
+         dedup + into_search_result and reaches the interactive-search \
+         UI's Indexer column. A regression here would silently render \
+         the column blank for every torznab/newznab hit."
+    );
+}
+
+#[tokio::test]
+async fn newznab_search_stamps_indexer_name() {
+    // Newznab indexers (Usenet) reuse the same wire format and
+    // parser; their kind column just changes from "torznab" to
+    // "newznab" so the protocol-mismatch guard at the indexer-pin
+    // save path can route torznab → torrent client and newznab →
+    // SAB. The "Indexer" column on interactive search must
+    // attribute usenet hits identically to torrent hits — the
+    // user can't tell which row of `download_clients` to pin a
+    // grab to without it.
+    let (server, client) = new_fixture_newznab().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("t", "tvsearch"))
+        .and(query_param("apikey", TEST_API_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SEARCH_BODY))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let query = SearchQuery {
+        q: "Test Show".to_string(),
+        categories: Vec::new(),
+        limit: None,
+        offset: None,
+    };
+    let releases = client
+        .search(&query)
+        .await
+        .expect("newznab search must succeed");
+    assert_eq!(releases.len(), 1);
+    assert_eq!(
+        releases[0].indexer_name, "WiremockUsenet",
+        "newznab parses to the same Release shape as torznab; the \
+         indexer_name plumbing must work for both kinds."
+    );
 }
 
 #[tokio::test]

@@ -93,7 +93,15 @@ pub async fn grab_batch_result(
     // each sibling's files into its own library entry instead.
     let wants_selective =
         !info_hash.is_empty() && auto_search::has_selective_discriminator(&detail);
-    let selective_outcome: Option<Vec<usize>> = if wants_selective {
+    // `effective_hash` is the id Ryokan persists on `grabbed_torrents.hash`
+    // and uses to reconcile the grab against the client's later state. For
+    // BT clients it equals the precomputed v1 infohash from the magnet/.torrent
+    // URL (default `add_torrent_returning_id` impl echoes it back). For SAB it
+    // becomes the `nzo_id` returned from `mode=addurl`, which is the only id
+    // SAB lets you key queue/history ops by — without this capture, SAB grabs
+    // got `hash=""` persisted, the episode-progress poller never matched them
+    // in `list_scoped`, and after 30s the reconcile loop marked them removed.
+    let (selective_outcome, effective_hash): (Option<Vec<usize>>, String) = if wants_selective {
         let detail_clone = detail.clone();
         let mut pick =
             move |files: &[String]| auto_search::pick_wanted_file_indices(files, &detail_clone);
@@ -101,8 +109,21 @@ pub async fn grab_batch_result(
             .add_torrent_with_file_filter(&url, &info_hash, &mut pick)
             .await
         {
-            Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => Some(kept),
-            Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => None,
+            // Selective branch echoes the precomputed info_hash since
+            // `add_torrent_with_file_filter` doesn't return an id. SAB's
+            // file-filter impl no-ops the filter and returns FullDownload,
+            // so SAB grabs that route through here keep the v1 picker-path
+            // limitation (documented in services/download_client/sabnzbd/mod.rs).
+            // Practically rare — SAB grabs require info_hash to be empty
+            // (NZBs have no infohash), and `wants_selective` requires
+            // info_hash to be non-empty, so this branch shouldn't fire for
+            // SAB in the first place.
+            Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
+                (Some(kept), info_hash.clone())
+            }
+            Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
+                (None, info_hash.clone())
+            }
             Err(e) => {
                 logger::warn(
                     &state.db,
@@ -114,17 +135,19 @@ pub async fn grab_batch_result(
                     &e,
                 )
                 .await;
-                qbit.add_torrent(&url, &info_hash)
+                let (_, hash) = qbit
+                    .add_torrent_returning_id(&url, &info_hash)
                     .await
                     .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-                None
+                (None, hash)
             }
         }
     } else {
-        qbit.add_torrent(&url, &info_hash)
+        let (_, hash) = qbit
+            .add_torrent_returning_id(&url, &info_hash)
             .await
             .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-        None
+        (None, hash)
     };
 
     // Classify so the log line carries the actual quality tier. Pass the
@@ -174,7 +197,12 @@ pub async fn grab_batch_result(
         // rows never get created at all.
         let ep_nums = batch_episode_numbers(&title, &detail);
         let grab_id = crate::models::grabbed_torrents::record_grab(
-            &state.db, &info_hash, &title, sid, &ep_nums, true,
+            &state.db,
+            &effective_hash,
+            &title,
+            sid,
+            &ep_nums,
+            true,
         )
         .await
         .ok()
@@ -216,7 +244,11 @@ pub async fn grab_batch_result(
             // matching spawn in `run_auto_search_targets_with_upgrades`.
             let db_task = state.db.clone();
             let qbit_task = qbit.clone();
-            let info_hash_task = info_hash.clone();
+            // `effective_hash` (the SAB nzo_id or the BT infohash)
+            // is what `get_files` keys off in the auto-expand path
+            // — passing the original BT-shape `info_hash` would be
+            // empty for SAB grabs and miss the file list entirely.
+            let info_hash_task = effective_hash.clone();
             let detail_task = detail.clone();
             let title_task = title.clone();
             let ep_nums_task = ep_nums.clone();
@@ -323,7 +355,10 @@ pub async fn grab_interactive_result(
     // auto-expand the library (that's `grab_batch_result`'s job).
     let wants_selective =
         !info_hash.is_empty() && auto_search::has_selective_discriminator(&detail);
-    let selective_outcome: Option<Vec<usize>> = if wants_selective {
+    // See `grab_batch_result` above for why `add_torrent_returning_id`
+    // matters. Same SAB-nzo_id capture rationale applies to the
+    // single-episode interactive grab path.
+    let (selective_outcome, effective_hash): (Option<Vec<usize>>, String) = if wants_selective {
         let detail_clone = detail.clone();
         let mut pick =
             move |files: &[String]| auto_search::pick_wanted_file_indices(files, &detail_clone);
@@ -331,8 +366,12 @@ pub async fn grab_interactive_result(
             .add_torrent_with_file_filter(&url, &info_hash, &mut pick)
             .await
         {
-            Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => Some(kept),
-            Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => None,
+            Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
+                (Some(kept), info_hash.clone())
+            }
+            Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
+                (None, info_hash.clone())
+            }
             Err(e) => {
                 logger::warn(
                     &state.db,
@@ -344,17 +383,19 @@ pub async fn grab_interactive_result(
                     &e,
                 )
                 .await;
-                qbit.add_torrent(&url, &info_hash)
+                let (_, hash) = qbit
+                    .add_torrent_returning_id(&url, &info_hash)
                     .await
                     .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-                None
+                (None, hash)
             }
         }
     } else {
-        qbit.add_torrent(&url, &info_hash)
+        let (_, hash) = qbit
+            .add_torrent_returning_id(&url, &info_hash)
             .await
             .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-        None
+        (None, hash)
     };
 
     // Interactive grab: the frontend doesn't currently round-trip the Nyaa
@@ -400,7 +441,7 @@ pub async fn grab_interactive_result(
         // Interactive single-episode grab — not a batch by definition.
         let grab_id = crate::models::grabbed_torrents::record_grab(
             &state.db,
-            &info_hash,
+            &effective_hash,
             &title,
             sid,
             &[episode_number],
