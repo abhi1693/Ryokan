@@ -454,9 +454,16 @@ pub struct IntegrationsForm {
     rtorrent_download_path: String,
     jellyfin_url: String,
     jellyfin_api_key: String,
+    /// Checkboxes + their paired API keys — unchecked / unset
+    /// omits the field; `#[serde(default)]` maps the absence to
+    /// `None`.
+    #[serde(default)]
     sonarr_enabled: Option<String>,
+    #[serde(default)]
     sonarr_api_key: Option<String>,
+    #[serde(default)]
     radarr_enabled: Option<String>,
+    #[serde(default)]
     radarr_api_key: Option<String>,
     /// #83 — Interactive file-picker trigger policy.
     #[serde(default)]
@@ -490,9 +497,15 @@ pub struct QualityForm {
     cutoff_resolution: String,
     finished_series_quality: String,
     prefer_subs: String,
+    /// Checkboxes — unchecked omits the field; `#[serde(default)]`
+    /// makes serde_urlencoded map the absence to `None`.
+    #[serde(default)]
     upgrade_search_enabled: Option<String>,
+    #[serde(default)]
     seadex_enabled: Option<String>,
+    #[serde(default)]
     default_custom_query_tokens: Option<String>,
+    #[serde(default)]
     default_restrict_to_uploader: Option<String>,
 }
 
@@ -514,15 +527,22 @@ pub struct QualityFormPartial {
 pub struct GeneralForm {
     media_root: String,
     title_language: String,
+    /// Checkbox: unchecked omits the field from the POST entirely;
+    /// `#[serde(default)]` makes serde_urlencoded map the absence to
+    /// `None` rather than failing deserialization. Same shape every
+    /// other Option<String> on the per-tab forms uses.
+    #[serde(default)]
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
-    /// Phase 7 PR E — Nyaa-specific RSS opt-out. Checkbox → `Some(_)`
-    /// when checked.
+    /// Phase 7 PR E — Nyaa-specific RSS opt-out.
+    #[serde(default)]
     disable_nyaa_rss: Option<String>,
+    #[serde(default)]
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
     /// 1.3.0 — opt-in: trigger auto-search when a series's monitoring
     /// mode changes. Default off.
+    #[serde(default)]
     search_on_monitoring_change: Option<String>,
 }
 
