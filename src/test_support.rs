@@ -466,6 +466,12 @@ mod e2e {
                 "/settings",
                 get(crate::handlers::settings::settings_page),
             )
+            // hx-boost rollout Phase A — Library index page mounted
+            // so the boost browser-e2e tests can navigate
+            // Library ↔ Settings via the boosted mobile-tabbar and
+            // assert the head-merge picked up each page's distinct
+            // `{% block page_css %}` link.
+            .route("/", get(crate::handlers::library::pages::index))
             // Issue #129 Phase 1 completion — per-tab subform handlers
             // (`/settings/general`, `/settings/quality`,
             // `/settings/integrations`). Mounted here so the
