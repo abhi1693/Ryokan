@@ -2989,19 +2989,308 @@ mod tests {
                 .expect("seed config");
         }
 
+        /// Seed a Config row with values **distinct from form
+        /// defaults** for every field the handler under test owns.
+        /// Pairs with a submit-payload built from values **distinct
+        /// from both the seed and form defaults** so a mutant that
+        /// deletes a single field's form-write (the most common
+        /// missed-mutant shape from the cargo-mutants run) leaves
+        /// that field at the seed value — which the assertion then
+        /// catches by comparing against the submitted value.
+        async fn seed_distinct_config(db: &SqlitePool) {
+            let cfg = config::Config {
+                // Integrations seeds.
+                active_client: "deluge".to_string(),
+                qbit_url: "http://qbit.seed:8080".to_string(),
+                qbit_user: "qbit-seed-user".to_string(),
+                qbit_pass: "qbit-seed-pass".to_string(),
+                qbit_category: "qbit-seed-cat".to_string(),
+                qbit_download_path: "/seed/qbit".to_string(),
+                deluge_url: "http://deluge.seed:8112".to_string(),
+                deluge_password: "deluge-seed-pass".to_string(),
+                deluge_label: "deluge-seed-label".to_string(),
+                deluge_download_path: "/seed/deluge".to_string(),
+                transmission_url: "http://trans.seed:9091".to_string(),
+                transmission_user: "trans-seed-user".to_string(),
+                transmission_password: "trans-seed-pass".to_string(),
+                transmission_label: "trans-seed-label".to_string(),
+                transmission_download_path: "/seed/trans".to_string(),
+                rtorrent_url: "http://rt.seed:8081".to_string(),
+                rtorrent_user: "rt-seed-user".to_string(),
+                rtorrent_password: "rt-seed-pass".to_string(),
+                rtorrent_label: "rt-seed-label".to_string(),
+                rtorrent_download_path: "/seed/rt".to_string(),
+                jellyfin_url: "http://jelly.seed:8096".to_string(),
+                jellyfin_api_key: "jelly-seed-key".to_string(),
+                sonarr_enabled: false,
+                sonarr_api_key: "sonarr-seed-key".to_string(),
+                radarr_enabled: true,
+                radarr_api_key: "radarr-seed-key".to_string(),
+                grab_preview_mode: "never".to_string(),
+                external_sync_interval_minutes: 60,
+                // Quality seeds.
+                preferred_groups: "SeedPreferred".to_string(),
+                blocked_groups: "SeedBlocked".to_string(),
+                preferred_source: "bluray".to_string(),
+                preferred_resolution: "720".to_string(),
+                cutoff_source: "dvd".to_string(),
+                cutoff_resolution: "480".to_string(),
+                finished_series_quality: "same".to_string(),
+                prefer_subs: false,
+                upgrade_search_enabled: false,
+                seadex_enabled: true,
+                default_custom_query_tokens: "seed-tokens".to_string(),
+                default_restrict_to_uploader: "seed-uploader".to_string(),
+                // General seeds.
+                media_root: "/seed/media".to_string(),
+                title_language: "native".to_string(),
+                rss_enabled: true,
+                rss_interval_minutes: 20,
+                disable_nyaa_rss: false,
+                post_processing_enabled: true,
+                post_processing_mode: "copy".to_string(),
+                search_on_monitoring_change: true,
+                ..config::Config::default()
+            };
+            config::save_config(db, &cfg)
+                .await
+                .expect("seed distinct config");
+        }
+
         #[tokio::test]
-        async fn general_submit_non_htmx_returns_full_settings_page() {
+        async fn general_submit_non_htmx_round_trips_every_field() {
+            // Mutation-killer test: seeds with values distinct from
+            // form defaults, submits with values distinct from BOTH
+            // the seed AND form defaults, asserts every owned field
+            // lands at the submitted value. A mutant that deletes
+            // any single field's form-write line in
+            // settings_general_submit leaves that field at the seed
+            // value — caught by the per-field assertion below.
+            //
+            // Also checks the non-HTMX render returns the full
+            // SettingsTemplate (`<h2>Settings</h2>` only appears in
+            // settings.html, not the per-tab partial).
             let db = in_memory_pool().await;
-            seed_initial_config(&db).await;
+            seed_distinct_config(&db).await;
             let state = build_test_app_state(db.clone(), None);
             let resp = settings_general_submit(
                 State(state),
                 HxRequest(false),
                 axum::Form(GeneralForm {
-                    media_root: "/srv/media-non-htmx".to_string(),
+                    media_root: "/submit/media".to_string(),
                     title_language: "romaji".to_string(),
+                    rss_enabled: None,        // submit→false, seed=true
+                    rss_interval_minutes: 45, // seed=20
+                    disable_nyaa_rss: Some(String::new()), // submit→true, seed=false
+                    post_processing_enabled: None, // submit→false, seed=true
+                    post_processing_mode: "move".to_string(), // seed=copy
+                    search_on_monitoring_change: None, // submit→false, seed=true
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            // Every General-tab field round-trips at the submitted value.
+            assert_eq!(saved.media_root, "/submit/media");
+            assert_eq!(saved.title_language, "romaji");
+            assert!(!saved.rss_enabled);
+            assert_eq!(saved.rss_interval_minutes, 45);
+            assert!(saved.disable_nyaa_rss);
+            assert!(!saved.post_processing_enabled);
+            assert_eq!(saved.post_processing_mode, "move");
+            assert!(!saved.search_on_monitoring_change);
+            // Cross-tab fields stay at seed values (regression guard
+            // against the per-tab handler clobbering fields it
+            // doesn't own).
+            assert_eq!(saved.preferred_resolution, "720");
+            assert_eq!(saved.jellyfin_url, "http://jelly.seed:8096");
+        }
+
+        #[tokio::test]
+        async fn quality_submit_non_htmx_round_trips_every_field() {
+            // Mutation-killer: seeds + submits every Quality field
+            // with distinct values so a deletion of any single
+            // field's form-write line surfaces as a per-field
+            // assertion failure. See `general_submit_non_htmx_round_trips_every_field`
+            // for the rationale.
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_quality_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(QualityForm {
+                    preferred_groups: "SubmitPreferred".to_string(), // seed=SeedPreferred
+                    blocked_groups: "SubmitBlocked".to_string(),     // seed=SeedBlocked
+                    preferred_source: "web".to_string(),             // seed=bluray
+                    preferred_resolution: "2160".to_string(),        // seed=720
+                    cutoff_source: "bluray".to_string(),             // seed=dvd
+                    cutoff_resolution: "1080".to_string(),           // seed=480
+                    finished_series_quality: "bd_only".to_string(),  // seed=same
+                    prefer_subs: "1".to_string(),                    // seed=false → submit→true
+                    upgrade_search_enabled: Some(String::new()),     // seed=false → submit→true
+                    seadex_enabled: None,                            // seed=true → submit→false
+                    default_custom_query_tokens: Some("submit-tokens".to_string()), // seed=seed-tokens
+                    default_restrict_to_uploader: Some("submit-uploader".to_string()), // seed=seed-uploader
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.preferred_groups, "SubmitPreferred");
+            assert_eq!(saved.blocked_groups, "SubmitBlocked");
+            assert_eq!(saved.preferred_source, "web");
+            assert_eq!(saved.preferred_resolution, "2160");
+            assert_eq!(saved.cutoff_source, "bluray");
+            assert_eq!(saved.cutoff_resolution, "1080");
+            assert_eq!(saved.finished_series_quality, "bd_only");
+            assert!(saved.prefer_subs);
+            assert!(saved.upgrade_search_enabled);
+            assert!(!saved.seadex_enabled);
+            assert_eq!(saved.default_custom_query_tokens, "submit-tokens");
+            assert_eq!(saved.default_restrict_to_uploader, "submit-uploader");
+            // Cross-tab fields (General + Integrations) stay at seed.
+            assert_eq!(saved.media_root, "/seed/media");
+            assert_eq!(saved.jellyfin_url, "http://jelly.seed:8096");
+            assert_eq!(saved.qbit_url, "http://qbit.seed:8080");
+        }
+
+        #[tokio::test]
+        async fn integrations_submit_non_htmx_round_trips_every_field() {
+            // Mutation-killer for the 22 Integrations field-write
+            // mutants the cargo-mutants run flagged. Same shape as
+            // the General + Quality versions: distinct seed, distinct
+            // submit, per-field assertion. Empty Jellyfin URL so
+            // the connection-test side effect is a no-op (avoids
+            // hitting an unreachable host and burning the connect
+            // timeout in every test run).
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_integrations_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(IntegrationsForm {
+                    active_client: "transmission".to_string(), // seed=deluge
+                    qbit_url: "http://qbit.submit:9090".to_string(), // seed=...:8080
+                    qbit_user: "qbit-submit-user".to_string(),
+                    qbit_pass: "qbit-submit-pass".to_string(),
+                    qbit_category: "qbit-submit-cat".to_string(),
+                    qbit_download_path: "/submit/qbit".to_string(),
+                    deluge_url: "http://deluge.submit:8112".to_string(),
+                    deluge_password: "deluge-submit-pass".to_string(),
+                    deluge_label: "deluge-submit-label".to_string(),
+                    deluge_download_path: "/submit/deluge".to_string(),
+                    transmission_url: "http://trans.submit:9091".to_string(),
+                    transmission_user: "trans-submit-user".to_string(),
+                    transmission_password: "trans-submit-pass".to_string(),
+                    transmission_label: "trans-submit-label".to_string(),
+                    transmission_download_path: "/submit/trans".to_string(),
+                    rtorrent_url: "http://rt.submit:8081".to_string(),
+                    rtorrent_user: "rt-submit-user".to_string(),
+                    rtorrent_password: "rt-submit-pass".to_string(),
+                    rtorrent_label: "rt-submit-label".to_string(),
+                    rtorrent_download_path: "/submit/rt".to_string(),
+                    jellyfin_url: String::new(), // empty — skips connection-test
+                    jellyfin_api_key: String::new(),
+                    sonarr_enabled: Some(String::new()), // seed=false → submit→true
+                    sonarr_api_key: Some("sonarr-submit-key".to_string()),
+                    radarr_enabled: None, // seed=true → submit→false
+                    radarr_api_key: Some("radarr-submit-key".to_string()),
+                    grab_preview_mode: Some("batches_only".to_string()), // seed=never
+                    external_sync_interval_minutes: Some(120),           // seed=60
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.active_client, "transmission");
+            assert_eq!(saved.qbit_url, "http://qbit.submit:9090");
+            assert_eq!(saved.qbit_user, "qbit-submit-user");
+            assert_eq!(saved.qbit_pass, "qbit-submit-pass");
+            assert_eq!(saved.qbit_category, "qbit-submit-cat");
+            assert_eq!(saved.qbit_download_path, "/submit/qbit");
+            assert_eq!(saved.deluge_url, "http://deluge.submit:8112");
+            assert_eq!(saved.deluge_password, "deluge-submit-pass");
+            assert_eq!(saved.deluge_label, "deluge-submit-label");
+            assert_eq!(saved.deluge_download_path, "/submit/deluge");
+            assert_eq!(saved.transmission_url, "http://trans.submit:9091");
+            assert_eq!(saved.transmission_user, "trans-submit-user");
+            assert_eq!(saved.transmission_password, "trans-submit-pass");
+            assert_eq!(saved.transmission_label, "trans-submit-label");
+            assert_eq!(saved.transmission_download_path, "/submit/trans");
+            assert_eq!(saved.rtorrent_url, "http://rt.submit:8081");
+            assert_eq!(saved.rtorrent_user, "rt-submit-user");
+            assert_eq!(saved.rtorrent_password, "rt-submit-pass");
+            assert_eq!(saved.rtorrent_label, "rt-submit-label");
+            assert_eq!(saved.rtorrent_download_path, "/submit/rt");
+            assert!(saved.jellyfin_url.is_empty());
+            assert!(saved.jellyfin_api_key.is_empty());
+            assert!(saved.sonarr_enabled);
+            assert_eq!(saved.sonarr_api_key, "sonarr-submit-key");
+            assert!(!saved.radarr_enabled);
+            assert_eq!(saved.radarr_api_key, "radarr-submit-key");
+            assert_eq!(saved.grab_preview_mode, "batches_only");
+            assert_eq!(saved.external_sync_interval_minutes, 120);
+            // Cross-tab fields stay at seed values.
+            assert_eq!(saved.media_root, "/seed/media");
+            assert_eq!(saved.preferred_resolution, "720");
+        }
+
+        // ─── media_root accessibility-warning paths ──────────────────
+        // Three tests pinning the `if !cfg.media_root.is_empty() &&
+        // !std::path::Path::new(&cfg.media_root).is_dir()` branch in
+        // settings_general_submit. The cargo-mutants run flagged 4
+        // missed mutants on this expression (replace && with ||,
+        // delete each !) because no test ever exercised the warning
+        // surface. These three tests cover the three legitimate
+        // states (empty, non-existent path, real dir) so any flip of
+        // the boolean logic produces a wrong output for at least one
+        // input.
+
+        /// Empty media_root → no warning. Mutating `!cfg.media_root.is_empty()`
+        /// to drop the `!` would emit a warning here (since
+        /// !"".is_empty() is false, and `false && X` short-circuits).
+        #[tokio::test]
+        async fn general_save_with_empty_media_root_emits_no_warning() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "english".to_string(),
                     rss_enabled: None,
-                    rss_interval_minutes: 30,
+                    rss_interval_minutes: 15,
                     disable_nyaa_rss: None,
                     post_processing_enabled: None,
                     post_processing_mode: "hardlink".to_string(),
@@ -3010,42 +3299,172 @@ mod tests {
             )
             .await
             .into_response();
-            assert_eq!(resp.status(), axum::http::StatusCode::OK);
             let body = body_string(resp).await;
-            // `<h2>Settings</h2>` is the page-header marker that lives
-            // in `settings.html` — the per-tab subform partials
-            // (`general_form.html` etc.) don't include it. If the
-            // handler accidentally returned the partial regardless of
-            // `is_htmx`, this assertion fails.
+            assert!(body.contains("Settings saved."));
             assert!(
-                body.contains("<h2>Settings</h2>"),
-                "non-HTMX response must be the full SettingsTemplate, not the partial"
+                !body.contains("not accessible"),
+                "empty media_root must not surface the inaccessible-path warning"
             );
-            // Persistence: the General-tab field landed.
+        }
+
+        /// Non-existent media_root → warning surfaces. Mutating the
+        /// `&&` to `||` would still warn here (since both branches
+        /// are true), but the `if !empty` mutation that always-emits
+        /// would be caught here too.
+        #[tokio::test]
+        async fn general_save_with_nonexistent_media_root_emits_warning() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: "/nonexistent-test-path-9b3a2".to_string(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(body.contains("Settings saved."));
+            assert!(
+                body.contains("not accessible"),
+                "non-existent media_root must surface the inaccessible-path warning"
+            );
+            assert!(body.contains("/nonexistent-test-path-9b3a2"));
+        }
+
+        /// media_root pointing at a real directory → no warning.
+        /// Mutating `!Path::is_dir()` to drop the `!` would emit a
+        /// warning here (since is_dir() is true, and `X && true`
+        /// passes both checks → the warning fires when it shouldn't).
+        #[tokio::test]
+        async fn general_save_with_existing_media_root_emits_no_warning() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().to_string_lossy().into_owned();
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: path.clone(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(body.contains("Settings saved."));
+            assert!(
+                !body.contains("not accessible"),
+                "media_root pointing at an existing dir must not surface the warning"
+            );
+        }
+
+        // ─── Validation coerce-on-bad-value paths ─────────────────────
+        // The cargo-mutants run flagged delete-match-arm mutants on
+        // every validation match in the per-tab handlers (e.g.,
+        // `match form.post_processing_mode.as_str() { "move" |
+        // "copy" | "hardlink" => form.post_processing_mode, _ =>
+        // "hardlink".to_string() }`). Tests that submit only valid
+        // values can't tell the difference between "valid arm
+        // matched and returned form value" and "valid arm deleted
+        // → fall through to default which happened to also equal
+        // the valid value." The fix: submit a deliberately-invalid
+        // value and assert the handler coerces to the documented
+        // default. If the valid arm is deleted, the test still
+        // passes (because it asserted the default); but if the
+        // *default* arm is deleted, the test fails. Asymmetric but
+        // useful: catches the half of the mutation surface that
+        // actually changes behavior end-to-end.
+
+        #[tokio::test]
+        async fn general_save_coerces_invalid_post_processing_mode_to_hardlink() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "garbage".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
             let saved = config::get_config(&db)
                 .await
                 .expect("get_config")
                 .expect("config row");
-            assert_eq!(saved.media_root, "/srv/media-non-htmx");
-            assert_eq!(saved.title_language, "romaji");
+            assert_eq!(saved.post_processing_mode, "hardlink");
         }
 
         #[tokio::test]
-        async fn quality_submit_non_htmx_returns_full_settings_page() {
+        async fn general_save_coerces_invalid_title_language_to_english() {
             let db = in_memory_pool().await;
             seed_initial_config(&db).await;
             let state = build_test_app_state(db.clone(), None);
-            let resp = settings_quality_submit(
+            let _ = settings_general_submit(
                 State(state),
-                HxRequest(false),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "klingon".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.title_language, "english");
+        }
+
+        #[tokio::test]
+        async fn quality_save_coerces_invalid_finished_series_quality_to_prefer_bd() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_quality_submit(
+                State(state),
+                HxRequest(true),
                 axum::Form(QualityForm {
-                    preferred_groups: "TestGroup".to_string(),
+                    preferred_groups: String::new(),
                     blocked_groups: String::new(),
-                    preferred_source: "bluray".to_string(),
-                    preferred_resolution: "2160".to_string(),
+                    preferred_source: "web".to_string(),
+                    preferred_resolution: "1080".to_string(),
                     cutoff_source: "bluray".to_string(),
-                    cutoff_resolution: "2160".to_string(),
-                    finished_series_quality: "prefer_bd".to_string(),
+                    cutoff_resolution: "1080".to_string(),
+                    finished_series_quality: "garbage".to_string(),
                     prefer_subs: "1".to_string(),
                     upgrade_search_enabled: None,
                     seadex_enabled: None,
@@ -3055,36 +3474,28 @@ mod tests {
             )
             .await
             .into_response();
-            assert_eq!(resp.status(), axum::http::StatusCode::OK);
-            let body = body_string(resp).await;
-            assert!(
-                body.contains("<h2>Settings</h2>"),
-                "non-HTMX response must be the full SettingsTemplate, not the partial"
-            );
             let saved = config::get_config(&db)
                 .await
                 .expect("get_config")
                 .expect("config row");
-            assert_eq!(saved.preferred_groups, "TestGroup");
-            assert_eq!(saved.preferred_resolution, "2160");
-            assert_eq!(saved.preferred_source, "bluray");
+            assert_eq!(saved.finished_series_quality, "prefer_bd");
         }
 
         #[tokio::test]
-        async fn integrations_submit_non_htmx_returns_full_settings_page() {
+        async fn integrations_save_coerces_unknown_active_client_to_qbittorrent() {
             let db = in_memory_pool().await;
             seed_initial_config(&db).await;
             let state = build_test_app_state(db.clone(), None);
-            let resp = settings_integrations_submit(
+            let _ = settings_integrations_submit(
                 State(state),
-                HxRequest(false),
+                HxRequest(true),
                 axum::Form(IntegrationsForm {
-                    active_client: "qbittorrent".to_string(),
-                    qbit_url: "http://qbit.local:8080".to_string(),
-                    qbit_user: "admin".to_string(),
-                    qbit_pass: "pw".to_string(),
-                    qbit_category: "ryokan".to_string(),
-                    qbit_download_path: "/downloads".to_string(),
+                    active_client: "garbage".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
                     deluge_url: String::new(),
                     deluge_password: String::new(),
                     deluge_label: String::new(),
@@ -3099,38 +3510,313 @@ mod tests {
                     rtorrent_password: String::new(),
                     rtorrent_label: String::new(),
                     rtorrent_download_path: String::new(),
-                    // Empty Jellyfin so the connection-test side
-                    // effect is a no-op (else this test would try to
-                    // hit a non-existent server and slow down the
-                    // suite by the connect-timeout).
                     jellyfin_url: String::new(),
                     jellyfin_api_key: String::new(),
-                    sonarr_enabled: Some(String::new()),
-                    sonarr_api_key: Some("sonarr-key-non-htmx".to_string()),
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
                     radarr_enabled: None,
                     radarr_api_key: None,
-                    grab_preview_mode: Some("never".to_string()),
-                    external_sync_interval_minutes: Some(45),
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
                 }),
             )
             .await
             .into_response();
-            assert_eq!(resp.status(), axum::http::StatusCode::OK);
-            let body = body_string(resp).await;
-            assert!(
-                body.contains("<h2>Settings</h2>"),
-                "non-HTMX response must be the full SettingsTemplate, not the partial"
-            );
             let saved = config::get_config(&db)
                 .await
                 .expect("get_config")
                 .expect("config row");
-            assert_eq!(saved.qbit_url, "http://qbit.local:8080");
-            assert_eq!(saved.qbit_user, "admin");
-            assert_eq!(saved.sonarr_api_key, "sonarr-key-non-htmx");
-            assert!(saved.sonarr_enabled);
-            assert_eq!(saved.grab_preview_mode, "never");
-            assert_eq!(saved.external_sync_interval_minutes, 45);
+            assert_eq!(saved.active_client, "qbittorrent");
+        }
+
+        // ─── general_response cfg-fallback path ───────────────────────
+
+        /// `general_response`'s Ok(Some(c)) match arm reads the cfg
+        /// from the DB when the caller passes `cfg=None`. cargo-
+        /// mutants flagged the deletion of this arm because no test
+        /// hit the path with both (a) `cfg=None` AND (b) a real config
+        /// row in the DB. The existing
+        /// `general_submit_with_no_config_row_renders_friendly_error`
+        /// has cfg=None *and* no DB row, so it falls through to
+        /// Config::default() either way.
+        ///
+        /// This test calls `general_response` directly with cfg=None
+        /// and a seeded distinct row in the DB, then asserts the
+        /// rendered response carries the seeded value. If the match
+        /// arm is deleted, the response would render
+        /// Config::default() values (empty media_root) and the
+        /// assertion would fail.
+        #[tokio::test]
+        async fn general_response_with_no_cfg_falls_back_to_db_row() {
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = general_response(&state, None, None, None, true).await;
+            let body = body_string(resp).await;
+            // The seeded media_root is "/seed/media" — should render
+            // in the form's value="..." attribute. If the Ok(Some)
+            // match arm were deleted, body would contain
+            // Config::default()'s empty media_root instead.
+            assert!(
+                body.contains("/seed/media"),
+                "general_response with cfg=None must read the row from the DB"
+            );
+        }
+
+        /// Companion to `general_response_with_no_cfg_falls_back_to_db_row`
+        /// — same Ok(Some(c)) cfg-fallback path on the Quality side.
+        #[tokio::test]
+        async fn quality_response_with_no_cfg_falls_back_to_db_row() {
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = quality_response(&state, None, None, None, true).await;
+            let body = body_string(resp).await;
+            // Seeded preferred_groups = "SeedPreferred" renders as a
+            // form input value. Default Config has empty
+            // preferred_groups; if the Ok(Some) arm were deleted,
+            // this assertion would fail.
+            assert!(
+                body.contains("SeedPreferred"),
+                "quality_response with cfg=None must read the row from the DB"
+            );
+        }
+
+        /// Companion to the General + Quality fallback tests — same
+        /// Ok(Some(c)) shape on the Integrations side.
+        #[tokio::test]
+        async fn integrations_response_with_no_cfg_falls_back_to_db_row() {
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = integrations_response(&state, None, None, None, true).await;
+            let body = body_string(resp).await;
+            // Seeded jellyfin_url renders as an input value attribute.
+            assert!(
+                body.contains("http://jelly.seed:8096"),
+                "integrations_response with cfg=None must read the row from the DB"
+            );
+        }
+
+        // ─── Integrations active_client coercion (per-arm coverage) ───
+        // The comprehensive `integrations_submit_non_htmx_round_trips_every_field`
+        // test only submits `active_client="transmission"`, so cargo-
+        // mutants can delete the "deluge" or "rtorrent" arms and still
+        // pass (those arms aren't exercised). Two small tests cover
+        // the remaining valid arms, plus the "qbittorrent" arm gets
+        // its coverage from the `integrations_save_coerces_unknown_active_client_to_qbittorrent`
+        // default-fallthrough test above.
+
+        #[tokio::test]
+        async fn integrations_save_preserves_active_client_deluge() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_integrations_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(IntegrationsForm {
+                    active_client: "deluge".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: String::new(),
+                    jellyfin_api_key: String::new(),
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.active_client, "deluge");
+        }
+
+        #[tokio::test]
+        async fn integrations_save_preserves_active_client_rtorrent() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_integrations_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(IntegrationsForm {
+                    active_client: "rtorrent".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: String::new(),
+                    jellyfin_api_key: String::new(),
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.active_client, "rtorrent");
+        }
+
+        // ─── Jellyfin connection-test gate ────────────────────────────
+        // The gate `if !cfg.jellyfin_url.is_empty() &&
+        // !cfg.jellyfin_api_key.is_empty()` decides whether to attempt
+        // a Jellyfin connection on Integrations save. cargo-mutants
+        // flagged 3 boolean-op mutants on this expression: the &&
+        // flipping to ||, and each ! being dropped. Tests that pass
+        // both fields non-empty (the existing browser-e2e test does
+        // this with 127.0.0.1:1) miss the case where exactly one is
+        // empty. These two tests cover (url-only, key-only) so any
+        // boolean-op flip produces a wrong output for at least one
+        // input — without the gate, an empty URL or empty API key
+        // would still attempt a connection and surface a "connection
+        // failed:" notice.
+
+        #[tokio::test]
+        async fn integrations_save_with_only_jellyfin_url_skips_connection_test() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_integrations_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(IntegrationsForm {
+                    active_client: "qbittorrent".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: "http://127.0.0.1:1".to_string(), // would-fail address
+                    jellyfin_api_key: String::new(),                // empty — gate must skip
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(
+                !body.contains("Jellyfin connection failed"),
+                "empty jellyfin_api_key must skip the connection test — \
+                 a `&&` → `||` mutation would attempt to connect against \
+                 the URL and surface 'connection failed:' here"
+            );
+            assert!(
+                !body.contains("Jellyfin") || !body.contains("connected"),
+                "skipped gate must not emit a 'connected' notice either"
+            );
+        }
+
+        #[tokio::test]
+        async fn integrations_save_with_only_jellyfin_api_key_skips_connection_test() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_integrations_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(IntegrationsForm {
+                    active_client: "qbittorrent".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: String::new(), // empty — gate must skip
+                    jellyfin_api_key: "some-key".to_string(), // present
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(
+                !body.contains("Jellyfin connection failed"),
+                "empty jellyfin_url must skip the connection test"
+            );
         }
 
         /// Regression for PR 133 review item #3: read-modify-write
