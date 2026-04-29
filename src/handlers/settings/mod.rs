@@ -2909,4 +2909,239 @@ mod tests {
             );
         }
     }
+
+    /// Issue #129 Phase 1 completion — non-HTMX path coverage for the
+    /// three new per-tab subform handlers
+    /// (`settings_general_submit`, `settings_quality_submit`,
+    /// `settings_integrations_submit`).
+    ///
+    /// The browser-e2e suite at
+    /// `tests/htmx_browser_e2e_settings_subforms.rs` covers the HTMX
+    /// path (request lands with `HX-Request: true`, handler returns
+    /// the small subform partial). It can't reach the no-JS fallback
+    /// because every request from a real browser carries the htmx
+    /// header once the vendored script loads. These unit tests fill
+    /// that gap by calling the handlers directly with
+    /// `HxRequest(false)`, which is the shape Axum produces when no
+    /// `HX-Request` header is present (regular form-POST from a JS-
+    /// disabled browser, or any external script hitting the
+    /// endpoint with `curl`).
+    ///
+    /// Each test asserts:
+    /// 1. The DB write happened — the handler did the same persistence
+    ///    work as the HTMX path.
+    /// 2. The response is the full `SettingsTemplate` HTML (carries
+    ///    the `<h2>Settings</h2>` page header from `settings.html`,
+    ///    which the per-tab subform partials don't include) — so
+    ///    a regression that returns the partial regardless of the
+    ///    HxRequest flag would visibly break a no-JS save (the
+    ///    user would see a fragment with no nav / chrome).
+    mod non_htmx_path {
+        use super::super::*;
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+        use axum::body::to_bytes;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use axum_htmx::HxRequest;
+        use sqlx::SqlitePool;
+
+        /// Read the response body as a UTF-8 string. axum's `Response`
+        /// is `Response<Body>` where `Body` is opaque; `to_bytes` with
+        /// a generous limit (2 MiB) covers the full SettingsTemplate
+        /// without truncating.
+        async fn body_string(resp: axum::response::Response) -> String {
+            let bytes = to_bytes(resp.into_body(), 2 * 1024 * 1024)
+                .await
+                .expect("read body");
+            String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+        }
+
+        async fn seed_initial_config(db: &SqlitePool) {
+            // Minimum-viable Config row — every per-tab handler reads
+            // the existing row to preserve fields it doesn't own. With
+            // no row, the handlers early-return with the
+            // "No config row found" error path; we want to exercise
+            // the success path here.
+            config::save_config(db, &config::Config::default())
+                .await
+                .expect("seed config");
+        }
+
+        #[tokio::test]
+        async fn general_submit_non_htmx_returns_full_settings_page() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(GeneralForm {
+                    media_root: "/srv/media-non-htmx".to_string(),
+                    title_language: "romaji".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 30,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            // `<h2>Settings</h2>` is the page-header marker that lives
+            // in `settings.html` — the per-tab subform partials
+            // (`general_form.html` etc.) don't include it. If the
+            // handler accidentally returned the partial regardless of
+            // `is_htmx`, this assertion fails.
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            // Persistence: the General-tab field landed.
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.media_root, "/srv/media-non-htmx");
+            assert_eq!(saved.title_language, "romaji");
+        }
+
+        #[tokio::test]
+        async fn quality_submit_non_htmx_returns_full_settings_page() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_quality_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(QualityForm {
+                    preferred_groups: "TestGroup".to_string(),
+                    blocked_groups: String::new(),
+                    preferred_source: "bluray".to_string(),
+                    preferred_resolution: "2160".to_string(),
+                    cutoff_source: "bluray".to_string(),
+                    cutoff_resolution: "2160".to_string(),
+                    finished_series_quality: "prefer_bd".to_string(),
+                    prefer_subs: "1".to_string(),
+                    upgrade_search_enabled: None,
+                    seadex_enabled: None,
+                    default_custom_query_tokens: None,
+                    default_restrict_to_uploader: None,
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.preferred_groups, "TestGroup");
+            assert_eq!(saved.preferred_resolution, "2160");
+            assert_eq!(saved.preferred_source, "bluray");
+        }
+
+        #[tokio::test]
+        async fn integrations_submit_non_htmx_returns_full_settings_page() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_integrations_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(IntegrationsForm {
+                    active_client: "qbittorrent".to_string(),
+                    qbit_url: "http://qbit.local:8080".to_string(),
+                    qbit_user: "admin".to_string(),
+                    qbit_pass: "pw".to_string(),
+                    qbit_category: "ryokan".to_string(),
+                    qbit_download_path: "/downloads".to_string(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    // Empty Jellyfin so the connection-test side
+                    // effect is a no-op (else this test would try to
+                    // hit a non-existent server and slow down the
+                    // suite by the connect-timeout).
+                    jellyfin_url: String::new(),
+                    jellyfin_api_key: String::new(),
+                    sonarr_enabled: Some(String::new()),
+                    sonarr_api_key: Some("sonarr-key-non-htmx".to_string()),
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: Some("never".to_string()),
+                    external_sync_interval_minutes: Some(45),
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.qbit_url, "http://qbit.local:8080");
+            assert_eq!(saved.qbit_user, "admin");
+            assert_eq!(saved.sonarr_api_key, "sonarr-key-non-htmx");
+            assert!(saved.sonarr_enabled);
+            assert_eq!(saved.grab_preview_mode, "never");
+            assert_eq!(saved.external_sync_interval_minutes, 45);
+        }
+
+        /// Companion regression: the early-return path when the
+        /// config row is missing. Surfaces the "No config row found —
+        /// run /setup first." error string in the response, which
+        /// the operator sees when they hit the endpoint before
+        /// completing first-run setup.
+        #[tokio::test]
+        async fn general_submit_with_no_config_row_renders_friendly_error() {
+            // Note: NO seed_initial_config call here — pool is empty.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("No config row found"),
+                "expected friendly first-run error in response body"
+            );
+        }
+    }
 }
