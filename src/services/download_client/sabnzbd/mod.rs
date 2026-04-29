@@ -506,6 +506,38 @@ impl DownloadClient for SabClient {
             .into_iter()
             .filter(|s| category_matches(&s.category))
         {
+            // Title-matching ancestor walk, ported from Sonarr's
+            // SAB client (`Sabnzbd.cs::GetHistory`). SAB's `storage`
+            // field can be:
+            //   1. The per-job folder path (`/complete/<title>/`) —
+            //      the typical case.
+            //   2. A file path inside the job folder
+            //      (`/complete/<title>/file.mkv`) — single-file
+            //      extracts on some SAB versions.
+            //   3. The parent complete dir alone (`/complete/`) —
+            //      pathological-but-real edge case observed in the
+            //      wild; happens when SAB couldn't determine where
+            //      the job extracted to (no rar / weird archive
+            //      shape) and fell back to recording the parent.
+            //
+            // Walk the parent chain of `storage` looking for an
+            // ancestor whose filename equals `name` (the job title).
+            // That ancestor IS the per-job folder. If we find one,
+            // use it as the canonical content_path so import-time
+            // walks and delete-time cleanups operate on a precise
+            // per-job scope. Without this narrowing, a job's
+            // `import_torrent` walks the WHOLE complete dir and
+            // sweeps in files belonging to OTHER grabs — which then
+            // get stamped onto this grab's `imported_source_paths`
+            // and incorrectly removed when this grab is deleted.
+            //
+            // Fallback when no ancestor matches: try
+            // `<storage>/<title>/` as a candidate (covers case 3
+            // above where Storage is the parent). If neither
+            // resolution works the original `storage` is kept so
+            // downstream code at least has something to attempt.
+            let canonical_job_path = canonical_job_path(&slot.storage, &slot.name);
+
             out.push(DownloadItem {
                 hash: slot.nzo_id,
                 name: slot.name,
@@ -515,26 +547,26 @@ impl DownloadClient for SabClient {
                 state: slot.status.clone(),
                 category: slot.category,
                 eta: 0,
-                save_path: slot.storage.clone(),
-                content_path: slot.storage,
+                save_path: canonical_job_path.clone(),
+                content_path: canonical_job_path,
                 state_kind: Self::map_state(&slot.status, true),
             });
         }
 
-        // Diagnostic trace so a user reporting "Ryokan can't see my
-        // SAB jobs" has something to grep for in System → Logs. Two
-        // useful counts: how many slots SAB returned in total, and
-        // how many survived the category filter. A "slots=N matched=0"
-        // line points the user (or future-me) directly at the
-        // category-config mismatch — easier than digging through the
-        // SAB UI to spot it.
-        tracing::debug!(
-            "sab list_scoped: configured_category={:?} queue_slots={} history_slots={} matched={}",
-            configured,
-            queue_total,
-            history_total,
-            out.len()
-        );
+        // Diagnostic trace, fires only when SAB returned slots but
+        // every one of them got dropped by the category filter — i.e.
+        // a user-reported "Ryokan can't see my SAB jobs" case. Avoids
+        // spamming logs every 5s on the happy path (the queue-tab
+        // poll calls list_scoped on every refresh).
+        let total = queue_total + history_total;
+        if total > 0 && out.is_empty() {
+            tracing::debug!(
+                "sab list_scoped: dropped every slot via category filter — configured_category={:?} queue_slots={} history_slots={}",
+                configured,
+                queue_total,
+                history_total,
+            );
+        }
 
         Ok(out)
     }
@@ -939,6 +971,91 @@ struct GetFilesEntry {
 
 // ── Wire-format helpers ─────────────────────────────────────────────
 
+/// Resolve SAB's `storage` field to the canonical per-job folder.
+/// SAB's reported storage takes one of three shapes:
+///
+///   1. **The per-job folder itself** (`/complete/<title>/`). This
+///      is the typical case. Detected by the basename equalling
+///      the job title; we return it as-is.
+///   2. **A file path inside the job folder**
+///      (`/complete/<title>/file.mkv`). Single-file extracts on some
+///      SAB versions. We use [`title_matching_ancestor`] to walk up
+///      and find the title-named parent dir.
+///   3. **The parent complete dir alone** (`/complete/`). Edge case
+///      observed in the wild — happens when SAB couldn't determine
+///      where extraction landed. We construct `<storage>/<title>/`
+///      as a candidate. This won't be filesystem-checked here (we
+///      operate on SAB-internal paths in Docker setups, where
+///      `is_dir()` against Ryokan's filesystem would lie); the
+///      downstream import walk handles the "path doesn't exist"
+///      case naturally.
+///
+/// The narrowing is critical: without it, `import_torrent`'s
+/// `walk_video_files` would walk SAB's WHOLE complete dir and sweep
+/// in files belonging to OTHER grabs, then stamp them onto this
+/// grab's `imported_source_paths`. Deleting one episode would then
+/// remove sibling episodes' source files too — see the user-reported
+/// 1154/1156 bug.
+fn canonical_job_path(storage: &str, title: &str) -> String {
+    if storage.is_empty() {
+        return String::new();
+    }
+    if title.is_empty() {
+        return storage.to_string();
+    }
+    // Case 1: storage already IS the per-job dir.
+    if let Some(name) = std::path::Path::new(storage)
+        .file_name()
+        .and_then(|n| n.to_str())
+        && name == title
+    {
+        return storage.to_string();
+    }
+    // Case 2: storage points inside the per-job dir somewhere.
+    if let Some(found) = title_matching_ancestor(storage, title) {
+        return found;
+    }
+    // Case 3: storage is the parent root (no per-job context).
+    // Construct the candidate; if SAB really created a per-job
+    // subdir named after the title, this resolves to it.
+    std::path::PathBuf::from(storage)
+        .join(title)
+        .display()
+        .to_string()
+}
+
+/// Walk parents of `path` looking for an ancestor whose filename
+/// equals `title`. Returns the **outermost** matching ancestor as a
+/// string, or `None` if no ancestor matches.
+///
+/// Ported from Sonarr's `Sabnzbd.cs::GetHistory` (the inner `while`
+/// loop ascending parents and matching against `sabHistoryItem.Title`).
+/// Used by [`canonical_job_path`] to handle the case where SAB's
+/// `storage` field points at a file inside the job folder rather
+/// than the folder itself.
+///
+/// The "outermost match wins" semantic mirrors Sonarr's behavior:
+/// the loop overwrites OutputPath each match and keeps walking up,
+/// so for a path like `/complete/<title>/<title>/file.mkv` the
+/// higher-up `<title>/` directory wins. Real-world archives rarely
+/// nest this way, but the chosen behavior is defensive.
+fn title_matching_ancestor(path: &str, title: &str) -> Option<String> {
+    if title.is_empty() || path.is_empty() {
+        return None;
+    }
+    let mut found: Option<std::path::PathBuf> = None;
+    let mut current = std::path::Path::new(path).parent();
+    while let Some(dir) = current {
+        if let Some(name) = dir.file_name().and_then(|n| n.to_str())
+            && name == title
+        {
+            found = Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    found.map(|p| p.display().to_string())
+}
+
 /// SAB returns percentages as strings ("47" → 0.47). Bare-int
 /// formatting on most installs; clamp to 0..=1.0.
 fn parse_percentage(s: &str) -> f64 {
@@ -997,6 +1114,109 @@ mod tests {
     fn endpoint_strips_trailing_slash_from_base() {
         let c = SabClient::new("http://host:8080/", "", "k", "anime");
         assert_eq!(c.endpoint(), "http://host:8080/api");
+    }
+
+    /// SAB's history `storage` field for a single-file extract often
+    /// points at the file inside the job folder. The title-matching
+    /// ancestor walk recovers the per-job folder so the import walk
+    /// scopes correctly. Without this, when SAB reports the parent
+    /// `complete/` dir or a file path, downstream code walked too
+    /// broadly and stamped/imported files from OTHER grabs in the
+    /// same complete dir.
+    #[test]
+    fn title_matching_ancestor_finds_job_dir_when_storage_is_a_file_path() {
+        let storage = "/downloads/complete/MyJob.S01E01/file.mkv";
+        let title = "MyJob.S01E01";
+        let got = title_matching_ancestor(storage, title);
+        assert_eq!(got, Some("/downloads/complete/MyJob.S01E01".to_string()));
+    }
+
+    /// When SAB's `storage` IS the per-job folder already, the walk
+    /// finds that folder one level up from the supplied path's
+    /// children — but since we walk *parents* of the input, the input
+    /// itself isn't checked. Returns None; caller falls back to using
+    /// `storage` directly.
+    #[test]
+    fn title_matching_ancestor_returns_none_when_storage_is_already_job_dir() {
+        let storage = "/downloads/complete/MyJob";
+        let title = "MyJob";
+        // The walk inspects PARENTS of storage; the path itself is the
+        // job dir but isn't tested. Caller's fallback chain handles
+        // this case via direct use of `storage`.
+        assert_eq!(title_matching_ancestor(storage, title), None);
+    }
+
+    /// Pathological case: SAB reports `storage` as the parent
+    /// complete dir with no per-job subdir. Walk finds no match
+    /// (no ancestor named after Title). Caller falls through to the
+    /// `<storage>/<title>/` candidate or to `storage` as-is — both
+    /// safer than walking the parent dir.
+    #[test]
+    fn title_matching_ancestor_returns_none_for_parent_only_storage() {
+        let storage = "/downloads/complete";
+        let title = "MyJob.S01E01";
+        assert_eq!(title_matching_ancestor(storage, title), None);
+    }
+
+    /// Multi-match: the OUTERMOST title-named ancestor wins (matches
+    /// Sonarr's behavior — the loop assignment overwrites and keeps
+    /// ascending). Defensive against unusual archive shapes.
+    #[test]
+    fn title_matching_ancestor_picks_outermost_match() {
+        let storage = "/downloads/MyJob/inner/MyJob/file.mkv";
+        let title = "MyJob";
+        assert_eq!(
+            title_matching_ancestor(storage, title),
+            Some("/downloads/MyJob".to_string())
+        );
+    }
+
+    /// Empty title or empty path: no walk, returns None.
+    #[test]
+    fn title_matching_ancestor_handles_empty_inputs() {
+        assert_eq!(title_matching_ancestor("", "MyJob"), None);
+        assert_eq!(title_matching_ancestor("/a/b", ""), None);
+    }
+
+    /// Per-job dir already as storage — return as-is. The basename
+    /// equals the title so we know it IS the job folder.
+    #[test]
+    fn canonical_job_path_uses_storage_when_basename_matches_title() {
+        assert_eq!(
+            canonical_job_path("/downloads/complete/MyJob.S01E01", "MyJob.S01E01"),
+            "/downloads/complete/MyJob.S01E01"
+        );
+    }
+
+    /// File path inside the job folder — walk finds the job dir.
+    #[test]
+    fn canonical_job_path_recovers_job_dir_from_file_path() {
+        assert_eq!(
+            canonical_job_path("/downloads/complete/MyJob.S01E01/file.mkv", "MyJob.S01E01"),
+            "/downloads/complete/MyJob.S01E01"
+        );
+    }
+
+    /// Parent-only storage — construct a candidate by joining title.
+    /// Pinned by the user-reported 1154/1156 bug: when SAB returns
+    /// the bare complete dir, downstream walks must scope to a
+    /// per-job candidate or sibling grabs' files get swept up too.
+    #[test]
+    fn canonical_job_path_constructs_candidate_for_parent_only_storage() {
+        assert_eq!(
+            canonical_job_path("/downloads/complete", "MyJob.S01E01"),
+            "/downloads/complete/MyJob.S01E01"
+        );
+    }
+
+    /// Empty inputs degrade gracefully — no panic, sensible defaults.
+    #[test]
+    fn canonical_job_path_handles_empty_inputs() {
+        assert_eq!(canonical_job_path("", "MyJob"), "");
+        assert_eq!(
+            canonical_job_path("/downloads/complete", ""),
+            "/downloads/complete"
+        );
     }
 
     #[test]

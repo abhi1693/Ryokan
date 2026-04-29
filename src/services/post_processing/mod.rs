@@ -626,6 +626,14 @@ async fn import_torrent(
     let mut imported_eps_by_series: std::collections::BTreeMap<i64, Vec<(i32, i64, String)>> =
         std::collections::BTreeMap::new();
     let mut imported_count = 0_usize;
+    // Source-side paths we successfully imported FROM. Persisted on
+    // the grab row at the end of this function so the delete and
+    // series-remove handlers can clean up SAB's complete dir
+    // regardless of whether the inode-based fallback applies (only
+    // hardlink mode shares inodes; copy mode has separate inodes,
+    // move mode has no surviving source). Captured in
+    // local-translated form (Ryokan's view of the path).
+    let mut imported_source_paths: Vec<String> = Vec::new();
     // Episode numbers (post-offset, the same value the rest of the
     // codebase uses) that reached `do_file_op` but failed. Drives the
     // PartiallyImported / AllFailed branches below so partial failures
@@ -985,12 +993,15 @@ async fn import_torrent(
                         // (SAB→qBit or qBit→SAB) would otherwise
                         // hit a client that doesn't know the old
                         // hash and silently leave the old job behind.
-                        let old_client = match old_grab.download_client_id {
-                            Some(id) => state.client_by_id(id).await,
-                            None => None,
-                        };
-                        let target = old_client.as_ref().unwrap_or(client);
-                        let _ = target.delete(&old_grab.hash, true).await;
+                        // `resolve_grab_client` also rescues legacy
+                        // NULL-stamped SAB grabs via the nzo_id-shape
+                        // heuristic.
+                        let target = state
+                            .resolve_grab_client(old_grab.download_client_id, &old_grab.hash)
+                            .await;
+                        if let Some(target) = target {
+                            let _ = target.delete(&old_grab.hash, true).await;
+                        }
                     }
                 }
                 grabs_to_mark_replaced.insert(old_grab.id);
@@ -1022,6 +1033,28 @@ async fn import_torrent(
                 )
                 .await;
                 imported_count += 1;
+                // Record the source path we imported from — but only
+                // if this file's parsed episode is one this grab
+                // actually claims. Without the filter, a wide walk
+                // (SAB returning the parent complete dir as `storage`,
+                // pre `canonical_job_path` narrowing) sweeps in
+                // stranger episodes from sibling SAB jobs and stamps
+                // them onto this grab. Deleting one episode then
+                // finds the wrong grab's stamps and over-removes.
+                //
+                // Batch grabs (`is_batch = 1`) and Phase-2 routed
+                // sibling imports legitimately import multiple
+                // episodes via one grab — for those, accept all
+                // imported files. Single-episode grabs check that
+                // the parsed `raw_ep_num` is in the grab's claimed
+                // `episode_numbers`.
+                let claims_this_episode = grab.is_batch
+                    || routes_by_file.contains_key(file_idx)
+                    || grab.episode_numbers.is_empty()
+                    || grab.episode_numbers.contains(&raw_ep_num);
+                if claims_this_episode {
+                    imported_source_paths.push(src.display().to_string());
+                }
                 touched_series.insert(target_series_id);
                 logger::info(
                     &state.db,
@@ -1190,6 +1223,17 @@ async fn import_torrent(
         }
         return Ok(ImportOutcome::AllFailed { failed_episodes });
     }
+
+    // Persist the source-side paths so the delete + series-remove
+    // handlers can clean up SAB's complete dir for copy/move modes
+    // (no shared inode) or for hardlink mode when SAB's
+    // `del_files=1` doesn't reach the file (the user's reported
+    // bug — SAB's history `storage` field can be the parent
+    // complete dir while the actual extracted .mkv lives in a
+    // subfolder created by the rar archive contents).
+    let _ =
+        grabbed_torrents::stamp_imported_source_paths(&state.db, grab.id, &imported_source_paths)
+            .await;
 
     // Flush the `grabbed_torrents.state = 'replaced'` updates collected
     // during the file loop. One UPDATE per distinct old grab instead
@@ -1887,6 +1931,30 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
             )
         };
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
+
+        // Post-processing-off mode never imports files but still
+        // records source-side paths so the series-remove handler can
+        // clean SAB's complete dir later. Walk the local-translated
+        // content path for video files and stamp them. Best-effort:
+        // empty list is fine (the grab might be a torrent with no
+        // .mkv-shaped extension, or the path might not be readable
+        // from Ryokan's view).
+        let walk_root = std::path::Path::new(&client_path);
+        if walk_root.is_dir() {
+            let videos = walk_video_files(walk_root);
+            let source_paths: Vec<String> = videos
+                .into_iter()
+                .map(|f| walk_root.join(&f.name).display().to_string())
+                .collect();
+            if !source_paths.is_empty() {
+                let _ = grabbed_torrents::stamp_imported_source_paths(
+                    &state.db,
+                    grab.id,
+                    &source_paths,
+                )
+                .await;
+            }
+        }
 
         // Mark the grab row as finalized so we stop polling it and the
         // UI stops treating it as in-flight. Use `mark_completed_no_import`

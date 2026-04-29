@@ -311,14 +311,12 @@ pub async fn remove_series(
         };
 
         if !hashes.is_empty() {
-            // Per-grab client routing: a series can have grabs across
-            // multiple clients (e.g. early SAB Usenet rip plus later
-            // qBit BD upgrade). Each grab's `download_client_id`
-            // points at the client that holds it; route per-grab so
-            // a SAB nzo_id doesn't get sent to qBit's `delete` (or
-            // vice versa) and silently leave the original behind.
-            let default_client = state.default_download_client().await;
-            for (_id, hash, dc_id) in &hashes {
+            // Per-grab client routing via `resolve_grab_client`. A
+            // series can have grabs across multiple clients (e.g.
+            // early SAB Usenet rip plus later qBit BD upgrade) AND
+            // legacy SAB grabs may have a NULL stamp; the helper's
+            // nzo_id-shape heuristic rescues those.
+            for (id, hash, dc_id) in &hashes {
                 if hash.is_empty() {
                     continue;
                 }
@@ -334,20 +332,42 @@ pub async fn remove_series(
                     torrents_removed += 1; // counted as "handled"
                     continue;
                 }
-                let client_for_grab = match dc_id {
-                    Some(id) => match state.client_by_id(*id).await {
-                        Some(c) => Some(c),
-                        None => default_client.clone(),
-                    },
-                    None => default_client.clone(),
-                };
-                let Some(client) = client_for_grab else {
+                let Some(client) = state.resolve_grab_client(*dc_id, hash).await else {
                     torrent_failures.push("Download client not configured".to_string());
                     continue;
                 };
                 match client.delete(hash, true).await {
                     Ok(()) => torrents_removed += 1,
                     Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
+                }
+
+                // Source-side cleanup using import-time-stamped paths.
+                // Same rationale as `delete_episode_file`: the client's
+                // delete is unreliable for SAB jobs whose history
+                // `storage` field is the parent complete dir. Stamped
+                // paths are precise and mode-agnostic.
+                let stamped = grabbed_torrents::get_imported_source_paths(&state.db, *id).await;
+                if !stamped.is_empty() {
+                    let owned: Vec<std::path::PathBuf> =
+                        stamped.iter().map(std::path::PathBuf::from).collect();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let mut removed: Vec<std::path::PathBuf> = Vec::new();
+                        for p in &owned {
+                            if std::fs::remove_file(p).is_ok() {
+                                removed.push(p.clone());
+                            }
+                        }
+                        // Single-level parent prune only. Mirror the
+                        // shape in `episodes::remove_stamped_source_paths`:
+                        // walking up unbounded would nuke the user's
+                        // complete dir if it only held this one job.
+                        for p in &removed {
+                            if let Some(dir) = p.parent() {
+                                let _ = std::fs::remove_dir(dir);
+                            }
+                        }
+                    })
+                    .await;
                 }
             }
         }

@@ -303,10 +303,186 @@ impl AppState {
         let pool = self.download_clients.read().await.clone();
         pool.clients.get(&id).cloned()
     }
+
+    /// Resolve a grab to its handling client given the `download_client_id`
+    /// stamp (when present) and the hash. Falls back through three layers:
+    ///
+    ///   1. The stamped client id, if it still exists in the pool.
+    ///   2. **Hash-shape heuristic** — SAB's `nzo_id` format
+    ///      (`SABnzbd_nzo_…`) is unmistakable. Old grabs from before
+    ///      grab-time stamping was wired (the `ALTER TABLE … ADD COLUMN
+    ///      download_client_id` migration runs without a backfill) have
+    ///      a NULL stamp, and naively falling through to the torrent
+    ///      default sends an nzo_id to qBit's `delete` endpoint, which
+    ///      silently 200s on unknown hashes — the user's symptom is
+    ///      "delete-from-disk leaves the SAB job alive forever." Route
+    ///      SAB-shaped hashes to ANY usenet client in the pool instead.
+    ///   3. The torrent default (the legacy fall-through; correct for
+    ///      BT v1 infohashes — 40-char hex, no SAB-style prefix).
+    pub async fn resolve_grab_client(
+        &self,
+        download_client_id: Option<i64>,
+        hash: &str,
+    ) -> Option<Arc<dyn DownloadClient>> {
+        if let Some(id) = download_client_id
+            && let Some(client) = self.client_by_id(id).await
+        {
+            return Some(client);
+        }
+        if hash.starts_with("SABnzbd_nzo_") {
+            let pool = self.download_clients.read().await.clone();
+            for c in pool.clients.values() {
+                if c.protocol() == "usenet" {
+                    return Some(c.clone());
+                }
+            }
+        }
+        self.default_download_client().await
+    }
 }
 
 impl FromRef<AppState> for SqlitePool {
     fn from_ref(state: &AppState) -> SqlitePool {
         state.db.clone()
+    }
+}
+
+#[cfg(test)]
+mod resolve_grab_client_tests {
+    use super::*;
+    use crate::services::download_client::{
+        AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+    };
+    use async_trait::async_trait;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::RwLock;
+
+    /// Minimal `DownloadClient` mock that lets a test pin the
+    /// `protocol()` return value. Every other method is a no-op stub.
+    struct ProtoClient(&'static str);
+
+    #[async_trait]
+    impl DownloadClient for ProtoClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("ok".into())
+        }
+        async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+            Ok(AddOutcome::Added)
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _url: &str,
+            _hash: &str,
+            _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<SelectiveOutcome, String> {
+            Ok(SelectiveOutcome::FullDownload)
+        }
+        async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+            Ok(vec![])
+        }
+        async fn pause(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_file_wanted(
+            &self,
+            _hash: &str,
+            _files: &[usize],
+            _wanted: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            self.0
+        }
+        fn protocol(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    fn build_state(default_torrent_id: Option<i64>) -> AppState {
+        let mut clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>> =
+            std::collections::HashMap::new();
+        clients.insert(1, Arc::new(ProtoClient("torrent")));
+        clients.insert(2, Arc::new(ProtoClient("usenet")));
+        let pool = DownloadClientPool {
+            clients,
+            default_torrent_id,
+            default_usenet_id: Some(2),
+        };
+        AppState {
+            db: sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy pool"),
+            download_clients: Arc::new(RwLock::new(Arc::new(pool))),
+            jellyfin: Arc::new(RwLock::new(None)),
+            custom_formats: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            indexers: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            progress: crate::services::progress::ProgressRegistry::new(),
+            users_exist: Arc::new(AtomicBool::new(true)),
+            interactive_search_cache: crate::services::interactive_search_cache::new(),
+            oauth_state: crate::services::oauth_state::new(),
+            start_time: chrono::Utc::now(),
+            tasks: crate::services::task_registry::TaskRegistry::new(),
+        }
+    }
+
+    /// Stamped `download_client_id` always wins, even for a SAB-shaped
+    /// hash that the heuristic would otherwise re-route.
+    #[tokio::test]
+    async fn stamped_id_wins_over_hash_heuristic() {
+        let state = build_state(Some(1));
+        // Pin to the torrent client (id=1) even though the hash looks
+        // SAB-shaped — the stamp is authoritative.
+        let client = state
+            .resolve_grab_client(Some(1), "SABnzbd_nzo_abcdef12")
+            .await
+            .expect("resolved");
+        assert_eq!(client.protocol(), "torrent");
+    }
+
+    /// Legacy NULL stamp + SAB-shaped hash routes to a usenet client
+    /// in the pool. Without this the user's existing SAB grabs (made
+    /// before grab-time stamping was wired) silently route to qBit's
+    /// `delete`, which 200s on unknown hashes and leaves the SAB job
+    /// alive forever.
+    #[tokio::test]
+    async fn null_stamp_with_sab_hash_routes_to_usenet_client() {
+        let state = build_state(Some(1));
+        let client = state
+            .resolve_grab_client(None, "SABnzbd_nzo_4rxsukkq")
+            .await
+            .expect("resolved");
+        assert_eq!(client.protocol(), "usenet");
+    }
+
+    /// Legacy NULL stamp + BT-shaped hash falls through to the torrent
+    /// default — no false-positive on a 40-char-hex infohash.
+    #[tokio::test]
+    async fn null_stamp_with_bt_hash_falls_through_to_torrent_default() {
+        let state = build_state(Some(1));
+        let client = state
+            .resolve_grab_client(None, "abc123def456abc123def456abc123def4567890")
+            .await
+            .expect("resolved");
+        assert_eq!(client.protocol(), "torrent");
+    }
+
+    /// Stamped id that no longer exists (client was deleted) falls
+    /// back through the heuristic. Same SAB rescue as the NULL case.
+    #[tokio::test]
+    async fn stamped_id_missing_from_pool_still_routes_via_heuristic() {
+        let state = build_state(Some(1));
+        let client = state
+            .resolve_grab_client(Some(999), "SABnzbd_nzo_abcdef12")
+            .await
+            .expect("resolved");
+        assert_eq!(client.protocol(), "usenet");
     }
 }

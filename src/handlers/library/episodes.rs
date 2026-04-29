@@ -23,6 +23,156 @@ use super::reconcile::{resolve_series_context, resolve_tracked_series};
 use super::search::run_auto_search_targets;
 use super::{Episode, MarkEpisodeFailedForm};
 
+/// Walk `root` recursively (depth cap matches `walk_video_files` in
+/// post_processing — 4 levels) and remove any regular file whose
+/// inode equals `inode`. Returns the list of removed paths so the
+/// caller can log them. Best-effort: I/O errors during walk or
+/// remove are swallowed because this is a cleanup pass after the
+/// authoritative media-side delete has already succeeded.
+///
+/// Used by `delete_episode_file` to scrub SAB-side hardlink sources
+/// when the client's own `del_files=1` doesn't reach them — the
+/// shared-inode property of hardlinks gives us a reliable way to
+/// find the source regardless of how SAB reports its history
+/// `storage` field. After file removal, walks back up cleaning out
+/// any directories that became empty as a result, stopping at
+/// `root` so we never empty out the configured complete dir.
+#[cfg(unix)]
+async fn remove_hardlinks_with_inode(
+    root: &std::path::Path,
+    inode: u64,
+) -> Vec<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    fn walk(dir: &std::path::Path, depth: u32, inode: u64, out: &mut Vec<std::path::PathBuf>) {
+        const MAX_DEPTH: u32 = 4;
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                walk(&path, depth + 1, inode, out);
+            } else if meta.is_file() && meta.ino() == inode {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = root.to_path_buf();
+    let inode_arg = inode;
+    tokio::task::spawn_blocking(move || {
+        let mut found = Vec::new();
+        walk(&root, 0, inode_arg, &mut found);
+        let mut removed = Vec::new();
+        for p in found {
+            if std::fs::remove_file(&p).is_ok() {
+                removed.push(p);
+            }
+        }
+        // Walk back up cleaning out emptied parents. Stop at `root`
+        // (don't try to rmdir the root itself — that's the user's
+        // configured complete dir).
+        let root_canon = std::fs::canonicalize(&root).unwrap_or(root.clone());
+        for p in &removed {
+            let mut parent = p.parent();
+            while let Some(dir) = parent {
+                if let Ok(canon) = std::fs::canonicalize(dir)
+                    && canon == root_canon
+                {
+                    break;
+                }
+                if std::fs::remove_dir(dir).is_err() {
+                    // Non-empty or permission denied — stop ascending.
+                    break;
+                }
+                parent = dir.parent();
+            }
+        }
+        removed
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[cfg(not(unix))]
+async fn remove_hardlinks_with_inode(
+    _root: &std::path::Path,
+    _inode: u64,
+) -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
+/// Check whether `path` is a regular file with the given inode.
+/// Used by the orphan-source-cleanup fallback in
+/// `delete_episode_file`: when a grab's stamped paths contain a file
+/// matching the just-deleted media file's inode, that's the SAB
+/// source we want to remove (regardless of which grab "officially"
+/// claims the episode).
+#[cfg(unix)]
+async fn path_has_inode(path: &str, inode: u64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let p = std::path::PathBuf::from(path);
+    tokio::task::spawn_blocking(move || {
+        std::fs::metadata(&p)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.ino() == inode)
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+async fn path_has_inode(_path: &str, _inode: u64) -> bool {
+    false
+}
+
+/// Remove each path in `sources` (best-effort) and prune the
+/// **immediate parent directory only** if it became empty as a
+/// result. Used by `delete_episode_file` and the series-remove path
+/// to clean up the source-side files Ryokan imported FROM — stamped
+/// at import time so we know exact paths regardless of how the
+/// download client reports its layout.
+///
+/// The single-level prune cap is critical: removing `complete/job/file.mkv`
+/// leaves `complete/job/` empty, which we want gone (the SAB job
+/// folder); but we must NEVER ascend further to `complete/` itself,
+/// or we'd nuke the user's configured complete root and all sibling
+/// jobs in it. Earlier versions walked up unbounded — for users
+/// whose `complete/` happened to contain only this one job, that
+/// removed the entire complete dir.
+async fn remove_stamped_source_paths(sources: &[String]) -> Vec<std::path::PathBuf> {
+    let owned: Vec<std::path::PathBuf> = sources.iter().map(std::path::PathBuf::from).collect();
+    tokio::task::spawn_blocking(move || {
+        let mut removed = Vec::new();
+        for p in &owned {
+            if std::fs::remove_file(p).is_ok() {
+                removed.push(p.clone());
+            }
+        }
+        // Single-level parent prune: try once per removed file. If
+        // the directory is non-empty (other files we didn't touch)
+        // or rmdir fails (permission, etc.), we leave it alone. We
+        // deliberately do NOT walk further up — see fn doc.
+        for p in &removed {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+        removed
+    })
+    .await
+    .unwrap_or_default()
+}
+
 #[utoipa::path(
     post,
     path = "/api/series/{anilist_id}/delete-file/{episode_number}",
@@ -117,6 +267,26 @@ pub async fn delete_episode_file(
                 );
             }
 
+            // Capture the media file's inode BEFORE removal. In
+            // hardlink import mode the SAB-side source shares this
+            // inode; we use it to find and remove the source after
+            // the media-side hardlink is gone. Necessary because
+            // SAB's `del_files=1` is unreliable when its history
+            // entry's `storage` field points at the parent complete
+            // dir (SAB refuses to recursively rm the whole complete
+            // root) — leaving the original .mkv intact in
+            // `complete/<job-folder>/`.
+            #[cfg(unix)]
+            let media_inode = {
+                use std::os::unix::fs::MetadataExt;
+                tokio::fs::metadata(&full_path_canon)
+                    .await
+                    .ok()
+                    .map(|m| m.ino())
+            };
+            #[cfg(not(unix))]
+            let media_inode: Option<u64> = None;
+
             if let Err(e) = tokio::fs::remove_file(&full_path_canon).await {
                 return json_err(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -137,15 +307,66 @@ pub async fn delete_episode_file(
                 grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
                     .await
                     .unwrap_or_default();
+
+            // Inode fallback when no grab claims this episode. Pre-fix
+            // wide-walk SAB grabs swept in stranger episodes from
+            // sibling SAB jobs and stamped them onto whichever grab's
+            // import was running; the grab's `episode_numbers` only
+            // covers its OWN release, so `find_imported_for_episode`
+            // returns empty for the over-imported episode even though
+            // a real stamped path for it exists. Walk every imported
+            // grab in this series, decode stamped JSON, find a path
+            // whose inode matches the just-deleted media file, remove
+            // it. Defense-in-depth — most grabs after the
+            // `canonical_job_path` fix won't need this.
+            if imported_grabs.is_empty()
+                && let Some(ino) = media_inode
+            {
+                let bundles =
+                    grabbed_torrents::imported_source_paths_for_series(&state.db, tracked.id)
+                        .await
+                        .unwrap_or_default();
+                let mut targets: Vec<String> = Vec::new();
+                for (_grab_id, json) in &bundles {
+                    let paths: Vec<String> = serde_json::from_str(json).unwrap_or_default();
+                    for p in paths {
+                        if path_has_inode(&p, ino).await {
+                            targets.push(p);
+                        }
+                    }
+                }
+                if !targets.is_empty() {
+                    let removed = remove_stamped_source_paths(&targets).await;
+                    if !removed.is_empty() {
+                        logger::info(
+                            &state.db,
+                            LogCategory::PostProcess,
+                            &format!(
+                                "Removed {} orphan source file(s) for episode {} via inode fallback",
+                                removed.len(),
+                                episode_number
+                            ),
+                            &removed
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        )
+                        .await;
+                    }
+                }
+            }
+
             let mut qbit_removed: Vec<String> = Vec::new();
             if !imported_grabs.is_empty() {
-                // Per-grab client routing: each grab row stamps its
-                // `download_client_id` at grab time so a SAB grab
-                // doesn't get sent to a qBit `delete` (no-op since
-                // qBit doesn't know that nzo_id) and vice-versa.
-                // Legacy grab rows with NULL fall back to the
-                // torrent default.
-                let default_client = state.default_download_client().await;
+                // Per-grab client routing via `resolve_grab_client`:
+                // prefers the stamped `download_client_id`, falls back
+                // through a SAB-nzo_id-shape heuristic for legacy
+                // grabs (NULL stamp from before grab-time stamping
+                // was wired), then to the torrent default. Without
+                // the heuristic an old SAB grab routes to qBit's
+                // delete, qBit 200s on the unknown hash, and the SAB
+                // job survives.
                 for grab in &imported_grabs {
                     if grab.is_batch {
                         continue;
@@ -173,27 +394,150 @@ pub async fn delete_episode_file(
                         let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
                         continue;
                     }
-                    let client_for_grab = match grab.download_client_id {
-                        Some(id) => match state.client_by_id(id).await {
-                            Some(c) => Some(c),
-                            None => default_client.clone(),
-                        },
-                        None => default_client.clone(),
-                    };
-                    let Some(client) = client_for_grab else {
+                    let Some(client) = state
+                        .resolve_grab_client(grab.download_client_id, &grab.hash)
+                        .await
+                    else {
                         continue;
                     };
-                    match client.delete(&grab.hash, true).await {
+                    let delete_result = client.delete(&grab.hash, true).await;
+
+                    // Belt-and-suspenders source-side cleanup. The
+                    // client's own `delete(hash, true)` is unreliable
+                    // for SAB (its `del_files=1` no-ops when its
+                    // history `storage` field is the parent complete
+                    // dir). Two complementary local-fs cleanup paths
+                    // run alongside the client delete:
+                    //
+                    //   1. **Stamped source paths** —
+                    //      `import_torrent` records the exact paths
+                    //      it imported FROM. Direct, mode-agnostic
+                    //      (works for hardlink, copy, and move —
+                    //      though move's source is already gone).
+                    //      Primary cleanup channel for fresh grabs.
+                    //   2. **Inode-based fallback** — for legacy
+                    //      grabs imported before stamping was wired
+                    //      (NULL `imported_source_paths`). Hardlink
+                    //      mode shares inodes between media-side and
+                    //      SAB-side files; we use the media inode
+                    //      (captured pre-deletion) to find the
+                    //      surviving SAB-side hardlink under the
+                    //      grab's `client_content_path`. Doesn't fire
+                    //      for legacy copy-mode grabs — those have
+                    //      no recovery path short of the user
+                    //      cleaning SAB by hand.
+                    let stamped_sources =
+                        grabbed_torrents::get_imported_source_paths(&state.db, grab.id).await;
+                    if !stamped_sources.is_empty() {
+                        let removed = remove_stamped_source_paths(&stamped_sources).await;
+                        if !removed.is_empty() {
+                            logger::info(
+                                &state.db,
+                                LogCategory::PostProcess,
+                                &format!(
+                                    "Removed {} source file(s) for episode {} via import-time stamps",
+                                    removed.len(),
+                                    episode_number
+                                ),
+                                &removed
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            )
+                            .await;
+                        }
+                    } else if let Some(ino) = media_inode {
+                        // Live-query the client for this hash's
+                        // canonical content_path. The stamped
+                        // `client_content_path` on legacy grabs
+                        // pre-dates our title-matching narrowing
+                        // (`canonical_job_path` in
+                        // `services::download_client::sabnzbd`)
+                        // and may still be the parent complete dir.
+                        // `list_scoped` runs the narrowing fresh, so
+                        // its `content_path` is the per-job folder.
+                        let live_path = match client.list_scoped().await {
+                            Ok(items) => items
+                                .into_iter()
+                                .find(|i| i.hash == grab.hash)
+                                .map(|i| i.content_path),
+                            Err(_) => None,
+                        };
+                        let stamped_path =
+                            grabbed_torrents::get_client_content_path(&state.db, grab.id).await;
+                        let content_path = live_path
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or(stamped_path);
+                        if !content_path.trim().is_empty() {
+                            let local = crate::services::download_client::translate_client_path(
+                                &content_path,
+                                &content_path,
+                                crate::services::download_client::per_client_download_path(&cfg),
+                            );
+                            let candidate = if local.is_empty() {
+                                content_path
+                            } else {
+                                local
+                            };
+                            let removed =
+                                remove_hardlinks_with_inode(std::path::Path::new(&candidate), ino)
+                                    .await;
+                            if !removed.is_empty() {
+                                logger::info(
+                                    &state.db,
+                                    LogCategory::PostProcess,
+                                    &format!(
+                                        "Removed {} source hardlink(s) for episode {} via inode match in '{}'",
+                                        removed.len(),
+                                        episode_number,
+                                        candidate
+                                    ),
+                                    &removed
+                                        .iter()
+                                        .map(|p| p.display().to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                )
+                                .await;
+                            } else {
+                                logger::warn(
+                                    &state.db,
+                                    LogCategory::PostProcess,
+                                    &format!(
+                                        "No source files matched inode for episode {} under '{}'",
+                                        episode_number, candidate
+                                    ),
+                                    &format!("inode={ino} hash={}", grab.hash),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+
+                    // Mark the grab removed regardless of the
+                    // client's delete result. The user explicitly
+                    // asked for deletion, the media file IS gone,
+                    // and the source-side cleanup above already
+                    // ran. Gating `mark_removed` on `client.delete`
+                    // returning `Ok` left the row stuck in
+                    // 'imported' state any time SAB returned a
+                    // non-success on housekeeping (e.g. the nzo_id
+                    // had already been purged from history by SAB's
+                    // own retention policy, or a stale-state grab
+                    // from a prior aborted session). The UI then
+                    // showed the episode as still imported even
+                    // though it was actually deleted on disk.
+                    match delete_result {
                         Ok(()) => {
                             qbit_removed.push(grab.torrent_name.clone());
-                            let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
                         }
                         Err(e) => {
                             logger::warn(
                                 &state.db,
                                 LogCategory::DownloadClient,
                                 &format!(
-                                    "Download client delete failed for episode {} torrent '{}' — continuing with file delete",
+                                    "Download client delete returned an error for episode {} torrent '{}' — proceeding with grab cleanup anyway",
                                     episode_number, grab.torrent_name
                                 ),
                                 &e,
@@ -201,6 +545,7 @@ pub async fn delete_episode_file(
                             .await;
                         }
                     }
+                    let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
                 }
             }
 
@@ -361,23 +706,15 @@ pub async fn cancel_pending_episode(
         "cancel_pending_episode: matching grabs"
     );
 
-    // Per-grab client routing: each grab row's `download_client_id`
-    // points at the client that holds it. Legacy NULLs fall back to
-    // the torrent default so cancel still works on rows that pre-date
-    // the multi-client refactor.
-    let default_client = state.default_download_client().await;
-
     let mut removed_count = 0;
     let mut torrent_failures: Vec<String> = Vec::new();
     for grab in &pending {
         if !grab.hash.is_empty() {
-            let client_for_grab = match grab.download_client_id {
-                Some(id) => match state.client_by_id(id).await {
-                    Some(c) => Some(c),
-                    None => default_client.clone(),
-                },
-                None => default_client.clone(),
-            };
+            // Per-grab client routing — see `resolve_grab_client` for
+            // the SAB-nzo_id heuristic that rescues legacy NULL stamps.
+            let client_for_grab = state
+                .resolve_grab_client(grab.download_client_id, &grab.hash)
+                .await;
             if let Some(client) = client_for_grab
                 && let Err(e) = client.delete(&grab.hash, true).await
             {
@@ -517,12 +854,6 @@ pub async fn mark_episode_failed(
         grabbed_torrents::find_imported_for_episode(&state.db, series_id, episode_number).await
         && !old_grabs.is_empty()
     {
-        // Per-grab client routing: the old grab might be on SAB
-        // while the new replacement is being acquired through a
-        // torrent indexer (or vice versa). Sending the SAB nzo_id
-        // to qBit's `delete` would silently no-op and leave the
-        // old SAB job behind.
-        let default_client = state.default_download_client().await;
         for old in &old_grabs {
             if old.hash.is_empty() {
                 continue;
@@ -545,14 +876,12 @@ pub async fn mark_episode_failed(
                 .await;
                 continue;
             }
-            let client_for_grab = match old.download_client_id {
-                Some(id) => match state.client_by_id(id).await {
-                    Some(c) => Some(c),
-                    None => default_client.clone(),
-                },
-                None => default_client.clone(),
-            };
-            let Some(client) = client_for_grab else {
+            // Per-grab client routing — see `resolve_grab_client`.
+            // Cross-protocol upgrade (SAB→qBit etc) lands here.
+            let Some(client) = state
+                .resolve_grab_client(old.download_client_id, &old.hash)
+                .await
+            else {
                 continue;
             };
             if let Err(e) = client.delete(&old.hash, true).await {
@@ -802,6 +1131,155 @@ mod tests {
     use crate::services::download_client::test_helpers;
     use crate::test_support;
     use std::sync::Arc;
+
+    /// `remove_hardlinks_with_inode` finds a hardlink anywhere under
+    /// `root` (depth-limited) and removes it. Verifies the actual
+    /// SAB-source-cleanup path: in hardlink import mode the
+    /// media-side and SAB-side files share an inode, so given the
+    /// inode of one we can locate and remove the other under SAB's
+    /// content_path even when SAB's reported `storage` field is
+    /// the parent complete dir (the user's reproducible bug).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_hardlinks_with_inode_finds_link_in_subdirectory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // Simulate SAB's complete dir + per-job subfolder shape that
+        // SAB's `del_files=1` guard refuses to descend into.
+        let job_dir = root.join("[Erai-raws].One.Piece-1159.HEVC");
+        std::fs::create_dir(&job_dir).unwrap();
+        let source = job_dir.join("[Erai-raws].One.Piece-1159.HEVC.mkv");
+        std::fs::write(&source, b"fake mkv contents").unwrap();
+        // Media-side hardlink — same inode. Lives outside `root` so
+        // it's not in scope for the cleanup pass.
+        let media_dir = tmp.path().join("media");
+        std::fs::create_dir(&media_dir).unwrap();
+        let media = media_dir.join("ONE PIECE - S01E1159.mkv");
+        std::fs::hard_link(&source, &media).unwrap();
+
+        // Capture the shared inode via the media side (the realistic
+        // call shape — caller has the media file's inode pre-deletion).
+        use std::os::unix::fs::MetadataExt;
+        let inode = std::fs::metadata(&media).unwrap().ino();
+        // Remove the media side first (mirrors the production order:
+        // delete media file, then walk SAB content_path for the
+        // surviving hardlink).
+        std::fs::remove_file(&media).unwrap();
+
+        let removed = remove_hardlinks_with_inode(root, inode).await;
+        assert_eq!(removed.len(), 1, "expected one source hardlink removed");
+        assert_eq!(removed[0], source);
+        assert!(!source.exists(), "source file must be gone");
+        // Job subdir cleaned up (became empty after file removal).
+        assert!(!job_dir.exists(), "empty job dir must be cleaned");
+        // Root preserved — never rmdir the user's complete dir.
+        assert!(root.exists(), "root must not be touched");
+    }
+
+    /// Inode mismatch (copy-mode imports — different inodes) means
+    /// the helper finds nothing and removes nothing. The client's
+    /// own `delete(hash, true)` is the cleanup path for copy-mode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_hardlinks_with_inode_skips_when_inode_does_not_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let source = root.join("show.mkv");
+        std::fs::write(&source, b"contents").unwrap();
+
+        // Pick an inode that very likely doesn't match anything in
+        // tmp (max u64 sentinel — real inodes are never this).
+        let removed = remove_hardlinks_with_inode(root, u64::MAX).await;
+        assert!(removed.is_empty());
+        assert!(source.exists(), "non-matching files must survive");
+    }
+
+    /// `remove_stamped_source_paths` removes the exact paths recorded
+    /// at import time and prunes the immediate parent dir (the SAB
+    /// job folder) if it became empty. Mode-agnostic — works for
+    /// hardlink, copy, or move imports (move's source already gone,
+    /// paths just no-op).
+    #[tokio::test]
+    async fn remove_stamped_source_paths_removes_files_and_immediate_parent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let job_dir = tmp.path().join("job-folder");
+        std::fs::create_dir(&job_dir).unwrap();
+        let f1 = job_dir.join("ep01.mkv");
+        let f2 = job_dir.join("ep02.mkv");
+        std::fs::write(&f1, b"a").unwrap();
+        std::fs::write(&f2, b"b").unwrap();
+        let stamps = vec![f1.display().to_string(), f2.display().to_string()];
+
+        let removed = remove_stamped_source_paths(&stamps).await;
+        assert_eq!(removed.len(), 2);
+        assert!(!f1.exists());
+        assert!(!f2.exists());
+        // Job folder (immediate parent of the removed files) cleaned.
+        assert!(!job_dir.exists(), "empty job dir should be pruned");
+        // Tempdir itself (the would-be `complete/` root) preserved.
+        assert!(tmp.path().exists(), "tempdir root must NOT be pruned");
+    }
+
+    /// **Regression guard for the "deletes the whole complete dir"
+    /// bug.** When the SAB complete dir contains exactly one job and
+    /// we remove that job, the prune logic must NOT ascend into
+    /// removing the complete dir itself. Earlier versions walked up
+    /// unbounded and trashed the whole download tree.
+    #[tokio::test]
+    async fn remove_stamped_source_paths_does_not_ascend_above_one_level() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Mirror the user-reported shape:
+        // <tmp>/complete/[job-folder]/file.mkv
+        let complete = tmp.path().join("complete");
+        let job = complete.join("[job-folder]");
+        std::fs::create_dir(&complete).unwrap();
+        std::fs::create_dir(&job).unwrap();
+        let f = job.join("file.mkv");
+        std::fs::write(&f, b"data").unwrap();
+
+        let removed = remove_stamped_source_paths(&[f.display().to_string()]).await;
+        assert_eq!(removed.len(), 1);
+        assert!(!f.exists(), "stamped file removed");
+        assert!(!job.exists(), "empty job folder cleaned (one level up)");
+        // CRITICAL: the configured complete dir survives even though
+        // it's now empty. Earlier unbounded walk would rmdir this.
+        assert!(
+            complete.exists(),
+            "complete dir must NOT be rmdir'd just because the only job inside it was cleared"
+        );
+    }
+
+    /// Missing source files (move-mode imports — source already
+    /// renamed away) don't error out. The helper just records nothing
+    /// removed and the caller continues.
+    #[tokio::test]
+    async fn remove_stamped_source_paths_silently_skips_missing_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stamps = vec![tmp.path().join("does-not-exist.mkv").display().to_string()];
+        let removed = remove_stamped_source_paths(&stamps).await;
+        assert!(removed.is_empty());
+    }
+
+    /// Non-empty parent dir is preserved — we only prune dirs that
+    /// became empty as a result of OUR removal. Other unrelated files
+    /// in a shared dir aren't touched.
+    #[tokio::test]
+    async fn remove_stamped_source_paths_preserves_non_empty_parent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("shared");
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("target.mkv");
+        let bystander = dir.join("bystander.mkv");
+        std::fs::write(&target, b"a").unwrap();
+        std::fs::write(&bystander, b"b").unwrap();
+
+        let stamps = vec![target.display().to_string()];
+        let removed = remove_stamped_source_paths(&stamps).await;
+        assert_eq!(removed.len(), 1);
+        assert!(!target.exists());
+        assert!(bystander.exists(), "unrelated sibling must survive");
+        assert!(dir.exists(), "non-empty parent must not be pruned");
+    }
 
     /// D2+D3 live integration test: cancelling a pending grab for an
     /// episode must delete the torrent from the active download

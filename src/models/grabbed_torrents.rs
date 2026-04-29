@@ -398,6 +398,90 @@ pub async fn mark_completed_no_import(db: &SqlitePool, id: i64) -> Result<(), sq
 /// recorded here; the library-side path lives on
 /// `episode_grab_history.file_name` after post-processing.
 ///
+/// Persist the source-side paths Ryokan imported from for this grab.
+/// Stored as JSON array of strings in `grabbed_torrents.imported_source_paths`.
+/// Per-grab (not per-episode) — fine because SAB grabs are 1:1 with jobs
+/// and the per-episode delete path skips batch grabs at the client-delete
+/// stage anyway. Used by `delete_episode_file` (in addition to the
+/// inode-based fallback that covers hardlink mode) and by the series
+/// remove path for copy-mode and move-mode imports where shared inodes
+/// don't help.
+pub async fn stamp_imported_source_paths(
+    db: &SqlitePool,
+    grab_id: i64,
+    paths: &[String],
+) -> Result<(), sqlx::Error> {
+    let json = serde_json::to_string(paths).unwrap_or_else(|_| "[]".into());
+    sqlx::query("UPDATE grabbed_torrents SET imported_source_paths = ? WHERE id = ?")
+        .bind(json)
+        .bind(grab_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Read back the JSON-array source paths persisted by
+/// [`stamp_imported_source_paths`]. Empty Vec when the column is NULL,
+/// the grab id doesn't exist, or the JSON parses badly — all benign
+/// for the cleanup-pass caller (nothing to remove).
+pub async fn get_imported_source_paths(db: &SqlitePool, grab_id: i64) -> Vec<String> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT imported_source_paths FROM grabbed_torrents WHERE id = ?")
+            .bind(grab_id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    match raw {
+        Some(s) if !s.is_empty() => serde_json::from_str(&s).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// All `(grab_id, imported_source_paths_json)` tuples for grabs in
+/// state='imported' for a given series. Used by the delete-from-disk
+/// fallback when `find_imported_for_episode` returns empty for an
+/// episode whose media file exists on disk — the file may have been
+/// imported by a sibling grab whose `episode_numbers` doesn't claim
+/// it (a side-effect of the pre-fix wide-walk SAB bug, where one
+/// grab's import swept in files belonging to other SAB jobs in the
+/// same complete dir). The caller then matches by inode against the
+/// JSON paths to recover the real source file.
+pub async fn imported_source_paths_for_series(
+    db: &SqlitePool,
+    series_id: i64,
+) -> Result<Vec<(i64, String)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, COALESCE(imported_source_paths, '') FROM grabbed_torrents \
+         WHERE series_id = ? AND state = 'imported' \
+         AND COALESCE(imported_source_paths, '') != ''",
+    )
+    .bind(series_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| (row.get::<i64, _>(0), row.get::<String, _>(1)))
+        .collect())
+}
+
+/// Read back `client_content_path` for a grab id. Used by the
+/// delete-from-disk path to know where to look for the source file
+/// to clean up alongside the media-library hardlink. Empty string
+/// when the column is NULL or the grab id doesn't exist; both cases
+/// are treated as "no source path known" by the caller.
+pub async fn get_client_content_path(db: &SqlitePool, grab_id: i64) -> String {
+    sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(client_content_path, '') FROM grabbed_torrents WHERE id = ?",
+    )
+    .bind(grab_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
 /// Idempotent: `WHERE COALESCE(client_content_path, '') = ''` so a
 /// later completion tick on an already-stamped row is a no-op.
 pub async fn stamp_client_content_path(

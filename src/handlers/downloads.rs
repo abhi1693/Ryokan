@@ -17,17 +17,13 @@ use crate::services::download_client::{DownloadClient, DownloadItemState};
 
 /// Route a queue-action (pause/resume/delete) to the right client by
 /// looking up the grab row for `hash` and resolving its
-/// `download_client_id`. Falls back to the torrent default for
-/// legacy rows whose column is NULL or for hashes not stamped in
-/// `grabbed_torrents` at all (manual adds outside Ryokan land here).
+/// `download_client_id`. The composed fallback chain via
+/// `resolve_grab_client` handles legacy NULL stamps for SAB grabs
+/// (nzo_id-shape heuristic) and finally the torrent default.
 /// Returns `None` only when no client is configured at all.
 async fn resolve_client_for_hash(state: &AppState, hash: &str) -> Option<Arc<dyn DownloadClient>> {
-    if let Some(id) = grabbed_torrents::client_id_for_hash(&state.db, hash).await
-        && let Some(client) = state.client_by_id(id).await
-    {
-        return Some(client);
-    }
-    state.default_download_client().await
+    let dc_id = grabbed_torrents::client_id_for_hash(&state.db, hash).await;
+    state.resolve_grab_client(dc_id, hash).await
 }
 
 struct QueueTorrentView {

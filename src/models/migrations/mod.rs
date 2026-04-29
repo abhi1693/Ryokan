@@ -2171,6 +2171,24 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // Source-side paths recorded at import time. JSON array of the
+    // file paths Ryokan hardlinked / copied / moved FROM during
+    // post-processing, in the local-translated form (Ryokan's view
+    // of the path, not the client's). Used by the per-episode delete
+    // and series-remove paths to clean up the original files when
+    // SAB's `del_files=1` doesn't reach them — SAB's reported
+    // history `storage` can be the parent complete dir while the
+    // actual extracted .mkv lives in a subfolder created by the rar
+    // archive contents. The inode-based fallback in
+    // `delete_episode_file` covers hardlink mode; this column
+    // covers copy mode (different inodes) and move mode (source no
+    // longer at SAB's path) uniformly. NULL on legacy rows and on
+    // grabs whose import didn't succeed.
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN imported_source_paths TEXT")
+        .execute(db)
+        .await
+        .ok();
+
     // Issue #28 PR A — per-series PT-upgrade opt-in (decision: PR E
     // wires the UI + sweep filter; column lands here so PR B's
     // search code can already filter on it without a chained
