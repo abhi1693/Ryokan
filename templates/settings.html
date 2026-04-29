@@ -29,23 +29,14 @@
     <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
 </div>
 
-{# Issue #129 Phase 1 completion — General + Quality tabs now have
-   their own subforms (`/settings/general`, `/settings/quality`) that
-   post only their tab's fields. Integrations stays on the legacy
-   bulk form `/settings` for now; its split is queued as a separate
-   commit (more fields, more side effects — Jellyfin connection
-   test, etc.). The bulk form is skipped on tab=general / tab=quality
-   so we don't render two forms with overlapping fields. #}
+{# Issue #129 Phase 1 completion — all three previously-bulk-form
+   tabs (Integrations, Quality, General) now have their own subforms
+   that post only their tab's fields. The legacy `/settings` POST
+   handler (`settings_submit`) stays mounted for any external
+   bookmark / script that still hits it, but no UI path reaches
+   it anymore. #}
 {% if tab == "integrations" %}
-<form method="post" action="/settings" class="settings-form">
-    <input type="hidden" name="tab" value="{{ tab }}">
-
-    <div class="settings-tab-panel active">
-{%~ include "partials/settings/integrations.html" ~%}
-    </div>
-
-    <button type="submit" class="btn btn-primary">Save Settings</button>
-</form>
+{%~ include "partials/settings/integrations_form.html" ~%}
 {% endif %}
 
 {% if tab == "quality" %}

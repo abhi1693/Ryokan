@@ -406,6 +406,78 @@ pub struct JellyfinTestForm {
 /// on success and a red one on failure; previously the JS just wrote
 /// plain text into the same element, so the only visible change is
 /// color.
+/// Issue #129 Phase 1 completion — Integrations tab subform. Final
+/// piece of the per-tab split. Largest field set of the three:
+/// includes the legacy single-slot download-client columns (qbit_*,
+/// deluge_*, transmission_*, rtorrent_*) carried through as hidden
+/// inputs in `integrations.html` for one-release rollback compat.
+/// They're persisted verbatim from form input — the new
+/// `download_clients` table is the runtime source of truth, but the
+/// columns stay round-trippable through Save so a stale tab doesn't
+/// blank them.
+#[derive(Deserialize)]
+pub struct IntegrationsForm {
+    #[serde(default)]
+    active_client: String,
+    qbit_url: String,
+    qbit_user: String,
+    qbit_pass: String,
+    qbit_category: String,
+    qbit_download_path: String,
+    #[serde(default)]
+    deluge_url: String,
+    #[serde(default)]
+    deluge_password: String,
+    #[serde(default)]
+    deluge_label: String,
+    #[serde(default)]
+    deluge_download_path: String,
+    #[serde(default)]
+    transmission_url: String,
+    #[serde(default)]
+    transmission_user: String,
+    #[serde(default)]
+    transmission_password: String,
+    #[serde(default)]
+    transmission_label: String,
+    #[serde(default)]
+    transmission_download_path: String,
+    #[serde(default)]
+    rtorrent_url: String,
+    #[serde(default)]
+    rtorrent_user: String,
+    #[serde(default)]
+    rtorrent_password: String,
+    #[serde(default)]
+    rtorrent_label: String,
+    #[serde(default)]
+    rtorrent_download_path: String,
+    jellyfin_url: String,
+    jellyfin_api_key: String,
+    sonarr_enabled: Option<String>,
+    sonarr_api_key: Option<String>,
+    radarr_enabled: Option<String>,
+    radarr_api_key: Option<String>,
+    /// #83 — Interactive file-picker trigger policy.
+    #[serde(default)]
+    grab_preview_mode: Option<String>,
+    /// #62 PR B — watch-list sync cadence in minutes. `None` means
+    /// the field was absent from this submission (e.g. no account
+    /// linked, so the input wasn't rendered) and the existing
+    /// value is preserved.
+    #[serde(default)]
+    external_sync_interval_minutes: Option<i32>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/settings/integrations_form.html")]
+pub(crate) struct IntegrationsFormPartial {
+    pub config: config::Config,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    pub external_account: Option<ExternalAccountView>,
+}
+
 /// Issue #129 Phase 1 completion — Quality tab subform. Companion to
 /// `GeneralForm`; same per-tab-isolation rationale.
 #[derive(Deserialize)]
@@ -1640,6 +1712,243 @@ async fn quality_response(
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: "quality".to_string(),
+        config: cfg,
+        groups,
+        suggestions,
+        custom_formats,
+        custom_format_edit: None,
+        custom_format_min_score_display,
+        custom_format_import_review: None,
+        message,
+        error,
+        indexer_edit: None,
+        version: env!("CARGO_PKG_VERSION"),
+        external_account,
+        title_language,
+        indexers,
+        indexer_catalog: crate::services::indexer_catalog::SEEDED,
+        indexer_seed: None,
+        download_clients,
+        direct_rss_feeds,
+    };
+    Html(template.render().unwrap_or_default()).into_response()
+}
+
+/// Issue #129 Phase 1 completion — Integrations tab dedicated POST
+/// handler. Owns Jellyfin URL+key, Sonarr/Radarr API enable+key,
+/// grab_preview_mode, external_sync_interval_minutes, and the legacy
+/// single-slot download-client columns (preserved verbatim through
+/// the hidden inputs in `integrations.html` so a stale tab can't
+/// blank them).
+///
+/// Side effect: when both jellyfin_url and jellyfin_api_key are set,
+/// runs a connection test and surfaces the result in the save toast +
+/// updates `state.jellyfin`. Matches the legacy bulk handler's
+/// `if active_tab == "integrations"` block.
+pub async fn settings_integrations_submit(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<IntegrationsForm>,
+) -> Response {
+    let existing_cfg = match config::get_config(&state.db).await {
+        Ok(Some(cfg)) => cfg,
+        _ => {
+            let err = "No config row found — run /setup first.".to_string();
+            return integrations_response(&state, None, None, Some(err), is_htmx).await;
+        }
+    };
+
+    let cfg = config::Config {
+        active_client: match form.active_client.trim() {
+            "deluge" => "deluge".to_string(),
+            "transmission" => "transmission".to_string(),
+            "rtorrent" => "rtorrent".to_string(),
+            _ => "qbittorrent".to_string(),
+        },
+        qbit_url: form.qbit_url.trim().to_string(),
+        qbit_user: form.qbit_user.trim().to_string(),
+        qbit_pass: form.qbit_pass,
+        qbit_category: form.qbit_category.trim().to_string(),
+        qbit_download_path: form
+            .qbit_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        deluge_url: form.deluge_url.trim().trim_end_matches('/').to_string(),
+        deluge_password: form.deluge_password,
+        deluge_label: sanitize_label(&form.deluge_label),
+        deluge_download_path: form
+            .deluge_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        transmission_url: form
+            .transmission_url
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        transmission_user: form.transmission_user.trim().to_string(),
+        transmission_password: form.transmission_password,
+        transmission_label: sanitize_label(&form.transmission_label),
+        transmission_download_path: form
+            .transmission_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        rtorrent_url: form.rtorrent_url.trim().trim_end_matches('/').to_string(),
+        rtorrent_user: form.rtorrent_user.trim().to_string(),
+        rtorrent_password: form.rtorrent_password,
+        rtorrent_label: sanitize_label(&form.rtorrent_label),
+        rtorrent_download_path: form
+            .rtorrent_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        jellyfin_url: form.jellyfin_url.trim().trim_end_matches('/').to_string(),
+        jellyfin_api_key: form.jellyfin_api_key.trim().to_string(),
+        sonarr_enabled: form.sonarr_enabled.is_some(),
+        sonarr_api_key: form.sonarr_api_key.unwrap_or_default().trim().to_string(),
+        radarr_enabled: form.radarr_enabled.is_some(),
+        radarr_api_key: form.radarr_api_key.unwrap_or_default().trim().to_string(),
+        grab_preview_mode: resolve_grab_preview_mode(
+            form.grab_preview_mode.as_deref(),
+            Some("integrations"),
+            Some(existing_cfg.grab_preview_mode.as_str()),
+        ),
+        external_sync_interval_minutes: resolve_external_sync_interval_minutes(
+            form.external_sync_interval_minutes,
+            Some("integrations"),
+            Some(existing_cfg.external_sync_interval_minutes),
+        ),
+        ..existing_cfg
+    };
+
+    if let Err(e) = config::save_config(&state.db, &cfg).await {
+        logger::error(
+            &state.db,
+            LogCategory::System,
+            "Failed to save Integrations settings",
+            &e.to_string(),
+        )
+        .await;
+        return integrations_response(
+            &state,
+            Some(cfg),
+            None,
+            Some(format!("Failed to save: {}", e)),
+            is_htmx,
+        )
+        .await;
+    }
+
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "Settings saved (Integrations)",
+        "",
+    )
+    .await;
+
+    let mut notices = vec!["Settings saved.".to_string()];
+
+    // Side effect: Jellyfin connection test on save. Mirrors the
+    // legacy bulk handler so the user gets immediate feedback in the
+    // save toast about whether the credentials they just entered
+    // actually reach a Jellyfin server. Updates `state.jellyfin` so
+    // every other request that reads it sees the live (or cleared)
+    // client.
+    if !cfg.jellyfin_url.is_empty() && !cfg.jellyfin_api_key.is_empty() {
+        let client = JellyfinClient::new(&cfg.jellyfin_url, &cfg.jellyfin_api_key);
+        match client.test_connection().await {
+            Ok(info) => {
+                let label = if info.server_name.trim().is_empty() {
+                    format!("Jellyfin ({})", info.version)
+                } else {
+                    format!(
+                        "Jellyfin {} ({}) connected.",
+                        info.server_name, info.version
+                    )
+                };
+                logger::info(
+                    &state.db,
+                    LogCategory::Jellyfin,
+                    &format!("{} connected", label),
+                    &cfg.jellyfin_url,
+                )
+                .await;
+                notices.push(label);
+                *state.jellyfin.write().await = Some(client);
+            }
+            Err(e) => {
+                logger::error(&state.db, LogCategory::Jellyfin, "Connection failed", &e).await;
+                *state.jellyfin.write().await = None;
+                notices.push(format!("Jellyfin connection failed: {}.", e));
+            }
+        }
+    } else {
+        *state.jellyfin.write().await = None;
+    }
+
+    integrations_response(&state, Some(cfg), Some(notices.join(" ")), None, is_htmx).await
+}
+
+/// Render the Integrations response in either HTMX (subform partial)
+/// or non-HTMX (full SettingsTemplate) shape. Mirrors
+/// `general_response` / `quality_response` but also threads the
+/// external_account through (the partial uses it for the linked-
+/// account legend badges + the prefs section).
+async fn integrations_response(
+    state: &AppState,
+    cfg: Option<config::Config>,
+    message: Option<String>,
+    error: Option<String>,
+    is_htmx: bool,
+) -> Response {
+    let cfg = match cfg {
+        Some(c) => c,
+        None => match config::get_config(&state.db).await {
+            Ok(Some(c)) => c,
+            _ => config::Config::default(),
+        },
+    };
+
+    let external_account = crate::models::external_accounts::get_current(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(ExternalAccountView::from_model);
+
+    if is_htmx {
+        return Html(
+            IntegrationsFormPartial {
+                config: cfg,
+                message,
+                error,
+                external_account,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response();
+    }
+
+    let groups = load_groups(&state.db).await;
+    let suggestions = load_suggestions(&state.db).await;
+    let custom_formats = load_custom_formats_view(&state.db).await;
+    let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
+    let title_language = cfg.title_language.clone();
+    let indexers = crate::models::indexers::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let download_clients = crate::models::download_clients::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let template = SettingsTemplate {
+        page: "settings".to_string(),
+        tab: "integrations".to_string(),
         config: cfg,
         groups,
         suggestions,
