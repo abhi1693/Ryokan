@@ -724,9 +724,11 @@ async fn main() {
             "/settings",
             get(handlers::settings::settings_page).post(handlers::settings::settings_submit),
         )
-        // Issue #129 Phase 1 completion — per-tab subform handler.
-        // Owns only General-tab fields; bulk `/settings` POST stays
-        // for the as-yet-unsplit Integrations + Quality tabs.
+        // Issue #129 Phase 1 completion — per-tab subform handlers.
+        // Each tab POSTs only its own fields to its dedicated route;
+        // the legacy `/settings` POST above is the no-UI fallback for
+        // any external bookmark or script still hitting the bulk
+        // endpoint.
         .route(
             "/settings/general",
             post(handlers::settings::settings_general_submit),

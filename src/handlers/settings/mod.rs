@@ -417,12 +417,26 @@ pub struct JellyfinTestForm {
 /// blank them.
 #[derive(Deserialize)]
 pub struct IntegrationsForm {
+    // Every String field carries `#[serde(default)]` so a hand-
+    // crafted POST that omits any of them deserializes as empty
+    // string rather than 422-ing. The legacy single-slot
+    // `qbit_*` columns are populated via the hidden inputs in
+    // `integrations.html` from the existing config row, so a
+    // browser submit always carries them — but the defaults
+    // are belt-and-braces against a `curl` user or any future
+    // template that drops a hidden input. Same shape every
+    // other Option<String> field already uses.
     #[serde(default)]
     active_client: String,
+    #[serde(default)]
     qbit_url: String,
+    #[serde(default)]
     qbit_user: String,
+    #[serde(default)]
     qbit_pass: String,
+    #[serde(default)]
     qbit_category: String,
+    #[serde(default)]
     qbit_download_path: String,
     #[serde(default)]
     deluge_url: String,
@@ -452,7 +466,9 @@ pub struct IntegrationsForm {
     rtorrent_label: String,
     #[serde(default)]
     rtorrent_download_path: String,
+    #[serde(default)]
     jellyfin_url: String,
+    #[serde(default)]
     jellyfin_api_key: String,
     /// Checkboxes + their paired API keys — unchecked / unset
     /// omits the field; `#[serde(default)]` maps the absence to
@@ -777,14 +793,30 @@ async fn build_settings_template(
     err: Option<String>,
     import_review: Option<ImportReviewView>,
     template_slug: Option<String>,
+    cfg_override: Option<config::Config>,
 ) -> SettingsTemplate {
     // Fan out the five independent lookups — config row, release-group
     // table, suggestion panel, custom-format list, linked external
     // account — in parallel. The old code issued them sequentially so
     // the wall time was the sum of N round trips even though none
     // depends on the others.
+    //
+    // `cfg_override` skips the config fetch when the caller already
+    // has a freshly-mutated `Config` in hand (the per-tab subform
+    // handlers pass the just-saved cfg through so the rerendered
+    // form reflects the mutation even if the caller got an
+    // intervening write — and on the save-error path so the user's
+    // unsaved input survives the failure render). The remaining 7
+    // lookups still parallelize either way.
+    let cfg_load = async {
+        if cfg_override.is_some() {
+            None
+        } else {
+            config::get_config(&state.db).await.ok().flatten()
+        }
+    };
     let (
-        cfg_res,
+        cfg_loaded,
         groups,
         suggestions,
         custom_formats,
@@ -793,7 +825,7 @@ async fn build_settings_template(
         download_clients_res,
         direct_rss_feeds_res,
     ) = tokio::join!(
-        config::get_config(&state.db),
+        cfg_load,
         load_groups(&state.db),
         load_suggestions(&state.db),
         load_custom_formats_view(&state.db),
@@ -802,7 +834,7 @@ async fn build_settings_template(
         crate::models::download_clients::list_all(&state.db),
         crate::models::direct_rss_feeds::list_all(&state.db),
     );
-    let cfg = cfg_res.ok().flatten().unwrap_or_default();
+    let cfg = cfg_override.or(cfg_loaded).unwrap_or_default();
     // A decrypt failure (tampered blob, key rotation without migration)
     // surfaces here as `Err` — treat as "nothing linked" for render
     // and rely on System → Logs to show the real error. The UI path
@@ -892,6 +924,7 @@ pub async fn settings_page(
         params.err,
         None,
         params.template,
+        None,
     )
     .await;
     Html(template.render().unwrap_or_default())
@@ -1553,50 +1586,23 @@ async fn general_response(
         .into_response();
     }
 
-    // Non-HTMX: render the full settings page so the form-POST + reload
-    // flow still works for users with JS off or for anyone landing on
-    // this route directly.
-    let groups = load_groups(&state.db).await;
-    let suggestions = load_suggestions(&state.db).await;
-    let custom_formats = load_custom_formats_view(&state.db).await;
-    let external_account = crate::models::external_accounts::get_current(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(ExternalAccountView::from_model);
-    let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
-    let title_language = cfg.title_language.clone();
-    let indexers = crate::models::indexers::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let download_clients = crate::models::download_clients::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let template = SettingsTemplate {
-        page: "settings".to_string(),
-        tab: "general".to_string(),
-        config: cfg,
-        groups,
-        suggestions,
-        custom_formats,
-        custom_format_edit: None,
-        custom_format_min_score_display,
-        custom_format_import_review: None,
+    // Non-HTMX: render the full settings page through the shared
+    // `build_settings_template` helper. Passes the post-save cfg
+    // through `cfg_override` so the form rerenders with the user's
+    // mutations rather than re-fetching what's in the DB (which on
+    // a save-error path would lose their unsaved input). The other
+    // 7 fan-out queries parallelize via `tokio::join!`.
+    let template = build_settings_template(
+        state,
+        Some("general".to_string()),
+        None,
         message,
         error,
-        indexer_edit: None,
-        version: env!("CARGO_PKG_VERSION"),
-        external_account,
-        title_language,
-        indexers,
-        indexer_catalog: crate::services::indexer_catalog::SEEDED,
-        indexer_seed: None,
-        download_clients,
-        direct_rss_feeds,
-    };
+        None,
+        None,
+        Some(cfg),
+    )
+    .await;
     Html(template.render().unwrap_or_default()).into_response()
 }
 
@@ -1710,47 +1716,19 @@ async fn quality_response(
         .into_response();
     }
 
-    let groups = load_groups(&state.db).await;
-    let suggestions = load_suggestions(&state.db).await;
-    let custom_formats = load_custom_formats_view(&state.db).await;
-    let external_account = crate::models::external_accounts::get_current(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(ExternalAccountView::from_model);
-    let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
-    let title_language = cfg.title_language.clone();
-    let indexers = crate::models::indexers::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let download_clients = crate::models::download_clients::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let template = SettingsTemplate {
-        page: "settings".to_string(),
-        tab: "quality".to_string(),
-        config: cfg,
-        groups,
-        suggestions,
-        custom_formats,
-        custom_format_edit: None,
-        custom_format_min_score_display,
-        custom_format_import_review: None,
+    // Non-HTMX: shared template path. See `general_response` for the
+    // `cfg_override` rationale.
+    let template = build_settings_template(
+        state,
+        Some("quality".to_string()),
+        None,
         message,
         error,
-        indexer_edit: None,
-        version: env!("CARGO_PKG_VERSION"),
-        external_account,
-        title_language,
-        indexers,
-        indexer_catalog: crate::services::indexer_catalog::SEEDED,
-        indexer_seed: None,
-        download_clients,
-        direct_rss_feeds,
-    };
+        None,
+        None,
+        Some(cfg),
+    )
+    .await;
     Html(template.render().unwrap_or_default()).into_response()
 }
 
@@ -1932,13 +1910,16 @@ async fn integrations_response(
         },
     };
 
-    let external_account = crate::models::external_accounts::get_current(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(ExternalAccountView::from_model);
-
     if is_htmx {
+        // The partial needs the linked-account view for its legend
+        // badge + prefs section. Fetch on the HTMX path only — the
+        // non-HTMX path goes through `build_settings_template` which
+        // does this in parallel with the rest of the fan-out.
+        let external_account = crate::models::external_accounts::get_current(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(ExternalAccountView::from_model);
         return Html(
             IntegrationsFormPartial {
                 config: cfg,
@@ -1952,42 +1933,19 @@ async fn integrations_response(
         .into_response();
     }
 
-    let groups = load_groups(&state.db).await;
-    let suggestions = load_suggestions(&state.db).await;
-    let custom_formats = load_custom_formats_view(&state.db).await;
-    let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
-    let title_language = cfg.title_language.clone();
-    let indexers = crate::models::indexers::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let download_clients = crate::models::download_clients::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
-        .await
-        .unwrap_or_default();
-    let template = SettingsTemplate {
-        page: "settings".to_string(),
-        tab: "integrations".to_string(),
-        config: cfg,
-        groups,
-        suggestions,
-        custom_formats,
-        custom_format_edit: None,
-        custom_format_min_score_display,
-        custom_format_import_review: None,
+    // Non-HTMX: shared template path. See `general_response` for the
+    // `cfg_override` rationale.
+    let template = build_settings_template(
+        state,
+        Some("integrations".to_string()),
+        None,
         message,
         error,
-        indexer_edit: None,
-        version: env!("CARGO_PKG_VERSION"),
-        external_account,
-        title_language,
-        indexers,
-        indexer_catalog: crate::services::indexer_catalog::SEEDED,
-        indexer_seed: None,
-        download_clients,
-        direct_rss_feeds,
-    };
+        None,
+        None,
+        Some(cfg),
+    )
+    .await;
     Html(template.render().unwrap_or_default()).into_response()
 }
 
@@ -2797,6 +2755,7 @@ mod tests {
                 None,
                 None,
                 Some("animebytes".to_string()),
+                None,
             )
             .await;
             let seed = template
@@ -2822,6 +2781,7 @@ mod tests {
                 None,
                 None,
                 Some("does-not-exist".to_string()),
+                None,
             )
             .await;
             assert!(template.indexer_seed.is_none());
@@ -2865,6 +2825,7 @@ mod tests {
                 None,
                 None,
                 Some("animebytes".to_string()),
+                None,
             )
             .await;
             // Prove the row's fields actually reached the
@@ -2894,6 +2855,7 @@ mod tests {
             let template = build_settings_template(
                 &state,
                 Some("indexers".to_string()),
+                None,
                 None,
                 None,
                 None,
