@@ -21,8 +21,10 @@
 
 mod file_ops;
 mod filenames;
+mod grab_claims_episode;
 mod lock;
 mod run_once;
+mod walk_video_files;
 
 /// Serializes the `lock.rs` test and the `run_once.rs` tests so they
 /// don't race on the production `POST_PROC_LOCK`. Both touch the

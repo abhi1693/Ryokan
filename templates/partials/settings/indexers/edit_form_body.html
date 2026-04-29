@@ -1,0 +1,130 @@
+{# Modal body for the Edit flow. Returned by `GET /settings/
+   indexers/{id}/edit-form` and swapped into `#indexer-modal-body`
+   (innerHTML) when the user clicks an existing-indexer card.
+   Same shape as add_form_body.html but pre-filled and carries a
+   hidden `id` so the upsert path runs as UPDATE not INSERT. #}
+<form method="post" action="/settings/indexers/upsert"
+      class="dc-modal-form"
+      hx-post="/settings/indexers/upsert"
+      hx-target="#indexer-section"
+      hx-swap="outerHTML">
+    <input type="hidden" name="id" value="{{ row.id }}">
+    <div class="modal-body">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="indexer-edit-name-{{ row.id }}">Name</label>
+                <input id="indexer-edit-name-{{ row.id }}" type="text" name="name" required maxlength="100" value="{{ row.name }}">
+            </div>
+            <div class="form-group">
+                <label for="indexer-edit-kind-{{ row.id }}">Kind</label>
+                {# Same `data-indexer-kind-select` contract as the Add
+                   form — the relabel helper in static/js/settings.js
+                   wires both via this attribute. #}
+                <select id="indexer-edit-kind-{{ row.id }}" name="kind" data-indexer-kind-select>
+                    <option value="torznab" {% if row.kind == "torznab" %}selected{% endif %}>torznab</option>
+                    <option value="newznab" {% if row.kind == "newznab" %}selected{% endif %}>newznab</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="indexer-edit-url-{{ row.id }}">URL</label>
+            <input id="indexer-edit-url-{{ row.id }}" type="url" name="url" required value="{{ row.url }}" data-indexer-url-input>
+        </div>
+
+        <div class="form-group">
+            <label for="indexer-edit-key-{{ row.id }}">API Key</label>
+            <input id="indexer-edit-key-{{ row.id }}" type="text" name="api_key" autocomplete="off" value="{{ row.api_key }}">
+            <span class="form-hint" data-indexer-api-key-hint>Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label for="indexer-edit-priority-{{ row.id }}">Priority</label>
+                <input id="indexer-edit-priority-{{ row.id }}" type="number" name="priority" value="{{ row.priority }}" min="1" max="50">
+            </div>
+            <div class="form-group">
+                <label for="indexer-edit-min-seeders-{{ row.id }}">Min Seeders</label>
+                <input id="indexer-edit-min-seeders-{{ row.id }}" type="number" name="min_seeders" value="{{ row.min_seeders }}" min="0">
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="indexer-edit-timeout-{{ row.id }}">Request Timeout (seconds)</label>
+            <input id="indexer-edit-timeout-{{ row.id }}" type="number" name="request_timeout_secs"
+                   value="{% if let Some(secs) = row.request_timeout_secs %}{{ secs }}{% endif %}"
+                   min="1" max="600" placeholder="30">
+            <span class="form-hint">Per-indexer override. Blank uses the default (30s, or RYOKAN_INDEXER_DEFAULT_TIMEOUT_SECS env). Range 1-600.</span>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label for="indexer-edit-ratio-{{ row.id }}">Seed Ratio</label>
+                <input id="indexer-edit-ratio-{{ row.id }}" type="number" name="seed_ratio" step="0.1" min="0"
+                       value="{% if let Some(r) = row.seed_ratio %}{{ r }}{% endif %}"
+                       placeholder="(client default)">
+                <span class="form-hint">Per-torrent seed ratio passed to the download client at add time. Blank inherits the client's global default.</span>
+            </div>
+            <div class="form-group">
+                <label for="indexer-edit-seed-time-{{ row.id }}">Seed Time (minutes)</label>
+                <input id="indexer-edit-seed-time-{{ row.id }}" type="number" name="seed_time_minutes" min="0"
+                       value="{% if let Some(m) = row.seed_time_minutes %}{{ m }}{% endif %}"
+                       placeholder="(client default)">
+                <span class="form-hint">Per-torrent minimum seed time. Blank inherits the client's global default.</span>
+            </div>
+        </div>
+
+        {# Enabled checkbox dropped from the UI — see add_form_body.html
+           for rationale. Hidden input keeps the wire shape so the
+           upsert handler's `enabled.is_some()` resolves true and
+           previously-disabled rows get re-enabled on the next save
+           (acceptable: the user clicked Edit, presumably to keep using
+           it). Existing disabled rows that aren't edited stay
+           disabled in the DB but become invisible on the UI. #}
+        <input type="hidden" name="enabled" value="on">
+
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" name="is_private_tracker" {% if row.is_private_tracker %}checked{% endif %}>
+                Private tracker
+            </label>
+        </div>
+
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" name="rss_enabled" {% if row.rss_enabled %}checked{% endif %}>
+                Enable RSS auto-sync
+            </label>
+            <span class="form-hint">When enabled, RSS sync will poll this indexer's RSS feed for newly-uploaded releases on every interval.</span>
+        </div>
+
+        <div class="form-group">
+            <label for="indexer-edit-dc-{{ row.id }}">Download Client</label>
+            <select id="indexer-edit-dc-{{ row.id }}" name="download_client_id">
+                <option value="">(use default)</option>
+                {% for dc in download_clients %}
+                <option value="{{ dc.id }}"
+                    data-protocol="{% if dc.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %}"
+                    {% if let Some(pin) = row.download_client_id %}{% if *pin == dc.id %}selected{% endif %}{% endif %}>
+                    {{ dc.name }}{% if dc.is_default %} (default){% endif %}
+                </option>
+                {% endfor %}
+            </select>
+            <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag. Torznab indexers can only be pinned to torrent clients; newznab indexers to usenet clients (SABnzbd).</span>
+        </div>
+    </div>
+    <div class="modal-footer">
+        {# Test — passes the row's id alongside form fields so the
+           backend re-uses the warm cache entry. Same JSON envelope
+           shape and toast surfacing as the Add modal's Test. #}
+        <button type="button" class="btn btn-secondary"
+                hx-post="/api/indexers/test"
+                hx-include="closest form"
+                hx-swap="none"
+                hx-disabled-elt="this"
+                onclick="ryokanWaitForIndexerTest(this)">Test</button>
+        <span style="margin-right:auto"></span>
+        <button type="button" class="btn btn-secondary" onclick="closeIndexerModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save changes</button>
+    </div>
+</form>

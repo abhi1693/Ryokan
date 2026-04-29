@@ -17,7 +17,10 @@
             </div>
             <div class="form-group">
                 <label for="dc-edit-kind-{{ row.id }}">Kind</label>
-                <select id="dc-edit-kind-{{ row.id }}" name="kind">
+                {# `data-dc-kind-select` — see add_form_body.html for the
+                   contract this attribute carries. The relabel helper
+                   in static/js/settings.js wires both forms via this. #}
+                <select id="dc-edit-kind-{{ row.id }}" name="kind" data-dc-kind-select>
                     <option value="qbittorrent" {% if row.kind == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
                     <option value="deluge" {% if row.kind == "deluge" %}selected{% endif %}>Deluge</option>
                     <option value="transmission" {% if row.kind == "transmission" %}selected{% endif %}>Transmission</option>
@@ -28,25 +31,26 @@
         </div>
         <div class="form-group">
             <label for="dc-edit-url-{{ row.id }}">URL</label>
-            <input id="dc-edit-url-{{ row.id }}" type="url" name="url" required value="{{ row.url }}" placeholder="http://localhost:8080">
-            <span class="form-hint">For Deluge / Transmission / rTorrent, point at the Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
+            <input id="dc-edit-url-{{ row.id }}" type="url" name="url" required value="{{ row.url }}" placeholder="http://localhost:8080" data-dc-url-input>
+            <span class="form-hint" data-dc-url-hint>Point at the client's Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
         </div>
-        <div class="form-row">
-            <div class="form-group">
-                <label for="dc-edit-username-{{ row.id }}">Username</label>
+        <div class="form-row" data-dc-credentials>
+            <div class="form-group" data-dc-username-group>
+                <label for="dc-edit-username-{{ row.id }}" data-dc-username-label>Username</label>
                 <input id="dc-edit-username-{{ row.id }}" type="text" name="username" autocomplete="off" value="{{ row.username }}">
-                <span class="form-hint">Deluge ignores the username and uses password only; leave blank.</span>
+                <span class="form-hint" data-dc-username-hint>Deluge ignores the username and uses password only; leave blank.</span>
             </div>
             <div class="form-group">
-                <label for="dc-edit-password-{{ row.id }}">Password</label>
-                <input id="dc-edit-password-{{ row.id }}" type="password" name="password" autocomplete="new-password" value="{{ row.password }}">
+                <label for="dc-edit-password-{{ row.id }}" data-dc-password-label>Password</label>
+                <input id="dc-edit-password-{{ row.id }}" type="password" name="password" autocomplete="new-password" value="{{ row.password }}" data-dc-password-input>
+                <span class="form-hint" data-dc-password-hint style="display:none"></span>
             </div>
         </div>
         <div class="form-row">
             <div class="form-group">
-                <label for="dc-edit-label-{{ row.id }}">Category / label</label>
+                <label for="dc-edit-label-{{ row.id }}" data-dc-label-label>Category / label</label>
                 <input id="dc-edit-label-{{ row.id }}" type="text" name="label" value="{{ row.label }}" placeholder="anime">
-                <span class="form-hint">qBit calls this a "category", the others call it a "label".</span>
+                <span class="form-hint" data-dc-label-hint>qBit calls this a "category", the others call it a "label".</span>
             </div>
             <div class="form-group">
                 <label for="dc-edit-download-path-{{ row.id }}">Download path (as Ryokan sees it)</label>
@@ -64,10 +68,23 @@
             </div>
             <div class="form-group">
                 <label class="checkbox-label">
-                    <input type="checkbox" name="is_default" {% if row.is_default %}checked{% endif %}>
+                    {# Auto-check when no row of this protocol is the
+                       current default. `row.is_default` takes
+                       precedence (the checkbox starts checked if
+                       this row is already default); otherwise the
+                       per-protocol "first" flag fills in so editing
+                       the last torrent client when no torrent
+                       default exists auto-promotes it. The kind-
+                       relabel JS in static/js/settings.js re-evaluates
+                       on dropdown change. #}
+                    <input type="checkbox" name="is_default"
+                           {% if row.is_default || (row.kind == "sabnzbd" && first_usenet_client) || (row.kind != "sabnzbd" && first_torrent_client) %}checked{% endif %}
+                           data-dc-default-checkbox
+                           data-first-torrent="{% if first_torrent_client %}1{% else %}0{% endif %}"
+                           data-first-usenet="{% if first_usenet_client %}1{% else %}0{% endif %}">
                     Default client
                 </label>
-                <span class="form-hint">Receives every grab without an explicit pin. Exactly one row holds this flag at a time.</span>
+                <span class="form-hint">Receives every grab without an explicit indexer pin. Per-protocol; torrent and usenet defaults are independent.</span>
             </div>
         </div>
     </div>

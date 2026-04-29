@@ -311,31 +311,45 @@ pub async fn remove_series(
         };
 
         if !hashes.is_empty() {
-            let client_opt = state.default_download_client().await;
-            if let Some(client) = client_opt {
-                for (_id, hash) in &hashes {
-                    if hash.is_empty() {
-                        continue;
-                    }
-                    // Issue #28 PR C — preserve PT seed rules across
-                    // series removal. A user wiping a series from the
-                    // library typically wants ratio policies honored
-                    // (their PT account's ratio is downstream of
-                    // every grab). The grabbed_torrents row gets
-                    // deleted below regardless via
-                    // delete_all_for_series, so the upgrade sweep
-                    // can't re-grab the same hash.
-                    if grabbed_torrents::respects_seed_rules(&state.db, hash).await {
-                        torrents_removed += 1; // counted as "handled"
-                        continue;
-                    }
-                    match client.delete(hash, true).await {
-                        Ok(()) => torrents_removed += 1,
-                        Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
-                    }
+            // Per-grab client routing via `resolve_grab_client`. A
+            // series can have grabs across multiple clients (e.g.
+            // early SAB Usenet rip plus later qBit BD upgrade) AND
+            // legacy SAB grabs may have a NULL stamp; the helper's
+            // nzo_id-shape heuristic rescues those.
+            for &(id, ref hash, dc_id) in &hashes {
+                if hash.is_empty() {
+                    continue;
                 }
-            } else {
-                torrent_failures.push("Download client not configured".to_string());
+                // Issue #28 PR C — preserve PT seed rules across
+                // series removal. A user wiping a series from the
+                // library typically wants ratio policies honored
+                // (their PT account's ratio is downstream of
+                // every grab). The grabbed_torrents row gets
+                // deleted below regardless via
+                // delete_all_for_series, so the upgrade sweep
+                // can't re-grab the same hash.
+                if grabbed_torrents::respects_seed_rules(&state.db, hash).await {
+                    torrents_removed += 1; // counted as "handled"
+                    continue;
+                }
+                let Some(client) = state.resolve_grab_client(dc_id, hash).await else {
+                    torrent_failures.push("Download client not configured".to_string());
+                    continue;
+                };
+                match client.delete(hash, true).await {
+                    Ok(()) => torrents_removed += 1,
+                    Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
+                }
+
+                // Source-side cleanup using import-time-stamped paths.
+                // Same rationale as `delete_episode_file`: the client's
+                // delete is unreliable for SAB jobs whose history
+                // `storage` field is the parent complete dir. Stamped
+                // paths are precise and mode-agnostic.
+                let stamped = grabbed_torrents::get_imported_source_paths(&state.db, id).await;
+                if !stamped.is_empty() {
+                    super::episodes::remove_stamped_source_paths(&stamped).await;
+                }
             }
         }
 

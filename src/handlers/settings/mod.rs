@@ -170,30 +170,26 @@ struct SettingsTemplate {
     /// list. Empty on a fresh install since no indexers exist
     /// until the user adds one.
     indexers: Vec<crate::models::indexers::Indexer>,
-    /// PR #107 review fix #5: when the indexers tab is active
-    /// and `?edit_id=N` is set, populate this with the matching
-    /// row so the upsert form prefills from the existing values.
-    /// `None` renders the bare "Add Indexer" form; same prefill
-    /// pattern as the Custom Formats tab.
-    indexer_edit: Option<crate::models::indexers::Indexer>,
     /// Curated picker grid for the Settings → Indexers tab.
     /// Always populated from the static catalog so the grid
-    /// renders identically regardless of DB state. The user
-    /// can still skip the picker by clicking one of the
-    /// `is_generic` cards or scrolling past to the form.
+    /// renders identically regardless of DB state. Each card
+    /// opens the shared add modal pre-filled with the seed's
+    /// defaults via `openIndexerAddModal(slug, name)` (see
+    /// static/js/settings.js).
     indexer_catalog: &'static [crate::services::indexer_catalog::SeededIndexer],
-    /// When the user clicks a picker card, the link sends
-    /// `?tab=indexers&template=<slug>` and this gets
-    /// populated with the matched seed so the Add form pre-
-    /// fills name / kind / private-flag / priority / min-
-    /// seeders / suggested seed-ratio. `None` renders the
-    /// generic blank form (which is what the user sees if
-    /// they bypass the picker).
-    indexer_seed: Option<&'static crate::services::indexer_catalog::SeededIndexer>,
     /// Multi-client refactor — every configured download client
     /// for the Download Clients tab list. Sorted default-first then
     /// case-insensitive by name (see `models::download_clients::list_all`).
     download_clients: Vec<crate::models::download_clients::DownloadClientRow>,
+    /// Per-protocol "no client of this protocol exists yet" flags.
+    /// Consumed by the inline-included `add_form_body.html` so the
+    /// pre-rendered Add modal pre-checks the Default checkbox per
+    /// protocol on a fresh install. Computed from `download_clients`
+    /// at render time. The section partial
+    /// (`DownloadClientsListPartial`) carries the same fields for
+    /// the HTMX-served partial path.
+    first_torrent_client: bool,
+    first_usenet_client: bool,
     /// Multi-RSS PR G/H — user-supplied direct RSS feeds (e.g.
     /// SubsPlease per-quality feeds) rendered on the Indexers tab
     /// alongside the torznab/newznab indexer rows. Empty until the
@@ -320,11 +316,6 @@ pub struct SettingsQuery {
     /// and re-render inline so the form state is preserved.
     msg: Option<String>,
     err: Option<String>,
-    /// Indexers tab — slug from the seeded catalog
-    /// (`services::indexer_catalog`). When set on the Add path,
-    /// the form pre-fills from the matched seed instead of
-    /// rendering blank.
-    template: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -813,7 +804,6 @@ async fn build_settings_template(
     msg: Option<String>,
     err: Option<String>,
     import_review: Option<ImportReviewView>,
-    template_slug: Option<String>,
     cfg_override: Option<config::Config>,
 ) -> SettingsTemplate {
     // Fan out the five independent lookups — config row, release-group
@@ -885,29 +875,14 @@ async fn build_settings_template(
 
     let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
     let title_language = cfg.title_language.clone();
-    // PR #107 review fix #5: resolve the indexer edit prefill the
-    // same way CF does. `edit_id` is shared across tabs — at most
-    // one tab consumes it at a time.
-    let indexer_edit = match edit_id {
-        Some(id) => crate::models::indexers::get_by_id(&state.db, id)
-            .await
-            .ok()
-            .flatten(),
-        None => None,
-    };
-    // Resolve the picker template only on the Add path — the
-    // Edit form is already row-driven, so the seed would just
-    // shadow real values. `template_slug` is also discarded if
-    // it doesn't match a known seed (stale or hand-typed
-    // links fall through to the blank Add form).
-    let indexer_seed = if indexer_edit.is_none() {
-        template_slug
-            .as_deref()
-            .and_then(crate::services::indexer_catalog::find_seed)
-    } else {
-        None
-    };
     let download_clients = download_clients_res.unwrap_or_default();
+    use crate::models::download_clients::protocol_for_kind;
+    let first_torrent_client = !download_clients
+        .iter()
+        .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("torrent"));
+    let first_usenet_client = !download_clients
+        .iter()
+        .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
     let direct_rss_feeds = direct_rss_feeds_res.unwrap_or_default();
     SettingsTemplate {
         page: "settings".to_string(),
@@ -925,10 +900,10 @@ async fn build_settings_template(
         external_account,
         title_language,
         indexers: indexers_res.unwrap_or_default(),
-        indexer_edit,
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
-        indexer_seed,
         download_clients,
+        first_torrent_client,
+        first_usenet_client,
         direct_rss_feeds,
     }
 }
@@ -944,7 +919,6 @@ pub async fn settings_page(
         params.msg,
         params.err,
         None,
-        params.template,
         None,
     )
     .await;
@@ -1359,6 +1333,13 @@ pub async fn settings_submit(
         let download_clients = crate::models::download_clients::list_all(&state.db)
             .await
             .unwrap_or_default();
+        use crate::models::download_clients::protocol_for_kind;
+        let first_torrent_client = !download_clients
+            .iter()
+            .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("torrent"));
+        let first_usenet_client = !download_clients
+            .iter()
+            .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
         let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
             .await
             .unwrap_or_default();
@@ -1374,14 +1355,14 @@ pub async fn settings_submit(
             custom_format_import_review: None,
             message: None,
             error: Some(format!("Failed to save: {}", e)),
-            indexer_edit: None,
             version: env!("CARGO_PKG_VERSION"),
             external_account,
             title_language,
             indexers,
             indexer_catalog: crate::services::indexer_catalog::SEEDED,
-            indexer_seed: None,
             download_clients,
+            first_torrent_client,
+            first_usenet_client,
             direct_rss_feeds,
         };
         return Html(template.render().unwrap_or_default());
@@ -1470,6 +1451,13 @@ pub async fn settings_submit(
     let download_clients = crate::models::download_clients::list_all(&state.db)
         .await
         .unwrap_or_default();
+    use crate::models::download_clients::protocol_for_kind;
+    let first_torrent_client = !download_clients
+        .iter()
+        .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("torrent"));
+    let first_usenet_client = !download_clients
+        .iter()
+        .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
     let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
         .await
         .unwrap_or_default();
@@ -1490,14 +1478,14 @@ pub async fn settings_submit(
         // the user changes integration settings).
         message: Some(notices.join(" ")),
         error: None,
-        indexer_edit: None,
         version: env!("CARGO_PKG_VERSION"),
         external_account,
         title_language,
         indexers,
         indexer_catalog: crate::services::indexer_catalog::SEEDED,
-        indexer_seed: None,
         download_clients,
+        first_torrent_client,
+        first_usenet_client,
         direct_rss_feeds,
     };
     Html(template.render().unwrap_or_default())
@@ -1642,7 +1630,6 @@ async fn general_response(
         message,
         error,
         None,
-        None,
         Some(cfg),
     )
     .await;
@@ -1772,7 +1759,6 @@ async fn quality_response(
         None,
         message,
         error,
-        None,
         None,
         Some(cfg),
     )
@@ -2001,7 +1987,6 @@ async fn integrations_response(
         None,
         message,
         error,
-        None,
         None,
         Some(cfg),
     )
@@ -2791,125 +2776,21 @@ mod tests {
         assert!(!labels[0].required);
     }
 
-    /// Indexer-picker pre-fill flow on the Settings → Indexers
-    /// tab. `?template=<slug>` resolves through
-    /// [`crate::services::indexer_catalog::find_seed`] and
-    /// populates [`SettingsTemplate::indexer_seed`]; the form
-    /// then renders pre-filled defaults from the seed instead of
-    /// blank. The two precedence rules below (edit shadows seed,
-    /// unknown-slug falls through) are the load-bearing
-    /// invariants for the picker UX.
+    /// Indexer picker / catalog rendering on the Settings → Indexers
+    /// tab. The URL-driven `?edit_id=N` / `?template=<slug>` inline-
+    /// form flow has been replaced by a click-to-modal flow whose
+    /// form bodies come from dedicated GET endpoints (covered by
+    /// `IndexerEditFormPartial` / `IndexerAddFormPartial` rendering
+    /// tests). What this section still needs to assert is that the
+    /// catalog grid is always populated from the static seed list,
+    /// since the page renders unconditionally without any
+    /// catalog-suppression branch.
     mod indexer_picker {
         use super::super::*;
         use crate::test_support::{build_test_app_state, in_memory_pool};
 
         #[tokio::test]
-        async fn template_slug_populates_indexer_seed() {
-            let db = in_memory_pool().await;
-            let state = build_test_app_state(db, None);
-            let template = build_settings_template(
-                &state,
-                Some("indexers".to_string()),
-                None,
-                None,
-                None,
-                None,
-                Some("animebytes".to_string()),
-                None,
-            )
-            .await;
-            let seed = template
-                .indexer_seed
-                .expect("animebytes slug should resolve to a seed");
-            assert_eq!(seed.slug, "animebytes");
-            assert_eq!(seed.display_name, "AnimeBytes");
-            assert!(seed.is_private_tracker);
-        }
-
-        #[tokio::test]
-        async fn unknown_template_slug_falls_through_to_picker() {
-            // Stale `?template=…` links from a removed catalog
-            // entry must degrade gracefully — the user lands on
-            // the blank picker grid, not an error page.
-            let db = in_memory_pool().await;
-            let state = build_test_app_state(db, None);
-            let template = build_settings_template(
-                &state,
-                Some("indexers".to_string()),
-                None,
-                None,
-                None,
-                None,
-                Some("does-not-exist".to_string()),
-                None,
-            )
-            .await;
-            assert!(template.indexer_seed.is_none());
-        }
-
-        #[tokio::test]
-        async fn edit_id_shadows_template_slug() {
-            // `?edit_id=N&template=…` URLs must pick the row
-            // (real DB values) over the seed (catalog defaults)
-            // — otherwise an Edit click on an existing row that
-            // happened to land on a seed-less form would
-            // overwrite real values with catalog defaults on
-            // Save.
-            let db = in_memory_pool().await;
-            let row_id = crate::models::indexers::insert(
-                &db,
-                crate::models::indexers::IndexerForm {
-                    name: "Existing",
-                    kind: "torznab",
-                    url: "https://prowlarr.local/1/api",
-                    api_key: "k",
-                    priority: 25,
-                    enabled: true,
-                    is_private_tracker: false,
-                    seed_ratio: None,
-                    seed_time_minutes: None,
-                    min_seeders: 1,
-                    request_timeout_secs: None,
-                    download_client_id: None,
-                    rss_enabled: false,
-                },
-            )
-            .await
-            .expect("seed indexer");
-            let state = build_test_app_state(db, None);
-            let template = build_settings_template(
-                &state,
-                Some("indexers".to_string()),
-                Some(row_id),
-                None,
-                None,
-                None,
-                Some("animebytes".to_string()),
-                None,
-            )
-            .await;
-            // Prove the row's fields actually reached the
-            // template — `is_some()` alone wouldn't catch a
-            // future `get_by_id` projection bug that returned
-            // a default-constructed row but kept the
-            // seed-suppression branch intact.
-            let edit = template
-                .indexer_edit
-                .as_ref()
-                .expect("edit_id must populate indexer_edit");
-            assert_eq!(edit.name, "Existing");
-            assert_eq!(edit.id, row_id);
-            assert!(
-                template.indexer_seed.is_none(),
-                "edit_id must shadow the template slug — seed defaults would clobber real row values"
-            );
-        }
-
-        #[tokio::test]
-        async fn no_template_no_edit_renders_blank_picker() {
-            // The default landing on `?tab=indexers` shows the
-            // grid + table; neither edit_id nor template
-            // populated.
+        async fn catalog_grid_is_always_populated() {
             let db = in_memory_pool().await;
             let state = build_test_app_state(db, None);
             let template = build_settings_template(
@@ -2920,11 +2801,8 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
             )
             .await;
-            assert!(template.indexer_seed.is_none());
-            assert!(template.indexer_edit.is_none());
             assert!(
                 !template.indexer_catalog.is_empty(),
                 "picker grid is always populated from the static catalog"

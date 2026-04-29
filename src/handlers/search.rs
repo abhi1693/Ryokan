@@ -516,15 +516,24 @@ pub async fn get_torrents(
     Json<Vec<crate::services::download_client::DownloadItem>>,
     (axum::http::StatusCode, String),
 > {
-    let client = state.default_download_client().await.ok_or((
-        axum::http::StatusCode::BAD_REQUEST,
-        "Download client not configured".to_string(),
-    ))?;
-
-    let torrents = client
-        .list_scoped()
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
+    // Fan out across every enabled client so SAB / Usenet jobs
+    // appear in the queue alongside torrent jobs. Mirrors the
+    // server-rendered queue tab in `handlers::downloads`.
+    let pool = state.download_clients.read().await.clone();
+    if pool.clients.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Download client not configured".to_string(),
+        ));
+    }
+    let mut torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
+    for c in pool.clients.values() {
+        match c.list_scoped().await {
+            Ok(mut items) => torrents.append(&mut items),
+            Err(e) => {
+                tracing::warn!("get_torrents: client list_scoped failed: {e}");
+            }
+        }
+    }
     Ok(Json(torrents))
 }

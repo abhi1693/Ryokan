@@ -99,7 +99,14 @@ async fn seed_group(db: &SqlitePool) -> &'static str {
 // ─── Indexers ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn indexers_delete_returns_empty_200_for_htmx_request() {
+async fn indexers_delete_returns_section_partial_for_htmx_request() {
+    // Card-redesign follow-up — every state-changing HTMX action on
+    // the Indexers tab now returns the whole #indexer-section partial
+    // in one swap (cards re-render with the deleted row gone, the
+    // shared modal collapses back to display:none, and the empty-state
+    // CTA surfaces if the section went from 1→0). Previously this
+    // returned empty 200 + per-row outerHTML swap; both shapes are
+    // visible here so the tab body doesn't regress silently.
     let db = in_memory_pool().await;
     let id = seed_indexer(&db).await;
     let state = build_test_app_state(db.clone(), None);
@@ -113,12 +120,18 @@ async fn indexers_delete_returns_empty_200_for_htmx_request() {
     .into_response();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
         .await
         .expect("read body");
+    let html = std::str::from_utf8(&body).expect("partial is utf-8");
     assert!(
-        body.is_empty(),
-        "HTMX delete must return empty body so hx-swap=outerHTML removes the row"
+        html.contains("id=\"indexer-section\""),
+        "section root must be the swap target; got: {html}"
+    );
+    // Empty-state CTA renders since the deletion left the section at 0 rows.
+    assert!(
+        html.contains("No indexers configured"),
+        "empty-state CTA must render after the only row is deleted; got: {html}"
     );
 
     // Row actually deleted (sanity check the handler did the work).

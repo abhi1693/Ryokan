@@ -164,16 +164,22 @@ async fn install_pool(
 ) {
     let mut clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>> =
         std::collections::HashMap::new();
-    let mut default_id = None;
+    // Tests in this module exercise torrent-side post-processing; the
+    // mock `DownloadClient` fixtures don't carry a protocol, so any
+    // `is_default = true` entry here pins the torrent default. A
+    // future usenet-flavored fixture should mint its own pool that
+    // populates `default_usenet_id` instead.
+    let mut default_torrent_id = None;
     for (id, c, is_default) in entries {
         if is_default {
-            default_id = Some(id);
+            default_torrent_id = Some(id);
         }
         clients.insert(id, c);
     }
     let pool = crate::DownloadClientPool {
         clients,
-        default_id,
+        default_torrent_id,
+        default_usenet_id: None,
     };
     *state.download_clients.write().await = Arc::new(pool);
 }

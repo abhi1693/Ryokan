@@ -789,12 +789,28 @@ async fn main() {
             post(handlers::settings::indexers::settings_indexers_delete),
         )
         .route(
+            "/settings/indexers/section",
+            get(handlers::settings::indexers::settings_indexers_section),
+        )
+        .route(
+            "/settings/indexers/add-form",
+            get(handlers::settings::indexers::settings_indexers_add_form),
+        )
+        .route(
+            "/settings/indexers/{id}/edit-form",
+            get(handlers::settings::indexers::settings_indexers_edit_form),
+        )
+        .route(
             "/settings/indexers/nyaa-pin",
             post(handlers::settings::download_clients::settings_indexers_nyaa_pin),
         )
         .route(
             "/settings/indexers/test-rss",
             post(handlers::settings::indexers::settings_indexers_test_rss),
+        )
+        .route(
+            "/api/indexers/test",
+            post(handlers::settings::indexers::settings_indexers_test_stateless),
         )
         .route(
             "/settings/direct-rss-feeds/upsert",

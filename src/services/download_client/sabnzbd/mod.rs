@@ -255,6 +255,17 @@ impl SabClient {
 #[async_trait]
 impl DownloadClient for SabClient {
     async fn test(&self) -> Result<String, String> {
+        // Two-step probe: `mode=version` is a PUBLIC SAB endpoint and
+        // returns 200 even with a missing/wrong API key, so it can't
+        // surface auth issues. `mode=queue` requires the API key, so
+        // following the version probe with a queue probe catches a
+        // bad/missing key at Test-connection time instead of at
+        // first-grab time. Without this, users would see a green
+        // "Connected: 4.5.5" pill, then their first NZB grab would
+        // fail with `SAB add returned HTTP 403 Forbidden` — the
+        // exact symptom the SAB-on-NZBGeek-paired-with-Prowlarr
+        // setup hits when the password / api_key field on the
+        // download_clients row is empty or wrong.
         let resp = self
             .http
             .get(self.endpoint())
@@ -269,15 +280,47 @@ impl DownloadClient for SabClient {
             .json()
             .await
             .map_err(|e| format!("SAB version parse failed: {e}"))?;
+        let version = body.version;
+
+        // Auth probe — fail with a clear message when the API key is
+        // missing/invalid. Only the status code matters; queue body
+        // shape isn't parsed.
+        let auth_resp = self
+            .http
+            .get(self.endpoint())
+            .query(&self.make_query(&[("mode", "queue"), ("start", "0"), ("limit", "1")]))
+            .send()
+            .await
+            .map_err(|e| format!("SAB queue probe failed: {e}"))?;
+        if auth_resp.status().as_u16() == 401 || auth_resp.status().as_u16() == 403 {
+            // SAB returns plain text on 403 ("API Key Required" /
+            // "API Key Incorrect"); surface it so the user knows
+            // exactly which field to fix on the download-clients row.
+            let detail = auth_resp.text().await.unwrap_or_default();
+            let trimmed = detail.trim();
+            return Err(if trimmed.is_empty() {
+                "SAB API key missing or invalid. Set the API Key field on the SABnzbd download-client row.".to_string()
+            } else {
+                format!(
+                    "SAB API key missing or invalid: {}. Set the API Key field on the SABnzbd download-client row.",
+                    trimmed
+                )
+            });
+        }
+        if !auth_resp.status().is_success() {
+            return Err(format!(
+                "SAB queue probe returned HTTP {}",
+                auth_resp.status()
+            ));
+        }
+
         // Return just the version string, without the "SABnzbd "
         // prefix. The status pill on the Settings → Download Clients
         // tab prepends the client kind label itself, so the prefix
         // would render as "SABnzbd SABnzbd 4.5.5"; the toast on the
         // Test-connection button concatenates "Connected: <version>"
         // and reads more naturally without the kind doubling either.
-        // qBit / Deluge / Transmission / rtorrent all return raw
-        // version strings already; this brings SAB in line.
-        Ok(body.version)
+        Ok(version)
     }
 
     async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
@@ -308,17 +351,60 @@ impl DownloadClient for SabClient {
             .await
             .map_err(|e| format!("SAB request failed: {e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("SAB add returned HTTP {}", resp.status()));
+            // 401/403 specifically — capture SAB's plain-text body so
+            // the user sees `API Key Required` / `API Key Incorrect`
+            // instead of the bare HTTP status. Other status codes
+            // surface the status alone since SAB's body for those
+            // (5xx, 502 Bad Gateway from a fronting proxy, etc.)
+            // isn't usefully diagnostic. The Test-connection probe
+            // now catches API-key issues at config time, but this
+            // path stays robust for users who upgraded a working
+            // setup and somehow lost their key.
+            let status = resp.status();
+            let detail = if matches!(status.as_u16(), 401 | 403) {
+                resp.text().await.unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let trimmed = detail.trim();
+            if trimmed.is_empty() {
+                return Err(format!("SAB add returned HTTP {status}"));
+            }
+            return Err(format!("SAB add returned HTTP {status}: {trimmed}"));
         }
-        let body: AddUrlResponse = resp
-            .json()
+        // SAB sometimes returns 200 with an HTML page (not JSON) when
+        // the API key is missing — varies by version + URL_BASE
+        // config, and the user-pasted-NZB-Key-instead-of-API-Key
+        // case is the most common footgun. Read the body as bytes
+        // once so we can fall back to a substring check on the
+        // well-known "API Key" warning if JSON parsing fails.
+        // Without this the user got an opaque parse error instead of
+        // an actionable hint.
+        let body_bytes = resp
+            .bytes()
             .await
-            .map_err(|e| format!("SAB addurl parse failed: {e}"))?;
+            .map_err(|e| format!("SAB addurl read body failed: {e}"))?;
+        let body: AddUrlResponse = match serde_json::from_slice(&body_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                let body_text = std::str::from_utf8(&body_bytes).unwrap_or_default();
+                if body_text.to_ascii_lowercase().contains("api key") {
+                    return Err(format!(
+                        "SAB rejected addurl: API key missing. Set the API Key field on the SABnzbd download-client row (Settings → Connections → Downloads → click the SAB row). Use SAB's full API Key (not the NZB Key — Ryokan needs queue access too). Find it in SABnzbd → Config → General → Security → API Key. SAB body: {}",
+                        body_text.trim()
+                    ));
+                }
+                return Err(format!("SAB addurl parse failed: {e}"));
+            }
+        };
         if !body.status {
-            return Err(format!(
-                "SAB rejected addurl: {}",
-                body.error.unwrap_or_else(|| "no error provided".into())
-            ));
+            let raw_error = body.error.unwrap_or_else(|| "no error provided".into());
+            if raw_error.to_ascii_lowercase().contains("api key") {
+                return Err(format!(
+                    "SAB rejected addurl: API key missing or invalid. Use the full API Key (not the NZB Key) from SABnzbd → Config → General → Security. SAB error: {raw_error}"
+                ));
+            }
+            return Err(format!("SAB rejected addurl: {raw_error}"));
         }
         if let Some(id) = body.nzo_ids.into_iter().next() {
             return Ok((AddOutcome::Added, id));
@@ -362,9 +448,40 @@ impl DownloadClient for SabClient {
     async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
         let queue = self.fetch_queue().await?;
         let history = self.fetch_history().await?;
-        let mut out: Vec<DownloadItem> =
-            Vec::with_capacity(queue.slots.len() + history.slots.len());
-        for slot in queue.slots.into_iter().filter(|s| s.cat == self.category) {
+        let queue_total = queue.slots.len();
+        let history_total = history.slots.len();
+        let mut out: Vec<DownloadItem> = Vec::with_capacity(queue_total + history_total);
+
+        // Category-match policy:
+        //   - Empty `self.category` → no filter; pass everything
+        //     through. The user didn't pin a category in Ryokan's
+        //     SAB row, so the trade-off "see all SAB activity vs
+        //     never see anything" picks visibility.
+        //   - Non-empty `self.category` → match SAB's slot category
+        //     case-insensitively, AND also accept slots whose
+        //     reported category is empty (SAB sometimes drops the
+        //     category on jobs added with a cat= parameter that
+        //     doesn't correspond to a configured category in SAB's
+        //     UI; the addurl call still succeeds but the resulting
+        //     slot reports `cat=""`). Without this, jobs Ryokan
+        //     just queued via `add_torrent` would silently fail
+        //     the filter and the reconcile loop would mark them
+        //     removed at the 30s grace window. The trade-off is
+        //     accepting cross-tool noise (jobs added by another
+        //     SAB caller with no category) — acceptable for a
+        //     single-user homelab; revisit if Ryokan grows multi-
+        //     user.
+        let configured = self.category.trim();
+        let want_lower = configured.to_ascii_lowercase();
+        let category_matches = |slot_cat: &str| -> bool {
+            if configured.is_empty() {
+                return true;
+            }
+            let s = slot_cat.trim();
+            s.is_empty() || s.eq_ignore_ascii_case(&want_lower)
+        };
+
+        for slot in queue.slots.into_iter().filter(|s| category_matches(&s.cat)) {
             out.push(DownloadItem {
                 hash: slot.nzo_id,
                 name: slot.filename,
@@ -387,8 +504,40 @@ impl DownloadClient for SabClient {
         for slot in history
             .slots
             .into_iter()
-            .filter(|s| s.category == self.category)
+            .filter(|s| category_matches(&s.category))
         {
+            // Title-matching ancestor walk, ported from Sonarr's
+            // SAB client (`Sabnzbd.cs::GetHistory`). SAB's `storage`
+            // field can be:
+            //   1. The per-job folder path (`/complete/<title>/`) —
+            //      the typical case.
+            //   2. A file path inside the job folder
+            //      (`/complete/<title>/file.mkv`) — single-file
+            //      extracts on some SAB versions.
+            //   3. The parent complete dir alone (`/complete/`) —
+            //      pathological-but-real edge case observed in the
+            //      wild; happens when SAB couldn't determine where
+            //      the job extracted to (no rar / weird archive
+            //      shape) and fell back to recording the parent.
+            //
+            // Walk the parent chain of `storage` looking for an
+            // ancestor whose filename equals `name` (the job title).
+            // That ancestor IS the per-job folder. If we find one,
+            // use it as the canonical content_path so import-time
+            // walks and delete-time cleanups operate on a precise
+            // per-job scope. Without this narrowing, a job's
+            // `import_torrent` walks the WHOLE complete dir and
+            // sweeps in files belonging to OTHER grabs — which then
+            // get stamped onto this grab's `imported_source_paths`
+            // and incorrectly removed when this grab is deleted.
+            //
+            // Fallback when no ancestor matches: try
+            // `<storage>/<title>/` as a candidate (covers case 3
+            // above where Storage is the parent). If neither
+            // resolution works the original `storage` is kept so
+            // downstream code at least has something to attempt.
+            let canonical_job_path = canonical_job_path(&slot.storage, &slot.name);
+
             out.push(DownloadItem {
                 hash: slot.nzo_id,
                 name: slot.name,
@@ -398,11 +547,27 @@ impl DownloadClient for SabClient {
                 state: slot.status.clone(),
                 category: slot.category,
                 eta: 0,
-                save_path: slot.storage.clone(),
-                content_path: slot.storage,
+                save_path: canonical_job_path.clone(),
+                content_path: canonical_job_path,
                 state_kind: Self::map_state(&slot.status, true),
             });
         }
+
+        // Diagnostic trace, fires only when SAB returned slots but
+        // every one of them got dropped by the category filter — i.e.
+        // a user-reported "Ryokan can't see my SAB jobs" case. Avoids
+        // spamming logs every 5s on the happy path (the queue-tab
+        // poll calls list_scoped on every refresh).
+        let total = queue_total + history_total;
+        if total > 0 && out.is_empty() {
+            tracing::debug!(
+                "sab list_scoped: dropped every slot via category filter — configured_category={:?} queue_slots={} history_slots={}",
+                configured,
+                queue_total,
+                history_total,
+            );
+        }
+
         Ok(out)
     }
 
@@ -456,52 +621,48 @@ impl DownloadClient for SabClient {
     }
 
     async fn delete(&self, info_hash: &str, delete_files: bool) -> Result<(), String> {
-        // SAB delete is split between queue and history — try queue
-        // first (covers in-flight), then history (covers completed).
-        // `del_files=1` removes the unpacked output directory on
-        // history deletes; queue deletes always remove the partial.
-        let mut q: Vec<(&str, &str)> =
-            vec![("mode", "queue"), ("name", "delete"), ("value", info_hash)];
+        // SAB delete is split between queue and history. Critically,
+        // `mode=queue&name=delete` returns `status: true`
+        // unconditionally — `_handle_queue` calls `report(output)`
+        // after `remove_multiple` even if the nzo_id wasn't in the
+        // queue at all (live-checked against SAB 4.x source). So if
+        // we tried queue first, every completed-and-imported job
+        // (which lives in history, not queue) would "succeed" against
+        // the queue endpoint and never hit history with `del_files=1`,
+        // leaving the unpacked storage dir behind.
+        //
+        // Fix: try history first (covers post-import deletes — the
+        // common case), fall back to queue only if history reports
+        // not-found. Same shape Sonarr / Radarr's SAB clients use.
+        // `del_files=1` removes the unpacked output dir on history;
+        // queue delete removes the partial download.
         let one = "1";
         let zero = "0";
-        if delete_files {
-            q.push(("del_files", one));
-        } else {
-            q.push(("del_files", zero));
-        }
-        let resp = self
-            .http
-            .get(self.endpoint())
-            .query(&self.make_query(&q))
-            .send()
-            .await
-            .map_err(|e| format!("SAB request failed: {e}"))?;
-        let body: StatusResponse = resp.json().await.unwrap_or_default();
-        if body.status {
-            return Ok(());
-        }
-        // Fallback: history. Mirror the queue branch and always send
-        // `del_files` explicitly — SAB's documented default is 0, but
-        // omitting the param leaves us at the mercy of any reverse
-        // proxy / future SAB version that fills in a different default.
+        let del_value = if delete_files { one } else { zero };
+
+        // Check history first; queue's `report(output)` fires on every
+        // call, including unknown nzo_ids, so a queue-first lookup
+        // would phantom-succeed on every post-import delete and never
+        // hit history with `del_files=1`. See module-level docs.
         let mut q: Vec<(&str, &str)> = vec![
             ("mode", "history"),
             ("name", "delete"),
             ("value", info_hash),
+            ("del_files", del_value),
         ];
-        if delete_files {
-            q.push(("del_files", one));
-        } else {
-            q.push(("del_files", zero));
+        let body = self.send_delete_probe(&q).await?;
+        if body.status {
+            return Ok(());
         }
-        let resp = self
-            .http
-            .get(self.endpoint())
-            .query(&self.make_query(&q))
-            .send()
-            .await
-            .map_err(|e| format!("SAB request failed: {e}"))?;
-        let body: StatusResponse = resp.json().await.unwrap_or_default();
+
+        // History didn't find it — try queue (covers in-flight cancel).
+        q = vec![
+            ("mode", "queue"),
+            ("name", "delete"),
+            ("value", info_hash),
+            ("del_files", del_value),
+        ];
+        let body = self.send_delete_probe(&q).await?;
         if body.status {
             Ok(())
         } else {
@@ -570,15 +731,39 @@ impl SabClient {
         if !resp.status().is_success() {
             return Err(format!("SAB add returned HTTP {}", resp.status()));
         }
-        let body: AddUrlResponse = resp
-            .json()
+        // SAB sometimes returns 200 with an HTML page (not JSON) when
+        // the API key is missing — varies by version + URL_BASE
+        // config, and the user-pasted-NZB-Key-instead-of-API-Key
+        // case is the most common footgun. Read the body as bytes
+        // once so we can fall back to a substring check on the
+        // well-known "API Key" warning if JSON parsing fails.
+        // Without this the user got an opaque parse error instead of
+        // an actionable hint.
+        let body_bytes = resp
+            .bytes()
             .await
-            .map_err(|e| format!("SAB addurl parse failed: {e}"))?;
+            .map_err(|e| format!("SAB addurl read body failed: {e}"))?;
+        let body: AddUrlResponse = match serde_json::from_slice(&body_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                let body_text = std::str::from_utf8(&body_bytes).unwrap_or_default();
+                if body_text.to_ascii_lowercase().contains("api key") {
+                    return Err(format!(
+                        "SAB rejected addurl: API key missing. Set the API Key field on the SABnzbd download-client row (Settings → Connections → Downloads → click the SAB row). Use SAB's full API Key (not the NZB Key — Ryokan needs queue access too). Find it in SABnzbd → Config → General → Security → API Key. SAB body: {}",
+                        body_text.trim()
+                    ));
+                }
+                return Err(format!("SAB addurl parse failed: {e}"));
+            }
+        };
         if !body.status {
-            return Err(format!(
-                "SAB rejected addurl: {}",
-                body.error.unwrap_or_else(|| "no error provided".into())
-            ));
+            let raw_error = body.error.unwrap_or_else(|| "no error provided".into());
+            if raw_error.to_ascii_lowercase().contains("api key") {
+                return Err(format!(
+                    "SAB rejected addurl: API key missing or invalid. Use the full API Key (not the NZB Key) from SABnzbd → Config → General → Security. SAB error: {raw_error}"
+                ));
+            }
+            return Err(format!("SAB rejected addurl: {raw_error}"));
         }
         if let Some(id) = body.nzo_ids.into_iter().next() {
             Ok((AddOutcome::Added, id))
@@ -650,6 +835,37 @@ impl SabClient {
             }
         }
         None
+    }
+
+    /// One leg of the two-leg delete (history first, then queue
+    /// fallback). Mirrors the auth-aware error path that `add_torrent`
+    /// uses: a 401/403 response captures SAB's plain-text body so the
+    /// user sees `API Key Incorrect` instead of the unhelpful
+    /// `SAB delete failed: no error provided` that comes out when
+    /// `resp.json().unwrap_or_default()` parses a non-JSON error page
+    /// into an empty `StatusResponse`.
+    async fn send_delete_probe(&self, params: &[(&str, &str)]) -> Result<StatusResponse, String> {
+        let resp = self
+            .http
+            .get(self.endpoint())
+            .query(&self.make_query(params))
+            .send()
+            .await
+            .map_err(|e| format!("SAB request failed: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let detail = if matches!(status.as_u16(), 401 | 403) {
+                resp.text().await.unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let trimmed = detail.trim();
+            if trimmed.is_empty() {
+                return Err(format!("SAB delete returned HTTP {status}"));
+            }
+            return Err(format!("SAB delete returned HTTP {status}: {trimmed}"));
+        }
+        Ok(resp.json().await.unwrap_or_default())
     }
 
     async fn queue_action(&self, name: &str, nzo_id: &str) -> Result<(), String> {
@@ -776,6 +992,91 @@ struct GetFilesEntry {
 
 // ── Wire-format helpers ─────────────────────────────────────────────
 
+/// Resolve SAB's `storage` field to the canonical per-job folder.
+/// SAB's reported storage takes one of three shapes:
+///
+///   1. **The per-job folder itself** (`/complete/<title>/`). This
+///      is the typical case. Detected by the basename equalling
+///      the job title; we return it as-is.
+///   2. **A file path inside the job folder**
+///      (`/complete/<title>/file.mkv`). Single-file extracts on some
+///      SAB versions. We use [`title_matching_ancestor`] to walk up
+///      and find the title-named parent dir.
+///   3. **The parent complete dir alone** (`/complete/`). Edge case
+///      observed in the wild — happens when SAB couldn't determine
+///      where extraction landed. We construct `<storage>/<title>/`
+///      as a candidate. This won't be filesystem-checked here (we
+///      operate on SAB-internal paths in Docker setups, where
+///      `is_dir()` against Ryokan's filesystem would lie); the
+///      downstream import walk handles the "path doesn't exist"
+///      case naturally.
+///
+/// The narrowing is critical: without it, `import_torrent`'s
+/// `walk_video_files` would walk SAB's WHOLE complete dir and sweep
+/// in files belonging to OTHER grabs, then stamp them onto this
+/// grab's `imported_source_paths`. Deleting one episode would then
+/// remove sibling episodes' source files too — see the user-reported
+/// 1154/1156 bug.
+fn canonical_job_path(storage: &str, title: &str) -> String {
+    if storage.is_empty() {
+        return String::new();
+    }
+    if title.is_empty() {
+        return storage.to_string();
+    }
+    // Case 1: storage already IS the per-job dir.
+    if let Some(name) = std::path::Path::new(storage)
+        .file_name()
+        .and_then(|n| n.to_str())
+        && name == title
+    {
+        return storage.to_string();
+    }
+    // Case 2: storage points inside the per-job dir somewhere.
+    if let Some(found) = title_matching_ancestor(storage, title) {
+        return found;
+    }
+    // Case 3: storage is the parent root (no per-job context).
+    // Construct the candidate; if SAB really created a per-job
+    // subdir named after the title, this resolves to it.
+    std::path::PathBuf::from(storage)
+        .join(title)
+        .display()
+        .to_string()
+}
+
+/// Walk parents of `path` looking for an ancestor whose filename
+/// equals `title`. Returns the **outermost** matching ancestor as a
+/// string, or `None` if no ancestor matches.
+///
+/// Ported from Sonarr's `Sabnzbd.cs::GetHistory` (the inner `while`
+/// loop ascending parents and matching against `sabHistoryItem.Title`).
+/// Used by [`canonical_job_path`] to handle the case where SAB's
+/// `storage` field points at a file inside the job folder rather
+/// than the folder itself.
+///
+/// The "outermost match wins" semantic mirrors Sonarr's behavior:
+/// the loop overwrites OutputPath each match and keeps walking up,
+/// so for a path like `/complete/<title>/<title>/file.mkv` the
+/// higher-up `<title>/` directory wins. Real-world archives rarely
+/// nest this way, but the chosen behavior is defensive.
+fn title_matching_ancestor(path: &str, title: &str) -> Option<String> {
+    if title.is_empty() || path.is_empty() {
+        return None;
+    }
+    let mut found: Option<std::path::PathBuf> = None;
+    let mut current = std::path::Path::new(path).parent();
+    while let Some(dir) = current {
+        if let Some(name) = dir.file_name().and_then(|n| n.to_str())
+            && name == title
+        {
+            found = Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    found.map(|p| p.display().to_string())
+}
+
 /// SAB returns percentages as strings ("47" → 0.47). Bare-int
 /// formatting on most installs; clamp to 0..=1.0.
 fn parse_percentage(s: &str) -> f64 {
@@ -834,6 +1135,109 @@ mod tests {
     fn endpoint_strips_trailing_slash_from_base() {
         let c = SabClient::new("http://host:8080/", "", "k", "anime");
         assert_eq!(c.endpoint(), "http://host:8080/api");
+    }
+
+    /// SAB's history `storage` field for a single-file extract often
+    /// points at the file inside the job folder. The title-matching
+    /// ancestor walk recovers the per-job folder so the import walk
+    /// scopes correctly. Without this, when SAB reports the parent
+    /// `complete/` dir or a file path, downstream code walked too
+    /// broadly and stamped/imported files from OTHER grabs in the
+    /// same complete dir.
+    #[test]
+    fn title_matching_ancestor_finds_job_dir_when_storage_is_a_file_path() {
+        let storage = "/downloads/complete/MyJob.S01E01/file.mkv";
+        let title = "MyJob.S01E01";
+        let got = title_matching_ancestor(storage, title);
+        assert_eq!(got, Some("/downloads/complete/MyJob.S01E01".to_string()));
+    }
+
+    /// When SAB's `storage` IS the per-job folder already, the walk
+    /// finds that folder one level up from the supplied path's
+    /// children — but since we walk *parents* of the input, the input
+    /// itself isn't checked. Returns None; caller falls back to using
+    /// `storage` directly.
+    #[test]
+    fn title_matching_ancestor_returns_none_when_storage_is_already_job_dir() {
+        let storage = "/downloads/complete/MyJob";
+        let title = "MyJob";
+        // The walk inspects PARENTS of storage; the path itself is the
+        // job dir but isn't tested. Caller's fallback chain handles
+        // this case via direct use of `storage`.
+        assert_eq!(title_matching_ancestor(storage, title), None);
+    }
+
+    /// Pathological case: SAB reports `storage` as the parent
+    /// complete dir with no per-job subdir. Walk finds no match
+    /// (no ancestor named after Title). Caller falls through to the
+    /// `<storage>/<title>/` candidate or to `storage` as-is — both
+    /// safer than walking the parent dir.
+    #[test]
+    fn title_matching_ancestor_returns_none_for_parent_only_storage() {
+        let storage = "/downloads/complete";
+        let title = "MyJob.S01E01";
+        assert_eq!(title_matching_ancestor(storage, title), None);
+    }
+
+    /// Multi-match: the OUTERMOST title-named ancestor wins (matches
+    /// Sonarr's behavior — the loop assignment overwrites and keeps
+    /// ascending). Defensive against unusual archive shapes.
+    #[test]
+    fn title_matching_ancestor_picks_outermost_match() {
+        let storage = "/downloads/MyJob/inner/MyJob/file.mkv";
+        let title = "MyJob";
+        assert_eq!(
+            title_matching_ancestor(storage, title),
+            Some("/downloads/MyJob".to_string())
+        );
+    }
+
+    /// Empty title or empty path: no walk, returns None.
+    #[test]
+    fn title_matching_ancestor_handles_empty_inputs() {
+        assert_eq!(title_matching_ancestor("", "MyJob"), None);
+        assert_eq!(title_matching_ancestor("/a/b", ""), None);
+    }
+
+    /// Per-job dir already as storage — return as-is. The basename
+    /// equals the title so we know it IS the job folder.
+    #[test]
+    fn canonical_job_path_uses_storage_when_basename_matches_title() {
+        assert_eq!(
+            canonical_job_path("/downloads/complete/MyJob.S01E01", "MyJob.S01E01"),
+            "/downloads/complete/MyJob.S01E01"
+        );
+    }
+
+    /// File path inside the job folder — walk finds the job dir.
+    #[test]
+    fn canonical_job_path_recovers_job_dir_from_file_path() {
+        assert_eq!(
+            canonical_job_path("/downloads/complete/MyJob.S01E01/file.mkv", "MyJob.S01E01"),
+            "/downloads/complete/MyJob.S01E01"
+        );
+    }
+
+    /// Parent-only storage — construct a candidate by joining title.
+    /// Pinned by the user-reported 1154/1156 bug: when SAB returns
+    /// the bare complete dir, downstream walks must scope to a
+    /// per-job candidate or sibling grabs' files get swept up too.
+    #[test]
+    fn canonical_job_path_constructs_candidate_for_parent_only_storage() {
+        assert_eq!(
+            canonical_job_path("/downloads/complete", "MyJob.S01E01"),
+            "/downloads/complete/MyJob.S01E01"
+        );
+    }
+
+    /// Empty inputs degrade gracefully — no panic, sensible defaults.
+    #[test]
+    fn canonical_job_path_handles_empty_inputs() {
+        assert_eq!(canonical_job_path("", "MyJob"), "");
+        assert_eq!(
+            canonical_job_path("/downloads/complete", ""),
+            "/downloads/complete"
+        );
     }
 
     #[test]

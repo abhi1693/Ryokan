@@ -398,6 +398,90 @@ pub async fn mark_completed_no_import(db: &SqlitePool, id: i64) -> Result<(), sq
 /// recorded here; the library-side path lives on
 /// `episode_grab_history.file_name` after post-processing.
 ///
+/// Persist the source-side paths Ryokan imported from for this grab.
+/// Stored as JSON array of strings in `grabbed_torrents.imported_source_paths`.
+/// Per-grab (not per-episode) — fine because SAB grabs are 1:1 with jobs
+/// and the per-episode delete path skips batch grabs at the client-delete
+/// stage anyway. Used by `delete_episode_file` (in addition to the
+/// inode-based fallback that covers hardlink mode) and by the series
+/// remove path for copy-mode and move-mode imports where shared inodes
+/// don't help.
+pub async fn stamp_imported_source_paths(
+    db: &SqlitePool,
+    grab_id: i64,
+    paths: &[String],
+) -> Result<(), sqlx::Error> {
+    let json = serde_json::to_string(paths).unwrap_or_else(|_| "[]".into());
+    sqlx::query("UPDATE grabbed_torrents SET imported_source_paths = ? WHERE id = ?")
+        .bind(json)
+        .bind(grab_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Read back the JSON-array source paths persisted by
+/// [`stamp_imported_source_paths`]. Empty Vec when the column is NULL,
+/// the grab id doesn't exist, or the JSON parses badly — all benign
+/// for the cleanup-pass caller (nothing to remove).
+pub async fn get_imported_source_paths(db: &SqlitePool, grab_id: i64) -> Vec<String> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT imported_source_paths FROM grabbed_torrents WHERE id = ?")
+            .bind(grab_id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    match raw {
+        Some(s) if !s.is_empty() => serde_json::from_str(&s).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// All `(grab_id, imported_source_paths_json)` tuples for grabs in
+/// state='imported' for a given series. Used by the delete-from-disk
+/// fallback when `find_imported_for_episode` returns empty for an
+/// episode whose media file exists on disk — the file may have been
+/// imported by a sibling grab whose `episode_numbers` doesn't claim
+/// it (a side-effect of the pre-fix wide-walk SAB bug, where one
+/// grab's import swept in files belonging to other SAB jobs in the
+/// same complete dir). The caller then matches by inode against the
+/// JSON paths to recover the real source file.
+pub async fn imported_source_paths_for_series(
+    db: &SqlitePool,
+    series_id: i64,
+) -> Result<Vec<(i64, String)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, COALESCE(imported_source_paths, '') FROM grabbed_torrents \
+         WHERE series_id = ? AND state = 'imported' \
+         AND COALESCE(imported_source_paths, '') != ''",
+    )
+    .bind(series_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| (row.get::<i64, _>(0), row.get::<String, _>(1)))
+        .collect())
+}
+
+/// Read back `client_content_path` for a grab id. Used by the
+/// delete-from-disk path to know where to look for the source file
+/// to clean up alongside the media-library hardlink. Empty string
+/// when the column is NULL or the grab id doesn't exist; both cases
+/// are treated as "no source path known" by the caller.
+pub async fn get_client_content_path(db: &SqlitePool, grab_id: i64) -> String {
+    sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(client_content_path, '') FROM grabbed_torrents WHERE id = ?",
+    )
+    .bind(grab_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
 /// Idempotent: `WHERE COALESCE(client_content_path, '') = ''` so a
 /// later completion tick on an already-stamped row is a no-op.
 pub async fn stamp_client_content_path(
@@ -496,6 +580,30 @@ pub async fn is_known_hash(db: &SqlitePool, info_hash: &str) -> bool {
     .ok()
     .flatten()
     .is_some()
+}
+
+/// Resolve a grab's `download_client_id` by hash. Used by the
+/// queue-action endpoints (pause/resume/delete) so a SAB job's
+/// nzo_id routes to the SAB client and a qBit hash routes to qBit
+/// — the actions only carry the hash on the wire, not the client
+/// id. Returns `None` for unknown hashes or for legacy rows that
+/// pre-date the multi-client refactor (column NULL); callers fall
+/// back to the torrent default in both cases.
+pub async fn client_id_for_hash(db: &SqlitePool, hash: &str) -> Option<i64> {
+    if hash.is_empty() {
+        return None;
+    }
+    sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT download_client_id FROM grabbed_torrents \
+         WHERE hash = ? \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(hash)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
 }
 
 /// Issue #28 PR C — read back the `respect_seed_rules` flag for
@@ -776,18 +884,20 @@ pub async fn find_imported_for_episode(
     // UNION dedups grabs where the same series matches through both
     // paths (parent of a single-series grab).
     let rows = sqlx::query(
-        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch FROM (
+        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch, download_client_id FROM (
              SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
                     g.series_id AS series_id, g.episode_numbers AS episode_numbers,
                     g.grabbed_at AS grabbed_at,
-                    COALESCE(g.is_batch, 0) AS is_batch
+                    COALESCE(g.is_batch, 0) AS is_batch,
+                    g.download_client_id AS download_client_id
              FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
              WHERE g.series_id = ? AND je.value = ? AND g.state = 'imported'
              UNION
              SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
                     g.series_id AS series_id, g.episode_numbers AS episode_numbers,
                     g.grabbed_at AS grabbed_at,
-                    COALESCE(g.is_batch, 0) AS is_batch
+                    COALESCE(g.is_batch, 0) AS is_batch,
+                    g.download_client_id AS download_client_id
              FROM grabbed_torrents g
              JOIN grabbed_torrent_series r ON r.grab_id = g.id
              , json_each(r.episode_numbers) AS je
@@ -817,9 +927,10 @@ pub async fn find_imported_for_episode(
                 state: "imported".to_string(),
                 grabbed_at: row.get("grabbed_at"),
                 is_batch: is_batch_i != 0,
-                // Not selected by this query — callers don't use the
-                // client routing here. Default None.
-                download_client_id: None,
+                download_client_id: row
+                    .try_get::<Option<i64>, _>("download_client_id")
+                    .ok()
+                    .flatten(),
             }
         })
         .collect())
@@ -842,18 +953,20 @@ pub async fn find_pending_for_episode(
     episode_number: i32,
 ) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
     let rows = sqlx::query(
-        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch FROM (
+        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch, download_client_id FROM (
              SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
                     g.series_id AS series_id, g.episode_numbers AS episode_numbers,
                     g.grabbed_at AS grabbed_at,
-                    COALESCE(g.is_batch, 0) AS is_batch
+                    COALESCE(g.is_batch, 0) AS is_batch,
+                    g.download_client_id AS download_client_id
              FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
              WHERE g.series_id = ? AND je.value = ? AND g.state = 'pending'
              UNION
              SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
                     g.series_id AS series_id, g.episode_numbers AS episode_numbers,
                     g.grabbed_at AS grabbed_at,
-                    COALESCE(g.is_batch, 0) AS is_batch
+                    COALESCE(g.is_batch, 0) AS is_batch,
+                    g.download_client_id AS download_client_id
              FROM grabbed_torrents g
              JOIN grabbed_torrent_series r ON r.grab_id = g.id
              , json_each(r.episode_numbers) AS je
@@ -883,7 +996,10 @@ pub async fn find_pending_for_episode(
                 state: "pending".to_string(),
                 grabbed_at: row.get("grabbed_at"),
                 is_batch: is_batch_i != 0,
-                download_client_id: None,
+                download_client_id: row
+                    .try_get::<Option<i64>, _>("download_client_id")
+                    .ok()
+                    .flatten(),
             }
         })
         .collect())
@@ -959,15 +1075,22 @@ pub async fn remove(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 pub async fn get_all_for_series(
     db: &SqlitePool,
     series_id: i64,
-) -> Result<Vec<(i64, String)>, sqlx::Error> {
-    let rows = sqlx::query("SELECT id, hash FROM grabbed_torrents WHERE series_id = ?")
-        .bind(series_id)
-        .fetch_all(db)
-        .await?;
+) -> Result<Vec<(i64, String, Option<i64>)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, hash, download_client_id FROM grabbed_torrents WHERE series_id = ?",
+    )
+    .bind(series_id)
+    .fetch_all(db)
+    .await?;
 
     Ok(rows
         .iter()
-        .map(|row| (row.get::<i64, _>("id"), row.get::<String, _>("hash")))
+        .map(|row| {
+            let id: i64 = row.get("id");
+            let hash: String = row.get("hash");
+            let dc_id: Option<i64> = row.try_get("download_client_id").unwrap_or(None);
+            (id, hash, dc_id)
+        })
         .collect())
 }
 
@@ -1674,5 +1797,60 @@ mod tests {
         let pending = get_all_pending(&db).await.expect("pending");
         let row = pending.iter().find(|g| g.id == grab_id).expect("present");
         assert_eq!(row.download_client_id, None);
+    }
+
+    /// `find_pending_for_episode` must read the `download_client_id`
+    /// column. Without it, the cancel-pending handler routes every
+    /// SAB grab to the (torrent) default client and the SAB queue
+    /// entry never gets removed — the user clicks Cancel, the row
+    /// vanishes from Ryokan's UI, and the SAB job downloads to
+    /// completion in the background as if nothing happened.
+    #[tokio::test]
+    async fn find_pending_for_episode_round_trips_download_client_id() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let (grab_id, _) = pr_c_seed_a_grab(&db).await;
+        set_download_client(&db, grab_id, Some(99))
+            .await
+            .expect("stamp");
+
+        let series_id: i64 =
+            sqlx::query_scalar("SELECT series_id FROM grabbed_torrents WHERE id = ?")
+                .bind(grab_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let pending = find_pending_for_episode(&db, series_id, 1)
+            .await
+            .expect("pending");
+        let row = pending.iter().find(|g| g.id == grab_id).expect("present");
+        assert_eq!(row.download_client_id, Some(99));
+    }
+
+    /// Same shape for `find_imported_for_episode` — used by the
+    /// delete-from-disk path. SAB grabs that completed and got
+    /// imported need the per-grab client routing to clean up the
+    /// SAB history entry's storage dir on user delete.
+    #[tokio::test]
+    async fn find_imported_for_episode_round_trips_download_client_id() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let (grab_id, _) = pr_c_seed_a_grab(&db).await;
+        set_download_client(&db, grab_id, Some(123))
+            .await
+            .expect("stamp");
+        mark_imported(&db, grab_id).await.expect("imported");
+
+        let series_id: i64 =
+            sqlx::query_scalar("SELECT series_id FROM grabbed_torrents WHERE id = ?")
+                .bind(grab_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let imported = find_imported_for_episode(&db, series_id, 1)
+            .await
+            .expect("imported");
+        let row = imported.iter().find(|g| g.id == grab_id).expect("present");
+        assert_eq!(row.download_client_id, Some(123));
     }
 }

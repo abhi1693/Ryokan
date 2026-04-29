@@ -60,6 +60,7 @@ pub fn parse_search_response(
     xml: &str,
     indexer_id: i64,
     indexer_priority: i32,
+    indexer_name: &str,
 ) -> Result<Result<Vec<Release>, TorznabError>, String> {
     if let Some(err) = parse_error(xml) {
         return Ok(Err(err));
@@ -68,7 +69,7 @@ pub fn parse_search_response(
     let mut releases = Vec::new();
     for caps in RE_ITEM.captures_iter(xml) {
         let block = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        let release = parse_item_block(block, indexer_id, indexer_priority);
+        let release = parse_item_block(block, indexer_id, indexer_priority, indexer_name);
         // Skip items with no usable identity. A torznab response
         // shouldn't emit empty items, but be defensive — a single
         // mangled item shouldn't shut out the rest of the page.
@@ -80,7 +81,12 @@ pub fn parse_search_response(
     Ok(Ok(releases))
 }
 
-fn parse_item_block(block: &str, indexer_id: i64, indexer_priority: i32) -> Release {
+fn parse_item_block(
+    block: &str,
+    indexer_id: i64,
+    indexer_priority: i32,
+    indexer_name: &str,
+) -> Release {
     let title = decode_xml(&extract_tag(block, "title"));
     let guid = decode_xml(&extract_tag(block, "guid"));
     let link = decode_xml(&extract_tag(block, "link"));
@@ -150,6 +156,7 @@ fn parse_item_block(block: &str, indexer_id: i64, indexer_priority: i32) -> Rele
     Release {
         indexer_id,
         indexer_priority,
+        indexer_name: indexer_name.to_string(),
         title,
         guid,
         link: download_url,

@@ -662,7 +662,6 @@ pub async fn settings_custom_formats_import(
             None,
             Some(review),
             None,
-            None,
         )
         .await;
         return Html(template.render().unwrap_or_default()).into_response();
@@ -1349,6 +1348,7 @@ pub async fn settings_custom_formats_test(
         score_breakdown: Vec::new(),
         upload_date: String::new(),
         indexer_id: None,
+        indexer_name: String::new(),
     };
     let seadex: std::collections::HashSet<String> = std::collections::HashSet::new();
     let ctx = EvalContext {

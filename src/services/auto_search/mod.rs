@@ -85,7 +85,15 @@ pub async fn find_all_for_target(
     target: &SearchTarget,
     _allow_batch: bool,
     cfs: &[CompiledCustomFormat],
+    indexers: &crate::IndexerCache,
 ) -> Vec<SearchResult> {
+    // Snapshot the indexer cache once. Same shape as the auto-search
+    // entry points: we clone the inner Arc<Vec<...>> under the read
+    // lock and release it before any HTTP work begins so a slow indexer
+    // can't pin the lock against a concurrent Settings → Indexers save.
+    let indexers_snapshot = indexers.read().await.clone();
+    let indexer_slice: &[std::sync::Arc<dyn crate::services::indexers::Indexer>] =
+        indexers_snapshot.as_slice();
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
     let queries = append_custom_tokens(
@@ -158,6 +166,7 @@ pub async fn find_all_for_target(
         restrict_user: &series_ctx.restrict_user,
         absolute_offset: series_ctx.absolute_offset,
         categories: &categories,
+        indexers: indexer_slice,
     };
 
     // Interactive search: allow batch results so user can see & pick them,
@@ -913,6 +922,14 @@ struct InteractiveQueryCtx<'a> {
     preferred_resolution: &'a str,
     target: &'a SearchTarget,
     expected_season: i32,
+    /// Configured torznab/newznab indexers to fan out to, snapshot-
+    /// cloned out of `IndexerCache` once at the entry point. Empty
+    /// slice = Nyaa-only behavior (matches the auto-search
+    /// `AutoQueryCtx::indexers` contract). Without this the
+    /// interactive picker per-episode flow only surfaces Nyaa-direct
+    /// results — torznab matches that auto-search and the batch
+    /// picker would surface stayed invisible.
+    indexers: &'a [std::sync::Arc<dyn crate::services::indexers::Indexer>],
     /// Nyaa category filter set — one of `1_2` (English-translated),
     /// `1_0` (Anime All, includes raws/foreign subs), or the MUSIC
     /// pair. Computed from `config.allow_non_english` at the entry
@@ -1167,75 +1184,183 @@ async fn run_queries_interactive(
         .collect()
         .await;
 
+    // Fan out to configured torznab/newznab indexers in parallel with
+    // the Nyaa stream. Empty `ctx.indexers` skips the pass entirely;
+    // users without indexer rows configured see Nyaa-only results,
+    // identical to v1.4 behavior. Helper is named so it can be
+    // tested in isolation against a wiremock'd torznab/newznab.
+    let indexer_responses: Vec<SearchResult> =
+        fan_out_indexers_for_interactive(queries, ctx.indexers).await;
+
     for resp in responses {
         let results = match resp {
             Ok(v) => v.results,
             Err(_) => continue,
         };
         for result in results {
-            let dedupe_key = if !result.info_hash.is_empty() {
-                result.info_hash.clone()
-            } else {
-                result.title.to_lowercase()
-            };
-            if !seen.insert(dedupe_key) {
-                continue;
-            }
-            // SeaDex trusts its AniList-ID-based curation over any
-            // title heuristic. If this hash is in the set, skip all
-            // alias / season / episode checks below — the unconditional
-            // `season_mismatch` in particular drops releases like
-            // smol's `Monogatari (Season 9)` for a Kizumonogatari Part
-            // 2 target, even though SeaDex has already confirmed the
-            // AniList ID match.
-            if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
-                tracing::debug!(
-                    "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
-                    result.title,
-                    result.info_hash
-                );
-                candidates.push(result);
-                continue;
-            }
-            // Relaxed alias matching: lower threshold than auto search
-            let normalized_title = normalize_title(&result.title);
-            let title_tokens = token_set(&normalized_title);
-            let alias_match = ctx.aliases.iter().any(|alias| {
-                let normalized_alias = normalize_title(alias);
-                normalized_title.contains(&normalized_alias)
-                    || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
-            });
-            if !alias_match {
-                continue;
-            }
-            // Sibling rejection: same sequel/prequel guard as the auto
-            // path — a release that matches a sibling more tightly than
-            // us is almost certainly for the sibling.
-            if sibling_match_rejects(&normalized_title, &title_tokens, ctx.sibling_precompute) {
-                continue;
-            }
-            // Season check: reject results clearly from a different season
-            if season_mismatch(&result.title, ctx.expected_season) {
-                continue;
-            }
-            // Episode check for single-episode targets (allow batches through).
-            // #30 — A release passes if its parsed number matches either the
-            // relative target (AL's per-cour numbering) OR the absolute
-            // number `target + absolute_offset` (what SubsPlease-style TV
-            // releases use for sequel cours, e.g. JJK S3 E9 shipped as
-            // "Jujutsu Kaisen - 56" with offset 47). When offset is 0 this
-            // collapses to the legacy strict-relative behavior.
-            if let SearchTarget::Episode(target_ep) = ctx.target
-                && !result.is_batch
-            {
-                let parsed = parse_release_numbers(&result.title);
-                if !parsed.is_empty() && !episode_match(&parsed, *target_ep, ctx.absolute_offset) {
-                    continue;
-                }
-            }
-            candidates.push(result);
+            apply_interactive_filter_and_push(result, &ctx, seen, candidates);
         }
     }
+
+    // Run torznab/newznab indexer results through the same relaxed-
+    // alias / season / episode gate as Nyaa results. Dedup-key collision
+    // (same infohash returned by both Nyaa and a torznab Prowlarr
+    // mirror) takes the first-seen — Nyaa wins because it ran first
+    // above, which is fine: per-component scoring is identical.
+    for result in indexer_responses {
+        apply_interactive_filter_and_push(result, &ctx, seen, candidates);
+    }
+}
+
+/// Fan out interactive-search queries to configured torznab/newznab
+/// indexers, dedup the resulting Releases (cross-indexer + cross-
+/// query), and convert each survivor to the `SearchResult` shape so
+/// the caller can run the same relaxed-alias / season / episode gate
+/// it runs over Nyaa results. Empty `indexers` returns an empty Vec
+/// without firing any HTTP — preserves the v1.4 Nyaa-only baseline
+/// for users who haven't configured any torznab/newznab rows.
+///
+/// Pulled out of `run_queries_interactive` so the indexer-side of
+/// the bug fix can be tested directly against a wiremock without
+/// also having to mock Nyaa. The auto-search path's `run_queries`
+/// has the same shape inline; deduping the two would require
+/// threading a `seen` HashSet through, and the savings aren't worth
+/// the indirection.
+async fn fan_out_indexers_for_interactive(
+    queries: &[String],
+    indexers: &[std::sync::Arc<dyn crate::services::indexers::Indexer>],
+) -> Vec<SearchResult> {
+    if indexers.is_empty() {
+        return Vec::new();
+    }
+    let outcome_streams: Vec<_> = stream::iter(queries.iter().cloned())
+        .map(|query| async move {
+            let search_query = crate::services::indexers::SearchQuery {
+                q: query.clone(),
+                categories: Vec::new(),
+                limit: None,
+                offset: None,
+            };
+            crate::services::indexers::fan_out_search(indexers, &search_query).await
+        })
+        .buffer_unordered(nyaa::NYAA_BUFFER)
+        .collect()
+        .await;
+    let mut releases: Vec<crate::services::indexers::Release> = Vec::new();
+    for outcomes in outcome_streams {
+        for outcome in outcomes {
+            match outcome.result {
+                Ok(rs) => releases.extend(rs),
+                Err(e) => {
+                    tracing::debug!(
+                        "interactive indexer fan-out failed for indexer #{} ({}): {}",
+                        outcome.indexer_id,
+                        outcome.indexer_name,
+                        e
+                    );
+                }
+            }
+        }
+    }
+    crate::services::indexers::dedup_for_auto_search(releases)
+        .into_iter()
+        .map(|r| r.into_search_result())
+        .collect()
+}
+
+/// Per-result interactive filter. Pulled out of `run_queries_interactive`
+/// so both the Nyaa loop and the indexer-fan-out loop apply the
+/// same relaxed-alias / sibling-rejection / season / episode gate
+/// without code duplication.
+fn apply_interactive_filter_and_push(
+    result: SearchResult,
+    ctx: &InteractiveQueryCtx<'_>,
+    seen: &mut HashSet<String>,
+    candidates: &mut Vec<SearchResult>,
+) {
+    // Dedup is namespaced by source: Nyaa-direct results dedup
+    // against each other (Nyaa returns the same release across
+    // multiple alias-query passes), and indexer results dedup
+    // per-indexer (`<id>:<hash>`). A release that surfaces from
+    // BOTH Nyaa and an indexer (e.g. a Prowlarr Nyaa-mirror, or a
+    // tracker that re-uploads public releases) shows up as TWO
+    // rows — once attributed to Nyaa, once to the indexer — so the
+    // user can pick a preferred tracker.
+    //
+    // This implements the "interactive search policy (decision
+    // #3)" called out in `services::indexers::dedup_for_auto_search`'s
+    // doc comment: per-(indexer, infohash) rows so the user has
+    // actual attribution to pick from. The pre-fix dedup keyed
+    // only on `info_hash`, which silently collapsed indexer rows
+    // into their Nyaa twin and made the new Indexer column always
+    // read "Nyaa" for any release Nyaa also carried — exactly the
+    // symptom that surfaced post-rollout when nekoBT searches
+    // returned successful responses but the modal showed no
+    // nekoBT-attributed rows.
+    let source_tag = match result.indexer_id {
+        Some(id) => id.to_string(),
+        None => "nyaa".to_string(),
+    };
+    let dedupe_key = if !result.info_hash.is_empty() {
+        format!("{source_tag}:{}", result.info_hash)
+    } else {
+        format!("{source_tag}:{}", result.title.to_lowercase())
+    };
+    if !seen.insert(dedupe_key) {
+        return;
+    }
+    // SeaDex trusts its AniList-ID-based curation over any title
+    // heuristic. If this hash is in the set, skip all alias / season /
+    // episode checks below — the unconditional `season_mismatch` in
+    // particular drops releases like smol's `Monogatari (Season 9)`
+    // for a Kizumonogatari Part 2 target, even though SeaDex has
+    // already confirmed the AniList ID match.
+    if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
+        tracing::debug!(
+            "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
+            result.title,
+            result.info_hash
+        );
+        candidates.push(result);
+        return;
+    }
+    // Relaxed alias matching: lower threshold than auto search
+    let normalized_title = normalize_title(&result.title);
+    let title_tokens = token_set(&normalized_title);
+    let alias_match = ctx.aliases.iter().any(|alias| {
+        let normalized_alias = normalize_title(alias);
+        normalized_title.contains(&normalized_alias)
+            || token_overlap_ratio(&title_tokens, &token_set(&normalized_alias)) >= 0.5
+    });
+    if !alias_match {
+        return;
+    }
+    // Sibling rejection: same sequel/prequel guard as the auto path —
+    // a release that matches a sibling more tightly than us is almost
+    // certainly for the sibling.
+    if sibling_match_rejects(&normalized_title, &title_tokens, ctx.sibling_precompute) {
+        return;
+    }
+    // Season check: reject results clearly from a different season
+    if season_mismatch(&result.title, ctx.expected_season) {
+        return;
+    }
+    // Episode check for single-episode targets (allow batches through).
+    // #30 — A release passes if its parsed number matches either the
+    // relative target (AL's per-cour numbering) OR the absolute number
+    // `target + absolute_offset` (what SubsPlease-style TV releases use
+    // for sequel cours, e.g. JJK S3 E9 shipped as "Jujutsu Kaisen -
+    // 56" with offset 47). When offset is 0 this collapses to the
+    // legacy strict-relative behavior.
+    if let SearchTarget::Episode(target_ep) = ctx.target
+        && !result.is_batch
+    {
+        let parsed = parse_release_numbers(&result.title);
+        if !parsed.is_empty() && !episode_match(&parsed, *target_ep, ctx.absolute_offset) {
+            return;
+        }
+    }
+    candidates.push(result);
 }
 
 /// #30 — Episode-filter acceptance check. A release's parsed episode
@@ -1565,6 +1690,347 @@ fn preferred_resolution_search_value(config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── fan_out_indexers_for_interactive ─────────────────────────────
+    //
+    // Regression coverage for the interactive-search bug where torznab/
+    // newznab indexers were wired up correctly for auto-search and RSS
+    // but completely skipped on the per-episode interactive picker.
+    // `find_all_for_target` didn't accept an indexer cache and
+    // `run_queries_interactive` didn't fan out — every result came
+    // straight from Nyaa and the user saw no nekoBT hits even when
+    // logs proved the indexer WAS being queried (by auto-search /
+    // RSS, on a separate code path). These tests pin the helper that
+    // closed the gap.
+
+    /// Empty indexer slice = no-op + no HTTP. Preserves the v1.4
+    /// Nyaa-only baseline for users who haven't configured any
+    /// torznab/newznab rows. Without this guard, every interactive
+    /// search would pay a futures-iter setup cost and the bug-fix
+    /// would have landed as a regression for the majority of users.
+    #[tokio::test]
+    async fn fan_out_skips_when_no_indexers_configured() {
+        let result = fan_out_indexers_for_interactive(
+            &["any query".to_string()],
+            &[], // no indexers configured
+        )
+        .await;
+        assert!(
+            result.is_empty(),
+            "empty indexer slice must short-circuit to an empty Vec without firing any HTTP"
+        );
+    }
+
+    /// Torznab indexer end-to-end: configure a wiremock'd torznab
+    /// indexer, call the helper, assert that the resulting
+    /// SearchResult carries the indexer's name (so the UI's
+    /// "Indexer" column attributes it correctly).
+    #[tokio::test]
+    async fn fan_out_torznab_indexer_results_carry_indexer_name() {
+        use crate::services::indexers::torznab::TorznabIndexer;
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel>
+<item>
+  <title>[nekoBT] Test Show - 01</title>
+  <guid>g1</guid>
+  <enclosure url="http://server/dl/abc" length="1000000000" type="application/x-bittorrent"/>
+  <torznab:attr name="seeders" value="42"/>
+  <torznab:attr name="leechers" value="0"/>
+  <torznab:attr name="infohash" value="ABCDEF1234567890"/>
+</item>
+</channel>
+</rss>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let row = crate::models::indexers::Indexer {
+            id: 7,
+            name: "nekoBT".to_string(),
+            kind: crate::models::indexers::KIND_TORZNAB.to_string(),
+            url: format!("{}/api", server.uri()),
+            api_key: "k".to_string(),
+            priority: 25,
+            enabled: true,
+            is_private_tracker: false,
+            seed_ratio: None,
+            seed_time_minutes: None,
+            min_seeders: 0,
+            request_timeout_secs: Some(5),
+            download_client_id: None,
+            rss_enabled: false,
+            rss_last_polled_at: None,
+            rss_last_poll_error: String::new(),
+            rss_last_item_count: 0,
+            caps_json: String::new(),
+            caps_refreshed_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let indexer = TorznabIndexer::from_row_arc(&row).expect("indexer must build");
+        let indexers: Vec<Arc<dyn crate::services::indexers::Indexer>> = vec![indexer];
+
+        let results = fan_out_indexers_for_interactive(&["Test Show".to_string()], &indexers).await;
+        assert_eq!(
+            results.len(),
+            1,
+            "expected one result from the wiremock'd torznab"
+        );
+        assert_eq!(results[0].title, "[nekoBT] Test Show - 01");
+        assert_eq!(
+            results[0].indexer_name, "nekoBT",
+            "indexer_name must propagate end-to-end (Release → SearchResult) so the \
+             UI 'Indexer' column attributes the row to nekoBT"
+        );
+        assert_eq!(results[0].indexer_id, Some(7));
+    }
+
+    /// Per-source dedup invariant: a release that surfaces from
+    /// BOTH Nyaa and an indexer with the same infohash must appear
+    /// as TWO rows in the candidate pool, one per source. This is
+    /// the explicit "interactive search policy (decision #3)" from
+    /// `services::indexers::dedup_for_auto_search`'s doc.
+    ///
+    /// Pre-fix the dedup keyed only on `info_hash`, which silently
+    /// merged the indexer row into its Nyaa twin. Result: the
+    /// "Indexer" column always read "Nyaa" for any release Nyaa
+    /// also carried. nekoBT-attributable rows became invisible to
+    /// the user even when nekoBT was returning identical results.
+    /// The user reported this verbatim post-fan-out rollout.
+    #[tokio::test]
+    async fn interactive_filter_dedup_is_per_source_not_per_hash() {
+        // Build a HashSet + candidates Vec by hand and exercise
+        // `apply_interactive_filter_and_push` directly with two
+        // SearchResults sharing an infohash but differing in
+        // `indexer_id` (None = Nyaa, Some(7) = nekoBT). Pre-fix
+        // both went through the same `seen.insert(hash)` and the
+        // second got skipped; post-fix the source-namespaced key
+        // lets both through.
+        use std::collections::HashSet;
+        let nyaa_result = SearchResult {
+            title: "[smol] Nisemonogatari".to_string(),
+            link: String::new(),
+            magnet: String::new(),
+            torrent: String::new(),
+            size: String::new(),
+            size_bytes: 0,
+            seeders: 50,
+            leechers: 0,
+            downloads: 0,
+            group: "smol".to_string(),
+            resolution: "1080".to_string(),
+            quality_label: String::new(),
+            source: String::new(),
+            web_kind: String::new(),
+            is_remux: false,
+            is_bdmv: false,
+            is_batch: true,
+            is_trusted: true,
+            score: 100,
+            info_hash: "deadbeef".to_string(),
+            score_breakdown: Vec::new(),
+            upload_date: String::new(),
+            indexer_id: None,
+            indexer_name: String::new(),
+        };
+        let mut indexer_result = nyaa_result.clone();
+        indexer_result.indexer_id = Some(7);
+        indexer_result.indexer_name = "nekoBT".to_string();
+
+        // Build a permissive ctx so the alias / season / episode
+        // gate downstream of the dedup doesn't reject anything.
+        let aliases = vec!["Monogatari".to_string(), "Nisemonogatari".to_string()];
+        let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &[]);
+        let preferred_groups: Vec<String> = Vec::new();
+        let target = SearchTarget::Single;
+        let seadex_hashes = std::collections::HashSet::new();
+        let categories = vec!["1_2".to_string()];
+        let ctx = InteractiveQueryCtx {
+            aliases: &aliases,
+            sibling_precompute: &sibling_precompute,
+            preferred_groups: &preferred_groups,
+            preferred_resolution: "1080p",
+            target: &target,
+            expected_season: 0,
+            seadex_hashes: &seadex_hashes,
+            restrict_user: "",
+            absolute_offset: 0,
+            categories: &categories,
+            indexers: &[],
+        };
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut candidates: Vec<SearchResult> = Vec::new();
+
+        apply_interactive_filter_and_push(nyaa_result, &ctx, &mut seen, &mut candidates);
+        apply_interactive_filter_and_push(indexer_result, &ctx, &mut seen, &mut candidates);
+
+        assert_eq!(
+            candidates.len(),
+            2,
+            "Same infohash from Nyaa + nekoBT must produce two rows so the user \
+             can pick a preferred source. A regression here would hide every \
+             nekoBT-attributed row whose hash also lives on Nyaa."
+        );
+        assert!(
+            candidates.iter().any(|c| c.indexer_name.is_empty()),
+            "Nyaa-direct row (empty indexer_name) must be present"
+        );
+        assert!(
+            candidates.iter().any(|c| c.indexer_name == "nekoBT"),
+            "nekoBT-attributed row must be present"
+        );
+    }
+
+    /// Counterpart: the SAME source returning the SAME hash twice
+    /// (which happens because `run_queries_interactive` runs N
+    /// alias-prefixed queries against Nyaa and they overlap) MUST
+    /// still dedup. Without this branch surviving the per-source
+    /// rewrite, every Nyaa result would land 3-5x in the candidate
+    /// pool — the user would see massive duplication.
+    #[tokio::test]
+    async fn interactive_filter_still_dedups_within_a_single_source() {
+        use std::collections::HashSet;
+        let nyaa_result = SearchResult {
+            title: "[smol] Nisemonogatari".to_string(),
+            link: String::new(),
+            magnet: String::new(),
+            torrent: String::new(),
+            size: String::new(),
+            size_bytes: 0,
+            seeders: 50,
+            leechers: 0,
+            downloads: 0,
+            group: "smol".to_string(),
+            resolution: "1080".to_string(),
+            quality_label: String::new(),
+            source: String::new(),
+            web_kind: String::new(),
+            is_remux: false,
+            is_bdmv: false,
+            is_batch: true,
+            is_trusted: true,
+            score: 100,
+            info_hash: "deadbeef".to_string(),
+            score_breakdown: Vec::new(),
+            upload_date: String::new(),
+            indexer_id: None,
+            indexer_name: String::new(),
+        };
+
+        let aliases = vec!["Monogatari".to_string()];
+        let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &[]);
+        let preferred_groups: Vec<String> = Vec::new();
+        let target = SearchTarget::Single;
+        let seadex_hashes = std::collections::HashSet::new();
+        let categories = vec!["1_2".to_string()];
+        let ctx = InteractiveQueryCtx {
+            aliases: &aliases,
+            sibling_precompute: &sibling_precompute,
+            preferred_groups: &preferred_groups,
+            preferred_resolution: "1080p",
+            target: &target,
+            expected_season: 0,
+            seadex_hashes: &seadex_hashes,
+            restrict_user: "",
+            absolute_offset: 0,
+            categories: &categories,
+            indexers: &[],
+        };
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut candidates: Vec<SearchResult> = Vec::new();
+
+        apply_interactive_filter_and_push(nyaa_result.clone(), &ctx, &mut seen, &mut candidates);
+        apply_interactive_filter_and_push(nyaa_result, &ctx, &mut seen, &mut candidates);
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "Two Nyaa hits with identical infohash must collapse to one row \
+             (otherwise alias-query overlap floods the candidate pool)"
+        );
+    }
+
+    /// Newznab variant — identical wire format, identical client,
+    /// just `kind = "newznab"`. Locks in that the indexer-name
+    /// plumbing isn't accidentally torznab-specific. Without this,
+    /// a future refactor that special-cased torznab would break
+    /// usenet attribution silently.
+    #[tokio::test]
+    async fn fan_out_newznab_indexer_results_carry_indexer_name() {
+        use crate::services::indexers::torznab::TorznabIndexer;
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0"?>
+<rss version="2.0">
+<channel>
+<item>
+  <title>Test.Show.S01E01.WEB-DL</title>
+  <guid>nzb-g1</guid>
+  <enclosure url="http://server/nzb/abc" length="500000000" type="application/x-nzb"/>
+  <torznab:attr name="size" value="500000000"/>
+</item>
+</channel>
+</rss>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let row = crate::models::indexers::Indexer {
+            id: 9,
+            name: "NZBGeek".to_string(),
+            kind: crate::models::indexers::KIND_NEWZNAB.to_string(),
+            url: format!("{}/api", server.uri()),
+            api_key: "k".to_string(),
+            priority: 30,
+            enabled: true,
+            is_private_tracker: false,
+            seed_ratio: None,
+            seed_time_minutes: None,
+            min_seeders: 0,
+            request_timeout_secs: Some(5),
+            download_client_id: None,
+            rss_enabled: false,
+            rss_last_polled_at: None,
+            rss_last_poll_error: String::new(),
+            rss_last_item_count: 0,
+            caps_json: String::new(),
+            caps_refreshed_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let indexer = TorznabIndexer::from_row_arc(&row).expect("indexer must build");
+        let indexers: Vec<Arc<dyn crate::services::indexers::Indexer>> = vec![indexer];
+
+        let results = fan_out_indexers_for_interactive(&["Test Show".to_string()], &indexers).await;
+        assert_eq!(
+            results.len(),
+            1,
+            "expected one result from the wiremock'd newznab"
+        );
+        assert_eq!(
+            results[0].indexer_name, "NZBGeek",
+            "newznab indexers must surface their name through the same plumbing as \
+             torznab — the UI Indexer column needs to attribute usenet hits too"
+        );
+        assert_eq!(results[0].indexer_id, Some(9));
+    }
 
     // ── detect_sibling_entries_in_pack ──────────────────────────────
 

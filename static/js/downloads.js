@@ -69,47 +69,76 @@ function escapeHtml(s) {
 function renderQueue(torrents) {
     const container = document.getElementById('queue-container');
     if (!container) return;
+
+    // Build the new HTML first, then short-circuit if the rendered
+    // markup is identical to what's already there. The 5s poll
+    // produces the same DOM 99% of the time (no progress change
+    // between two ticks once a job is finished or queued idle), so
+    // skipping the innerHTML replace keeps the scrollbar steady and
+    // the buttons' :hover state alive.
+    let html;
     if (!torrents || torrents.length === 0) {
-        container.innerHTML = '<div class="logs-empty">No active downloads.</div>';
-        return;
-    }
-    const isDownloadingKind = (k) => k === 'downloading' || k === 'downloading-stalled'
-        || k === 'downloading-queued' || k === 'checking-download';
-    torrents.sort((a, b) => {
-        const aDown = isDownloadingKind(a.state_kind) ? 0 : 1;
-        const bDown = isDownloadingKind(b.state_kind) ? 0 : 1;
-        if (aDown !== bDown) return aDown - bDown;
-        return b.progress - a.progress;
-    });
-    let html = '<div class="rss-table-wrap"><table class="rss-table"><thead><tr>';
-    html += '<th>Name</th><th>Size</th><th>Progress</th><th>Speed</th><th>ETA</th><th>Status</th><th>Actions</th>';
-    html += '</tr></thead><tbody>';
-    for (const t of torrents) {
-        const pct = (t.progress * 100).toFixed(1);
-        const isPaused = t.state_kind === 'paused' || t.state_kind === 'paused-complete';
-        html += `<tr data-hash="${escapeHtml(t.hash)}">`;
-        html += `<td><div class="dl-torrent-name">${escapeHtml(t.name)}</div></td>`;
-        html += `<td>${formatSize(t.size)}</td>`;
-        html += `<td><div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div></td>`;
-        html += `<td>${formatSpeed(t.dlspeed)}</td>`;
-        html += `<td>${formatEta(t.eta)}</td>`;
-        html += `<td><span class="log-badge ${stateBadgeClass(t.state_kind)}">${stateLabel(t.state_kind)}</span></td>`;
-        html += `<td class="dl-actions">`;
-        if (isPaused) {
-            html += `<button class="btn btn-ghost btn-sm" onclick="resumeTorrent('${escapeHtml(t.hash)}')" title="Resume"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>`;
-        } else {
-            html += `<button class="btn btn-ghost btn-sm" onclick="pauseTorrent('${escapeHtml(t.hash)}')" title="Pause"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>`;
+        html = '<div class="logs-empty">No active downloads.</div>';
+    } else {
+        const isDownloadingKind = (k) => k === 'downloading' || k === 'downloading-stalled'
+            || k === 'downloading-queued' || k === 'checking-download';
+        torrents.sort((a, b) => {
+            const aDown = isDownloadingKind(a.state_kind) ? 0 : 1;
+            const bDown = isDownloadingKind(b.state_kind) ? 0 : 1;
+            if (aDown !== bDown) return aDown - bDown;
+            return b.progress - a.progress;
+        });
+        html = '<div class="rss-table-wrap"><table class="rss-table"><thead><tr>';
+        html += '<th>Name</th><th>Size</th><th>Progress</th><th>Speed</th><th>ETA</th><th>Status</th><th>Actions</th>';
+        html += '</tr></thead><tbody>';
+        for (const t of torrents) {
+            const pct = (t.progress * 100).toFixed(1);
+            const isPaused = t.state_kind === 'paused' || t.state_kind === 'paused-complete';
+            html += `<tr data-hash="${escapeHtml(t.hash)}">`;
+            html += `<td><div class="dl-torrent-name">${escapeHtml(t.name)}</div></td>`;
+            html += `<td>${formatSize(t.size)}</td>`;
+            html += `<td><div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div><span class="dl-progress-text">${pct}%</span></div></td>`;
+            html += `<td>${formatSpeed(t.dlspeed)}</td>`;
+            html += `<td>${formatEta(t.eta)}</td>`;
+            html += `<td><span class="log-badge ${stateBadgeClass(t.state_kind)}">${stateLabel(t.state_kind)}</span></td>`;
+            html += `<td class="dl-actions">`;
+            if (isPaused) {
+                html += `<button class="btn btn-ghost btn-sm" onclick="resumeTorrent('${escapeHtml(t.hash)}')" title="Resume"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>`;
+            } else {
+                html += `<button class="btn btn-ghost btn-sm" onclick="pauseTorrent('${escapeHtml(t.hash)}')" title="Pause"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>`;
+            }
+            // Copy infohash button — keep in sync with the template's
+            // queue-row rendering in downloads.html. Without this, the
+            // post-fetch JS render dropped the button so it visibly
+            // flashed away on page load when loadQueue() ran immediately.
+            html += `<button class="btn btn-ghost btn-sm" onclick="ryokanCopy('${escapeHtml(t.hash)}', this)" title="Copy infohash"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>`;
+            html += `<button class="btn btn-ghost btn-sm" onclick="deleteTorrent('${escapeHtml(t.hash)}')" title="Remove"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>`;
+            html += `</td></tr>`;
         }
-        // Copy infohash button — keep in sync with the template's
-        // queue-row rendering in downloads.html. Without this, the
-        // post-fetch JS render dropped the button so it visibly
-        // flashed away on page load when loadQueue() ran immediately.
-        html += `<button class="btn btn-ghost btn-sm" onclick="ryokanCopy('${escapeHtml(t.hash)}', this)" title="Copy infohash"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>`;
-        html += `<button class="btn btn-ghost btn-sm" onclick="deleteTorrent('${escapeHtml(t.hash)}')" title="Remove"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>`;
-        html += `</td></tr>`;
+        html += '</tbody></table></div>';
     }
-    html += '</tbody></table></div>';
+
+    // Skip the swap if nothing changed — keeps scroll/hover/focus.
+    if (container.innerHTML === html) return;
+
+    // The queue table sits inside `.rss-table-wrap` which has
+    // `max-height: 680px; overflow: auto` (base.css). The scrollbar
+    // the user actually drags is on THAT element, not the window —
+    // so saving `window.scrollY` is irrelevant; we need the wrap's
+    // `scrollTop`. innerHTML on the parent rebuilds the wrap and the
+    // fresh element starts at scrollTop=0, which the user perceives
+    // as "the page jumped back to the top" of the table.
+    const prevWrap = container.querySelector('.rss-table-wrap');
+    const prevWrapScrollTop = prevWrap ? prevWrap.scrollTop : 0;
+    // Window scroll preservation too — innerHTML can collapse height
+    // momentarily and scroll-anchor the document to the top in some
+    // browsers. Cheap to do alongside.
+    const prevScrollX = window.scrollX;
+    const prevScrollY = window.scrollY;
     container.innerHTML = html;
+    const newWrap = container.querySelector('.rss-table-wrap');
+    if (newWrap) newWrap.scrollTop = prevWrapScrollTop;
+    window.scrollTo({left: prevScrollX, top: prevScrollY, behavior: 'instant'});
 }
 
 function loadQueue() {

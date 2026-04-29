@@ -1,336 +1,22 @@
-    <fieldset>
-        <legend>Indexers</legend>
-
-        {% if !indexers.is_empty() %}
-        <div class="table-scroll-wrap">
-        <table class="indexers-table">
-            <thead>
-                <tr>
-                    <th>Priority</th>
-                    <th>Name</th>
-                    <th>Kind</th>
-                    <th>URL</th>
-                    <th>Private</th>
-                    <th>Status</th>
-                    <th>RSS</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for idx in indexers %}
-                <tr>
-                    <td>{{ idx.priority }}</td>
-                    <td>{{ idx.name }}</td>
-                    <td>{{ idx.kind }}</td>
-                    <td><code>{{ idx.url }}</code></td>
-                    <td>{% if idx.is_private_tracker %}Yes{% else %}No{% endif %}</td>
-                    <td>{% if idx.enabled %}Enabled{% else %}Disabled{% endif %}</td>
-                    <td>
-                        {# Multi-RSS PR 1 — surface the per-indexer
-                           rss_enabled flag inline. The poll-result
-                           fields land on this same cell so the user
-                           can see "Off" / "Idle" / "✓ N items" / "✗
-                           Error" at a glance instead of digging into
-                           the edit form. #}
-                        {% if !idx.rss_enabled %}
-                        <span class="rss-pill rss-pill-off" title="RSS auto-sync disabled for this indexer">Off</span>
-                        {% else if !idx.rss_last_poll_error.is_empty() %}
-                        <span class="rss-pill rss-pill-error" title="{{ idx.rss_last_poll_error }}">✗ Error</span>
-                        {% else if let Some(_) = idx.rss_last_polled_at %}
-                        <span class="rss-pill rss-pill-ok" title="Last poll returned {{ idx.rss_last_item_count }} item{% if idx.rss_last_item_count == 1 %}{% else %}s{% endif %}">✓ {{ idx.rss_last_item_count }} items</span>
-                        {% else %}
-                        <span class="rss-pill rss-pill-idle" title="Enabled but not yet polled — first sync runs on the next interval">Idle</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        <a href="/settings?tab=indexers&edit_id={{ idx.id }}" class="btn btn-small">Edit</a>
-                        <form method="post" action="/settings/indexers/delete" style="display:inline"
-                              hx-post="/settings/indexers/delete"
-                              hx-target="closest tr"
-                              hx-swap="outerHTML"
-                              data-ryokan-confirm-title="Delete indexer?"
-                              data-ryokan-confirm-body="Remove '{{ idx.name }}' from Ryokan. Existing grab history is preserved with the indexer reference cleared. The deletion can't be undone; you'll need to re-add the row from scratch."
-                              data-ryokan-confirm-yes="Delete"
-                              data-ryokan-confirm-no="Cancel"
-                              data-ryokan-confirm-danger="1">
-                            <input type="hidden" name="id" value="{{ idx.id }}">
-                            <button type="submit" class="btn btn-danger btn-small">Delete</button>
-                        </form>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        </div>
-        {% endif %}
-
-        {% if let Some(edit) = indexer_edit %}
-        <h3 class="settings-subheading">Edit Indexer</h3>
-        <p class="form-hint">
-            Updating <strong>{{ edit.name }}</strong>.
-            <a href="/settings?tab=indexers">Cancel and return to Add Indexer.</a>
-        </p>
-        <form method="post" action="/settings/indexers/upsert" class="settings-form settings-subform">
-            <input type="hidden" name="id" value="{{ edit.id }}">
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="indexer-edit-name">Name</label>
-                    <input id="indexer-edit-name" type="text" name="name" required maxlength="100" value="{{ edit.name }}">
-                </div>
-                <div class="form-group">
-                    <label for="indexer-edit-kind">Kind</label>
-                    <select id="indexer-edit-kind" name="kind">
-                        <option value="torznab" {% if edit.kind == "torznab" %}selected{% endif %}>torznab</option>
-                        <option value="newznab" {% if edit.kind == "newznab" %}selected{% endif %}>newznab</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label for="indexer-edit-url">URL</label>
-                <input id="indexer-edit-url" type="url" name="url" required value="{{ edit.url }}">
-            </div>
-
-            <div class="form-group">
-                <label for="indexer-edit-key">API Key</label>
-                <input id="indexer-edit-key" type="text" name="api_key" autocomplete="off" value="{{ edit.api_key }}">
-                <span class="form-hint">Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="indexer-edit-priority">Priority</label>
-                    <input id="indexer-edit-priority" type="number" name="priority" value="{{ edit.priority }}" min="1" max="50">
-                </div>
-                <div class="form-group">
-                    <label for="indexer-edit-min-seeders">Min Seeders</label>
-                    <input id="indexer-edit-min-seeders" type="number" name="min_seeders" value="{{ edit.min_seeders }}" min="0">
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label for="indexer-edit-timeout">Request Timeout (seconds)</label>
-                <input id="indexer-edit-timeout" type="number" name="request_timeout_secs"
-                       value="{% if let Some(secs) = edit.request_timeout_secs %}{{ secs }}{% endif %}"
-                       min="1" max="600" placeholder="30">
-                <span class="form-hint">Per-indexer override. Blank uses the default (30s, or RYOKAN_INDEXER_DEFAULT_TIMEOUT_SECS env). Range 1–600.</span>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="indexer-edit-ratio">Seed Ratio</label>
-                    <input id="indexer-edit-ratio" type="number" name="seed_ratio" step="0.1" min="0"
-                           value="{% if let Some(r) = edit.seed_ratio %}{{ r }}{% endif %}"
-                           placeholder="(client default)">
-                    <span class="form-hint">Per-torrent seed ratio passed to the download client at add time. Blank inherits the client's global default.</span>
-                </div>
-                <div class="form-group">
-                    <label for="indexer-edit-seed-time">Seed Time (minutes)</label>
-                    <input id="indexer-edit-seed-time" type="number" name="seed_time_minutes" min="0"
-                           value="{% if let Some(m) = edit.seed_time_minutes %}{{ m }}{% endif %}"
-                           placeholder="(client default)">
-                    <span class="form-hint">Per-torrent minimum seed time. Blank inherits the client's global default.</span>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label class="checkbox-label">
-                    <input type="checkbox" name="enabled" {% if edit.enabled %}checked{% endif %}>
-                    Enabled
-                </label>
-            </div>
-
-            <div class="form-group">
-                <label class="checkbox-label">
-                    <input type="checkbox" name="is_private_tracker" {% if edit.is_private_tracker %}checked{% endif %}>
-                    Private tracker
-                </label>
-            </div>
-
-            <div class="form-group">
-                <label class="checkbox-label">
-                    <input type="checkbox" name="rss_enabled" {% if edit.rss_enabled %}checked{% endif %}>
-                    Enable RSS auto-sync
-                </label>
-                <span class="form-hint">When on, the master RSS sync polls this indexer's RSS feed for newly-uploaded releases on every interval (cadence on the General tab). Off keeps the indexer reachable for manual searches but skips it on the auto-sync. PT trackers usually want this on so new uploads grab promptly.</span>
-            </div>
-
-            <div class="form-group">
-                <label for="indexer-edit-dc">Download Client</label>
-                {# kind→protocol mapping below mirrors
-                   `services::download_client::protocol_for_client_kind`.
-                   Keep them in sync — adding a future client kind
-                   (e.g. NZBGet → usenet) means editing both. The JS
-                   in static/js/settings.js gates the picker by
-                   data-protocol; a missing/wrong value would leak
-                   protocol-mismatch saves through to the server-side
-                   guard. #}
-                <select id="indexer-edit-dc" name="download_client_id">
-                    <option value="">(use default)</option>
-                    {% for dc in download_clients %}
-                    <option value="{{ dc.id }}"
-                        data-protocol="{% if dc.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %}"
-                        {% if let Some(pin) = edit.download_client_id %}{% if *pin == dc.id %}selected{% endif %}{% endif %}>
-                        {{ dc.name }}{% if dc.is_default %} (default){% endif %}
-                    </option>
-                    {% endfor %}
-                </select>
-                <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag. Torznab indexers can only be pinned to torrent clients; newznab indexers to usenet clients (SABnzbd).</span>
-            </div>
-
-            <button type="submit" class="btn btn-primary">Save Changes</button>
-        </form>
-        {% else if let Some(seed) = indexer_seed %}
-        <a href="/settings?tab=indexers" class="btn-icon indexer-seed-close"
-           aria-label="Back to indexer picker" title="Back to indexer picker">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </a>
-        {% if !seed.notes.is_empty() %}
-        <div class="indexer-seed-notes">
-            <strong>{{ seed.display_name }}:</strong> {{ seed.notes }}
-        </div>
-        {% endif %}
-        <form method="post" action="/settings/indexers/upsert" class="settings-form settings-subform">
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="indexer-add-name">Name</label>
-                    <input id="indexer-add-name" type="text" name="name" required maxlength="100"
-                           value="{{ seed.display_name }}">
-                </div>
-                <div class="form-group">
-                    <label for="indexer-add-kind">Kind</label>
-                    <select id="indexer-add-kind" name="kind">
-                        <option value="torznab" {% if seed.default_kind == "torznab" %}selected{% endif %}>torznab</option>
-                        <option value="newznab" {% if seed.default_kind == "newznab" %}selected{% endif %}>newznab</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label for="indexer-add-url">URL</label>
-                <input id="indexer-add-url" type="url" name="url" required
-                       placeholder="{{ seed.url_placeholder }}">
-            </div>
-
-            <div class="form-group">
-                <label for="indexer-add-key">API Key</label>
-                <input id="indexer-add-key" type="text" name="api_key" autocomplete="off"
-                       placeholder="from Prowlarr Settings &rarr; General">
-                <span class="form-hint">Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="indexer-add-priority">Priority</label>
-                    <input id="indexer-add-priority" type="number" name="priority" value="{{ seed.default_priority }}" min="1" max="50">
-                    <span class="form-hint">Lower = preferred. Range 1–50.</span>
-                </div>
-                <div class="form-group">
-                    <label for="indexer-add-min-seeders">Min Seeders</label>
-                    <input id="indexer-add-min-seeders" type="number" name="min_seeders" value="{{ seed.default_min_seeders }}" min="0">
-                    <span class="form-hint">Releases below this floor are dropped before scoring.</span>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label for="indexer-add-timeout">Request Timeout (seconds)</label>
-                <input id="indexer-add-timeout" type="number" name="request_timeout_secs" min="1" max="600" placeholder="30">
-                <span class="form-hint">Per-indexer override. Blank uses the default (30s).</span>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="indexer-add-ratio">Seed Ratio</label>
-                    <input id="indexer-add-ratio" type="number" name="seed_ratio" step="0.1" min="0"
-                           value="{% if let Some(r) = seed.default_seed_ratio %}{{ r }}{% endif %}"
-                           placeholder="(client default)">
-                    <span class="form-hint">Per-torrent seed ratio passed to the download client at add time.</span>
-                </div>
-                <div class="form-group">
-                    <label for="indexer-add-seed-time">Seed Time (minutes)</label>
-                    <input id="indexer-add-seed-time" type="number" name="seed_time_minutes" min="0"
-                           value="{% if let Some(m) = seed.default_seed_time_minutes %}{{ m }}{% endif %}"
-                           placeholder="(client default)">
-                    <span class="form-hint">Per-torrent minimum seed time.</span>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label class="checkbox-label">
-                    <input type="checkbox" name="enabled" checked>
-                    Enabled
-                </label>
-            </div>
-
-            <div class="form-group">
-                <label class="checkbox-label">
-                    <input type="checkbox" name="is_private_tracker" {% if seed.is_private_tracker %}checked{% endif %}>
-                    Private tracker
-                </label>
-                <span class="form-hint">Marks this indexer as PT for the per-series upgrade opt-in.</span>
-            </div>
-
-            <div class="form-group">
-                <label class="checkbox-label">
-                    {# PT trackers default-on for RSS — they're the
-                       primary use case for the auto-sync (new
-                       uploads, freeleech windows, etc.). Public
-                       trackers default off. #}
-                    <input type="checkbox" name="rss_enabled" {% if seed.is_private_tracker %}checked{% endif %}>
-                    Enable RSS auto-sync
-                </label>
-                <span class="form-hint">When on, the master RSS sync polls this indexer's RSS feed on every interval. Off keeps the indexer reachable for manual searches but skips it on the auto-sync.</span>
-            </div>
-
-            <div class="form-group">
-                <label for="indexer-add-dc">Download Client</label>
-                <select id="indexer-add-dc" name="download_client_id">
-                    <option value="">(use default)</option>
-                    {% for dc in download_clients %}
-                    <option value="{{ dc.id }}"
-                        data-protocol="{% if dc.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %}">
-                        {{ dc.name }}{% if dc.is_default %} (default){% endif %}
-                    </option>
-                    {% endfor %}
-                </select>
-                <span class="form-hint">Pin grabs from this indexer to a specific download client. Leave on <em>(use default)</em> to route through whichever client has the default flag. Torznab indexers can only be pinned to torrent clients; newznab indexers to usenet clients (SABnzbd).</span>
-            </div>
-
-            <button type="submit" class="btn btn-primary">Add Indexer</button>
-        </form>
-        {% else %}
-        <h3 class="settings-subheading">Add Indexer</h3>
-
-        <div class="indexer-catalog-grid">
-            {% for seed in indexer_catalog %}
-            <a class="indexer-catalog-card{% if seed.is_generic %} indexer-catalog-card-generic{% endif %}"
-               href="/settings?tab=indexers&amp;template={{ seed.slug }}">
-                <div class="indexer-catalog-card-header">
-                    <span class="indexer-catalog-card-name">{{ seed.display_name }}</span>
-                    {% if seed.is_private_tracker %}
-                    <span class="indexer-catalog-card-pill indexer-catalog-card-pill-private">PRIVATE</span>
-                    {% else if !seed.is_generic %}
-                    <span class="indexer-catalog-card-pill indexer-catalog-card-pill-public">PUBLIC</span>
-                    {% endif %}
-                </div>
-                <p class="indexer-catalog-card-blurb">{{ seed.blurb }}</p>
-            </a>
-            {% endfor %}
-        </div>
-        {% endif %}
-    </fieldset>
+    {# Indexers fieldset — owned by the section partial so a
+       successful HTMX upsert/delete can re-render the whole thing
+       (catalog grid + existing-indexer cards + modal) in one swap.
+       The previous URL-driven `?edit_id=N` / `?template=slug` inline-
+       form flow has been replaced by a click-to-modal flow that
+       mirrors the Download Clients section — see
+       static/js/settings.js#openIndexerEditModal +
+       openIndexerAddModal. #}
+{%~ include "partials/settings/indexers/list.html" ~%}
 
     {# Built-in Nyaa search routes through whichever download
        client this row points at. Empty selection = use the default
        client. Standalone form (not nested in any other) — POSTs
        to `/settings/indexers/nyaa-pin`, which writes
        `config.nyaa_download_client_id`. #}
-    {% if indexer_edit.is_none() && indexer_seed.is_none() %}
     <fieldset class="settings-form">
         <legend>Nyaa search</legend>
         <p class="form-hint" style="margin: 0 0 12px;">
-            Ryokan's built-in Nyaa search (the public-tracker hot path) isn't a torznab indexer row — pin it to a download client here. Only torrent clients are eligible since Nyaa returns magnets / .torrent URLs.
+            Ryokan's built-in Nyaa search (the public-tracker hot path) isn't a torznab indexer row; pin it to a download client here. Only torrent clients are eligible since Nyaa returns magnets / .torrent URLs.
         </p>
         <form method="post" action="/settings/indexers/nyaa-pin" class="settings-form settings-subform">
             <div class="form-group">
@@ -354,21 +40,17 @@
             <button type="submit" class="btn btn-primary">Save Nyaa pin</button>
         </form>
     </fieldset>
-    {% endif %}
 
     {# Multi-RSS PR G/H — user-supplied direct RSS feeds (e.g.
        SubsPlease's per-quality feeds). Distinct from the per-indexer
        RSS toggle above: those poll torznab/newznab indexers via
        their RSS endpoint and route through their indexer-level
        seed rules; direct feeds are arbitrary URLs that bypass the
-       indexer registry entirely. Same hidden-during-edit-flow
-       gating as Nyaa + autobrr so the user isn't distracted while
-       editing one indexer. #}
-    {% if indexer_edit.is_none() && indexer_seed.is_none() %}
+       indexer registry entirely. #}
     <fieldset class="settings-form">
         <legend>Direct RSS feeds</legend>
         <p class="form-hint" style="margin: 0 0 12px;">
-            User-supplied RSS URLs that don't go through Prowlarr / Jackett. The release-group RSS feeds from SubsPlease are the canonical use case — paste the per-quality feed URL and Ryokan picks up new episodes on every sync interval.
+            User-supplied RSS URLs that don't go through Prowlarr / Jackett. The release-group RSS feeds from SubsPlease are the canonical use case; paste the per-quality feed URL and Ryokan picks up new episodes on every sync interval.
         </p>
 
         {% if !direct_rss_feeds.is_empty() %}
@@ -457,21 +139,13 @@
             <button type="submit" class="btn btn-primary">Add RSS feed</button>
         </form>
     </fieldset>
-    {% endif %}
 
     {# Push receivers — webhook-driven release sources. autobrr's
        Webhook action POSTs releases at Ryokan's /api/webhook/autobrr
        endpoint; the API key here gates that endpoint. Lives on the
        Indexers tab (rather than Connections) because conceptually
        it's just another way releases reach Ryokan, alongside the
-       torznab / newznab indexer rows above.
-
-       Hidden while the user is in the picker pre-fill or row-edit
-       flow (they're focused on adding/editing one indexer; the
-       autobrr panel is unrelated context). The default picker view
-       still shows it so the panel is reachable from the Indexers
-       tab. #}
-    {% if indexer_edit.is_none() && indexer_seed.is_none() %}
+       torznab / newznab indexer rows above. #}
     {# `class="settings-form"` on the fieldset (not the form, since
        there's no form to wrap with — the regen-button binds to the
        external `autobrr-regen-form` sibling) makes the
@@ -546,4 +220,3 @@
             <span class="form-hint">Paste this into autobrr's Webhook action <em>Data (JSON)</em> field. Set Content-Type to <code>application/json</code> and add an <code>X-Api-Key</code> header with the API key above.</span>
         </div>
     </fieldset>
-    {% endif %}

@@ -64,22 +64,39 @@ use services::{
 /// instances on every per-target search.
 pub type IndexerCache = Arc<RwLock<Arc<Vec<Arc<dyn Indexer>>>>>;
 
-/// Multi-client routing — pair of (id-keyed map of live trait
-/// impls, default client id). Both swap atomically when the
-/// cache is rebuilt by [`services::download_client::rebuild_clients_cache`]
-/// on Settings → Connections → Downloads edits. Lookup at grab
-/// time is a `HashMap::get` against the inner `Arc` — read lock
-/// releases before the dispatch.
+/// Multi-client routing — id-keyed map of live trait impls plus
+/// the per-protocol default ids. The whole struct swaps atomically
+/// when the cache is rebuilt by
+/// [`services::download_client::rebuild_clients_cache`] on
+/// Settings → Connections → Downloads edits. Lookup at grab time
+/// is a `HashMap::get` against the inner `Arc` — read lock releases
+/// before the dispatch.
 ///
-/// `default_id` is the row id of the `is_default = 1` row at
-/// build time. `None` when no client is configured (fresh
-/// install) or when every row was disabled. The pin-resolution
-/// helpers ([`AppState::client_for_indexer`] etc.) fall back to
-/// `default_id` when no pin matches.
+/// `default_torrent_id` and `default_usenet_id` are the row ids of
+/// the `is_default = 1` rows at build time, scoped per protocol.
+/// Each is `None` when no client of that protocol is configured
+/// (or when every row of that protocol was disabled). The pin-
+/// resolution helpers ([`AppState::client_for_indexer`] etc.) fall
+/// back to the matching protocol's default — a torznab indexer with
+/// no pin routes to `default_torrent_id`; a newznab indexer routes
+/// to `default_usenet_id`.
 #[derive(Default)]
 pub struct DownloadClientPool {
     pub clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>>,
-    pub default_id: Option<i64>,
+    pub default_torrent_id: Option<i64>,
+    pub default_usenet_id: Option<i64>,
+}
+
+impl DownloadClientPool {
+    /// The default-client id for the given wire protocol
+    /// (`"torrent"` / `"usenet"`). Anything else returns None.
+    pub fn default_for_protocol(&self, protocol: &str) -> Option<i64> {
+        match protocol {
+            "torrent" => self.default_torrent_id,
+            "usenet" => self.default_usenet_id,
+            _ => None,
+        }
+    }
 }
 
 /// Same swap-on-write shape as `IndexerCache` / `CompiledCfCache`
@@ -187,21 +204,37 @@ impl AppState {
     /// stamp it on `grabbed_torrents.download_client_id`.
     /// Post-processing routes per-grab through that id back to the
     /// owning client.
+    ///
+    /// Default-fallback is per-protocol: a torznab indexer with no
+    /// pin lands on `default_torrent_id`; a newznab indexer lands on
+    /// `default_usenet_id`. When the indexer's protocol can't be
+    /// derived (unknown kind, indexer not in the cache snapshot) —
+    /// or when no pin context is given at all — falls through to
+    /// the torrent default since every Ryokan-internal default-only
+    /// caller is torrent-shaped (Nyaa search, manual grabs, library
+    /// re-grab buttons).
     pub async fn client_for_indexer_with_id(
         &self,
         indexer_id: Option<i64>,
     ) -> Option<(Arc<dyn DownloadClient>, i64)> {
         let pool = self.download_clients.read().await.clone();
+        let mut protocol: &str = "torrent";
         if let Some(id) = indexer_id {
             let indexers = self.indexers.read().await.clone();
-            if let Some(idx) = indexers.iter().find(|i| i.id() == id)
-                && let Some(pinned) = idx.download_client_id()
-                && let Some(client) = pool.clients.get(&pinned)
-            {
-                return Some((client.clone(), pinned));
+            if let Some(idx) = indexers.iter().find(|i| i.id() == id) {
+                if let Some(pinned) = idx.download_client_id()
+                    && let Some(client) = pool.clients.get(&pinned)
+                {
+                    return Some((client.clone(), pinned));
+                }
+                if let Some(p) =
+                    crate::services::download_client::protocol_for_indexer_kind(idx.kind())
+                {
+                    protocol = p;
+                }
             }
         }
-        let default_id = pool.default_id?;
+        let default_id = pool.default_for_protocol(protocol)?;
         let client = pool.clients.get(&default_id)?.clone();
         Some((client, default_id))
     }
@@ -217,6 +250,9 @@ impl AppState {
 
     /// Same resolution as [`Self::client_for_nyaa`] but also returns
     /// the resolved `download_clients.id` for grab-row stamping.
+    /// Always falls back to the torrent default — Nyaa items are
+    /// magnets / .torrent URLs, so a usenet-default fallback would
+    /// just trip the protocol guard at add-time anyway.
     pub async fn client_for_nyaa_with_id(
         &self,
         nyaa_pin: Option<i64>,
@@ -227,7 +263,7 @@ impl AppState {
         {
             return Some((client.clone(), pinned));
         }
-        let default_id = pool.default_id?;
+        let default_id = pool.default_torrent_id?;
         let client = pool.clients.get(&default_id)?.clone();
         Some((client, default_id))
     }
@@ -243,10 +279,16 @@ impl AppState {
 
     /// Same resolution as [`Self::default_download_client`] but also
     /// returns the resolved id for grab-row stamping. Mirror of the
-    /// `_with_id` helpers above.
+    /// `_with_id` helpers above. Returns the **torrent** default —
+    /// every internal call site that hits this helper is torrent-
+    /// flavored (Nyaa search, manual grabs, library episode
+    /// re-grab, post-processing torrent lookup, RSS / upgrade
+    /// "is anything configured" gates). Usenet routing always goes
+    /// through the indexer's pin (or its protocol's per-pin default
+    /// via `client_for_indexer_with_id`).
     pub async fn default_download_client_with_id(&self) -> Option<(Arc<dyn DownloadClient>, i64)> {
         let pool = self.download_clients.read().await.clone();
-        let default_id = pool.default_id?;
+        let default_id = pool.default_torrent_id?;
         let client = pool.clients.get(&default_id)?.clone();
         Some((client, default_id))
     }
@@ -261,10 +303,186 @@ impl AppState {
         let pool = self.download_clients.read().await.clone();
         pool.clients.get(&id).cloned()
     }
+
+    /// Resolve a grab to its handling client given the `download_client_id`
+    /// stamp (when present) and the hash. Falls back through three layers:
+    ///
+    ///   1. The stamped client id, if it still exists in the pool.
+    ///   2. **Hash-shape heuristic** — SAB's `nzo_id` format
+    ///      (`SABnzbd_nzo_…`) is unmistakable. Old grabs from before
+    ///      grab-time stamping was wired (the `ALTER TABLE … ADD COLUMN
+    ///      download_client_id` migration runs without a backfill) have
+    ///      a NULL stamp, and naively falling through to the torrent
+    ///      default sends an nzo_id to qBit's `delete` endpoint, which
+    ///      silently 200s on unknown hashes — the user's symptom is
+    ///      "delete-from-disk leaves the SAB job alive forever." Route
+    ///      SAB-shaped hashes to ANY usenet client in the pool instead.
+    ///   3. The torrent default (the legacy fall-through; correct for
+    ///      BT v1 infohashes — 40-char hex, no SAB-style prefix).
+    pub async fn resolve_grab_client(
+        &self,
+        download_client_id: Option<i64>,
+        hash: &str,
+    ) -> Option<Arc<dyn DownloadClient>> {
+        if let Some(id) = download_client_id
+            && let Some(client) = self.client_by_id(id).await
+        {
+            return Some(client);
+        }
+        if hash.starts_with("SABnzbd_nzo_") {
+            let pool = self.download_clients.read().await.clone();
+            for c in pool.clients.values() {
+                if c.protocol() == "usenet" {
+                    return Some(c.clone());
+                }
+            }
+        }
+        self.default_download_client().await
+    }
 }
 
 impl FromRef<AppState> for SqlitePool {
     fn from_ref(state: &AppState) -> SqlitePool {
         state.db.clone()
+    }
+}
+
+#[cfg(test)]
+mod resolve_grab_client_tests {
+    use super::*;
+    use crate::services::download_client::{
+        AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+    };
+    use async_trait::async_trait;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::RwLock;
+
+    /// Minimal `DownloadClient` mock that lets a test pin the
+    /// `protocol()` return value. Every other method is a no-op stub.
+    struct ProtoClient(&'static str);
+
+    #[async_trait]
+    impl DownloadClient for ProtoClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("ok".into())
+        }
+        async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+            Ok(AddOutcome::Added)
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _url: &str,
+            _hash: &str,
+            _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<SelectiveOutcome, String> {
+            Ok(SelectiveOutcome::FullDownload)
+        }
+        async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+            Ok(vec![])
+        }
+        async fn pause(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_file_wanted(
+            &self,
+            _hash: &str,
+            _files: &[usize],
+            _wanted: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            self.0
+        }
+        fn protocol(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    fn build_state(default_torrent_id: Option<i64>) -> AppState {
+        let mut clients: std::collections::HashMap<i64, Arc<dyn DownloadClient>> =
+            std::collections::HashMap::new();
+        clients.insert(1, Arc::new(ProtoClient("torrent")));
+        clients.insert(2, Arc::new(ProtoClient("usenet")));
+        let pool = DownloadClientPool {
+            clients,
+            default_torrent_id,
+            default_usenet_id: Some(2),
+        };
+        AppState {
+            db: sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy pool"),
+            download_clients: Arc::new(RwLock::new(Arc::new(pool))),
+            jellyfin: Arc::new(RwLock::new(None)),
+            custom_formats: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            indexers: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            progress: crate::services::progress::ProgressRegistry::new(),
+            users_exist: Arc::new(AtomicBool::new(true)),
+            interactive_search_cache: crate::services::interactive_search_cache::new(),
+            oauth_state: crate::services::oauth_state::new(),
+            start_time: chrono::Utc::now(),
+            tasks: crate::services::task_registry::TaskRegistry::new(),
+        }
+    }
+
+    /// Stamped `download_client_id` always wins, even for a SAB-shaped
+    /// hash that the heuristic would otherwise re-route.
+    #[tokio::test]
+    async fn stamped_id_wins_over_hash_heuristic() {
+        let state = build_state(Some(1));
+        // Pin to the torrent client (id=1) even though the hash looks
+        // SAB-shaped — the stamp is authoritative.
+        let client = state
+            .resolve_grab_client(Some(1), "SABnzbd_nzo_abcdef12")
+            .await
+            .expect("resolved");
+        assert_eq!(client.protocol(), "torrent");
+    }
+
+    /// Legacy NULL stamp + SAB-shaped hash routes to a usenet client
+    /// in the pool. Without this the user's existing SAB grabs (made
+    /// before grab-time stamping was wired) silently route to qBit's
+    /// `delete`, which 200s on unknown hashes and leaves the SAB job
+    /// alive forever.
+    #[tokio::test]
+    async fn null_stamp_with_sab_hash_routes_to_usenet_client() {
+        let state = build_state(Some(1));
+        let client = state
+            .resolve_grab_client(None, "SABnzbd_nzo_4rxsukkq")
+            .await
+            .expect("resolved");
+        assert_eq!(client.protocol(), "usenet");
+    }
+
+    /// Legacy NULL stamp + BT-shaped hash falls through to the torrent
+    /// default — no false-positive on a 40-char-hex infohash.
+    #[tokio::test]
+    async fn null_stamp_with_bt_hash_falls_through_to_torrent_default() {
+        let state = build_state(Some(1));
+        let client = state
+            .resolve_grab_client(None, "abc123def456abc123def456abc123def4567890")
+            .await
+            .expect("resolved");
+        assert_eq!(client.protocol(), "torrent");
+    }
+
+    /// Stamped id that no longer exists (client was deleted) falls
+    /// back through the heuristic. Same SAB rescue as the NULL case.
+    #[tokio::test]
+    async fn stamped_id_missing_from_pool_still_routes_via_heuristic() {
+        let state = build_state(Some(1));
+        let client = state
+            .resolve_grab_client(Some(999), "SABnzbd_nzo_abcdef12")
+            .await
+            .expect("resolved");
+        assert_eq!(client.protocol(), "usenet");
     }
 }

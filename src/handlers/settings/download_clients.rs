@@ -66,6 +66,15 @@ pub fn kind_label(kind: &str) -> &'static str {
 #[template(path = "partials/settings/download_clients/list.html")]
 struct DownloadClientsListPartial {
     rows: Vec<DownloadClientRow>,
+    // Per-protocol "first client" flags consumed by the inline
+    // include of `add_form_body.html` at the bottom of `list.html`
+    // (the section partial pre-renders the Add form body so the
+    // modal opens fast on first click). Same data the GET-only
+    // `DownloadClientAddFormPartial` carries; populated from the
+    // section's `rows` so a fresh install pre-checks Default on
+    // both protocols.
+    first_torrent_client: bool,
+    first_usenet_client: bool,
 }
 
 impl DownloadClientsListPartial {
@@ -84,6 +93,16 @@ impl DownloadClientsListPartial {
 #[template(path = "partials/settings/download_clients/edit_form_body.html")]
 struct DownloadClientEditFormPartial {
     row: DownloadClientRow,
+    /// Same per-protocol "first client" flags as the Add partial.
+    /// Used by the Default-checkbox initial-render condition AND by
+    /// the JS kind-relabel helper after a kind change. Computed
+    /// from the current DB state (including this row's contribution
+    /// — if this row IS the default torrent, `first_torrent_client`
+    /// resolves to false, and the template-side condition
+    /// `row.is_default || first_<protocol>_client` lands on
+    /// row.is_default for the checked state).
+    first_torrent_client: bool,
+    first_usenet_client: bool,
 }
 
 impl DownloadClientEditFormPartial {
@@ -95,14 +114,22 @@ impl DownloadClientEditFormPartial {
 /// Add form body — symmetric with the edit form but for fresh
 /// inserts. Returned by `GET /api/download-clients/add-form`;
 /// swapped into `#dc-modal-body` when the user clicks the "+
-/// Add download client" tile. `first_client` pre-checks the
-/// "default" checkbox so the very first row lands as default
-/// (an empty default config surfaces "no download client
-/// configured" at grab-routing time, which is a worse default).
+/// Add download client" tile.
+///
+/// `first_torrent_client` / `first_usenet_client` drive the
+/// auto-check on the "Default client" checkbox. Per-protocol so the
+/// first SAB added gets default-checked even when a torrent default
+/// already exists (and vice versa) — without this, a user adding
+/// SAB after qBit would end up with no usenet default until they
+/// manually clicked Set Default. The kind-relabel JS in
+/// `static/js/settings.js` reads both flags via data attributes on
+/// the form and toggles the checkbox state when the user flips the
+/// kind dropdown.
 #[derive(Template)]
 #[template(path = "partials/settings/download_clients/add_form_body.html")]
 struct DownloadClientAddFormPartial {
-    first_client: bool,
+    first_torrent_client: bool,
+    first_usenet_client: bool,
 }
 
 impl DownloadClientAddFormPartial {
@@ -139,7 +166,19 @@ impl DownloadClientStatusPillPartial {
 /// the `/api/download-clients/section` cancel-edit refresh route.
 async fn render_section(state: &AppState) -> Response {
     let rows = list_all(&state.db).await.unwrap_or_default();
-    DownloadClientsListPartial { rows }.into_html_ok()
+    use crate::models::download_clients::protocol_for_kind;
+    let first_torrent_client = !rows
+        .iter()
+        .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("torrent"));
+    let first_usenet_client = !rows
+        .iter()
+        .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
+    DownloadClientsListPartial {
+        rows,
+        first_torrent_client,
+        first_usenet_client,
+    }
+    .into_html_ok()
 }
 
 /// Form payload for create/update. `id == None` creates a new row;
@@ -548,7 +587,31 @@ pub async fn settings_download_clients_edit_form(
     Path(id): Path<i64>,
 ) -> Response {
     match get_by_id(&state.db, id).await {
-        Ok(Some(row)) => DownloadClientEditFormPartial { row }.into_html_ok(),
+        Ok(Some(row)) => {
+            // Same per-protocol "first client" probe the Add form
+            // does, scoped to ALL rows (including this one). The
+            // template's checkbox condition is
+            // `row.is_default || first_<protocol>_client`, so when
+            // this row IS the default the first-flag resolves to
+            // false and the row's own state takes precedence; when
+            // this row isn't the default but no other row of the
+            // same protocol is, the first-flag flips on and the
+            // checkbox auto-checks.
+            let rows = list_all(&state.db).await.unwrap_or_default();
+            use crate::models::download_clients::protocol_for_kind;
+            let first_torrent_client = !rows
+                .iter()
+                .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("torrent"));
+            let first_usenet_client = !rows
+                .iter()
+                .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
+            DownloadClientEditFormPartial {
+                row,
+                first_torrent_client,
+                first_usenet_client,
+            }
+            .into_html_ok()
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "Download client not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -565,11 +628,26 @@ pub async fn settings_download_clients_edit_form(
     ),
 )]
 pub async fn settings_download_clients_add_form(State(state): State<AppState>) -> Response {
-    let first_client = list_all(&state.db)
-        .await
-        .map(|rows| rows.is_empty())
-        .unwrap_or(false);
-    DownloadClientAddFormPartial { first_client }.into_html_ok()
+    // Per-protocol "no current default" probe — auto-checks Default
+    // when no row of this protocol is marked is_default, so adding
+    // SAB when no usenet default exists picks it up automatically
+    // (and same for the first torrent client). Semantic-mirror with
+    // the Edit partial so behavior is identical across the two
+    // forms. DB-error fallback is false-on-both so a transient sqlx
+    // hiccup doesn't silently steal an existing default's flag.
+    let rows = list_all(&state.db).await.unwrap_or_default();
+    use crate::models::download_clients::protocol_for_kind;
+    let first_torrent_client = !rows
+        .iter()
+        .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("torrent"));
+    let first_usenet_client = !rows
+        .iter()
+        .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
+    DownloadClientAddFormPartial {
+        first_torrent_client,
+        first_usenet_client,
+    }
+    .into_html_ok()
 }
 
 #[utoipa::path(

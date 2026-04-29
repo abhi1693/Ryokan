@@ -8,8 +8,26 @@
     font-size: 12px;
 }
 
+/* `font-size: 0` collapses the ~4px visual gap that adjacent
+   `display: inline-block` <button> siblings get from any source-
+   whitespace between them. The template render keeps newlines +
+   indentation between sibling <button> tags, while the JS poll-
+   rebuild (`container.innerHTML = renderQueue(…)` every 5s)
+   concatenates with `html += ` and produces no whitespace at all.
+   Without the reset, the first render sat at ~8px gap (template
+   whitespace plus the explicit margin below) and the first poll
+   snapped down to 4px — visibly "every button got their padding
+   reduced and they all stuck together". Children carry their own
+   `font-size` from `.btn-sm` so text doesn't disappear. */
 .dl-actions {
     white-space: nowrap;
+    font-size: 0;
+}
+
+/* Explicit gap that doesn't depend on inter-element whitespace,
+   so template and JS renders are pixel-identical. */
+.dl-actions .btn + .btn {
+    margin-left: 4px;
 }
 
 /* Secondary info line under a History row's torrent name, used for

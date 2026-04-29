@@ -870,6 +870,7 @@ fieldset legend {
     background: transparent;
     border: none;
     color: inherit;
+    text-decoration: none;
     text-align: left;
     cursor: pointer;
     font: inherit;
@@ -1053,7 +1054,23 @@ fieldset legend {
     border-top: 1px solid var(--border);
 }
 
-.dc-modal-form { display: flex; flex-direction: column; min-height: 0; }
+/* The modal-body container divs (#dc-modal-body, #indexer-modal-body)
+   sit between `.modal` (a column flex container with max-height: 80vh)
+   and the form. Without flex routing through them the form collapses
+   to its content height and the bottom of a tall form (the indexer
+   Add form has 11 fields in 7 rows) gets clipped by the modal's
+   overflow:hidden bound. Making them column-flex containers that
+   grow to fill the parent lets the inner `.modal-body` carry the
+   overflow-y:auto scroll affordance the form needs. */
+#dc-modal-body,
+#indexer-modal-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.dc-modal-form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .dc-modal-form .modal-body { padding: 20px 24px; }
 .dc-modal-form .form-group { margin-bottom: 14px; }
 .dc-modal-form .form-row   { display: flex; gap: 16px; }

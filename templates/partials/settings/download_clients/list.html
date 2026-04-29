@@ -37,7 +37,7 @@
                 <div class="dc-card-header">
                     <div class="dc-card-title">
                         <strong class="dc-card-name">{{ row.name }}</strong>
-                        {% if row.is_default %}<span class="dc-default-pill" title="This client receives every grab without an explicit indexer pin">Default</span>{% endif %}
+                        {% if row.is_default %}<span class="dc-default-pill" title="Default {% if row.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %} client — receives every {% if row.kind == "sabnzbd" %}newznab{% else %}torznab{% endif %} grab without an explicit indexer pin">Default</span>{% endif %}
                     </div>
                     {# Status pill — placeholder loads then HTMX swap-on-load
                        replaces with the probed version, or a static Disabled

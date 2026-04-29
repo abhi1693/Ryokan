@@ -640,18 +640,20 @@ window.ryokanEscapeHtml = function (value) {
 // without a secure origin don't expose navigator.clipboard).
 window.ryokanCopy = function (text, btn) {
     if (text == null || text === '') return Promise.resolve();
-    const flash = function (label, ms) {
-        if (!btn) return;
-        const original = btn.textContent;
-        btn.textContent = label;
-        setTimeout(function () { btn.textContent = original; }, ms || 1500);
-    };
+    // No in-button flash — the toast carries the success/failure
+    // feedback. The previous flash mutated `btn.innerHTML` to swap
+    // the SVG for "Copied!" text and back; on icon-only buttons
+    // (downloads queue actions, settings API-key copy) the
+    // round-trip occasionally clobbered padding because any layout
+    // change racing with the 1500ms restore left the button
+    // visibly squashed. `btn` is now an unused parameter, kept on
+    // the signature so existing call sites (`ryokanCopy(hash, this)`)
+    // don't need to change.
+    void btn;
     const success = function () {
-        flash('Copied!', 1500);
         window.ryokanToast({kind: 'success', title: 'Copied to clipboard', body: '', log: false, duration: 1500});
     };
     const failure = function (err) {
-        flash('Failed', 2000);
         window.ryokanToast({kind: 'error', title: 'Copy failed', body: (err && err.message) || 'Browser denied clipboard access', log: false});
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {

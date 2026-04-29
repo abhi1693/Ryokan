@@ -9,9 +9,22 @@ use axum::{
 use axum_htmx::HxRequest;
 use serde::Deserialize;
 
+use std::sync::Arc;
+
 use crate::AppState;
 use crate::models::grabbed_torrents;
-use crate::services::download_client::DownloadItemState;
+use crate::services::download_client::{DownloadClient, DownloadItemState};
+
+/// Route a queue-action (pause/resume/delete) to the right client by
+/// looking up the grab row for `hash` and resolving its
+/// `download_client_id`. The composed fallback chain via
+/// `resolve_grab_client` handles legacy NULL stamps for SAB grabs
+/// (nzo_id-shape heuristic) and finally the torrent default.
+/// Returns `None` only when no client is configured at all.
+async fn resolve_client_for_hash(state: &AppState, hash: &str) -> Option<Arc<dyn DownloadClient>> {
+    let dc_id = grabbed_torrents::client_id_for_hash(&state.db, hash).await;
+    state.resolve_grab_client(dc_id, hash).await
+}
 
 struct QueueTorrentView {
     hash: String,
@@ -151,35 +164,47 @@ pub async fn downloads_page(
         .unwrap_or_else(|| "english".to_string());
 
     let (queue, queue_error) = if tab == "queue" {
-        let client = state.default_download_client().await;
-        match client {
-            Some(c) => match c.list_scoped().await {
-                Ok(mut torrents) => {
-                    // Sort: downloading first, then by progress descending.
-                    let is_downloading = |k: DownloadItemState| {
-                        matches!(
-                            k,
-                            DownloadItemState::Downloading
-                                | DownloadItemState::DownloadingStalled
-                                | DownloadItemState::DownloadingQueued
-                                | DownloadItemState::CheckingDownload
-                        )
-                    };
-                    torrents.sort_by(|a, b| {
-                        let a_down = if is_downloading(a.state_kind) { 0 } else { 1 };
-                        let b_down = if is_downloading(b.state_kind) { 0 } else { 1 };
-                        a_down.cmp(&b_down).then(
-                            b.progress
-                                .partial_cmp(&a.progress)
-                                .unwrap_or(std::cmp::Ordering::Equal),
-                        )
-                    });
-                    let views = torrents.iter().map(torrent_to_view).collect();
-                    (views, String::new())
+        // Fan out across every enabled client so SAB / Usenet jobs
+        // appear alongside torrent jobs in the queue. A single
+        // client erroring (e.g. SAB unreachable) doesn't blank the
+        // whole tab — it logs and the other clients still render.
+        let pool = state.download_clients.read().await.clone();
+        if pool.clients.is_empty() {
+            (Vec::new(), "Download client is not configured.".to_string())
+        } else {
+            let mut torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
+            let mut errors: Vec<String> = Vec::new();
+            for (id, c) in pool.clients.iter() {
+                match c.list_scoped().await {
+                    Ok(mut items) => torrents.append(&mut items),
+                    Err(e) => errors.push(format!("client #{}: {}", id, e)),
                 }
-                Err(e) => (Vec::new(), format!("Could not load queue: {}", e)),
-            },
-            None => (Vec::new(), "Download client is not configured.".to_string()),
+            }
+            let is_downloading = |k: DownloadItemState| {
+                matches!(
+                    k,
+                    DownloadItemState::Downloading
+                        | DownloadItemState::DownloadingStalled
+                        | DownloadItemState::DownloadingQueued
+                        | DownloadItemState::CheckingDownload
+                )
+            };
+            torrents.sort_by(|a, b| {
+                let a_down = if is_downloading(a.state_kind) { 0 } else { 1 };
+                let b_down = if is_downloading(b.state_kind) { 0 } else { 1 };
+                a_down.cmp(&b_down).then(
+                    b.progress
+                        .partial_cmp(&a.progress)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+            });
+            let views = torrents.iter().map(torrent_to_view).collect();
+            let error_msg = if errors.is_empty() {
+                String::new()
+            } else {
+                format!("Could not load queue from: {}", errors.join("; "))
+            };
+            (views, error_msg)
         }
     } else {
         (Vec::new(), String::new())
@@ -246,7 +271,7 @@ pub async fn api_pause_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentActionForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = state.default_download_client().await.ok_or((
+    let client = resolve_client_for_hash(&state, &form.hash).await.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "Download client not configured".to_string(),
     ))?;
@@ -273,7 +298,7 @@ pub async fn api_resume_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentActionForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = state.default_download_client().await.ok_or((
+    let client = resolve_client_for_hash(&state, &form.hash).await.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "Download client not configured".to_string(),
     ))?;
@@ -300,7 +325,7 @@ pub async fn api_delete_torrent(
     State(state): State<AppState>,
     Json(form): Json<TorrentDeleteForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let client = state.default_download_client().await.ok_or((
+    let client = resolve_client_for_hash(&state, &form.hash).await.ok_or((
         axum::http::StatusCode::BAD_REQUEST,
         "Download client not configured".to_string(),
     ))?;

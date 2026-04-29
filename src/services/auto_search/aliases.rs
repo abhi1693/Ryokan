@@ -128,15 +128,25 @@ pub fn collect_aliases(detail: &AnimeDetail) -> Vec<String> {
 // list includes Parts 1 and 3, and the episode-number parser still has to
 // see `02` on the filename for Part 2 to win.
 
+// `\b.*$` (word-boundary + arbitrary trailing) instead of `\s*$`
+// (strict end-of-string) so romaji titles that pack the cour's arc
+// name AFTER the season marker still produce sequel variants. AL ships
+// `Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e 4th Season
+// 2-nensei-hen Ichi Gakki` for COTE S4 — release groups drop the
+// arc descriptor and just publish `[SubsPlease] Youkoso ... S4 - 06`.
+// The pre-fix anchor required the marker to be the LAST tokens of
+// the alias, so COTE-shape titles produced no S4/-04 variants and
+// the search short-circuited with no matches. `\b` is load-bearing
+// against `Seasonal` accidentally matching as `Season`+`al`.
 static RE_ORDINAL_SEASON: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+(\d+)(?:st|nd|rd|th)\s+Season\s*$").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+(\d+)(?:st|nd|rd|th)\s+Season\b.*$").unwrap());
 static RE_WORD_SEASON: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(.+?)\s+(First|Second|Third|Fourth|Fifth|Sixth)\s+Season\s*$").unwrap()
+    Regex::new(r"(?i)^(.+?)\s+(First|Second|Third|Fourth|Fifth|Sixth)\s+Season\b.*$").unwrap()
 });
 static RE_SEASON_N: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+Season\s+(\d+)\s*$").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+Season\s+(\d+)\b.*$").unwrap());
 static RE_S_N: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+S(\d{1,2})\s*$").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+S(\d{1,2})\b.*$").unwrap());
 static RE_PART_N: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+Part\s+(\d+)(?::\s+.+)?\s*$").unwrap());
 static RE_PART_ROMAN: LazyLock<Regex> = LazyLock::new(|| {
@@ -1145,6 +1155,72 @@ mod tests {
             variants
                 .iter()
                 .any(|v| v == "Sono Bisque Doll wa Koi wo Suru II")
+        );
+    }
+
+    /// Romaji-title regression: AniList ships some titles with the
+    /// cour's arc name appended AFTER the `Nth Season` marker. COTE S4
+    /// is the canonical case: the AL romaji is `Youkoso Jitsuryoku
+    /// Shijou Shugi no Kyoushitsu e 4th Season 2-nensei-hen Ichi
+    /// Gakki`, but every release group ships the same cour as
+    /// `[SubsPlease] Youkoso ... S4 - 06`. Pre-fix the
+    /// `RE_ORDINAL_SEASON` end-of-string anchor required the marker to
+    /// be the last tokens of the alias, so the variant generator
+    /// produced no `S4` / `S04` / `- 04` aliases for these titles —
+    /// auto-search and interactive search both short-circuited with
+    /// zero matches even though the franchise had releases on every
+    /// configured indexer.
+    #[test]
+    fn sequel_variants_strip_trailing_arc_descriptor_after_season_marker() {
+        let input = vec![
+            "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e 4th Season 2-nensei-hen Ichi Gakki"
+                .to_string(),
+        ];
+        let variants = sequel_variant_aliases(&input);
+        let base = "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e";
+        assert!(
+            variants.iter().any(|v| v == &format!("{} S4", base)),
+            "expected base+S4 variant for COTE-shape title; got {:?}",
+            variants
+        );
+        assert!(
+            variants.iter().any(|v| v == &format!("{} S04", base)),
+            "expected base+S04 variant; got {:?}",
+            variants
+        );
+        assert!(
+            variants.iter().any(|v| v == &format!("{} - 04", base)),
+            "expected base+`- 04` variant; got {:?}",
+            variants
+        );
+    }
+
+    /// Word-form season marker with trailing arc — covers the
+    /// `Some Title Second Season Foo Arc` shape (AniList sometimes
+    /// uses ordinal words instead of digits for the season marker).
+    #[test]
+    fn sequel_variants_handle_word_season_with_trailing_descriptor() {
+        let input = vec!["Some Title Second Season Sub Arc".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(
+            variants.iter().any(|v| v == "Some Title S2"),
+            "word-form season + trailing arc must still produce S2 variant; got {:?}",
+            variants
+        );
+    }
+
+    /// Sanity check: pure-marker aliases (no trailing arc) still work
+    /// after the regex relaxation. Without this, the relaxation could
+    /// silently change behavior for the simple case the original
+    /// regex was designed for.
+    #[test]
+    fn sequel_variants_still_handle_bare_season_markers() {
+        let input = vec!["Sono Bisque Doll wa Koi wo Suru 2nd Season".to_string()];
+        let variants = sequel_variant_aliases(&input);
+        assert!(
+            variants
+                .iter()
+                .any(|v| v == "Sono Bisque Doll wa Koi wo Suru S2")
         );
     }
 

@@ -114,6 +114,17 @@ pub struct SearchResult {
     /// break and Nyaa-only flows don't add noise to API responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexer_id: Option<i64>,
+    /// Display name of the indexer that surfaced this release. Empty
+    /// for Nyaa-direct results — the interactive-search UI renders
+    /// "Nyaa" as the fallback so the column is never blank. Sourced
+    /// from `Release.indexer_name` for torznab/newznab fan-out
+    /// results. Kept distinct from `indexer_id` because the UI needs
+    /// the name without an extra round-trip to /api/indexers, and
+    /// because the name survives indexer-row deletion (the FK
+    /// becomes dangling but the historical name stays meaningful in
+    /// grab-history records that join on the search payload).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub indexer_name: String,
 }
 
 #[derive(Clone)]

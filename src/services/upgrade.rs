@@ -519,7 +519,8 @@ mod tests {
         clients.insert(1, Arc::new(StubClient));
         let pool = crate::DownloadClientPool {
             clients,
-            default_id: Some(1),
+            default_torrent_id: Some(1),
+            default_usenet_id: None,
         };
         *state.download_clients.write().await = Arc::new(pool);
     }

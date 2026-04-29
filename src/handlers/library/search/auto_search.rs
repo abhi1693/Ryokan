@@ -463,45 +463,60 @@ async fn run_auto_search_targets_with_upgrades(
                 // files to its own library entry. On filter error,
                 // fall back to a full add rather than dropping the
                 // grab entirely.
-                let selective_outcome: Result<Option<Vec<usize>>, String> = if wants_selective {
-                    let detail_clone = detail.clone();
-                    let info_hash_clone = result.info_hash.clone();
-                    let mut pick = move |files: &[String]| {
-                        auto_search::pick_wanted_file_indices(files, &detail_clone)
+                // `effective_hash` is the id Ryokan persists on
+                // `grabbed_torrents.hash` — same rationale as the interactive
+                // grab handler in handlers/library/search/grab.rs. BT clients
+                // echo the precomputed info_hash via `add_torrent_returning_id`'s
+                // default impl; SAB returns its `nzo_id`, which is the only
+                // id SAB lets you key queue/history ops by. Without this
+                // capture, SAB-routed grabs land with `hash=""` and the
+                // post-processing reconcile loop marks them removed after
+                // 30s when `list_scoped` can't match them.
+                let selective_outcome: Result<(Option<Vec<usize>>, String), String> =
+                    if wants_selective {
+                        let detail_clone = detail.clone();
+                        let info_hash_clone = result.info_hash.clone();
+                        let mut pick = move |files: &[String]| {
+                            auto_search::pick_wanted_file_indices(files, &detail_clone)
+                        };
+                        match qbit
+                            .add_torrent_with_file_filter(&url, &info_hash_clone, &mut pick)
+                            .await
+                        {
+                            // Selective branch echoes the precomputed
+                            // info_hash since `add_torrent_with_file_filter`
+                            // doesn't return an id. SAB grabs don't fire
+                            // this branch in practice (require info_hash
+                            // non-empty, which NZBs lack).
+                            Ok(crate::services::download_client::SelectiveOutcome::Filtered(
+                                kept,
+                            )) => Ok((Some(kept), result.info_hash.clone())),
+                            Ok(
+                                crate::services::download_client::SelectiveOutcome::FullDownload,
+                            ) => Ok((None, result.info_hash.clone())),
+                            Err(e) => {
+                                logger::warn(
+                                    &state.db,
+                                    LogCategory::Grab,
+                                    &format!(
+                                        "{}: selective download failed, falling back to full grab",
+                                        label
+                                    ),
+                                    &e,
+                                )
+                                .await;
+                                qbit.add_torrent_returning_id(&url, &result.info_hash)
+                                    .await
+                                    .map(|(_, hash)| (None, hash))
+                            }
+                        }
+                    } else {
+                        qbit.add_torrent_returning_id(&url, &result.info_hash)
+                            .await
+                            .map(|(_, hash)| (None, hash))
                     };
-                    match qbit
-                        .add_torrent_with_file_filter(&url, &info_hash_clone, &mut pick)
-                        .await
-                    {
-                        Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
-                            Ok(Some(kept))
-                        }
-                        Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
-                            Ok(None)
-                        }
-                        Err(e) => {
-                            logger::warn(
-                                &state.db,
-                                LogCategory::Grab,
-                                &format!(
-                                    "{}: selective download failed, falling back to full grab",
-                                    label
-                                ),
-                                &e,
-                            )
-                            .await;
-                            qbit.add_torrent(&url, &result.info_hash)
-                                .await
-                                .map(|_| None)
-                        }
-                    }
-                } else {
-                    qbit.add_torrent(&url, &result.info_hash)
-                        .await
-                        .map(|_| None)
-                };
                 match selective_outcome {
-                    Ok(kept) => {
+                    Ok((kept, effective_hash)) => {
                         let selective_suffix = match (&kept, wants_selective) {
                             (Some(ids), _) => format!(", selective={}", ids.len()),
                             (None, true) => ", selective=full(timeout)".to_string(),
@@ -558,7 +573,7 @@ async fn run_auto_search_targets_with_upgrades(
                             // and let the next reconcile pick it up.
                             let grab_id = crate::models::grabbed_torrents::record_grab(
                                 &state.db,
-                                &result.info_hash,
+                                &effective_hash,
                                 &result.title,
                                 sid,
                                 &ep_nums,
@@ -577,7 +592,7 @@ async fn run_auto_search_targets_with_upgrades(
                                     crate::services::download_client::apply_indexer_seed_rules(
                                         &state.db,
                                         &*qbit,
-                                        &result.info_hash,
+                                        &effective_hash,
                                         result.indexer_id,
                                     )
                                     .await;
@@ -639,7 +654,7 @@ async fn run_auto_search_targets_with_upgrades(
                                 // falls back to the parent series.
                                 let db_task = state.db.clone();
                                 let qbit_task = qbit.clone();
-                                let info_hash_task = result.info_hash.clone();
+                                let info_hash_task = effective_hash.clone();
                                 let detail_task = detail.clone();
                                 let ep_nums_task = ep_nums.clone();
                                 let title_task = result.title.clone();

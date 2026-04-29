@@ -13,6 +13,11 @@ use crate::services::download_client::DownloadClient;
 
 #[tokio::test]
 async fn test_returns_version_string_on_success() {
+    // `test()` is now a two-step probe — `mode=version` (public) for
+    // the version string, then `mode=queue` (auth-required) so a
+    // missing/invalid API key surfaces at config time instead of
+    // silently passing the public-endpoint check and then failing
+    // every grab with HTTP 403. Both mocks must be present.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
         .and(path("/api"))
@@ -20,6 +25,14 @@ async fn test_returns_version_string_on_success() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "version": "4.3.2",
         })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"queue": {"slots": []}})),
+        )
         .mount(&server)
         .await;
 
@@ -88,9 +101,60 @@ async fn test_sends_apikey_query_param() {
         })))
         .mount(&server)
         .await;
+    // Auth probe needs the same key — pin both calls to verify the
+    // apikey query param threads through every step of `test()`.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .and(query_param("apikey", super::fixture::TEST_API_KEY))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"queue": {"slots": []}})),
+        )
+        .mount(&server)
+        .await;
 
     client
         .test()
         .await
         .expect("apikey query param must be sent on every request");
+}
+
+/// New regression test: when SAB's queue probe returns 403, the
+/// error must call out the API key specifically so the user knows
+/// what to fix. The prior `test()` shape only probed `mode=version`
+/// (public endpoint) and silently passed even with a missing/wrong
+/// key — the resulting `Grab failed for episode N: SAB add returned
+/// HTTP 403 Forbidden` toast on first grab was the actionable
+/// symptom. This test pins the diagnostic message at the SAB
+/// trait-impl boundary.
+#[tokio::test]
+async fn test_returns_api_key_error_when_queue_probe_returns_403() {
+    let (server, client) = new_fixture().await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "version": "4.3.2",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "queue"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("API Key Incorrect"))
+        .mount(&server)
+        .await;
+
+    let err = client
+        .test()
+        .await
+        .expect_err("queue probe 403 must fail the test");
+    assert!(
+        err.contains("API key"),
+        "diagnostic must mention API key explicitly so the user knows which field to fix; got: {err}"
+    );
+    assert!(
+        err.contains("API Key Incorrect"),
+        "SAB's body text must be surfaced so the user sees SAB's exact reason; got: {err}"
+    );
 }

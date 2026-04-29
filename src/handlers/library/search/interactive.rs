@@ -312,8 +312,16 @@ pub async fn interactive_search_episode(
     // Same single-entry collapse as auto_search_episode — the interactive
     // picker otherwise returns zero results for movies.
     let target = auto_search::SearchTarget::for_episode(&detail, episode_number);
-    let mut results =
-        auto_search::find_all_for_target(&state.db, &detail, &cfg, &target, false, &cfs).await;
+    let mut results = auto_search::find_all_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &target,
+        false,
+        &cfs,
+        &state.indexers,
+    )
+    .await;
 
     // Layer 3 (group-map) enrichment. Auto-search already runs the full
     // source pipeline so its classification is complete, but the interactive

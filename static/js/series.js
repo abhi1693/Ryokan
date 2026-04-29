@@ -671,14 +671,21 @@ function renderInteractiveResults(results, epNum) {
         body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">No results found.</div>';
         return;
     }
-    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th>Group</th><th class="col-quality">Quality</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
+    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th class="col-indexer">Indexer</th><th>Group</th><th class="col-quality">Quality</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
     results.forEach((r, idx) => {
         const batchTag = r.is_batch ? '<span class="tag tag-batch" style="margin-left:4px">batch</span>' : '';
         const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
         const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
+        // Empty `indexer_name` falls back to "Nyaa" — Nyaa-direct
+        // results don't carry a name (Nyaa isn't a row in the indexers
+        // table per plan decision #1) but the column should still
+        // attribute every row so the user can tell where a hit came
+        // from at a glance.
+        const indexer = escHtml(r.indexer_name || 'Nyaa');
         html += `<tr>
             <td class="col-score">${renderScoreDetails(r, scoreClass)}</td>
             <td><a class="isearch-release-link" href="${escHtml(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
+            <td class="col-indexer" style="color:var(--text-dim)">${indexer}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
             <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
@@ -740,9 +747,18 @@ function grabInteractiveResult(epNum, idx, btn) {
         })
     })
     .then(async r => {
+        // The server returns errors as `(StatusCode, String)`, which axum
+        // serializes as plain-text bodies — NOT JSON. Reading r.json()
+        // first returns `{}`, dropping the actual server error and leaving
+        // the user with an unhelpful "Grab failed" toast (the JS-side
+        // fallback). Read text first, parse JSON only on success
+        // responses where the handler returns a JSON envelope.
+        const text = await r.text();
+        if (!r.ok) {
+            throw new Error(text && text.trim().length > 0 ? text : 'Grab failed');
+        }
         let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Grab failed');
+        try { data = JSON.parse(text); } catch (_) {}
         btn.textContent = 'Sent';
         btn.classList.add('btn-success');
         // Update the episode row to show grabbed state
@@ -813,14 +829,16 @@ function renderInteractiveBatchResults(results) {
         body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">No batch releases found.</div>';
         return;
     }
-    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th>Group</th><th class="col-quality">Quality</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
+    let html = '<table class="interactive-search-table"><thead><tr><th class="col-score">Score</th><th>Release</th><th class="col-indexer">Indexer</th><th>Group</th><th class="col-quality">Quality</th><th class="col-size">Size</th><th class="col-seeds">Seeds</th><th class="col-grab">Grab</th></tr></thead><tbody>';
     results.forEach((r, idx) => {
         const batchTag = r.is_batch ? '<span class="tag tag-batch" style="margin-left:4px">batch</span>' : '';
         const trustedTag = r.is_trusted ? '<span class="tag tag-trusted" style="margin-left:4px">trusted</span>' : '';
         const scoreClass = r.score >= 80 ? 'score-high' : r.score >= 40 ? 'score-mid' : 'score-low';
+        const indexer = escHtml(r.indexer_name || 'Nyaa');
         html += `<tr>
             <td class="col-score">${renderScoreDetails(r, scoreClass)}</td>
             <td><a class="isearch-release-link" href="${escHtml(r.link)}" target="_blank" rel="noopener">${escHtml(r.title)}</a>${batchTag}${trustedTag}</td>
+            <td class="col-indexer" style="color:var(--text-dim)">${indexer}</td>
             <td style="color:var(--text-dim)">${escHtml(r.group)}</td>
             <td class="col-quality">${escHtml(r.quality_label || parseQualityFromTitle(r.title, r.resolution))}</td>
             <td class="col-size" style="color:var(--text-dim)">${escHtml(r.size)}</td>
@@ -878,9 +896,14 @@ function grabInteractiveBatchResult(idx, btn) {
         })
     })
     .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Grab failed');
+        // Same error-surfacing pattern as the single-episode grab —
+        // axum's `(StatusCode, String)` errors come back as plain text,
+        // not JSON, so reading r.json() first drops the actual server
+        // message.
+        const text = await r.text();
+        if (!r.ok) {
+            throw new Error(text && text.trim().length > 0 ? text : 'Grab failed');
+        }
         btn.textContent = 'Sent';
         btn.classList.add('btn-success');
         ensureDlPollRunning();
