@@ -506,6 +506,26 @@ mod e2e {
                 "/settings/indexers/{id}/edit-form",
                 axum::routing::get(crate::handlers::settings::indexers::settings_indexers_edit_form),
             )
+            // SAB cleanup PR — modal-form endpoints used by the
+            // browser-e2e tests in
+            // `tests/htmx_browser_e2e_settings_modals.rs`. The
+            // production `/api/download-clients/add-form` and
+            // `/api/indexers/test` are mounted in main.rs's
+            // `protected_routes`; the test harness needs them too so
+            // browser navigations / fetches against the test app
+            // hit the real handlers rather than 404 with an empty
+            // body (which Firefox renders as the empty-plaintext
+            // sentinel that bit the test on first authoring).
+            .route(
+                "/api/download-clients/add-form",
+                axum::routing::get(
+                    crate::handlers::settings::download_clients::settings_download_clients_add_form,
+                ),
+            )
+            .route(
+                "/api/indexers/test",
+                post(crate::handlers::settings::indexers::settings_indexers_test_stateless),
+            )
             .route(
                 "/settings/download-clients/delete",
                 post(crate::handlers::settings::download_clients::settings_download_clients_delete),
