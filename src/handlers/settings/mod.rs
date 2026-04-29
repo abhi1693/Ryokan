@@ -406,6 +406,37 @@ pub struct JellyfinTestForm {
 /// on success and a red one on failure; previously the JS just wrote
 /// plain text into the same element, so the only visible change is
 /// color.
+/// Issue #129 Phase 1 completion — General tab subform. Replaces the
+/// bulk-form path through `settings_submit` for the General tab so a
+/// Save click only POSTs General fields (not the previously-bundled
+/// integrations + quality fields too). HTMX path swaps the form
+/// region in place; non-HTMX path falls back to the full
+/// SettingsTemplate render so progressive enhancement holds.
+#[derive(Deserialize)]
+pub struct GeneralForm {
+    media_root: String,
+    title_language: String,
+    rss_enabled: Option<String>,
+    rss_interval_minutes: i32,
+    /// Phase 7 PR E — Nyaa-specific RSS opt-out. Checkbox → `Some(_)`
+    /// when checked.
+    disable_nyaa_rss: Option<String>,
+    post_processing_enabled: Option<String>,
+    post_processing_mode: String,
+    /// 1.3.0 — opt-in: trigger auto-search when a series's monitoring
+    /// mode changes. Default off.
+    search_on_monitoring_change: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/settings/general_form.html")]
+pub struct GeneralFormPartial {
+    pub config: config::Config,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    pub version: &'static str,
+}
+
 #[derive(Template)]
 #[template(path = "partials/settings/connection_test_result.html")]
 pub struct ConnectionTestResultPartial {
@@ -842,14 +873,54 @@ pub async fn settings_submit(
             "same" | "prefer_bd" | "bd_only" => form.finished_series_quality,
             _ => "prefer_bd".to_string(),
         },
-        media_root: form.media_root.trim().trim_end_matches('/').to_string(),
-        title_language: match form.title_language.as_str() {
-            "romaji" | "english" | "native" => form.title_language,
-            _ => "english".to_string(),
+        // General-tab fields (media_root, title_language, rss_*, post_processing_*,
+        // search_on_monitoring_change, disable_nyaa_rss) are now owned by the
+        // dedicated `/settings/general` subform handler (issue #129 Phase 1
+        // completion). The legacy bulk form covers integrations + quality
+        // only, so the General fields aren't even in the POST body when
+        // reaching this handler — `Form<SettingsForm>` deserializes them
+        // as empty defaults via `#[serde(default)]`. Preserving them
+        // from `existing_cfg` here when `tab != "general"` keeps the
+        // legacy-bookmark / external-script case working: a POST with
+        // tab=general still flows through the old per-field logic, but
+        // a POST from the new integrations/quality forms doesn't blank
+        // out General-tab values.
+        media_root: if form.tab.as_deref() == Some("general") {
+            form.media_root.trim().trim_end_matches('/').to_string()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.media_root.clone())
+                .unwrap_or_default()
+        },
+        title_language: if form.tab.as_deref() == Some("general") {
+            match form.title_language.as_str() {
+                "romaji" | "english" | "native" => form.title_language,
+                _ => "english".to_string(),
+            }
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.title_language.clone())
+                .unwrap_or_else(|| "english".to_string())
         },
         force_mal_fallback: current_force_mal_fallback,
-        rss_enabled: form.rss_enabled.is_some(),
-        rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
+        rss_enabled: if form.tab.as_deref() == Some("general") {
+            form.rss_enabled.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.rss_enabled)
+                .unwrap_or(false)
+        },
+        rss_interval_minutes: if form.tab.as_deref() == Some("general") {
+            form.rss_interval_minutes.clamp(1, 60)
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.rss_interval_minutes)
+                .unwrap_or(15)
+        },
         // multi-rss commit E — preserve the existing master flag
         // through the Settings save. The toggle UI for this flag
         // is deferred to 1.5.1; until then it can be flipped
@@ -860,18 +931,46 @@ pub async fn settings_submit(
             .as_ref()
             .map(|cfg| cfg.rss_master_enabled)
             .unwrap_or(true),
-        disable_nyaa_rss: form.disable_nyaa_rss.is_some(),
+        disable_nyaa_rss: if form.tab.as_deref() == Some("general") {
+            form.disable_nyaa_rss.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.disable_nyaa_rss)
+                .unwrap_or(false)
+        },
         force_kitsu_fallback: current_force_kitsu_fallback,
-        post_processing_enabled: form.post_processing_enabled.is_some(),
-        post_processing_mode: match form.post_processing_mode.as_str() {
-            "move" | "copy" | "hardlink" => form.post_processing_mode,
-            _ => "hardlink".to_string(),
+        post_processing_enabled: if form.tab.as_deref() == Some("general") {
+            form.post_processing_enabled.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.post_processing_enabled)
+                .unwrap_or(false)
+        },
+        post_processing_mode: if form.tab.as_deref() == Some("general") {
+            match form.post_processing_mode.as_str() {
+                "move" | "copy" | "hardlink" => form.post_processing_mode,
+                _ => "hardlink".to_string(),
+            }
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.post_processing_mode.clone())
+                .unwrap_or_else(|| "hardlink".to_string())
         },
         auto_grab_on_add: existing_cfg
             .as_ref()
             .map(|c| c.auto_grab_on_add)
             .unwrap_or(true),
-        search_on_monitoring_change: form.search_on_monitoring_change.is_some(),
+        search_on_monitoring_change: if form.tab.as_deref() == Some("general") {
+            form.search_on_monitoring_change.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.search_on_monitoring_change)
+                .unwrap_or(false)
+        },
         prefer_subs: form.prefer_subs == "1",
         allow_non_english: existing_cfg
             .as_ref()
@@ -1158,6 +1257,169 @@ pub async fn settings_submit(
         direct_rss_feeds,
     };
     Html(template.render().unwrap_or_default())
+}
+
+/// Issue #129 Phase 1 completion — General tab dedicated POST handler.
+/// Owns only General-tab fields (`media_root`, `title_language`, RSS
+/// flags, post-processing flags, monitoring-change auto-search opt-in).
+/// Reads existing config to preserve every other tab's fields,
+/// validates + sanitizes the General fields, persists, and returns
+/// either the General-tab subform partial (HTMX) or the full settings
+/// page (non-HTMX). Mirrors the per-tab split pattern that the bulk
+/// `settings_submit` handler used to do internally via `form.tab` checks.
+pub async fn settings_general_submit(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<GeneralForm>,
+) -> Response {
+    let existing_cfg = match config::get_config(&state.db).await {
+        Ok(Some(cfg)) => cfg,
+        // No config row yet (first-run): bail with a friendly error
+        // so the operator runs through /setup first instead of getting
+        // a save-into-nothing silent no-op.
+        _ => {
+            let err = "No config row found — run /setup first.".to_string();
+            return general_response(&state, None, None, Some(err), is_htmx).await;
+        }
+    };
+
+    // Build the merged config: General-tab fields from form, every
+    // other field copied from existing.
+    let cfg = config::Config {
+        media_root: form.media_root.trim().trim_end_matches('/').to_string(),
+        title_language: match form.title_language.as_str() {
+            "romaji" | "english" | "native" => form.title_language,
+            _ => "english".to_string(),
+        },
+        rss_enabled: form.rss_enabled.is_some(),
+        rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
+        disable_nyaa_rss: form.disable_nyaa_rss.is_some(),
+        post_processing_enabled: form.post_processing_enabled.is_some(),
+        post_processing_mode: match form.post_processing_mode.as_str() {
+            "move" | "copy" | "hardlink" => form.post_processing_mode,
+            _ => "hardlink".to_string(),
+        },
+        search_on_monitoring_change: form.search_on_monitoring_change.is_some(),
+        // Everything else: preserved verbatim.
+        ..existing_cfg
+    };
+
+    if let Err(e) = config::save_config(&state.db, &cfg).await {
+        logger::error(
+            &state.db,
+            LogCategory::System,
+            "Failed to save General settings",
+            &e.to_string(),
+        )
+        .await;
+        return general_response(
+            &state,
+            Some(cfg),
+            None,
+            Some(format!("Failed to save: {}", e)),
+            is_htmx,
+        )
+        .await;
+    }
+
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "Settings saved (General)",
+        "",
+    )
+    .await;
+
+    let mut notices = vec!["Settings saved.".to_string()];
+    if !cfg.media_root.is_empty() && !std::path::Path::new(&cfg.media_root).is_dir() {
+        notices.push(format!(
+            "Warning: media root '{}' is not accessible.",
+            cfg.media_root
+        ));
+    }
+
+    general_response(&state, Some(cfg), Some(notices.join(" ")), None, is_htmx).await
+}
+
+/// Render the General response in either HTMX (subform partial) or
+/// non-HTMX (full SettingsTemplate) shape. Factored out so the
+/// success + DB-error paths in `settings_general_submit` share the
+/// same render logic without duplicating the field-load +
+/// template-build code.
+async fn general_response(
+    state: &AppState,
+    cfg: Option<config::Config>,
+    message: Option<String>,
+    error: Option<String>,
+    is_htmx: bool,
+) -> Response {
+    let cfg = match cfg {
+        Some(c) => c,
+        None => match config::get_config(&state.db).await {
+            Ok(Some(c)) => c,
+            _ => config::Config::default(),
+        },
+    };
+
+    if is_htmx {
+        return Html(
+            GeneralFormPartial {
+                config: cfg,
+                message,
+                error,
+                version: env!("CARGO_PKG_VERSION"),
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response();
+    }
+
+    // Non-HTMX: render the full settings page so the form-POST + reload
+    // flow still works for users with JS off or for anyone landing on
+    // this route directly.
+    let groups = load_groups(&state.db).await;
+    let suggestions = load_suggestions(&state.db).await;
+    let custom_formats = load_custom_formats_view(&state.db).await;
+    let external_account = crate::models::external_accounts::get_current(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(ExternalAccountView::from_model);
+    let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
+    let title_language = cfg.title_language.clone();
+    let indexers = crate::models::indexers::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let download_clients = crate::models::download_clients::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let template = SettingsTemplate {
+        page: "settings".to_string(),
+        tab: "general".to_string(),
+        config: cfg,
+        groups,
+        suggestions,
+        custom_formats,
+        custom_format_edit: None,
+        custom_format_min_score_display,
+        custom_format_import_review: None,
+        message,
+        error,
+        indexer_edit: None,
+        version: env!("CARGO_PKG_VERSION"),
+        external_account,
+        title_language,
+        indexers,
+        indexer_catalog: crate::services::indexer_catalog::SEEDED,
+        indexer_seed: None,
+        download_clients,
+        direct_rss_feeds,
+    };
+    Html(template.render().unwrap_or_default()).into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────

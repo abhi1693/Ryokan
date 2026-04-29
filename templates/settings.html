@@ -29,7 +29,13 @@
     <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
 </div>
 
-{% if tab != "groups" && tab != "custom_formats" && tab != "indexers" && tab != "downloads" %}
+{# Issue #129 Phase 1 completion — General tab now has its own subform
+   (`/settings/general`) that posts only General fields. Integrations
+   and Quality remain on the legacy bulk form `/settings` for now;
+   their splits are queued as separate commits. The bulk form is
+   skipped on tab=general so we don't render two forms with overlapping
+   fields. #}
+{% if tab == "integrations" || tab == "quality" %}
 <form method="post" action="/settings" class="settings-form">
     <input type="hidden" name="tab" value="{{ tab }}">
 
@@ -41,12 +47,12 @@
 {%~ include "partials/settings/quality.html" ~%}
     </div>
 
-    <div class="settings-tab-panel {% if tab == "general" %}active{% endif %}">
-{%~ include "partials/settings/general.html" ~%}
-    </div>
-
     <button type="submit" class="btn btn-primary">Save Settings</button>
 </form>
+{% endif %}
+
+{% if tab == "general" %}
+{%~ include "partials/settings/general_form.html" ~%}
 {% endif %}
 
 {# Sibling form for the autobrr API key regenerate button. Lives at

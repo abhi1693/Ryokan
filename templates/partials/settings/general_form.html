@@ -1,0 +1,32 @@
+{# Per-tab subform for Settings → General. Issue #129 Phase 1
+   completion: previously the bulk `<form action="/settings">` covered
+   integrations + quality + general in one POST that always submitted
+   all three tabs' fields together, which made HTMX migration awkward
+   (one swap target couldn't represent a per-tab save) and let a Save
+   click on one tab silently re-save the other two. Per-tab subforms
+   isolate the fields to their tab, post to a dedicated endpoint
+   (`/settings/general`), and HTMX-swap just the form region on save
+   so the user gets a green toast + their inputs preserved without a
+   full page render.
+
+   Wrapper id="settings-general-region" is the swap target; the
+   handler returns this same partial on the HTMX path so successful
+   saves replace the form in place. The non-HTMX path returns the
+   full SettingsTemplate and the browser does a normal redirect-style
+   reload — progressive enhancement for users with JS off. #}
+<div id="settings-general-region">
+    {% if let Some(msg) = message %}
+    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Settings saved">{{ msg }}</div>
+    {% endif %}
+    {% if let Some(err) = error %}
+    <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Settings error">{{ err }}</div>
+    {% endif %}
+
+    <form method="post" action="/settings/general" class="settings-form"
+          hx-post="/settings/general"
+          hx-target="#settings-general-region"
+          hx-swap="outerHTML">
+{%~ include "partials/settings/general.html" ~%}
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+    </form>
+</div>
