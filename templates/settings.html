@@ -29,26 +29,27 @@
     <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
 </div>
 
-{# Issue #129 Phase 1 completion — General tab now has its own subform
-   (`/settings/general`) that posts only General fields. Integrations
-   and Quality remain on the legacy bulk form `/settings` for now;
-   their splits are queued as separate commits. The bulk form is
-   skipped on tab=general so we don't render two forms with overlapping
-   fields. #}
-{% if tab == "integrations" || tab == "quality" %}
+{# Issue #129 Phase 1 completion — General + Quality tabs now have
+   their own subforms (`/settings/general`, `/settings/quality`) that
+   post only their tab's fields. Integrations stays on the legacy
+   bulk form `/settings` for now; its split is queued as a separate
+   commit (more fields, more side effects — Jellyfin connection
+   test, etc.). The bulk form is skipped on tab=general / tab=quality
+   so we don't render two forms with overlapping fields. #}
+{% if tab == "integrations" %}
 <form method="post" action="/settings" class="settings-form">
     <input type="hidden" name="tab" value="{{ tab }}">
 
-    <div class="settings-tab-panel {% if tab == "integrations" %}active{% endif %}">
+    <div class="settings-tab-panel active">
 {%~ include "partials/settings/integrations.html" ~%}
-    </div>
-
-    <div class="settings-tab-panel {% if tab == "quality" %}active{% endif %}">
-{%~ include "partials/settings/quality.html" ~%}
     </div>
 
     <button type="submit" class="btn btn-primary">Save Settings</button>
 </form>
+{% endif %}
+
+{% if tab == "quality" %}
+{%~ include "partials/settings/quality_form.html" ~%}
 {% endif %}
 
 {% if tab == "general" %}

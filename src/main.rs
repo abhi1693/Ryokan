@@ -731,6 +731,10 @@ async fn main() {
             "/settings/general",
             post(handlers::settings::settings_general_submit),
         )
+        .route(
+            "/settings/quality",
+            post(handlers::settings::settings_quality_submit),
+        )
         // Issue #62 PR A: AL + MAL OAuth endpoints. `start` GETs
         // redirect the user to the provider; `submit` POSTs accept
         // the pasted token/code, validate, and persist via

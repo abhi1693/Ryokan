@@ -406,6 +406,32 @@ pub struct JellyfinTestForm {
 /// on success and a red one on failure; previously the JS just wrote
 /// plain text into the same element, so the only visible change is
 /// color.
+/// Issue #129 Phase 1 completion — Quality tab subform. Companion to
+/// `GeneralForm`; same per-tab-isolation rationale.
+#[derive(Deserialize)]
+pub struct QualityForm {
+    preferred_groups: String,
+    blocked_groups: String,
+    preferred_source: String,
+    preferred_resolution: String,
+    cutoff_source: String,
+    cutoff_resolution: String,
+    finished_series_quality: String,
+    prefer_subs: String,
+    upgrade_search_enabled: Option<String>,
+    seadex_enabled: Option<String>,
+    default_custom_query_tokens: Option<String>,
+    default_restrict_to_uploader: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/settings/quality_form.html")]
+pub struct QualityFormPartial {
+    pub config: config::Config,
+    pub message: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Issue #129 Phase 1 completion — General tab subform. Replaces the
 /// bulk-form path through `settings_submit` for the General tab so a
 /// Save click only POSTs General fields (not the previously-bundled
@@ -853,12 +879,61 @@ pub async fn settings_submit(
             .to_string(),
         jellyfin_url: form.jellyfin_url.trim().trim_end_matches('/').to_string(),
         jellyfin_api_key: form.jellyfin_api_key.trim().to_string(),
-        preferred_groups: form.preferred_groups.trim().to_string(),
-        blocked_groups: form.blocked_groups.trim().to_string(),
-        preferred_source: validate_source(&form.preferred_source, "web"),
-        preferred_resolution: validate_resolution(&form.preferred_resolution, "1080"),
-        cutoff_source: validate_cutoff_source(&form.cutoff_source, "bluray"),
-        cutoff_resolution: validate_resolution(&form.cutoff_resolution, "1080"),
+        // Quality-tab fields (preferred_groups, blocked_groups,
+        // preferred_*/cutoff_*, finished_series_quality, prefer_subs)
+        // are now owned by the dedicated `/settings/quality` subform
+        // handler. Same gating shape as the General fields below:
+        // preserve from `existing_cfg` when this isn't a tab=quality
+        // POST so an Integrations save through the legacy bulk form
+        // doesn't blank out Quality knobs.
+        preferred_groups: if form.tab.as_deref() == Some("quality") {
+            form.preferred_groups.trim().to_string()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.preferred_groups.clone())
+                .unwrap_or_default()
+        },
+        blocked_groups: if form.tab.as_deref() == Some("quality") {
+            form.blocked_groups.trim().to_string()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.blocked_groups.clone())
+                .unwrap_or_default()
+        },
+        preferred_source: if form.tab.as_deref() == Some("quality") {
+            validate_source(&form.preferred_source, "web")
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.preferred_source.clone())
+                .unwrap_or_else(|| "web".to_string())
+        },
+        preferred_resolution: if form.tab.as_deref() == Some("quality") {
+            validate_resolution(&form.preferred_resolution, "1080")
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.preferred_resolution.clone())
+                .unwrap_or_else(|| "1080".to_string())
+        },
+        cutoff_source: if form.tab.as_deref() == Some("quality") {
+            validate_cutoff_source(&form.cutoff_source, "bluray")
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.cutoff_source.clone())
+                .unwrap_or_else(|| "bluray".to_string())
+        },
+        cutoff_resolution: if form.tab.as_deref() == Some("quality") {
+            validate_resolution(&form.cutoff_resolution, "1080")
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.cutoff_resolution.clone())
+                .unwrap_or_else(|| "1080".to_string())
+        },
         // Legacy combined tier columns — kept one release for rollback.
         // No longer user-editable; carried forward from the existing row.
         quality_profile: existing_cfg
@@ -869,9 +944,16 @@ pub async fn settings_submit(
             .as_ref()
             .map(|c| c.quality_cutoff.clone())
             .unwrap_or_else(|| "bd_1080".to_string()),
-        finished_series_quality: match form.finished_series_quality.as_str() {
-            "same" | "prefer_bd" | "bd_only" => form.finished_series_quality,
-            _ => "prefer_bd".to_string(),
+        finished_series_quality: if form.tab.as_deref() == Some("quality") {
+            match form.finished_series_quality.as_str() {
+                "same" | "prefer_bd" | "bd_only" => form.finished_series_quality,
+                _ => "prefer_bd".to_string(),
+            }
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.finished_series_quality.clone())
+                .unwrap_or_else(|| "prefer_bd".to_string())
         },
         // General-tab fields (media_root, title_language, rss_*, post_processing_*,
         // search_on_monitoring_change, disable_nyaa_rss) are now owned by the
@@ -971,7 +1053,11 @@ pub async fn settings_submit(
                 .map(|c| c.search_on_monitoring_change)
                 .unwrap_or(false)
         },
-        prefer_subs: form.prefer_subs == "1",
+        prefer_subs: if form.tab.as_deref() == Some("quality") {
+            form.prefer_subs == "1"
+        } else {
+            existing_cfg.as_ref().map(|c| c.prefer_subs).unwrap_or(true)
+        },
         allow_non_english: existing_cfg
             .as_ref()
             .map(|c| c.allow_non_english)
@@ -1400,6 +1486,160 @@ async fn general_response(
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: "general".to_string(),
+        config: cfg,
+        groups,
+        suggestions,
+        custom_formats,
+        custom_format_edit: None,
+        custom_format_min_score_display,
+        custom_format_import_review: None,
+        message,
+        error,
+        indexer_edit: None,
+        version: env!("CARGO_PKG_VERSION"),
+        external_account,
+        title_language,
+        indexers,
+        indexer_catalog: crate::services::indexer_catalog::SEEDED,
+        indexer_seed: None,
+        download_clients,
+        direct_rss_feeds,
+    };
+    Html(template.render().unwrap_or_default()).into_response()
+}
+
+/// Issue #129 Phase 1 completion — Quality tab dedicated POST handler.
+/// Mirrors `settings_general_submit`. Owns only Quality-tab fields;
+/// preserves every other tab's fields via struct-update on existing
+/// config.
+pub async fn settings_quality_submit(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<QualityForm>,
+) -> Response {
+    let existing_cfg = match config::get_config(&state.db).await {
+        Ok(Some(cfg)) => cfg,
+        _ => {
+            let err = "No config row found — run /setup first.".to_string();
+            return quality_response(&state, None, None, Some(err), is_htmx).await;
+        }
+    };
+
+    let cfg = config::Config {
+        preferred_groups: form.preferred_groups.trim().to_string(),
+        blocked_groups: form.blocked_groups.trim().to_string(),
+        preferred_source: validate_source(&form.preferred_source, "web"),
+        preferred_resolution: validate_resolution(&form.preferred_resolution, "1080"),
+        cutoff_source: validate_cutoff_source(&form.cutoff_source, "bluray"),
+        cutoff_resolution: validate_resolution(&form.cutoff_resolution, "1080"),
+        finished_series_quality: match form.finished_series_quality.as_str() {
+            "same" | "prefer_bd" | "bd_only" => form.finished_series_quality,
+            _ => "prefer_bd".to_string(),
+        },
+        prefer_subs: form.prefer_subs == "1",
+        upgrade_search_enabled: form.upgrade_search_enabled.is_some(),
+        seadex_enabled: form.seadex_enabled.is_some(),
+        default_custom_query_tokens: form
+            .default_custom_query_tokens
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        default_restrict_to_uploader: form
+            .default_restrict_to_uploader
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        ..existing_cfg
+    };
+
+    if let Err(e) = config::save_config(&state.db, &cfg).await {
+        logger::error(
+            &state.db,
+            LogCategory::System,
+            "Failed to save Quality settings",
+            &e.to_string(),
+        )
+        .await;
+        return quality_response(
+            &state,
+            Some(cfg),
+            None,
+            Some(format!("Failed to save: {}", e)),
+            is_htmx,
+        )
+        .await;
+    }
+
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "Settings saved (Quality)",
+        "",
+    )
+    .await;
+
+    quality_response(
+        &state,
+        Some(cfg),
+        Some("Settings saved.".to_string()),
+        None,
+        is_htmx,
+    )
+    .await
+}
+
+/// Render the Quality response in either HTMX (subform partial) or
+/// non-HTMX (full SettingsTemplate) shape. Mirrors `general_response`.
+async fn quality_response(
+    state: &AppState,
+    cfg: Option<config::Config>,
+    message: Option<String>,
+    error: Option<String>,
+    is_htmx: bool,
+) -> Response {
+    let cfg = match cfg {
+        Some(c) => c,
+        None => match config::get_config(&state.db).await {
+            Ok(Some(c)) => c,
+            _ => config::Config::default(),
+        },
+    };
+
+    if is_htmx {
+        return Html(
+            QualityFormPartial {
+                config: cfg,
+                message,
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response();
+    }
+
+    let groups = load_groups(&state.db).await;
+    let suggestions = load_suggestions(&state.db).await;
+    let custom_formats = load_custom_formats_view(&state.db).await;
+    let external_account = crate::models::external_accounts::get_current(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(ExternalAccountView::from_model);
+    let custom_format_min_score_display = min_score_display(cfg.custom_format_minimum_score);
+    let title_language = cfg.title_language.clone();
+    let indexers = crate::models::indexers::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let download_clients = crate::models::download_clients::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let template = SettingsTemplate {
+        page: "settings".to_string(),
+        tab: "quality".to_string(),
         config: cfg,
         groups,
         suggestions,
