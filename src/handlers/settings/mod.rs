@@ -7,6 +7,7 @@ use axum::{
 };
 use axum_htmx::HxRequest;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
@@ -21,6 +22,26 @@ pub mod direct_rss_feeds;
 pub mod download_clients;
 pub mod indexers;
 use custom_formats::ImportReviewView;
+
+/// Process-wide serializer for `config` row read-modify-write across
+/// every Settings save handler — the per-tab subforms
+/// (`settings_general_submit`, `settings_quality_submit`,
+/// `settings_integrations_submit`) and the legacy bulk
+/// `settings_submit`. Each handler reads `existing_cfg`, builds a new
+/// `Config` via struct-update, and writes it back. Without this lock,
+/// two concurrent saves (the user has Settings open in two tabs and
+/// hits Save in both) can interleave: A reads, B reads, A writes,
+/// B writes — B's write is built on A's pre-modification snapshot,
+/// silently losing A's changes.
+///
+/// Mutex (not transaction with `BEGIN IMMEDIATE`) because Ryokan is
+/// single-process; a `tokio::sync::Mutex` matches the existing
+/// `RSS_SYNC_LOCK` / `EXTERNAL_SYNC_LOCK` / `POST_PROC_LOCK` pattern
+/// for serializing handler-level work that read-modify-writes shared
+/// state. A multi-process deployment (which Ryokan doesn't support
+/// today) would need DB-level locking instead.
+static CONFIG_WRITE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// View-model wrapper rendered on the Custom Formats tab. Surfaces
 /// parse errors (so the user can spot broken CFs without tailing logs)
@@ -934,6 +955,14 @@ pub async fn settings_submit(
     State(state): State<AppState>,
     Form(form): Form<SettingsForm>,
 ) -> Html<String> {
+    // Hold `CONFIG_WRITE_LOCK` — the legacy bulk handler does the
+    // same read-modify-write the per-tab subforms do (read existing
+    // cfg, build a merged Config via the per-field tab-aware
+    // preserve logic, save), so it's exposed to the same race.
+    // Even though the UI no longer routes here, an external script
+    // posting to `/settings` would race with a concurrent per-tab
+    // save without this lock.
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
     // Load the existing config row once and derive every non-form
     // field from it. The previous code fetched it twice back-to-back
     // (once for force_mal_fallback, once for the rest), which was
@@ -1357,6 +1386,10 @@ pub async fn settings_submit(
         };
         return Html(template.render().unwrap_or_default());
     }
+    // Drop the write lock now that the read-modify-write is done —
+    // the legacy bulk handler also has a Jellyfin connection-test
+    // side effect (Integrations branch below) that's the slow path.
+    drop(_guard);
 
     logger::info(&state.db, LogCategory::System, "Settings saved", "").await;
     let mut notices: Vec<String> = vec!["Settings saved.".to_string()];
@@ -1483,6 +1516,12 @@ pub async fn settings_general_submit(
     HxRequest(is_htmx): HxRequest,
     Form(form): Form<GeneralForm>,
 ) -> Response {
+    // Hold `CONFIG_WRITE_LOCK` for the full read-modify-write so a
+    // concurrent save through any other Settings handler can't
+    // interleave between our `get_config` and `save_config` and lose
+    // our struct-update merge. The lock spans get_config → save_config
+    // (any post-save side effects can run after we drop it).
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
     let existing_cfg = match config::get_config(&state.db).await {
         Ok(Some(cfg)) => cfg,
         // No config row yet (first-run): bail with a friendly error
@@ -1532,6 +1571,10 @@ pub async fn settings_general_submit(
         )
         .await;
     }
+    // Drop the write lock now that the read-modify-write is done.
+    // Post-save work (logger, notices, response render) doesn't
+    // need it, and a concurrent saver shouldn't be blocked by it.
+    drop(_guard);
 
     logger::info(
         &state.db,
@@ -1615,6 +1658,9 @@ pub async fn settings_quality_submit(
     HxRequest(is_htmx): HxRequest,
     Form(form): Form<QualityForm>,
 ) -> Response {
+    // Hold `CONFIG_WRITE_LOCK` — see `settings_general_submit` for the
+    // read-modify-write race rationale.
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
     let existing_cfg = match config::get_config(&state.db).await {
         Ok(Some(cfg)) => cfg,
         _ => {
@@ -1667,6 +1713,8 @@ pub async fn settings_quality_submit(
         )
         .await;
     }
+    // See `settings_general_submit` for the lock-drop rationale.
+    drop(_guard);
 
     logger::info(
         &state.db,
@@ -1748,6 +1796,13 @@ pub async fn settings_integrations_submit(
     HxRequest(is_htmx): HxRequest,
     Form(form): Form<IntegrationsForm>,
 ) -> Response {
+    // Hold `CONFIG_WRITE_LOCK` — see `settings_general_submit` for the
+    // read-modify-write race rationale. We drop the lock explicitly
+    // after `save_config` completes (below) so the Jellyfin
+    // connection-test side effect — which can hang for the full
+    // connect-timeout when the URL points at an unreachable host —
+    // doesn't block other Settings saves on its network round trip.
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
     let existing_cfg = match config::get_config(&state.db).await {
         Ok(Some(cfg)) => cfg,
         _ => {
@@ -1838,6 +1893,11 @@ pub async fn settings_integrations_submit(
         )
         .await;
     }
+    // Drop before the Jellyfin connection-test side effect: that
+    // network probe is the slow path of this handler and there's no
+    // reason to make a concurrent saver on a different tab wait
+    // through it.
+    drop(_guard);
 
     logger::info(
         &state.db,
@@ -3071,6 +3131,75 @@ mod tests {
             assert!(saved.sonarr_enabled);
             assert_eq!(saved.grab_preview_mode, "never");
             assert_eq!(saved.external_sync_interval_minutes, 45);
+        }
+
+        /// Regression for PR 133 review item #3: read-modify-write
+        /// race across concurrent saves. Without `CONFIG_WRITE_LOCK`,
+        /// the General handler reading existing_cfg + the Quality
+        /// handler reading existing_cfg in parallel both see the
+        /// pre-mutation row, then each writes back its own merge —
+        /// the second writer's write loses whatever the first
+        /// writer changed (because the second writer's struct-update
+        /// merge built on a stale snapshot).
+        ///
+        /// With the lock, the second handler waits for the first to
+        /// commit, reads the post-first-save row, and merges its
+        /// change on top. Both fields land.
+        ///
+        /// Two concurrent saves via `tokio::join!`: General sets
+        /// `title_language = "romaji"`, Quality sets
+        /// `preferred_resolution = "2160"`. Final config must have
+        /// **both** (the loser's write would silently drop one).
+        #[tokio::test]
+        async fn concurrent_general_and_quality_saves_dont_lose_updates() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+
+            let general_state = state.clone();
+            let quality_state = state.clone();
+            let general = settings_general_submit(
+                State(general_state),
+                HxRequest(false),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "romaji".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            );
+            let quality = settings_quality_submit(
+                State(quality_state),
+                HxRequest(false),
+                axum::Form(QualityForm {
+                    preferred_groups: String::new(),
+                    blocked_groups: String::new(),
+                    preferred_source: "web".to_string(),
+                    preferred_resolution: "2160".to_string(),
+                    cutoff_source: "bluray".to_string(),
+                    cutoff_resolution: "1080".to_string(),
+                    finished_series_quality: "prefer_bd".to_string(),
+                    prefer_subs: "1".to_string(),
+                    upgrade_search_enabled: None,
+                    seadex_enabled: None,
+                    default_custom_query_tokens: None,
+                    default_restrict_to_uploader: None,
+                }),
+            );
+            let (_a, _b) = tokio::join!(general, quality);
+
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            // Both handlers' field changes must land — interleaving
+            // would have dropped one of them.
+            assert_eq!(saved.title_language, "romaji");
+            assert_eq!(saved.preferred_resolution, "2160");
         }
 
         /// Companion regression: the early-return path when the
