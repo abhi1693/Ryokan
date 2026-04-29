@@ -119,16 +119,42 @@ function stopPolling() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
-// Guarded: only wires up the poll toggle when the logs tab is rendered.
-// On other tabs (#poll-toggle is absent) this is a silent no-op.
-(function () {
-    const pollToggle = document.getElementById('poll-toggle');
-    if (!pollToggle) return;
-    pollToggle.addEventListener('change', function () {
-        if (this.checked) startPolling(); else stopPolling();
-    });
-    startPolling();
-})();
+// Page-lifecycle-aware logs poller. Phase B of the hx-boost rollout:
+// boost-swaps don't re-fire DOMContentLoaded, and a module-scope IIFE
+// only runs on initial document load. Without lifecycle wiring the
+// poll-toggle binding leaks (toggle clicked on the second visit
+// changes nothing because the listener is bound to the prior page's
+// element) and `startPolling()` accumulates duplicate intervals on
+// repeat visits.
+//
+// `mount` re-resolves the toggle element each entry, binds the change
+// listener, starts polling. `unmount` stops polling. The toggle's
+// own change handler still calls start/stop directly so the user-
+// driven toggle works regardless of nav state.
+window.ryokanRegisterPageInit('system-logs-poll', {
+    check: function () {
+        return !!document.getElementById('poll-toggle');
+    },
+    mount: function () {
+        const pollToggle = document.getElementById('poll-toggle');
+        if (!pollToggle) return; // defensive; check() should preclude this
+        // `data-bound` flag mirrors the pattern in settings.js: a
+        // re-mount on the SAME page (rare — shouldn't happen via
+        // boost since check() returning the same truthy doesn't
+        // re-fire mount, but a future htmx.process call elsewhere
+        // could trigger it) is idempotent w.r.t. event listeners.
+        if (!pollToggle.dataset.ryokanBound) {
+            pollToggle.addEventListener('change', function () {
+                if (this.checked) startPolling(); else stopPolling();
+            });
+            pollToggle.dataset.ryokanBound = '1';
+        }
+        startPolling();
+    },
+    unmount: function () {
+        stopPolling();
+    },
+});
 
 // ── RSS tab ─────────────────────────────────────────────────────────────
 

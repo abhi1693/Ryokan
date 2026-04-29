@@ -752,5 +752,12 @@ window.ryokanCopy = function (text, btn) {
     window.ryokanRefreshTimestamps = refresh;
 
     window.addEventListener('DOMContentLoaded', refresh);
+    // Phase B of the hx-boost rollout — also refresh on every
+    // boosted swap. Without this, navigating to a page with new
+    // [data-ts] nodes via boost would leave them showing the raw
+    // timestamp until the 30s `setInterval` tick caught up.
+    if (window.htmx && typeof window.htmx.onLoad === 'function') {
+        window.htmx.onLoad(refresh);
+    }
     setInterval(refresh, 30000);
 })();
