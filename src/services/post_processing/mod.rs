@@ -772,6 +772,33 @@ async fn import_torrent(
             continue;
         }
 
+        // Skip files this grab doesn't claim. SAB's `storage` field
+        // can be the parent complete dir (not the per-job folder),
+        // making `walk_video_files` sweep in stranger episodes from
+        // sibling jobs. Without this guard those strangers would
+        // get hardlinked AND trigger upgrade-replace on existing
+        // grabs for those episodes (incorrectly marking unrelated
+        // grabs as `replaced`). Batch grabs and Phase-2 routed
+        // imports legitimately span multiple episodes — for those,
+        // `claims_this_episode` permits everything.
+        let claims_this_episode = grab.is_batch
+            || routes_by_file.contains_key(file_idx)
+            || grab.episode_numbers.is_empty()
+            || grab.episode_numbers.contains(&raw_ep_num);
+        if !claims_this_episode {
+            logger::debug(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Skipping stranger file '{}' (parsed ep {}) — grab #{} only claims {:?}",
+                    filename_only, raw_ep_num, grab.id, grab.episode_numbers
+                ),
+                "",
+            )
+            .await;
+            continue;
+        }
+
         let ep_title = ctx
             .ep_meta
             .get(&ep_num)
@@ -1033,28 +1060,11 @@ async fn import_torrent(
                 )
                 .await;
                 imported_count += 1;
-                // Record the source path we imported from — but only
-                // if this file's parsed episode is one this grab
-                // actually claims. Without the filter, a wide walk
-                // (SAB returning the parent complete dir as `storage`,
-                // pre `canonical_job_path` narrowing) sweeps in
-                // stranger episodes from sibling SAB jobs and stamps
-                // them onto this grab. Deleting one episode then
-                // finds the wrong grab's stamps and over-removes.
-                //
-                // Batch grabs (`is_batch = 1`) and Phase-2 routed
-                // sibling imports legitimately import multiple
-                // episodes via one grab — for those, accept all
-                // imported files. Single-episode grabs check that
-                // the parsed `raw_ep_num` is in the grab's claimed
-                // `episode_numbers`.
-                let claims_this_episode = grab.is_batch
-                    || routes_by_file.contains_key(file_idx)
-                    || grab.episode_numbers.is_empty()
-                    || grab.episode_numbers.contains(&raw_ep_num);
-                if claims_this_episode {
-                    imported_source_paths.push(src.display().to_string());
-                }
+                // The early `claims_this_episode` guard above already
+                // filtered out stranger files for this grab — so any
+                // file reaching this point is a legitimate import,
+                // and its source path is safe to stamp.
+                imported_source_paths.push(src.display().to_string());
                 touched_series.insert(target_series_id);
                 logger::info(
                     &state.db,
