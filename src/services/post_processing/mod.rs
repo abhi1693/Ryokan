@@ -42,6 +42,39 @@ pub static LIBRARY_CLASSIFY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
 // string set, which silently skipped Deluge's completed torrents
 // forever (#63 Phase 2 regression).
 
+/// Decide whether a walked file's parsed episode number is one this
+/// grab's import should claim.
+///
+/// SAB's `storage` field can be the parent complete dir (not the
+/// per-job folder), so `walk_video_files` may sweep in stranger
+/// episodes from sibling jobs. Without a guard, those strangers get
+/// hardlinked AND trigger upgrade-replace on existing grabs for those
+/// episodes — which incorrectly flips unrelated grabs to `replaced`.
+///
+/// Permissive cases (return `true`):
+///   - `is_batch = 1` — batches legitimately span many episodes.
+///   - File is covered by a route row — Phase-2 sibling-routed
+///     imports are allowed to import any episode the route claims.
+///   - `episode_numbers` is empty — legacy grabs from before the
+///     column was reliably populated. Permissive-on-empty preserves
+///     backward compatibility for those rows; tightening to
+///     "everything must claim explicitly" would silently break
+///     imports for any grab whose episode list never got stamped.
+///
+/// Strict case: parsed `raw_ep_num` must appear in
+/// `grab.episode_numbers`.
+pub(crate) fn grab_claims_episode(
+    is_batch: bool,
+    file_in_routes: bool,
+    grab_episode_numbers: &[i32],
+    raw_ep_num: i32,
+) -> bool {
+    is_batch
+        || file_in_routes
+        || grab_episode_numbers.is_empty()
+        || grab_episode_numbers.contains(&raw_ep_num)
+}
+
 pub(crate) fn is_video_file(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(
@@ -565,6 +598,22 @@ async fn import_torrent(
         let walk_root = Path::new(&source_base);
         if walk_root.is_dir() {
             files = walk_video_files(walk_root);
+        } else {
+            // SAB's `canonical_job_path` case-3 candidate (constructed
+            // as `<storage>/<title>/` when SAB reports the parent
+            // complete dir as `storage`) doesn't always resolve on
+            // Ryokan's host view. Surface the miss here so a user
+            // reporting "SAB job completed but never imported" has a
+            // log line to grep for; without it the grab silently
+            // stays pending and `client.get_files()` empty leaves no
+            // breadcrumb for what went wrong.
+            tracing::debug!(
+                source_base = %source_base,
+                grab_id = grab.id,
+                hash = %grab.hash,
+                "import_torrent: source_base is not a directory on Ryokan's view — \
+                 SAB-canonical path may not resolve through download_path translation"
+            );
         }
     }
 
@@ -772,19 +821,14 @@ async fn import_torrent(
             continue;
         }
 
-        // Skip files this grab doesn't claim. SAB's `storage` field
-        // can be the parent complete dir (not the per-job folder),
-        // making `walk_video_files` sweep in stranger episodes from
-        // sibling jobs. Without this guard those strangers would
-        // get hardlinked AND trigger upgrade-replace on existing
-        // grabs for those episodes (incorrectly marking unrelated
-        // grabs as `replaced`). Batch grabs and Phase-2 routed
-        // imports legitimately span multiple episodes — for those,
-        // `claims_this_episode` permits everything.
-        let claims_this_episode = grab.is_batch
-            || routes_by_file.contains_key(file_idx)
-            || grab.episode_numbers.is_empty()
-            || grab.episode_numbers.contains(&raw_ep_num);
+        // Skip stranger files. See `grab_claims_episode` doc for the
+        // full rationale and matrix of cases.
+        let claims_this_episode = grab_claims_episode(
+            grab.is_batch,
+            routes_by_file.contains_key(file_idx),
+            &grab.episode_numbers,
+            raw_ep_num,
+        );
         if !claims_this_episode {
             logger::debug(
                 &state.db,

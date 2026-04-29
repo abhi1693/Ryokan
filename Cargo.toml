@@ -95,6 +95,11 @@ name = "htmx_browser_e2e_settings_subforms"
 path = "tests/htmx_browser_e2e_settings_subforms.rs"
 required-features = ["test-support", "browser-e2e"]
 
+[[test]]
+name = "htmx_browser_e2e_settings_modals"
+path = "tests/htmx_browser_e2e_settings_modals.rs"
+required-features = ["test-support", "browser-e2e"]
+
 [dependencies]
 # Web framework + async runtime
 axum = { version = "0.8", features = ["macros"] }

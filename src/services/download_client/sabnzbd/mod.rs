@@ -640,20 +640,17 @@ impl DownloadClient for SabClient {
         let zero = "0";
         let del_value = if delete_files { one } else { zero };
 
+        // Check history first; queue's `report(output)` fires on every
+        // call, including unknown nzo_ids, so a queue-first lookup
+        // would phantom-succeed on every post-import delete and never
+        // hit history with `del_files=1`. See module-level docs.
         let mut q: Vec<(&str, &str)> = vec![
             ("mode", "history"),
             ("name", "delete"),
             ("value", info_hash),
             ("del_files", del_value),
         ];
-        let resp = self
-            .http
-            .get(self.endpoint())
-            .query(&self.make_query(&q))
-            .send()
-            .await
-            .map_err(|e| format!("SAB request failed: {e}"))?;
-        let body: StatusResponse = resp.json().await.unwrap_or_default();
+        let body = self.send_delete_probe(&q).await?;
         if body.status {
             return Ok(());
         }
@@ -665,14 +662,7 @@ impl DownloadClient for SabClient {
             ("value", info_hash),
             ("del_files", del_value),
         ];
-        let resp = self
-            .http
-            .get(self.endpoint())
-            .query(&self.make_query(&q))
-            .send()
-            .await
-            .map_err(|e| format!("SAB request failed: {e}"))?;
-        let body: StatusResponse = resp.json().await.unwrap_or_default();
+        let body = self.send_delete_probe(&q).await?;
         if body.status {
             Ok(())
         } else {
@@ -845,6 +835,37 @@ impl SabClient {
             }
         }
         None
+    }
+
+    /// One leg of the two-leg delete (history first, then queue
+    /// fallback). Mirrors the auth-aware error path that `add_torrent`
+    /// uses: a 401/403 response captures SAB's plain-text body so the
+    /// user sees `API Key Incorrect` instead of the unhelpful
+    /// `SAB delete failed: no error provided` that comes out when
+    /// `resp.json().unwrap_or_default()` parses a non-JSON error page
+    /// into an empty `StatusResponse`.
+    async fn send_delete_probe(&self, params: &[(&str, &str)]) -> Result<StatusResponse, String> {
+        let resp = self
+            .http
+            .get(self.endpoint())
+            .query(&self.make_query(params))
+            .send()
+            .await
+            .map_err(|e| format!("SAB request failed: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let detail = if matches!(status.as_u16(), 401 | 403) {
+                resp.text().await.unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let trimmed = detail.trim();
+            if trimmed.is_empty() {
+                return Err(format!("SAB delete returned HTTP {status}"));
+            }
+            return Err(format!("SAB delete returned HTTP {status}: {trimmed}"));
+        }
+        Ok(resp.json().await.unwrap_or_default())
     }
 
     async fn queue_action(&self, name: &str, nzo_id: &str) -> Result<(), String> {

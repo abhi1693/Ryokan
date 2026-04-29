@@ -149,7 +149,7 @@ async fn path_has_inode(_path: &str, _inode: u64) -> bool {
 /// jobs in it. Earlier versions walked up unbounded — for users
 /// whose `complete/` happened to contain only this one job, that
 /// removed the entire complete dir.
-async fn remove_stamped_source_paths(sources: &[String]) -> Vec<std::path::PathBuf> {
+pub(super) async fn remove_stamped_source_paths(sources: &[String]) -> Vec<std::path::PathBuf> {
     let owned: Vec<std::path::PathBuf> = sources.iter().map(std::path::PathBuf::from).collect();
     tokio::task::spawn_blocking(move || {
         let mut removed = Vec::new();
@@ -326,15 +326,31 @@ pub async fn delete_episode_file(
                     grabbed_torrents::imported_source_paths_for_series(&state.db, tracked.id)
                         .await
                         .unwrap_or_default();
-                let mut targets: Vec<String> = Vec::new();
+                // Flatten every grab's stamps into one path list; for
+                // a series with N imported grabs and ~M stamps each,
+                // this is N×M paths to stat. Run the inode probes in
+                // parallel via `buffer_unordered(8)` so a series with
+                // a deep history doesn't serialize ~hundreds of
+                // `spawn_blocking` round-trips through the blocking
+                // pool while the user waits on the delete handler.
+                let mut all_paths: Vec<String> = Vec::new();
                 for (_grab_id, json) in &bundles {
                     let paths: Vec<String> = serde_json::from_str(json).unwrap_or_default();
-                    for p in paths {
-                        if path_has_inode(&p, ino).await {
-                            targets.push(p);
-                        }
-                    }
+                    all_paths.extend(paths);
                 }
+                use futures_util::StreamExt;
+                let targets: Vec<String> = futures_util::stream::iter(all_paths)
+                    .map(|p| async move {
+                        if path_has_inode(&p, ino).await {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    })
+                    .buffer_unordered(8)
+                    .filter_map(|opt| async move { opt })
+                    .collect()
+                    .await;
                 if !targets.is_empty() {
                     let removed = remove_stamped_source_paths(&targets).await;
                     if !removed.is_empty() {
