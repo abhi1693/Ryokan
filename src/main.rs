@@ -724,6 +724,23 @@ async fn main() {
             "/settings",
             get(handlers::settings::settings_page).post(handlers::settings::settings_submit),
         )
+        // Issue #129 Phase 1 completion — per-tab subform handlers.
+        // Each tab POSTs only its own fields to its dedicated route;
+        // the legacy `/settings` POST above is the no-UI fallback for
+        // any external bookmark or script still hitting the bulk
+        // endpoint.
+        .route(
+            "/settings/general",
+            post(handlers::settings::settings_general_submit),
+        )
+        .route(
+            "/settings/quality",
+            post(handlers::settings::settings_quality_submit),
+        )
+        .route(
+            "/settings/integrations",
+            post(handlers::settings::settings_integrations_submit),
+        )
         // Issue #62 PR A: AL + MAL OAuth endpoints. `start` GETs
         // redirect the user to the provider; `submit` POSTs accept
         // the pasted token/code, validate, and persist via

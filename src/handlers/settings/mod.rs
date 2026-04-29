@@ -7,6 +7,7 @@ use axum::{
 };
 use axum_htmx::HxRequest;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
@@ -21,6 +22,26 @@ pub mod direct_rss_feeds;
 pub mod download_clients;
 pub mod indexers;
 use custom_formats::ImportReviewView;
+
+/// Process-wide serializer for `config` row read-modify-write across
+/// every Settings save handler — the per-tab subforms
+/// (`settings_general_submit`, `settings_quality_submit`,
+/// `settings_integrations_submit`) and the legacy bulk
+/// `settings_submit`. Each handler reads `existing_cfg`, builds a new
+/// `Config` via struct-update, and writes it back. Without this lock,
+/// two concurrent saves (the user has Settings open in two tabs and
+/// hits Save in both) can interleave: A reads, B reads, A writes,
+/// B writes — B's write is built on A's pre-modification snapshot,
+/// silently losing A's changes.
+///
+/// Mutex (not transaction with `BEGIN IMMEDIATE`) because Ryokan is
+/// single-process; a `tokio::sync::Mutex` matches the existing
+/// `RSS_SYNC_LOCK` / `EXTERNAL_SYNC_LOCK` / `POST_PROC_LOCK` pattern
+/// for serializing handler-level work that read-modify-writes shared
+/// state. A multi-process deployment (which Ryokan doesn't support
+/// today) would need DB-level locking instead.
+static CONFIG_WRITE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// View-model wrapper rendered on the Custom Formats tab. Surfaces
 /// parse errors (so the user can spot broken CFs without tailing logs)
@@ -406,6 +427,171 @@ pub struct JellyfinTestForm {
 /// on success and a red one on failure; previously the JS just wrote
 /// plain text into the same element, so the only visible change is
 /// color.
+/// Issue #129 Phase 1 completion — Integrations tab subform. Final
+/// piece of the per-tab split. Largest field set of the three:
+/// includes the legacy single-slot download-client columns (qbit_*,
+/// deluge_*, transmission_*, rtorrent_*) carried through as hidden
+/// inputs in `integrations.html` for one-release rollback compat.
+/// They're persisted verbatim from form input — the new
+/// `download_clients` table is the runtime source of truth, but the
+/// columns stay round-trippable through Save so a stale tab doesn't
+/// blank them.
+#[derive(Deserialize)]
+pub struct IntegrationsForm {
+    // Every String field carries `#[serde(default)]` so a hand-
+    // crafted POST that omits any of them deserializes as empty
+    // string rather than 422-ing. The legacy single-slot
+    // `qbit_*` columns are populated via the hidden inputs in
+    // `integrations.html` from the existing config row, so a
+    // browser submit always carries them — but the defaults
+    // are belt-and-braces against a `curl` user or any future
+    // template that drops a hidden input. Same shape every
+    // other Option<String> field already uses.
+    #[serde(default)]
+    active_client: String,
+    #[serde(default)]
+    qbit_url: String,
+    #[serde(default)]
+    qbit_user: String,
+    #[serde(default)]
+    qbit_pass: String,
+    #[serde(default)]
+    qbit_category: String,
+    #[serde(default)]
+    qbit_download_path: String,
+    #[serde(default)]
+    deluge_url: String,
+    #[serde(default)]
+    deluge_password: String,
+    #[serde(default)]
+    deluge_label: String,
+    #[serde(default)]
+    deluge_download_path: String,
+    #[serde(default)]
+    transmission_url: String,
+    #[serde(default)]
+    transmission_user: String,
+    #[serde(default)]
+    transmission_password: String,
+    #[serde(default)]
+    transmission_label: String,
+    #[serde(default)]
+    transmission_download_path: String,
+    #[serde(default)]
+    rtorrent_url: String,
+    #[serde(default)]
+    rtorrent_user: String,
+    #[serde(default)]
+    rtorrent_password: String,
+    #[serde(default)]
+    rtorrent_label: String,
+    #[serde(default)]
+    rtorrent_download_path: String,
+    #[serde(default)]
+    jellyfin_url: String,
+    #[serde(default)]
+    jellyfin_api_key: String,
+    /// Checkboxes + their paired API keys — unchecked / unset
+    /// omits the field; `#[serde(default)]` maps the absence to
+    /// `None`.
+    #[serde(default)]
+    sonarr_enabled: Option<String>,
+    #[serde(default)]
+    sonarr_api_key: Option<String>,
+    #[serde(default)]
+    radarr_enabled: Option<String>,
+    #[serde(default)]
+    radarr_api_key: Option<String>,
+    /// #83 — Interactive file-picker trigger policy.
+    #[serde(default)]
+    grab_preview_mode: Option<String>,
+    /// #62 PR B — watch-list sync cadence in minutes. `None` means
+    /// the field was absent from this submission (e.g. no account
+    /// linked, so the input wasn't rendered) and the existing
+    /// value is preserved.
+    #[serde(default)]
+    external_sync_interval_minutes: Option<i32>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/settings/integrations_form.html")]
+pub(crate) struct IntegrationsFormPartial {
+    pub config: config::Config,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    pub external_account: Option<ExternalAccountView>,
+}
+
+/// Issue #129 Phase 1 completion — Quality tab subform. Companion to
+/// `GeneralForm`; same per-tab-isolation rationale.
+#[derive(Deserialize)]
+pub struct QualityForm {
+    preferred_groups: String,
+    blocked_groups: String,
+    preferred_source: String,
+    preferred_resolution: String,
+    cutoff_source: String,
+    cutoff_resolution: String,
+    finished_series_quality: String,
+    prefer_subs: String,
+    /// Checkboxes — unchecked omits the field; `#[serde(default)]`
+    /// makes serde_urlencoded map the absence to `None`.
+    #[serde(default)]
+    upgrade_search_enabled: Option<String>,
+    #[serde(default)]
+    seadex_enabled: Option<String>,
+    #[serde(default)]
+    default_custom_query_tokens: Option<String>,
+    #[serde(default)]
+    default_restrict_to_uploader: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/settings/quality_form.html")]
+pub struct QualityFormPartial {
+    pub config: config::Config,
+    pub message: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Issue #129 Phase 1 completion — General tab subform. Replaces the
+/// bulk-form path through `settings_submit` for the General tab so a
+/// Save click only POSTs General fields (not the previously-bundled
+/// integrations + quality fields too). HTMX path swaps the form
+/// region in place; non-HTMX path falls back to the full
+/// SettingsTemplate render so progressive enhancement holds.
+#[derive(Deserialize)]
+pub struct GeneralForm {
+    media_root: String,
+    title_language: String,
+    /// Checkbox: unchecked omits the field from the POST entirely;
+    /// `#[serde(default)]` makes serde_urlencoded map the absence to
+    /// `None` rather than failing deserialization. Same shape every
+    /// other Option<String> on the per-tab forms uses.
+    #[serde(default)]
+    rss_enabled: Option<String>,
+    rss_interval_minutes: i32,
+    /// Phase 7 PR E — Nyaa-specific RSS opt-out.
+    #[serde(default)]
+    disable_nyaa_rss: Option<String>,
+    #[serde(default)]
+    post_processing_enabled: Option<String>,
+    post_processing_mode: String,
+    /// 1.3.0 — opt-in: trigger auto-search when a series's monitoring
+    /// mode changes. Default off.
+    #[serde(default)]
+    search_on_monitoring_change: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/settings/general_form.html")]
+pub struct GeneralFormPartial {
+    pub config: config::Config,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    pub version: &'static str,
+}
+
 #[derive(Template)]
 #[template(path = "partials/settings/connection_test_result.html")]
 pub struct ConnectionTestResultPartial {
@@ -628,14 +814,30 @@ async fn build_settings_template(
     err: Option<String>,
     import_review: Option<ImportReviewView>,
     template_slug: Option<String>,
+    cfg_override: Option<config::Config>,
 ) -> SettingsTemplate {
     // Fan out the five independent lookups — config row, release-group
     // table, suggestion panel, custom-format list, linked external
     // account — in parallel. The old code issued them sequentially so
     // the wall time was the sum of N round trips even though none
     // depends on the others.
+    //
+    // `cfg_override` skips the config fetch when the caller already
+    // has a freshly-mutated `Config` in hand (the per-tab subform
+    // handlers pass the just-saved cfg through so the rerendered
+    // form reflects the mutation even if the caller got an
+    // intervening write — and on the save-error path so the user's
+    // unsaved input survives the failure render). The remaining 7
+    // lookups still parallelize either way.
+    let cfg_load = async {
+        if cfg_override.is_some() {
+            None
+        } else {
+            config::get_config(&state.db).await.ok().flatten()
+        }
+    };
     let (
-        cfg_res,
+        cfg_loaded,
         groups,
         suggestions,
         custom_formats,
@@ -644,7 +846,7 @@ async fn build_settings_template(
         download_clients_res,
         direct_rss_feeds_res,
     ) = tokio::join!(
-        config::get_config(&state.db),
+        cfg_load,
         load_groups(&state.db),
         load_suggestions(&state.db),
         load_custom_formats_view(&state.db),
@@ -653,7 +855,7 @@ async fn build_settings_template(
         crate::models::download_clients::list_all(&state.db),
         crate::models::direct_rss_feeds::list_all(&state.db),
     );
-    let cfg = cfg_res.ok().flatten().unwrap_or_default();
+    let cfg = cfg_override.or(cfg_loaded).unwrap_or_default();
     // A decrypt failure (tampered blob, key rotation without migration)
     // surfaces here as `Err` — treat as "nothing linked" for render
     // and rely on System → Logs to show the real error. The UI path
@@ -743,6 +945,7 @@ pub async fn settings_page(
         params.err,
         None,
         params.template,
+        None,
     )
     .await;
     Html(template.render().unwrap_or_default())
@@ -752,6 +955,14 @@ pub async fn settings_submit(
     State(state): State<AppState>,
     Form(form): Form<SettingsForm>,
 ) -> Html<String> {
+    // Hold `CONFIG_WRITE_LOCK` — the legacy bulk handler does the
+    // same read-modify-write the per-tab subforms do (read existing
+    // cfg, build a merged Config via the per-field tab-aware
+    // preserve logic, save), so it's exposed to the same race.
+    // Even though the UI no longer routes here, an external script
+    // posting to `/settings` would race with a concurrent per-tab
+    // save without this lock.
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
     // Load the existing config row once and derive every non-form
     // field from it. The previous code fetched it twice back-to-back
     // (once for force_mal_fallback, once for the rest), which was
@@ -822,12 +1033,61 @@ pub async fn settings_submit(
             .to_string(),
         jellyfin_url: form.jellyfin_url.trim().trim_end_matches('/').to_string(),
         jellyfin_api_key: form.jellyfin_api_key.trim().to_string(),
-        preferred_groups: form.preferred_groups.trim().to_string(),
-        blocked_groups: form.blocked_groups.trim().to_string(),
-        preferred_source: validate_source(&form.preferred_source, "web"),
-        preferred_resolution: validate_resolution(&form.preferred_resolution, "1080"),
-        cutoff_source: validate_cutoff_source(&form.cutoff_source, "bluray"),
-        cutoff_resolution: validate_resolution(&form.cutoff_resolution, "1080"),
+        // Quality-tab fields (preferred_groups, blocked_groups,
+        // preferred_*/cutoff_*, finished_series_quality, prefer_subs)
+        // are now owned by the dedicated `/settings/quality` subform
+        // handler. Same gating shape as the General fields below:
+        // preserve from `existing_cfg` when this isn't a tab=quality
+        // POST so an Integrations save through the legacy bulk form
+        // doesn't blank out Quality knobs.
+        preferred_groups: if form.tab.as_deref() == Some("quality") {
+            form.preferred_groups.trim().to_string()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.preferred_groups.clone())
+                .unwrap_or_default()
+        },
+        blocked_groups: if form.tab.as_deref() == Some("quality") {
+            form.blocked_groups.trim().to_string()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.blocked_groups.clone())
+                .unwrap_or_default()
+        },
+        preferred_source: if form.tab.as_deref() == Some("quality") {
+            validate_source(&form.preferred_source, "web")
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.preferred_source.clone())
+                .unwrap_or_else(|| "web".to_string())
+        },
+        preferred_resolution: if form.tab.as_deref() == Some("quality") {
+            validate_resolution(&form.preferred_resolution, "1080")
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.preferred_resolution.clone())
+                .unwrap_or_else(|| "1080".to_string())
+        },
+        cutoff_source: if form.tab.as_deref() == Some("quality") {
+            validate_cutoff_source(&form.cutoff_source, "bluray")
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.cutoff_source.clone())
+                .unwrap_or_else(|| "bluray".to_string())
+        },
+        cutoff_resolution: if form.tab.as_deref() == Some("quality") {
+            validate_resolution(&form.cutoff_resolution, "1080")
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.cutoff_resolution.clone())
+                .unwrap_or_else(|| "1080".to_string())
+        },
         // Legacy combined tier columns — kept one release for rollback.
         // No longer user-editable; carried forward from the existing row.
         quality_profile: existing_cfg
@@ -838,18 +1098,65 @@ pub async fn settings_submit(
             .as_ref()
             .map(|c| c.quality_cutoff.clone())
             .unwrap_or_else(|| "bd_1080".to_string()),
-        finished_series_quality: match form.finished_series_quality.as_str() {
-            "same" | "prefer_bd" | "bd_only" => form.finished_series_quality,
-            _ => "prefer_bd".to_string(),
+        finished_series_quality: if form.tab.as_deref() == Some("quality") {
+            match form.finished_series_quality.as_str() {
+                "same" | "prefer_bd" | "bd_only" => form.finished_series_quality,
+                _ => "prefer_bd".to_string(),
+            }
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.finished_series_quality.clone())
+                .unwrap_or_else(|| "prefer_bd".to_string())
         },
-        media_root: form.media_root.trim().trim_end_matches('/').to_string(),
-        title_language: match form.title_language.as_str() {
-            "romaji" | "english" | "native" => form.title_language,
-            _ => "english".to_string(),
+        // General-tab fields (media_root, title_language, rss_*, post_processing_*,
+        // search_on_monitoring_change, disable_nyaa_rss) are now owned by the
+        // dedicated `/settings/general` subform handler (issue #129 Phase 1
+        // completion). The legacy bulk form covers integrations + quality
+        // only, so the General fields aren't even in the POST body when
+        // reaching this handler — `Form<SettingsForm>` deserializes them
+        // as empty defaults via `#[serde(default)]`. Preserving them
+        // from `existing_cfg` here when `tab != "general"` keeps the
+        // legacy-bookmark / external-script case working: a POST with
+        // tab=general still flows through the old per-field logic, but
+        // a POST from the new integrations/quality forms doesn't blank
+        // out General-tab values.
+        media_root: if form.tab.as_deref() == Some("general") {
+            form.media_root.trim().trim_end_matches('/').to_string()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.media_root.clone())
+                .unwrap_or_default()
+        },
+        title_language: if form.tab.as_deref() == Some("general") {
+            match form.title_language.as_str() {
+                "romaji" | "english" | "native" => form.title_language,
+                _ => "english".to_string(),
+            }
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.title_language.clone())
+                .unwrap_or_else(|| "english".to_string())
         },
         force_mal_fallback: current_force_mal_fallback,
-        rss_enabled: form.rss_enabled.is_some(),
-        rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
+        rss_enabled: if form.tab.as_deref() == Some("general") {
+            form.rss_enabled.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.rss_enabled)
+                .unwrap_or(false)
+        },
+        rss_interval_minutes: if form.tab.as_deref() == Some("general") {
+            form.rss_interval_minutes.clamp(1, 60)
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.rss_interval_minutes)
+                .unwrap_or(15)
+        },
         // multi-rss commit E — preserve the existing master flag
         // through the Settings save. The toggle UI for this flag
         // is deferred to 1.5.1; until then it can be flipped
@@ -860,19 +1167,51 @@ pub async fn settings_submit(
             .as_ref()
             .map(|cfg| cfg.rss_master_enabled)
             .unwrap_or(true),
-        disable_nyaa_rss: form.disable_nyaa_rss.is_some(),
+        disable_nyaa_rss: if form.tab.as_deref() == Some("general") {
+            form.disable_nyaa_rss.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.disable_nyaa_rss)
+                .unwrap_or(false)
+        },
         force_kitsu_fallback: current_force_kitsu_fallback,
-        post_processing_enabled: form.post_processing_enabled.is_some(),
-        post_processing_mode: match form.post_processing_mode.as_str() {
-            "move" | "copy" | "hardlink" => form.post_processing_mode,
-            _ => "hardlink".to_string(),
+        post_processing_enabled: if form.tab.as_deref() == Some("general") {
+            form.post_processing_enabled.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.post_processing_enabled)
+                .unwrap_or(false)
+        },
+        post_processing_mode: if form.tab.as_deref() == Some("general") {
+            match form.post_processing_mode.as_str() {
+                "move" | "copy" | "hardlink" => form.post_processing_mode,
+                _ => "hardlink".to_string(),
+            }
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.post_processing_mode.clone())
+                .unwrap_or_else(|| "hardlink".to_string())
         },
         auto_grab_on_add: existing_cfg
             .as_ref()
             .map(|c| c.auto_grab_on_add)
             .unwrap_or(true),
-        search_on_monitoring_change: form.search_on_monitoring_change.is_some(),
-        prefer_subs: form.prefer_subs == "1",
+        search_on_monitoring_change: if form.tab.as_deref() == Some("general") {
+            form.search_on_monitoring_change.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.search_on_monitoring_change)
+                .unwrap_or(false)
+        },
+        prefer_subs: if form.tab.as_deref() == Some("quality") {
+            form.prefer_subs == "1"
+        } else {
+            existing_cfg.as_ref().map(|c| c.prefer_subs).unwrap_or(true)
+        },
         allow_non_english: existing_cfg
             .as_ref()
             .map(|c| c.allow_non_english)
@@ -1047,6 +1386,10 @@ pub async fn settings_submit(
         };
         return Html(template.render().unwrap_or_default());
     }
+    // Drop the write lock now that the read-modify-write is done —
+    // the legacy bulk handler also has a Jellyfin connection-test
+    // side effect (Integrations branch below) that's the slow path.
+    drop(_guard);
 
     logger::info(&state.db, LogCategory::System, "Settings saved", "").await;
     let mut notices: Vec<String> = vec!["Settings saved.".to_string()];
@@ -1158,6 +1501,512 @@ pub async fn settings_submit(
         direct_rss_feeds,
     };
     Html(template.render().unwrap_or_default())
+}
+
+/// Issue #129 Phase 1 completion — General tab dedicated POST handler.
+/// Owns only General-tab fields (`media_root`, `title_language`, RSS
+/// flags, post-processing flags, monitoring-change auto-search opt-in).
+/// Reads existing config to preserve every other tab's fields,
+/// validates + sanitizes the General fields, persists, and returns
+/// either the General-tab subform partial (HTMX) or the full settings
+/// page (non-HTMX). Mirrors the per-tab split pattern that the bulk
+/// `settings_submit` handler used to do internally via `form.tab` checks.
+pub async fn settings_general_submit(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<GeneralForm>,
+) -> Response {
+    // Hold `CONFIG_WRITE_LOCK` for the full read-modify-write so a
+    // concurrent save through any other Settings handler can't
+    // interleave between our `get_config` and `save_config` and lose
+    // our struct-update merge. The lock spans get_config → save_config
+    // (any post-save side effects can run after we drop it).
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
+    let existing_cfg = match config::get_config(&state.db).await {
+        Ok(Some(cfg)) => cfg,
+        // No config row yet (first-run): bail with a friendly error
+        // so the operator runs through /setup first instead of getting
+        // a save-into-nothing silent no-op.
+        _ => {
+            let err = "No config row found — run /setup first.".to_string();
+            return general_response(&state, None, None, Some(err), is_htmx).await;
+        }
+    };
+
+    // Build the merged config: General-tab fields from form, every
+    // other field copied from existing.
+    let cfg = config::Config {
+        media_root: form.media_root.trim().trim_end_matches('/').to_string(),
+        title_language: match form.title_language.as_str() {
+            "romaji" | "english" | "native" => form.title_language,
+            _ => "english".to_string(),
+        },
+        rss_enabled: form.rss_enabled.is_some(),
+        rss_interval_minutes: form.rss_interval_minutes.clamp(1, 60),
+        disable_nyaa_rss: form.disable_nyaa_rss.is_some(),
+        post_processing_enabled: form.post_processing_enabled.is_some(),
+        post_processing_mode: match form.post_processing_mode.as_str() {
+            "move" | "copy" | "hardlink" => form.post_processing_mode,
+            _ => "hardlink".to_string(),
+        },
+        search_on_monitoring_change: form.search_on_monitoring_change.is_some(),
+        // Everything else: preserved verbatim.
+        ..existing_cfg
+    };
+
+    if let Err(e) = config::save_config(&state.db, &cfg).await {
+        logger::error(
+            &state.db,
+            LogCategory::System,
+            "Failed to save General settings",
+            &e.to_string(),
+        )
+        .await;
+        return general_response(
+            &state,
+            Some(cfg),
+            None,
+            Some(format!("Failed to save: {}", e)),
+            is_htmx,
+        )
+        .await;
+    }
+    // Drop the write lock now that the read-modify-write is done.
+    // Post-save work (logger, notices, response render) doesn't
+    // need it, and a concurrent saver shouldn't be blocked by it.
+    drop(_guard);
+
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "Settings saved (General)",
+        "",
+    )
+    .await;
+
+    let mut notices = vec!["Settings saved.".to_string()];
+    if !cfg.media_root.is_empty() && !std::path::Path::new(&cfg.media_root).is_dir() {
+        notices.push(format!(
+            "Warning: media root '{}' is not accessible.",
+            cfg.media_root
+        ));
+    }
+
+    general_response(&state, Some(cfg), Some(notices.join(" ")), None, is_htmx).await
+}
+
+/// Render the General response in either HTMX (subform partial) or
+/// non-HTMX (full SettingsTemplate) shape. Factored out so the
+/// success + DB-error paths in `settings_general_submit` share the
+/// same render logic without duplicating the field-load +
+/// template-build code.
+async fn general_response(
+    state: &AppState,
+    cfg: Option<config::Config>,
+    message: Option<String>,
+    error: Option<String>,
+    is_htmx: bool,
+) -> Response {
+    let cfg = match cfg {
+        Some(c) => c,
+        None => match config::get_config(&state.db).await {
+            Ok(Some(c)) => c,
+            _ => config::Config::default(),
+        },
+    };
+
+    if is_htmx {
+        return Html(
+            GeneralFormPartial {
+                config: cfg,
+                message,
+                error,
+                version: env!("CARGO_PKG_VERSION"),
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response();
+    }
+
+    // Non-HTMX: render the full settings page through the shared
+    // `build_settings_template` helper. Passes the post-save cfg
+    // through `cfg_override` so the form rerenders with the user's
+    // mutations rather than re-fetching what's in the DB (which on
+    // a save-error path would lose their unsaved input). The other
+    // 7 fan-out queries parallelize via `tokio::join!`.
+    let template = build_settings_template(
+        state,
+        Some("general".to_string()),
+        None,
+        message,
+        error,
+        None,
+        None,
+        Some(cfg),
+    )
+    .await;
+    Html(template.render().unwrap_or_default()).into_response()
+}
+
+/// Issue #129 Phase 1 completion — Quality tab dedicated POST handler.
+/// Mirrors `settings_general_submit`. Owns only Quality-tab fields;
+/// preserves every other tab's fields via struct-update on existing
+/// config.
+pub async fn settings_quality_submit(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<QualityForm>,
+) -> Response {
+    // Hold `CONFIG_WRITE_LOCK` — see `settings_general_submit` for the
+    // read-modify-write race rationale.
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
+    let existing_cfg = match config::get_config(&state.db).await {
+        Ok(Some(cfg)) => cfg,
+        _ => {
+            let err = "No config row found — run /setup first.".to_string();
+            return quality_response(&state, None, None, Some(err), is_htmx).await;
+        }
+    };
+
+    let cfg = config::Config {
+        preferred_groups: form.preferred_groups.trim().to_string(),
+        blocked_groups: form.blocked_groups.trim().to_string(),
+        preferred_source: validate_source(&form.preferred_source, "web"),
+        preferred_resolution: validate_resolution(&form.preferred_resolution, "1080"),
+        cutoff_source: validate_cutoff_source(&form.cutoff_source, "bluray"),
+        cutoff_resolution: validate_resolution(&form.cutoff_resolution, "1080"),
+        finished_series_quality: match form.finished_series_quality.as_str() {
+            "same" | "prefer_bd" | "bd_only" => form.finished_series_quality,
+            _ => "prefer_bd".to_string(),
+        },
+        prefer_subs: form.prefer_subs == "1",
+        upgrade_search_enabled: form.upgrade_search_enabled.is_some(),
+        seadex_enabled: form.seadex_enabled.is_some(),
+        default_custom_query_tokens: form
+            .default_custom_query_tokens
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        default_restrict_to_uploader: form
+            .default_restrict_to_uploader
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        ..existing_cfg
+    };
+
+    if let Err(e) = config::save_config(&state.db, &cfg).await {
+        logger::error(
+            &state.db,
+            LogCategory::System,
+            "Failed to save Quality settings",
+            &e.to_string(),
+        )
+        .await;
+        return quality_response(
+            &state,
+            Some(cfg),
+            None,
+            Some(format!("Failed to save: {}", e)),
+            is_htmx,
+        )
+        .await;
+    }
+    // See `settings_general_submit` for the lock-drop rationale.
+    drop(_guard);
+
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "Settings saved (Quality)",
+        "",
+    )
+    .await;
+
+    quality_response(
+        &state,
+        Some(cfg),
+        Some("Settings saved.".to_string()),
+        None,
+        is_htmx,
+    )
+    .await
+}
+
+/// Render the Quality response in either HTMX (subform partial) or
+/// non-HTMX (full SettingsTemplate) shape. Mirrors `general_response`.
+async fn quality_response(
+    state: &AppState,
+    cfg: Option<config::Config>,
+    message: Option<String>,
+    error: Option<String>,
+    is_htmx: bool,
+) -> Response {
+    let cfg = match cfg {
+        Some(c) => c,
+        None => match config::get_config(&state.db).await {
+            Ok(Some(c)) => c,
+            _ => config::Config::default(),
+        },
+    };
+
+    if is_htmx {
+        return Html(
+            QualityFormPartial {
+                config: cfg,
+                message,
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response();
+    }
+
+    // Non-HTMX: shared template path. See `general_response` for the
+    // `cfg_override` rationale.
+    let template = build_settings_template(
+        state,
+        Some("quality".to_string()),
+        None,
+        message,
+        error,
+        None,
+        None,
+        Some(cfg),
+    )
+    .await;
+    Html(template.render().unwrap_or_default()).into_response()
+}
+
+/// Issue #129 Phase 1 completion — Integrations tab dedicated POST
+/// handler. Owns Jellyfin URL+key, Sonarr/Radarr API enable+key,
+/// grab_preview_mode, external_sync_interval_minutes, and the legacy
+/// single-slot download-client columns (preserved verbatim through
+/// the hidden inputs in `integrations.html` so a stale tab can't
+/// blank them).
+///
+/// Side effect: when both jellyfin_url and jellyfin_api_key are set,
+/// runs a connection test and surfaces the result in the save toast +
+/// updates `state.jellyfin`. Matches the legacy bulk handler's
+/// `if active_tab == "integrations"` block.
+pub async fn settings_integrations_submit(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<IntegrationsForm>,
+) -> Response {
+    // Hold `CONFIG_WRITE_LOCK` — see `settings_general_submit` for the
+    // read-modify-write race rationale. We drop the lock explicitly
+    // after `save_config` completes (below) so the Jellyfin
+    // connection-test side effect — which can hang for the full
+    // connect-timeout when the URL points at an unreachable host —
+    // doesn't block other Settings saves on its network round trip.
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
+    let existing_cfg = match config::get_config(&state.db).await {
+        Ok(Some(cfg)) => cfg,
+        _ => {
+            let err = "No config row found — run /setup first.".to_string();
+            return integrations_response(&state, None, None, Some(err), is_htmx).await;
+        }
+    };
+
+    let cfg = config::Config {
+        active_client: match form.active_client.trim() {
+            "deluge" => "deluge".to_string(),
+            "transmission" => "transmission".to_string(),
+            "rtorrent" => "rtorrent".to_string(),
+            _ => "qbittorrent".to_string(),
+        },
+        qbit_url: form.qbit_url.trim().to_string(),
+        qbit_user: form.qbit_user.trim().to_string(),
+        qbit_pass: form.qbit_pass,
+        qbit_category: form.qbit_category.trim().to_string(),
+        qbit_download_path: form
+            .qbit_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        deluge_url: form.deluge_url.trim().trim_end_matches('/').to_string(),
+        deluge_password: form.deluge_password,
+        deluge_label: sanitize_label(&form.deluge_label),
+        deluge_download_path: form
+            .deluge_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        transmission_url: form
+            .transmission_url
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        transmission_user: form.transmission_user.trim().to_string(),
+        transmission_password: form.transmission_password,
+        transmission_label: sanitize_label(&form.transmission_label),
+        transmission_download_path: form
+            .transmission_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        rtorrent_url: form.rtorrent_url.trim().trim_end_matches('/').to_string(),
+        rtorrent_user: form.rtorrent_user.trim().to_string(),
+        rtorrent_password: form.rtorrent_password,
+        rtorrent_label: sanitize_label(&form.rtorrent_label),
+        rtorrent_download_path: form
+            .rtorrent_download_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        jellyfin_url: form.jellyfin_url.trim().trim_end_matches('/').to_string(),
+        jellyfin_api_key: form.jellyfin_api_key.trim().to_string(),
+        sonarr_enabled: form.sonarr_enabled.is_some(),
+        sonarr_api_key: form.sonarr_api_key.unwrap_or_default().trim().to_string(),
+        radarr_enabled: form.radarr_enabled.is_some(),
+        radarr_api_key: form.radarr_api_key.unwrap_or_default().trim().to_string(),
+        grab_preview_mode: resolve_grab_preview_mode(
+            form.grab_preview_mode.as_deref(),
+            Some("integrations"),
+            Some(existing_cfg.grab_preview_mode.as_str()),
+        ),
+        external_sync_interval_minutes: resolve_external_sync_interval_minutes(
+            form.external_sync_interval_minutes,
+            Some("integrations"),
+            Some(existing_cfg.external_sync_interval_minutes),
+        ),
+        ..existing_cfg
+    };
+
+    if let Err(e) = config::save_config(&state.db, &cfg).await {
+        logger::error(
+            &state.db,
+            LogCategory::System,
+            "Failed to save Integrations settings",
+            &e.to_string(),
+        )
+        .await;
+        return integrations_response(
+            &state,
+            Some(cfg),
+            None,
+            Some(format!("Failed to save: {}", e)),
+            is_htmx,
+        )
+        .await;
+    }
+    // Drop before the Jellyfin connection-test side effect: that
+    // network probe is the slow path of this handler and there's no
+    // reason to make a concurrent saver on a different tab wait
+    // through it.
+    drop(_guard);
+
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "Settings saved (Integrations)",
+        "",
+    )
+    .await;
+
+    let mut notices = vec!["Settings saved.".to_string()];
+
+    // Side effect: Jellyfin connection test on save. Mirrors the
+    // legacy bulk handler so the user gets immediate feedback in the
+    // save toast about whether the credentials they just entered
+    // actually reach a Jellyfin server. Updates `state.jellyfin` so
+    // every other request that reads it sees the live (or cleared)
+    // client.
+    if !cfg.jellyfin_url.is_empty() && !cfg.jellyfin_api_key.is_empty() {
+        let client = JellyfinClient::new(&cfg.jellyfin_url, &cfg.jellyfin_api_key);
+        match client.test_connection().await {
+            Ok(info) => {
+                let label = if info.server_name.trim().is_empty() {
+                    format!("Jellyfin ({})", info.version)
+                } else {
+                    format!(
+                        "Jellyfin {} ({}) connected.",
+                        info.server_name, info.version
+                    )
+                };
+                logger::info(
+                    &state.db,
+                    LogCategory::Jellyfin,
+                    &format!("{} connected", label),
+                    &cfg.jellyfin_url,
+                )
+                .await;
+                notices.push(label);
+                *state.jellyfin.write().await = Some(client);
+            }
+            Err(e) => {
+                logger::error(&state.db, LogCategory::Jellyfin, "Connection failed", &e).await;
+                *state.jellyfin.write().await = None;
+                notices.push(format!("Jellyfin connection failed: {}.", e));
+            }
+        }
+    } else {
+        *state.jellyfin.write().await = None;
+    }
+
+    integrations_response(&state, Some(cfg), Some(notices.join(" ")), None, is_htmx).await
+}
+
+/// Render the Integrations response in either HTMX (subform partial)
+/// or non-HTMX (full SettingsTemplate) shape. Mirrors
+/// `general_response` / `quality_response` but also threads the
+/// external_account through (the partial uses it for the linked-
+/// account legend badges + the prefs section).
+async fn integrations_response(
+    state: &AppState,
+    cfg: Option<config::Config>,
+    message: Option<String>,
+    error: Option<String>,
+    is_htmx: bool,
+) -> Response {
+    let cfg = match cfg {
+        Some(c) => c,
+        None => match config::get_config(&state.db).await {
+            Ok(Some(c)) => c,
+            _ => config::Config::default(),
+        },
+    };
+
+    if is_htmx {
+        // The partial needs the linked-account view for its legend
+        // badge + prefs section. Fetch on the HTMX path only — the
+        // non-HTMX path goes through `build_settings_template` which
+        // does this in parallel with the rest of the fan-out.
+        let external_account = crate::models::external_accounts::get_current(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(ExternalAccountView::from_model);
+        return Html(
+            IntegrationsFormPartial {
+                config: cfg,
+                message,
+                error,
+                external_account,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response();
+    }
+
+    // Non-HTMX: shared template path. See `general_response` for the
+    // `cfg_override` rationale.
+    let template = build_settings_template(
+        state,
+        Some("integrations".to_string()),
+        None,
+        message,
+        error,
+        None,
+        None,
+        Some(cfg),
+    )
+    .await;
+    Html(template.render().unwrap_or_default()).into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1966,6 +2815,7 @@ mod tests {
                 None,
                 None,
                 Some("animebytes".to_string()),
+                None,
             )
             .await;
             let seed = template
@@ -1991,6 +2841,7 @@ mod tests {
                 None,
                 None,
                 Some("does-not-exist".to_string()),
+                None,
             )
             .await;
             assert!(template.indexer_seed.is_none());
@@ -2034,6 +2885,7 @@ mod tests {
                 None,
                 None,
                 Some("animebytes".to_string()),
+                None,
             )
             .await;
             // Prove the row's fields actually reached the
@@ -2068,6 +2920,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await;
             assert!(template.indexer_seed.is_none());
@@ -2075,6 +2928,996 @@ mod tests {
             assert!(
                 !template.indexer_catalog.is_empty(),
                 "picker grid is always populated from the static catalog"
+            );
+        }
+    }
+
+    /// Issue #129 Phase 1 completion — non-HTMX path coverage for the
+    /// three new per-tab subform handlers
+    /// (`settings_general_submit`, `settings_quality_submit`,
+    /// `settings_integrations_submit`).
+    ///
+    /// The browser-e2e suite at
+    /// `tests/htmx_browser_e2e_settings_subforms.rs` covers the HTMX
+    /// path (request lands with `HX-Request: true`, handler returns
+    /// the small subform partial). It can't reach the no-JS fallback
+    /// because every request from a real browser carries the htmx
+    /// header once the vendored script loads. These unit tests fill
+    /// that gap by calling the handlers directly with
+    /// `HxRequest(false)`, which is the shape Axum produces when no
+    /// `HX-Request` header is present (regular form-POST from a JS-
+    /// disabled browser, or any external script hitting the
+    /// endpoint with `curl`).
+    ///
+    /// Each test asserts:
+    /// 1. The DB write happened — the handler did the same persistence
+    ///    work as the HTMX path.
+    /// 2. The response is the full `SettingsTemplate` HTML (carries
+    ///    the `<h2>Settings</h2>` page header from `settings.html`,
+    ///    which the per-tab subform partials don't include) — so
+    ///    a regression that returns the partial regardless of the
+    ///    HxRequest flag would visibly break a no-JS save (the
+    ///    user would see a fragment with no nav / chrome).
+    mod non_htmx_path {
+        use super::super::*;
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+        use axum::body::to_bytes;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use axum_htmx::HxRequest;
+        use sqlx::SqlitePool;
+
+        /// Read the response body as a UTF-8 string. axum's `Response`
+        /// is `Response<Body>` where `Body` is opaque; `to_bytes` with
+        /// a generous limit (2 MiB) covers the full SettingsTemplate
+        /// without truncating.
+        async fn body_string(resp: axum::response::Response) -> String {
+            let bytes = to_bytes(resp.into_body(), 2 * 1024 * 1024)
+                .await
+                .expect("read body");
+            String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+        }
+
+        async fn seed_initial_config(db: &SqlitePool) {
+            // Minimum-viable Config row — every per-tab handler reads
+            // the existing row to preserve fields it doesn't own. With
+            // no row, the handlers early-return with the
+            // "No config row found" error path; we want to exercise
+            // the success path here.
+            config::save_config(db, &config::Config::default())
+                .await
+                .expect("seed config");
+        }
+
+        /// Seed a Config row with values **distinct from form
+        /// defaults** for every field the handler under test owns.
+        /// Pairs with a submit-payload built from values **distinct
+        /// from both the seed and form defaults** so a mutant that
+        /// deletes a single field's form-write (the most common
+        /// missed-mutant shape from the cargo-mutants run) leaves
+        /// that field at the seed value — which the assertion then
+        /// catches by comparing against the submitted value.
+        async fn seed_distinct_config(db: &SqlitePool) {
+            let cfg = config::Config {
+                // Integrations seeds.
+                active_client: "deluge".to_string(),
+                qbit_url: "http://qbit.seed:8080".to_string(),
+                qbit_user: "qbit-seed-user".to_string(),
+                qbit_pass: "qbit-seed-pass".to_string(),
+                qbit_category: "qbit-seed-cat".to_string(),
+                qbit_download_path: "/seed/qbit".to_string(),
+                deluge_url: "http://deluge.seed:8112".to_string(),
+                deluge_password: "deluge-seed-pass".to_string(),
+                deluge_label: "deluge-seed-label".to_string(),
+                deluge_download_path: "/seed/deluge".to_string(),
+                transmission_url: "http://trans.seed:9091".to_string(),
+                transmission_user: "trans-seed-user".to_string(),
+                transmission_password: "trans-seed-pass".to_string(),
+                transmission_label: "trans-seed-label".to_string(),
+                transmission_download_path: "/seed/trans".to_string(),
+                rtorrent_url: "http://rt.seed:8081".to_string(),
+                rtorrent_user: "rt-seed-user".to_string(),
+                rtorrent_password: "rt-seed-pass".to_string(),
+                rtorrent_label: "rt-seed-label".to_string(),
+                rtorrent_download_path: "/seed/rt".to_string(),
+                jellyfin_url: "http://jelly.seed:8096".to_string(),
+                jellyfin_api_key: "jelly-seed-key".to_string(),
+                sonarr_enabled: false,
+                sonarr_api_key: "sonarr-seed-key".to_string(),
+                radarr_enabled: true,
+                radarr_api_key: "radarr-seed-key".to_string(),
+                grab_preview_mode: "never".to_string(),
+                external_sync_interval_minutes: 60,
+                // Quality seeds.
+                preferred_groups: "SeedPreferred".to_string(),
+                blocked_groups: "SeedBlocked".to_string(),
+                preferred_source: "bluray".to_string(),
+                preferred_resolution: "720".to_string(),
+                cutoff_source: "dvd".to_string(),
+                cutoff_resolution: "480".to_string(),
+                finished_series_quality: "same".to_string(),
+                prefer_subs: false,
+                upgrade_search_enabled: false,
+                seadex_enabled: true,
+                default_custom_query_tokens: "seed-tokens".to_string(),
+                default_restrict_to_uploader: "seed-uploader".to_string(),
+                // General seeds.
+                media_root: "/seed/media".to_string(),
+                title_language: "native".to_string(),
+                rss_enabled: true,
+                rss_interval_minutes: 20,
+                disable_nyaa_rss: false,
+                post_processing_enabled: true,
+                post_processing_mode: "copy".to_string(),
+                search_on_monitoring_change: true,
+                ..config::Config::default()
+            };
+            config::save_config(db, &cfg)
+                .await
+                .expect("seed distinct config");
+        }
+
+        #[tokio::test]
+        async fn general_submit_non_htmx_round_trips_every_field() {
+            // Mutation-killer test: seeds with values distinct from
+            // form defaults, submits with values distinct from BOTH
+            // the seed AND form defaults, asserts every owned field
+            // lands at the submitted value. A mutant that deletes
+            // any single field's form-write line in
+            // settings_general_submit leaves that field at the seed
+            // value — caught by the per-field assertion below.
+            //
+            // Also checks the non-HTMX render returns the full
+            // SettingsTemplate (`<h2>Settings</h2>` only appears in
+            // settings.html, not the per-tab partial).
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(GeneralForm {
+                    media_root: "/submit/media".to_string(),
+                    title_language: "romaji".to_string(),
+                    rss_enabled: None,        // submit→false, seed=true
+                    rss_interval_minutes: 45, // seed=20
+                    disable_nyaa_rss: Some(String::new()), // submit→true, seed=false
+                    post_processing_enabled: None, // submit→false, seed=true
+                    post_processing_mode: "move".to_string(), // seed=copy
+                    search_on_monitoring_change: None, // submit→false, seed=true
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            // Every General-tab field round-trips at the submitted value.
+            assert_eq!(saved.media_root, "/submit/media");
+            assert_eq!(saved.title_language, "romaji");
+            assert!(!saved.rss_enabled);
+            assert_eq!(saved.rss_interval_minutes, 45);
+            assert!(saved.disable_nyaa_rss);
+            assert!(!saved.post_processing_enabled);
+            assert_eq!(saved.post_processing_mode, "move");
+            assert!(!saved.search_on_monitoring_change);
+            // Cross-tab fields stay at seed values (regression guard
+            // against the per-tab handler clobbering fields it
+            // doesn't own).
+            assert_eq!(saved.preferred_resolution, "720");
+            assert_eq!(saved.jellyfin_url, "http://jelly.seed:8096");
+        }
+
+        #[tokio::test]
+        async fn quality_submit_non_htmx_round_trips_every_field() {
+            // Mutation-killer: seeds + submits every Quality field
+            // with distinct values so a deletion of any single
+            // field's form-write line surfaces as a per-field
+            // assertion failure. See `general_submit_non_htmx_round_trips_every_field`
+            // for the rationale.
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_quality_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(QualityForm {
+                    preferred_groups: "SubmitPreferred".to_string(), // seed=SeedPreferred
+                    blocked_groups: "SubmitBlocked".to_string(),     // seed=SeedBlocked
+                    preferred_source: "web".to_string(),             // seed=bluray
+                    preferred_resolution: "2160".to_string(),        // seed=720
+                    cutoff_source: "bluray".to_string(),             // seed=dvd
+                    cutoff_resolution: "1080".to_string(),           // seed=480
+                    finished_series_quality: "bd_only".to_string(),  // seed=same
+                    prefer_subs: "1".to_string(),                    // seed=false → submit→true
+                    upgrade_search_enabled: Some(String::new()),     // seed=false → submit→true
+                    seadex_enabled: None,                            // seed=true → submit→false
+                    default_custom_query_tokens: Some("submit-tokens".to_string()), // seed=seed-tokens
+                    default_restrict_to_uploader: Some("submit-uploader".to_string()), // seed=seed-uploader
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.preferred_groups, "SubmitPreferred");
+            assert_eq!(saved.blocked_groups, "SubmitBlocked");
+            assert_eq!(saved.preferred_source, "web");
+            assert_eq!(saved.preferred_resolution, "2160");
+            assert_eq!(saved.cutoff_source, "bluray");
+            assert_eq!(saved.cutoff_resolution, "1080");
+            assert_eq!(saved.finished_series_quality, "bd_only");
+            assert!(saved.prefer_subs);
+            assert!(saved.upgrade_search_enabled);
+            assert!(!saved.seadex_enabled);
+            assert_eq!(saved.default_custom_query_tokens, "submit-tokens");
+            assert_eq!(saved.default_restrict_to_uploader, "submit-uploader");
+            // Cross-tab fields (General + Integrations) stay at seed.
+            assert_eq!(saved.media_root, "/seed/media");
+            assert_eq!(saved.jellyfin_url, "http://jelly.seed:8096");
+            assert_eq!(saved.qbit_url, "http://qbit.seed:8080");
+        }
+
+        #[tokio::test]
+        async fn integrations_submit_non_htmx_round_trips_every_field() {
+            // Mutation-killer for the 22 Integrations field-write
+            // mutants the cargo-mutants run flagged. Same shape as
+            // the General + Quality versions: distinct seed, distinct
+            // submit, per-field assertion. Empty Jellyfin URL so
+            // the connection-test side effect is a no-op (avoids
+            // hitting an unreachable host and burning the connect
+            // timeout in every test run).
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_integrations_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(IntegrationsForm {
+                    active_client: "transmission".to_string(), // seed=deluge
+                    qbit_url: "http://qbit.submit:9090".to_string(), // seed=...:8080
+                    qbit_user: "qbit-submit-user".to_string(),
+                    qbit_pass: "qbit-submit-pass".to_string(),
+                    qbit_category: "qbit-submit-cat".to_string(),
+                    qbit_download_path: "/submit/qbit".to_string(),
+                    deluge_url: "http://deluge.submit:8112".to_string(),
+                    deluge_password: "deluge-submit-pass".to_string(),
+                    deluge_label: "deluge-submit-label".to_string(),
+                    deluge_download_path: "/submit/deluge".to_string(),
+                    transmission_url: "http://trans.submit:9091".to_string(),
+                    transmission_user: "trans-submit-user".to_string(),
+                    transmission_password: "trans-submit-pass".to_string(),
+                    transmission_label: "trans-submit-label".to_string(),
+                    transmission_download_path: "/submit/trans".to_string(),
+                    rtorrent_url: "http://rt.submit:8081".to_string(),
+                    rtorrent_user: "rt-submit-user".to_string(),
+                    rtorrent_password: "rt-submit-pass".to_string(),
+                    rtorrent_label: "rt-submit-label".to_string(),
+                    rtorrent_download_path: "/submit/rt".to_string(),
+                    jellyfin_url: String::new(), // empty — skips connection-test
+                    jellyfin_api_key: String::new(),
+                    sonarr_enabled: Some(String::new()), // seed=false → submit→true
+                    sonarr_api_key: Some("sonarr-submit-key".to_string()),
+                    radarr_enabled: None, // seed=true → submit→false
+                    radarr_api_key: Some("radarr-submit-key".to_string()),
+                    grab_preview_mode: Some("batches_only".to_string()), // seed=never
+                    external_sync_interval_minutes: Some(120),           // seed=60
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<h2>Settings</h2>"),
+                "non-HTMX response must be the full SettingsTemplate, not the partial"
+            );
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.active_client, "transmission");
+            assert_eq!(saved.qbit_url, "http://qbit.submit:9090");
+            assert_eq!(saved.qbit_user, "qbit-submit-user");
+            assert_eq!(saved.qbit_pass, "qbit-submit-pass");
+            assert_eq!(saved.qbit_category, "qbit-submit-cat");
+            assert_eq!(saved.qbit_download_path, "/submit/qbit");
+            assert_eq!(saved.deluge_url, "http://deluge.submit:8112");
+            assert_eq!(saved.deluge_password, "deluge-submit-pass");
+            assert_eq!(saved.deluge_label, "deluge-submit-label");
+            assert_eq!(saved.deluge_download_path, "/submit/deluge");
+            assert_eq!(saved.transmission_url, "http://trans.submit:9091");
+            assert_eq!(saved.transmission_user, "trans-submit-user");
+            assert_eq!(saved.transmission_password, "trans-submit-pass");
+            assert_eq!(saved.transmission_label, "trans-submit-label");
+            assert_eq!(saved.transmission_download_path, "/submit/trans");
+            assert_eq!(saved.rtorrent_url, "http://rt.submit:8081");
+            assert_eq!(saved.rtorrent_user, "rt-submit-user");
+            assert_eq!(saved.rtorrent_password, "rt-submit-pass");
+            assert_eq!(saved.rtorrent_label, "rt-submit-label");
+            assert_eq!(saved.rtorrent_download_path, "/submit/rt");
+            assert!(saved.jellyfin_url.is_empty());
+            assert!(saved.jellyfin_api_key.is_empty());
+            assert!(saved.sonarr_enabled);
+            assert_eq!(saved.sonarr_api_key, "sonarr-submit-key");
+            assert!(!saved.radarr_enabled);
+            assert_eq!(saved.radarr_api_key, "radarr-submit-key");
+            assert_eq!(saved.grab_preview_mode, "batches_only");
+            assert_eq!(saved.external_sync_interval_minutes, 120);
+            // Cross-tab fields stay at seed values.
+            assert_eq!(saved.media_root, "/seed/media");
+            assert_eq!(saved.preferred_resolution, "720");
+        }
+
+        // ─── media_root accessibility-warning paths ──────────────────
+        // Three tests pinning the `if !cfg.media_root.is_empty() &&
+        // !std::path::Path::new(&cfg.media_root).is_dir()` branch in
+        // settings_general_submit. The cargo-mutants run flagged 4
+        // missed mutants on this expression (replace && with ||,
+        // delete each !) because no test ever exercised the warning
+        // surface. These three tests cover the three legitimate
+        // states (empty, non-existent path, real dir) so any flip of
+        // the boolean logic produces a wrong output for at least one
+        // input.
+
+        /// Empty media_root → no warning. Mutating `!cfg.media_root.is_empty()`
+        /// to drop the `!` would emit a warning here (since
+        /// !"".is_empty() is false, and `false && X` short-circuits).
+        #[tokio::test]
+        async fn general_save_with_empty_media_root_emits_no_warning() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(body.contains("Settings saved."));
+            assert!(
+                !body.contains("not accessible"),
+                "empty media_root must not surface the inaccessible-path warning"
+            );
+        }
+
+        /// Non-existent media_root → warning surfaces. Mutating the
+        /// `&&` to `||` would still warn here (since both branches
+        /// are true), but the `if !empty` mutation that always-emits
+        /// would be caught here too.
+        #[tokio::test]
+        async fn general_save_with_nonexistent_media_root_emits_warning() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: "/nonexistent-test-path-9b3a2".to_string(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(body.contains("Settings saved."));
+            assert!(
+                body.contains("not accessible"),
+                "non-existent media_root must surface the inaccessible-path warning"
+            );
+            assert!(body.contains("/nonexistent-test-path-9b3a2"));
+        }
+
+        /// media_root pointing at a real directory → no warning.
+        /// Mutating `!Path::is_dir()` to drop the `!` would emit a
+        /// warning here (since is_dir() is true, and `X && true`
+        /// passes both checks → the warning fires when it shouldn't).
+        #[tokio::test]
+        async fn general_save_with_existing_media_root_emits_no_warning() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().to_string_lossy().into_owned();
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: path.clone(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(body.contains("Settings saved."));
+            assert!(
+                !body.contains("not accessible"),
+                "media_root pointing at an existing dir must not surface the warning"
+            );
+        }
+
+        // ─── Validation coerce-on-bad-value paths ─────────────────────
+        // The cargo-mutants run flagged delete-match-arm mutants on
+        // every validation match in the per-tab handlers (e.g.,
+        // `match form.post_processing_mode.as_str() { "move" |
+        // "copy" | "hardlink" => form.post_processing_mode, _ =>
+        // "hardlink".to_string() }`). Tests that submit only valid
+        // values can't tell the difference between "valid arm
+        // matched and returned form value" and "valid arm deleted
+        // → fall through to default which happened to also equal
+        // the valid value." The fix: submit a deliberately-invalid
+        // value and assert the handler coerces to the documented
+        // default. If the valid arm is deleted, the test still
+        // passes (because it asserted the default); but if the
+        // *default* arm is deleted, the test fails. Asymmetric but
+        // useful: catches the half of the mutation surface that
+        // actually changes behavior end-to-end.
+
+        #[tokio::test]
+        async fn general_save_coerces_invalid_post_processing_mode_to_hardlink() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "garbage".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.post_processing_mode, "hardlink");
+        }
+
+        #[tokio::test]
+        async fn general_save_coerces_invalid_title_language_to_english() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_general_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "klingon".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.title_language, "english");
+        }
+
+        #[tokio::test]
+        async fn quality_save_coerces_invalid_finished_series_quality_to_prefer_bd() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_quality_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(QualityForm {
+                    preferred_groups: String::new(),
+                    blocked_groups: String::new(),
+                    preferred_source: "web".to_string(),
+                    preferred_resolution: "1080".to_string(),
+                    cutoff_source: "bluray".to_string(),
+                    cutoff_resolution: "1080".to_string(),
+                    finished_series_quality: "garbage".to_string(),
+                    prefer_subs: "1".to_string(),
+                    upgrade_search_enabled: None,
+                    seadex_enabled: None,
+                    default_custom_query_tokens: None,
+                    default_restrict_to_uploader: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.finished_series_quality, "prefer_bd");
+        }
+
+        #[tokio::test]
+        async fn integrations_save_coerces_unknown_active_client_to_qbittorrent() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_integrations_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(IntegrationsForm {
+                    active_client: "garbage".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: String::new(),
+                    jellyfin_api_key: String::new(),
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.active_client, "qbittorrent");
+        }
+
+        // ─── general_response cfg-fallback path ───────────────────────
+
+        /// `general_response`'s Ok(Some(c)) match arm reads the cfg
+        /// from the DB when the caller passes `cfg=None`. cargo-
+        /// mutants flagged the deletion of this arm because no test
+        /// hit the path with both (a) `cfg=None` AND (b) a real config
+        /// row in the DB. The existing
+        /// `general_submit_with_no_config_row_renders_friendly_error`
+        /// has cfg=None *and* no DB row, so it falls through to
+        /// Config::default() either way.
+        ///
+        /// This test calls `general_response` directly with cfg=None
+        /// and a seeded distinct row in the DB, then asserts the
+        /// rendered response carries the seeded value. If the match
+        /// arm is deleted, the response would render
+        /// Config::default() values (empty media_root) and the
+        /// assertion would fail.
+        #[tokio::test]
+        async fn general_response_with_no_cfg_falls_back_to_db_row() {
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = general_response(&state, None, None, None, true).await;
+            let body = body_string(resp).await;
+            // The seeded media_root is "/seed/media" — should render
+            // in the form's value="..." attribute. If the Ok(Some)
+            // match arm were deleted, body would contain
+            // Config::default()'s empty media_root instead.
+            assert!(
+                body.contains("/seed/media"),
+                "general_response with cfg=None must read the row from the DB"
+            );
+        }
+
+        /// Companion to `general_response_with_no_cfg_falls_back_to_db_row`
+        /// — same Ok(Some(c)) cfg-fallback path on the Quality side.
+        #[tokio::test]
+        async fn quality_response_with_no_cfg_falls_back_to_db_row() {
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = quality_response(&state, None, None, None, true).await;
+            let body = body_string(resp).await;
+            // Seeded preferred_groups = "SeedPreferred" renders as a
+            // form input value. Default Config has empty
+            // preferred_groups; if the Ok(Some) arm were deleted,
+            // this assertion would fail.
+            assert!(
+                body.contains("SeedPreferred"),
+                "quality_response with cfg=None must read the row from the DB"
+            );
+        }
+
+        /// Companion to the General + Quality fallback tests — same
+        /// Ok(Some(c)) shape on the Integrations side.
+        #[tokio::test]
+        async fn integrations_response_with_no_cfg_falls_back_to_db_row() {
+            let db = in_memory_pool().await;
+            seed_distinct_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = integrations_response(&state, None, None, None, true).await;
+            let body = body_string(resp).await;
+            // Seeded jellyfin_url renders as an input value attribute.
+            assert!(
+                body.contains("http://jelly.seed:8096"),
+                "integrations_response with cfg=None must read the row from the DB"
+            );
+        }
+
+        // ─── Integrations active_client coercion (per-arm coverage) ───
+        // The comprehensive `integrations_submit_non_htmx_round_trips_every_field`
+        // test only submits `active_client="transmission"`, so cargo-
+        // mutants can delete the "deluge" or "rtorrent" arms and still
+        // pass (those arms aren't exercised). Two small tests cover
+        // the remaining valid arms, plus the "qbittorrent" arm gets
+        // its coverage from the `integrations_save_coerces_unknown_active_client_to_qbittorrent`
+        // default-fallthrough test above.
+
+        #[tokio::test]
+        async fn integrations_save_preserves_active_client_deluge() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_integrations_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(IntegrationsForm {
+                    active_client: "deluge".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: String::new(),
+                    jellyfin_api_key: String::new(),
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.active_client, "deluge");
+        }
+
+        #[tokio::test]
+        async fn integrations_save_preserves_active_client_rtorrent() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let _ = settings_integrations_submit(
+                State(state),
+                HxRequest(true),
+                axum::Form(IntegrationsForm {
+                    active_client: "rtorrent".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: String::new(),
+                    jellyfin_api_key: String::new(),
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(saved.active_client, "rtorrent");
+        }
+
+        // ─── Jellyfin connection-test gate ────────────────────────────
+        // The gate `if !cfg.jellyfin_url.is_empty() &&
+        // !cfg.jellyfin_api_key.is_empty()` decides whether to attempt
+        // a Jellyfin connection on Integrations save. cargo-mutants
+        // flagged 3 boolean-op mutants on this expression: the &&
+        // flipping to ||, and each ! being dropped. Tests that pass
+        // both fields non-empty (the existing browser-e2e test does
+        // this with 127.0.0.1:1) miss the case where exactly one is
+        // empty. These two tests cover (url-only, key-only) so any
+        // boolean-op flip produces a wrong output for at least one
+        // input — without the gate, an empty URL or empty API key
+        // would still attempt a connection and surface a "connection
+        // failed:" notice.
+
+        #[tokio::test]
+        async fn integrations_save_with_only_jellyfin_url_skips_connection_test() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_integrations_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(IntegrationsForm {
+                    active_client: "qbittorrent".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: "http://127.0.0.1:1".to_string(), // would-fail address
+                    jellyfin_api_key: String::new(),                // empty — gate must skip
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(
+                !body.contains("Jellyfin connection failed"),
+                "empty jellyfin_api_key must skip the connection test — \
+                 a `&&` → `||` mutation would attempt to connect against \
+                 the URL and surface 'connection failed:' here"
+            );
+            assert!(
+                !body.contains("Jellyfin") || !body.contains("connected"),
+                "skipped gate must not emit a 'connected' notice either"
+            );
+        }
+
+        #[tokio::test]
+        async fn integrations_save_with_only_jellyfin_api_key_skips_connection_test() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+            let resp = settings_integrations_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(IntegrationsForm {
+                    active_client: "qbittorrent".to_string(),
+                    qbit_url: String::new(),
+                    qbit_user: String::new(),
+                    qbit_pass: String::new(),
+                    qbit_category: String::new(),
+                    qbit_download_path: String::new(),
+                    deluge_url: String::new(),
+                    deluge_password: String::new(),
+                    deluge_label: String::new(),
+                    deluge_download_path: String::new(),
+                    transmission_url: String::new(),
+                    transmission_user: String::new(),
+                    transmission_password: String::new(),
+                    transmission_label: String::new(),
+                    transmission_download_path: String::new(),
+                    rtorrent_url: String::new(),
+                    rtorrent_user: String::new(),
+                    rtorrent_password: String::new(),
+                    rtorrent_label: String::new(),
+                    rtorrent_download_path: String::new(),
+                    jellyfin_url: String::new(), // empty — gate must skip
+                    jellyfin_api_key: "some-key".to_string(), // present
+                    sonarr_enabled: None,
+                    sonarr_api_key: None,
+                    radarr_enabled: None,
+                    radarr_api_key: None,
+                    grab_preview_mode: None,
+                    external_sync_interval_minutes: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(
+                !body.contains("Jellyfin connection failed"),
+                "empty jellyfin_url must skip the connection test"
+            );
+        }
+
+        /// Regression for PR 133 review item #3: read-modify-write
+        /// race across concurrent saves. Without `CONFIG_WRITE_LOCK`,
+        /// the General handler reading existing_cfg + the Quality
+        /// handler reading existing_cfg in parallel both see the
+        /// pre-mutation row, then each writes back its own merge —
+        /// the second writer's write loses whatever the first
+        /// writer changed (because the second writer's struct-update
+        /// merge built on a stale snapshot).
+        ///
+        /// With the lock, the second handler waits for the first to
+        /// commit, reads the post-first-save row, and merges its
+        /// change on top. Both fields land.
+        ///
+        /// Two concurrent saves via `tokio::join!`: General sets
+        /// `title_language = "romaji"`, Quality sets
+        /// `preferred_resolution = "2160"`. Final config must have
+        /// **both** (the loser's write would silently drop one).
+        #[tokio::test]
+        async fn concurrent_general_and_quality_saves_dont_lose_updates() {
+            let db = in_memory_pool().await;
+            seed_initial_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+
+            let general_state = state.clone();
+            let quality_state = state.clone();
+            let general = settings_general_submit(
+                State(general_state),
+                HxRequest(false),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "romaji".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            );
+            let quality = settings_quality_submit(
+                State(quality_state),
+                HxRequest(false),
+                axum::Form(QualityForm {
+                    preferred_groups: String::new(),
+                    blocked_groups: String::new(),
+                    preferred_source: "web".to_string(),
+                    preferred_resolution: "2160".to_string(),
+                    cutoff_source: "bluray".to_string(),
+                    cutoff_resolution: "1080".to_string(),
+                    finished_series_quality: "prefer_bd".to_string(),
+                    prefer_subs: "1".to_string(),
+                    upgrade_search_enabled: None,
+                    seadex_enabled: None,
+                    default_custom_query_tokens: None,
+                    default_restrict_to_uploader: None,
+                }),
+            );
+            let (_a, _b) = tokio::join!(general, quality);
+
+            let saved = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            // Both handlers' field changes must land — interleaving
+            // would have dropped one of them.
+            assert_eq!(saved.title_language, "romaji");
+            assert_eq!(saved.preferred_resolution, "2160");
+        }
+
+        /// Companion regression: the early-return path when the
+        /// config row is missing. Surfaces the "No config row found —
+        /// run /setup first." error string in the response, which
+        /// the operator sees when they hit the endpoint before
+        /// completing first-run setup.
+        #[tokio::test]
+        async fn general_submit_with_no_config_row_renders_friendly_error() {
+            // Note: NO seed_initial_config call here — pool is empty.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let resp = settings_general_submit(
+                State(state),
+                HxRequest(false),
+                axum::Form(GeneralForm {
+                    media_root: String::new(),
+                    title_language: "english".to_string(),
+                    rss_enabled: None,
+                    rss_interval_minutes: 15,
+                    disable_nyaa_rss: None,
+                    post_processing_enabled: None,
+                    post_processing_mode: "hardlink".to_string(),
+                    search_on_monitoring_change: None,
+                }),
+            )
+            .await
+            .into_response();
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("No config row found"),
+                "expected friendly first-run error in response body"
             );
         }
     }

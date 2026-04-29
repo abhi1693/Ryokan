@@ -29,24 +29,22 @@
     <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
 </div>
 
-{% if tab != "groups" && tab != "custom_formats" && tab != "indexers" && tab != "downloads" %}
-<form method="post" action="/settings" class="settings-form">
-    <input type="hidden" name="tab" value="{{ tab }}">
+{# Issue #129 Phase 1 completion — all three previously-bulk-form
+   tabs (Integrations, Quality, General) now have their own subforms
+   that post only their tab's fields. The legacy `/settings` POST
+   handler (`settings_submit`) stays mounted for any external
+   bookmark / script that still hits it, but no UI path reaches
+   it anymore. #}
+{% if tab == "integrations" %}
+{%~ include "partials/settings/integrations_form.html" ~%}
+{% endif %}
 
-    <div class="settings-tab-panel {% if tab == "integrations" %}active{% endif %}">
-{%~ include "partials/settings/integrations.html" ~%}
-    </div>
+{% if tab == "quality" %}
+{%~ include "partials/settings/quality_form.html" ~%}
+{% endif %}
 
-    <div class="settings-tab-panel {% if tab == "quality" %}active{% endif %}">
-{%~ include "partials/settings/quality.html" ~%}
-    </div>
-
-    <div class="settings-tab-panel {% if tab == "general" %}active{% endif %}">
-{%~ include "partials/settings/general.html" ~%}
-    </div>
-
-    <button type="submit" class="btn btn-primary">Save Settings</button>
-</form>
+{% if tab == "general" %}
+{%~ include "partials/settings/general_form.html" ~%}
 {% endif %}
 
 {# Sibling form for the autobrr API key regenerate button. Lives at

@@ -126,8 +126,18 @@
        opens on load), or on "+ Add Custom Format" tile click. The form
        still submits natively to the server; a successful save redirects
        back to the tab (no modal) and a validation error redirects back
-       with ?edit_id=N and the modal re-opens with the error in &err. #}
-    <div class="modal-backdrop" id="cf-editor-modal" style="display:none">
+       with ?edit_id=N and the modal re-opens with the error in &err.
+
+       `hx-disable` walls the editor off from any future hx-* parent.
+       The CF editor has its own state machine (live JSON validation,
+       expandable sections, the spec-row repeater) that doesn't fit
+       HTMX's server-round-trip model — Phase 4 of the migration
+       deliberately left it as hand-rolled JS. Without `hx-disable`,
+       a re-introduction of `hx-boost` (or any ancestor sprouting an
+       hx-* attribute later) would silently start intercepting the
+       editor's clicks. Defensive: today nothing inside hits an hx-*
+       parent so this is a no-op, but it locks in the boundary. #}
+    <div class="modal-backdrop" id="cf-editor-modal" style="display:none" hx-disable>
         <div class="modal cf-editor-modal" style="max-width:780px"
              role="dialog" aria-modal="true" aria-labelledby="cf-editor-modal-title">
             <div class="modal-header">

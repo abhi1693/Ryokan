@@ -459,6 +459,26 @@ mod e2e {
                 "/settings",
                 get(crate::handlers::settings::settings_page),
             )
+            // Issue #129 Phase 1 completion — per-tab subform handlers
+            // (`/settings/general`, `/settings/quality`,
+            // `/settings/integrations`). Mounted here so the
+            // browser-e2e tests at `htmx_browser_e2e_settings_subforms`
+            // can POST through them; the production main.rs has the
+            // same trio. Each handler reads `HxRequest` and returns
+            // either the per-tab partial (HTMX) or the full
+            // SettingsTemplate (no-JS).
+            .route(
+                "/settings/general",
+                post(crate::handlers::settings::settings_general_submit),
+            )
+            .route(
+                "/settings/quality",
+                post(crate::handlers::settings::settings_quality_submit),
+            )
+            .route(
+                "/settings/integrations",
+                post(crate::handlers::settings::settings_integrations_submit),
+            )
             .route(
                 "/settings/indexers/delete",
                 post(crate::handlers::settings::indexers::settings_indexers_delete),
