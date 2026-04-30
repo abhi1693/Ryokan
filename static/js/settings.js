@@ -111,33 +111,26 @@ function closeCfEditorModal() {
         el.classList.remove('cf-card-selected');
     });
 }
-// Auto-open on load when the URL carries ?edit_id=N — the server
-// already rendered the pre-filled form inside the modal markup, so
-// this is just a display flip. Also handle backdrop click + Escape
-// to dismiss.
+// CF editor modal open/close lifecycle is now mostly server-driven:
+// the partial template renders `display:flex` when the handler set
+// `custom_format_edit = Some(...)` (i.e. the URL had `?edit_id=N`).
+// The JS-side dance of reading `window.location.search` from an
+// inline IIFE got into trouble under hx-boost — htmx pushes the URL
+// *after* inserted body scripts evaluate, so on a boost-nav the IIFE
+// would see the previous page's URL and leave the modal hidden until
+// the user did a hard refresh. Letting the server own the initial
+// display state sidesteps the timing problem entirely.
 //
-// Two distinct concerns here, gated separately under hx-boost:
-// 1. **Auto-open** runs on every navigation. CF cards link via plain
-//    `<a href="?edit_id=N">` and rely on the server re-rendering the
-//    form pre-filled — the JS just flips `display:flex`. The whole
-//    body is re-rendered on each boost-nav with the new card's data,
-//    so this MUST fire fresh every time. Earlier the guard wrapped
-//    both pieces and clicking a second CF card after the first did
-//    nothing — modal stayed hidden until full refresh.
-// 2. **Backdrop click + Escape listeners** are bound to long-lived
-//    elements (the modal's containing div is fresh each visit, but
-//    `document` persists). Listener-attach is gated by the singleton
-//    flag so we don't accumulate Escape handlers across visits.
-(function autoOpenCfEditorOnEditIdParam() {
+// What's left for JS: backdrop click + Escape dismissal. Backdrop
+// listener attaches per visit (modal element is fresh each render);
+// Escape listener is gated so it doesn't accumulate on `document`.
+(function() {
     const modal = document.getElementById('cf-editor-modal');
-    if (!modal) return;
-    const params = new URLSearchParams(window.location.search);
-    if (params.has('edit_id')) {
-        modal.style.display = 'flex';
+    if (modal) {
+        modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) closeCfEditorModal();
+        });
     }
-    modal.addEventListener('click', function(ev) {
-        if (ev.target === modal) closeCfEditorModal();
-    });
     if (window.__ryokanCfEditorEscBound) return;
     window.__ryokanCfEditorEscBound = true;
     document.addEventListener('keydown', function(ev) {
