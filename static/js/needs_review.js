@@ -37,6 +37,12 @@ var REVIEW_OVERRIDE_SOURCE_MAP = {
     const bulkSource = document.getElementById('review-bulk-source');
     const bulkResolution = document.getElementById('review-bulk-resolution');
     if (!bar || !selectAll || !applyBtn) return;
+    // Element-bound listeners (selectAll/clearBtn/applyBtn) attach to
+    // these specific DOM nodes; on a hx-boost nav-back, these elements
+    // are fresh nodes that need fresh listeners. The document-scoped
+    // listeners (`change` / `keydown` event delegation) are gated by a
+    // separate singleton guard further down — `document` persists
+    // across body swaps so re-attaching there would accumulate.
 
     function rowChecks() {
         return Array.from(document.querySelectorAll('.review-row-check'));

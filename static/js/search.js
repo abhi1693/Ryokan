@@ -321,6 +321,8 @@ function renderScoreBreakdown(r) {
 // logic — one direction is easier to reason about and predictable for
 // both keyboard and touch users.
 (function () {
+    if (window.__ryokanSearchScoreBreakdownInit) return;
+    window.__ryokanSearchScoreBreakdownInit = true;
     function closeAllOpenBreakdowns(except) {
         document.querySelectorAll('details.score-details[open]').forEach(function (d) {
             if (d !== except) d.removeAttribute('open');
@@ -456,12 +458,17 @@ function renderScoreBreakdown(r) {
         tbody.appendChild(frag);
     }
 
-    document.addEventListener('DOMContentLoaded', function () {
+    function bindSortHandlers() {
         const table = document.getElementById('results-table');
         if (!table) return;
         const tbody = document.getElementById('results-body');
         if (!tbody) return;
         table.querySelectorAll('th.sortable').forEach(function (th) {
+            // Per-th `dataset.bound` guard: under hx-boost the IIFE
+            // re-runs and we'd otherwise add another click listener
+            // every visit.
+            if (th.dataset.sortBound === '1') return;
+            th.dataset.sortBound = '1';
             th.addEventListener('click', function () {
                 const key = th.dataset.sortKey;
                 const wasAsc = th.classList.contains('sort-asc');
@@ -494,5 +501,14 @@ function renderScoreBreakdown(r) {
             const dir = initial.classList.contains('sort-asc') ? 'asc' : 'desc';
             sortRows(tbody, key, dir);
         }
-    });
+    }
+    // hx-boost re-runs this script on every nav, but DOMContentLoaded
+    // only fires on the very first full page load — after that, a
+    // listener attached to it never executes. Bind directly when the
+    // DOM is already parsed (which it always is after the first paint).
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bindSortHandlers);
+    } else {
+        bindSortHandlers();
+    }
 })();

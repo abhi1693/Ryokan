@@ -116,6 +116,8 @@ function closeCfEditorModal() {
 // this is just a display flip. Also handle backdrop click + Escape
 // to dismiss.
 (function() {
+    if (window.__ryokanCfEditorModalInit) return;
+    window.__ryokanCfEditorModalInit = true;
     const modal = document.getElementById('cf-editor-modal');
     if (!modal) return;
     const params = new URLSearchParams(window.location.search);
@@ -258,6 +260,8 @@ window.ryokanWaitForIndexerTest = function (btn) {
         });
     }
     bindDownloadClientModal();
+    if (window.__ryokanDcModalGlobalListeners) return;
+    window.__ryokanDcModalGlobalListeners = true;
     document.body.addEventListener('htmx:afterSwap', function(ev) {
         if (ev.target && ev.target.id === 'dc-section') {
             bindDownloadClientModal();
@@ -542,6 +546,8 @@ function openIndexerAddModal(slug, name) {
         });
     }
     bindIndexerModal();
+    if (window.__ryokanIndexerModalGlobalListeners) return;
+    window.__ryokanIndexerModalGlobalListeners = true;
     document.body.addEventListener('htmx:afterSwap', function(ev) {
         if (ev.target && ev.target.id === 'indexer-section') {
             bindIndexerModal();
@@ -944,6 +950,8 @@ function buildCfImportResolvePayload(form) {
 // close). Clears the flag on submit so the save itself doesn't trigger
 // the prompt.
 (function () {
+    if (window.__ryokanSettingsDirtyGuardInit) return;
+    window.__ryokanSettingsDirtyGuardInit = true;
     const form = document.querySelector('form.settings-form[action="/settings"]');
     if (!form) return;
     let dirty = false;
@@ -1294,13 +1302,22 @@ function saveExternalAccountPrefs() {
 //
 // Singleton guard: hx-boost re-runs this script on every nav-back to
 // Settings. Without the guard, each visit starts another `setInterval`
-// — N visits = N parallel timers all walking the DOM every 30s.
-// The clear-and-restart pattern means the latest visit wins.
+// + attaches another `DOMContentLoaded` listener (the latter is a
+// harmless no-op on boost-navs — DOMContentLoaded already fired — but
+// the timer accumulation is a real CPU leak). Clear any prior timer
+// so the latest visit wins; the IIFE itself uses an inner early-return
+// guard so its DOMContentLoaded attach + initial tick only fire once.
 if (window.__ryokanSettingsRelativeTimeTimer) {
     clearInterval(window.__ryokanSettingsRelativeTimeTimer);
     window.__ryokanSettingsRelativeTimeTimer = null;
 }
 (function () {
+    // First-run-only flag for the DOMContentLoaded listener attach +
+    // initial tick. The setInterval is reset every visit (the outer
+    // clearInterval ensures single-timer semantics).
+    const firstRun = !window.__ryokanSettingsRelativeTimeInit;
+    window.__ryokanSettingsRelativeTimeInit = true;
+
     function humanize(unixTs, nowSec) {
         const delta = Math.max(0, nowSec - unixTs);
         if (delta < 60) return 'Just now';
@@ -1327,9 +1344,16 @@ if (window.__ryokanSettingsRelativeTimeTimer) {
 
     // First tick immediately so any clock drift since the
     // server-render gets corrected on page load. Then every 30s.
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', tick);
+    if (firstRun) {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', tick);
+        } else {
+            tick();
+        }
     } else {
+        // Boost-nav re-entry: DOMContentLoaded already fired ages ago
+        // and tick() may not have run since. Run it once so the
+        // freshly-rendered timestamp markers update immediately.
         tick();
     }
     window.__ryokanSettingsRelativeTimeTimer = setInterval(tick, 30 * 1000);

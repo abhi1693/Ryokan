@@ -562,6 +562,8 @@ function renderScoreDetails(r, scoreClass) {
 // breakdown silently opened offscreen and looked like nothing happened
 // when you clicked the score badge.
 (function () {
+    if (window.__ryokanScoreBreakdownInit) return;
+    window.__ryokanScoreBreakdownInit = true;
     function closeAllOpenBreakdowns(except) {
         document.querySelectorAll('details.score-details[open]').forEach(function (d) {
             if (d !== except) d.removeAttribute('open');
@@ -1656,7 +1658,17 @@ function updateEpisodeRow(epNum, state, group) {
         btnLeft.addEventListener('click', () => scrollByViewport(-1));
         btnRight.addEventListener('click', () => scrollByViewport(1));
         track.addEventListener('scroll', updateButtons, { passive: true });
-        window.addEventListener('resize', updateButtons);
+        // Per-section resize listener used to attach to `window` here.
+        // Under body-wide hx-boost, the script re-runs on every nav-back
+        // and a fresh `window.resize` listener attached for each visit
+        // (window persists across body swaps even when the section DOM
+        // doesn't). After N visits, N closures captured stale section
+        // refs and fired on every resize. Use ResizeObserver on `track`
+        // instead — the observer is GC'd with the detached section,
+        // so no cross-visit accumulation.
+        if (typeof ResizeObserver !== 'undefined') {
+            new ResizeObserver(updateButtons).observe(track);
+        }
 
         updateButtons();
     });
