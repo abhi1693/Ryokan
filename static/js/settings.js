@@ -1291,6 +1291,15 @@ function saveExternalAccountPrefs() {
 // browsing Settings sees "last sync 4 minutes ago" tick over to
 // "5 minutes ago" without reloading. Idempotent: if the page has
 // no marker elements it's a no-op + the timer is skipped.
+//
+// Singleton guard: hx-boost re-runs this script on every nav-back to
+// Settings. Without the guard, each visit starts another `setInterval`
+// — N visits = N parallel timers all walking the DOM every 30s.
+// The clear-and-restart pattern means the latest visit wins.
+if (window.__ryokanSettingsRelativeTimeTimer) {
+    clearInterval(window.__ryokanSettingsRelativeTimeTimer);
+    window.__ryokanSettingsRelativeTimeTimer = null;
+}
 (function () {
     function humanize(unixTs, nowSec) {
         const delta = Math.max(0, nowSec - unixTs);
@@ -1323,7 +1332,7 @@ function saveExternalAccountPrefs() {
     } else {
         tick();
     }
-    setInterval(tick, 30 * 1000);
+    window.__ryokanSettingsRelativeTimeTimer = setInterval(tick, 30 * 1000);
 })();
 
 // Per-indexer Download Client dropdown: filter options by protocol so

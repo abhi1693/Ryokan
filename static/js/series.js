@@ -1880,8 +1880,22 @@ function pollDownloadProgress() {
         .catch(() => {});
 }
 
-// Start polling if the series is tracked
+// Start polling if the series is tracked. The 5s interval polls the
+// per-series download-progress endpoint to update the in-row queue
+// progress bars; `pollDownloadProgress` clears its own interval when
+// nothing is downloading. Wrapped in a singleton-clear pattern: htmx
+// body-swap re-runs this script on every nav-back to a series page,
+// and a fresh `setInterval` here without clearing the previous one
+// would stack — N visits = N parallel pollers all hitting the same
+// API every 5s. Clearing any prior `dlPollTimer` first means the most
+// recent visit wins; the variable is module-scope so the prior
+// execution's value survives the new file run (this is one of the few
+// places where the cross-execution `var` carryover is *desirable*).
 if (SD.dbId) {
+    if (dlPollTimer) {
+        clearInterval(dlPollTimer);
+        dlPollTimer = null;
+    }
     pollDownloadProgress();
     dlPollActive = true;
     dlPollTimer = setInterval(pollDownloadProgress, 5000);
