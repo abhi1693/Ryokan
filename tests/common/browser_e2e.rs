@@ -477,6 +477,63 @@ pub async fn wait_until_substring(
     }
 }
 
+/// Poll `client.current_url()` until its path matches
+/// `expected_path` or the timeout elapses. Boosted nav is async
+/// (htmx swaps body, then pushState's the URL), so a synchronous
+/// URL check right after `.click()` would race the URL update.
+/// Used by the boost-phase test files.
+pub async fn wait_for_path(
+    client: &fantoccini::Client,
+    expected_path: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let current = client
+            .current_url()
+            .await
+            .map_err(|e| format!("current_url: {e}"))?;
+        if current.path() == expected_path {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for path={expected_path:?} (current path: {:?})",
+                current.path()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Poll a JavaScript expression until it returns truthy or timeout
+/// elapses. The wrapper coerces the result through `!!(...)` so any
+/// truthy / falsy JS value works as a predicate. Replaces fixed-
+/// `tokio::time::sleep` patterns that were observed flaky under
+/// parallel test execution. Used by the boost-phase test files.
+pub async fn wait_for_js_truthy(
+    client: &fantoccini::Client,
+    expr: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let result = client
+            .execute(&format!("return !!({expr});"), vec![])
+            .await
+            .map_err(|e| format!("execute {expr:?}: {e}"))?;
+        if result.as_bool().unwrap_or(false) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for JS expr to be truthy: {expr:?}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 // ─── Click helpers ────────────────────────────────────────────────
 
 /// Find a `<form>` whose `data-ryokan-confirm-body` attribute (or a

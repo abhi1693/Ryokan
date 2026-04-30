@@ -466,12 +466,26 @@ mod e2e {
                 "/settings",
                 get(crate::handlers::settings::settings_page),
             )
-            // hx-boost rollout Phase A — Library index page mounted
-            // so the boost browser-e2e tests can navigate
-            // Library ↔ Settings via the boosted mobile-tabbar and
-            // assert the head-merge picked up each page's distinct
-            // `{% block page_css %}` link.
+            // hx-boost rollout — top-level pages mounted so boost
+            // browser-e2e tests can navigate the full pentagon
+            // (Library / Search / Downloads / Settings / System)
+            // via the boosted nav and assert head-support picked
+            // up each page's distinct `{% block page_css %}` link.
+            // Phase D pentagon-nav test exercises every route here.
             .route("/", get(crate::handlers::library::pages::index))
+            .route("/search", get(crate::handlers::search::search_page))
+            .route("/system", get(crate::handlers::system::system_page))
+            // Phase D's logout-flow test follows the GET → /logout
+            // → 303 /login chain, so the logout handler needs to be
+            // reachable. /logout must be inside the protected layer
+            // (the auth middleware reads the cookie before clearing
+            // it); the production main.rs mounts it the same way.
+            // The test exercises the REAL cookie-clear path —
+            // `handlers::auth::logout` emits `Set-Cookie: Max-Age=0`
+            // identically here as in production, so the assertion
+            // that subsequent navs land on `/login` reflects the
+            // genuine middleware redirect, not a mocked path.
+            .route("/logout", get(crate::handlers::auth::logout))
             // Issue #129 Phase 1 completion — per-tab subform handlers
             // (`/settings/general`, `/settings/quality`,
             // `/settings/integrations`). Mounted here so the

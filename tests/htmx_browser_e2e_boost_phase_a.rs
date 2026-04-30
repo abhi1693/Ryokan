@@ -24,6 +24,7 @@ use std::time::Duration;
 mod browser_e2e;
 use browser_e2e::{
     assert_htmx_loaded, open_with_session, seed_user_session, spawn_app, try_connect_browser,
+    wait_for_path,
 };
 
 /// Set a mobile-width viewport so the `.mobile-tabbar` actually
@@ -47,34 +48,6 @@ async fn set_desktop_viewport(client: &fantoccini::Client) -> Result<(), String>
         .set_window_rect(0, 0, 1280, 900)
         .await
         .map_err(|e| format!("set_window_rect: {e}"))
-}
-
-/// Poll `client.current_url()` until its path matches `expected_path`
-/// or the timeout elapses. Boosted nav is async (htmx swaps body
-/// then pushState's the URL), so a synchronous check right after
-/// `.click()` would race the URL update.
-async fn wait_for_path(
-    client: &fantoccini::Client,
-    expected_path: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let current = client
-            .current_url()
-            .await
-            .map_err(|e| format!("current_url: {e}"))?;
-        if current.path() == expected_path {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "timed out waiting for path={expected_path:?} (current path: {:?})",
-                current.path()
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 /// **head-css-swap** — the failure-mode detector.
@@ -227,13 +200,20 @@ async fn boost_reapplies_origin_css_when_navigating_back() {
     let _ = client.close().await;
 }
 
-/// **non-boosted-paths-unchanged** — the desktop top-nav stays on
-/// plain anchor navigation. Phase A's narrow opt-in means clicking
-/// the desktop nav must still trigger a real document load — proven
-/// by a window-scoped marker that gets reset on real navigation but
-/// would survive a boosted swap.
+/// **desktop-nav-is-boosted-under-body-wide-opt-in** — under body-wide
+/// `hx-boost="true"` (Phase D), the desktop top-nav is boost-
+/// intercepted. Plant a window-scoped marker pre-click; if boost
+/// fires, the marker survives the swap (boost preserves window
+/// scope). A real document load would wipe it.
+///
+/// Pre-Phase-D this test was named
+/// `desktop_nav_does_full_document_navigation_not_boosted_swap`
+/// and asserted the inverse (marker wiped, proving Phase A's
+/// narrow opt-in didn't widen onto the desktop nav). Phase D
+/// renamed it to match the new invariant; git-blame on the
+/// assertion lines flows through the rename.
 #[tokio::test]
-async fn desktop_nav_does_full_document_navigation_not_boosted_swap() {
+async fn desktop_nav_is_boosted_under_body_wide_opt_in() {
     let Ok(client) = try_connect_browser().await else {
         return;
     };
@@ -276,19 +256,43 @@ async fn desktop_nav_does_full_document_navigation_not_boosted_swap() {
         .await
         .expect("url updated to /settings");
 
+    // Read marker + boost state in one round trip; failure assertion
+    // below carries the full diagnostic so an unexpected outcome
+    // surfaces with body[hx-boost] and typeof htmx for debugging
+    // without spamming green CI runs with println output.
     let marker = client
         .execute(
-            "return typeof window.__ryokan_boost_phase_a_marker;",
+            "return {marker: typeof window.__ryokan_boost_phase_a_marker, \
+                     hxBoost: document.body.getAttribute('hx-boost'), \
+                     htmxLoaded: typeof window.htmx};",
             vec![],
         )
         .await
         .expect("read marker");
-    let marker_str = marker.as_str().unwrap_or("");
+    let marker_field = marker
+        .get("marker")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(missing)");
+    let hx_boost = marker
+        .get("hxBoost")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(missing)");
+    let htmx_loaded = marker
+        .get("htmxLoaded")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(missing)");
+    // Phase D update: under body-wide hx-boost, this test inverts —
+    // the desktop nav IS now boosted, so the marker should SURVIVE
+    // the click. Pre-Phase-D this test asserted the marker was
+    // wiped (proving narrow-opt-in didn't widen). Now it asserts
+    // body-wide boost successfully intercepts.
     assert_eq!(
-        marker_str, "undefined",
-        "desktop top-nav must do a full document load (marker should be wiped); \
-         got marker={marker_str:?} — desktop nav was unexpectedly boost-swapped, \
-         which would mean Phase A's narrow opt-in widened too far"
+        marker_field, "string",
+        "under body-wide hx-boost (Phase D), the desktop top-nav \
+         should be boost-intercepted and the window-scoped marker \
+         should survive the swap. Got marker={marker_field:?} \
+         body[hx-boost]={hx_boost:?} typeof htmx={htmx_loaded:?} — \
+         body-wide boost may not be wired correctly"
     );
 
     let _ = client.close().await;

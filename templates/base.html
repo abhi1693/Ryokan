@@ -3,6 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {# Phase D — htmx 2.x reads <meta name="htmx-config"> during init,
+       before any of its own setup runs. This is the canonical way to
+       seed `htmx.config` and replaces the earlier inline-script dance
+       that tried to set the flag inside an `htmx:load` once-listener.
+       The flag matters: without it, browser-back on a dynamic page
+       (Downloads queue / System logs) restores the body snapshot
+       captured at first visit instead of refetching, leaving the
+       page showing stale content. #}
+    <meta name="htmx-config" content='{"historyEnableCache":false}'>
     <title>Ryokan{% block title %}{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/topbar.css">
@@ -11,22 +20,40 @@
     <link rel="stylesheet" href="/static/css/modals.css">
     {% block page_css %}{% endblock %}
 </head>
-<body hx-ext="head-support">
-    {# `hx-ext="head-support"` opts the document into the
-       `htmx-ext-head-support` extension (vendored at
-       `static/vendor/htmx-ext-head-support-2.0.5.min.js`). The
-       extension diffs the response's `<head>` against the current
-       document's head: adds new `<link>` / `<script>` tags from the
-       new page, removes ones the new page doesn't reference, leaves
-       shared tags in place. This is the prerequisite for the
-       hx-boost rollout — without head-merging, navigating between
-       pages with different `{% block page_css %}` would leave the
-       prior page's CSS stuck in the head and the new page would
-       render unstyled (the same regression that killed the
-       attempt-1 boost rollout). The extension is a no-op until an
-       ancestor element opts into `hx-boost` or until an `hx-*`
-       request returns content with a `<head>` block; loading the
-       script with no boost wired in yet is harmless. #}
+<body hx-ext="head-support" hx-boost="true">
+    {# Phase D of the hx-boost rollout (per
+       /home/john/Documents/ryokan-roadmap/hx_boost_rollout_plan.md):
+       `hx-boost="true"` on `<body>` opts every plain `<a>` and
+       `<form>` in the document into htmx swap-based navigation. No
+       full-page reload between Library / Search / Downloads /
+       Settings / System; head + body diff in place via
+       `htmx-ext-head-support`.
+
+       `hx-ext="head-support"` is the prerequisite — without
+       head-merging, navigating between pages with different
+       `{% block page_css %}` would leave the prior page's CSS stuck
+       in the head and the new page would render unstyled (the
+       regression that killed the pre-rollout attempt). The extension
+       diffs the response's `<head>` against the current document's
+       head: adds new `<link>` / `<script>` tags from the new page,
+       removes ones the new page doesn't reference, leaves shared
+       tags in place.
+
+       Per-element `hx-boost="false"` opt-outs in this file:
+         - `<a href="/logout">` (below). `/logout` is a GET handler;
+           boost would send a GET via fetch and inline-swap the
+           response. Bypassing boost sidesteps the history-API write
+           + body-swap racing the 303 + cookie-clear that the auth
+           middleware emits, and a real doc load on this rare path
+           is fine.
+
+       Opt-outs to add IF you ever introduce them (none currently
+       present; documented here so the convention is greppable):
+         - `target="_blank"` external links — htmx 2.x respects the
+           target attr natively but a defensive opt-out doesn't hurt.
+         - In-page anchor links (`href="#section"`) — boost may try
+           to fetch the same URL in some htmx versions; cheaper to
+           opt-out than version-chase. #}
     <script>
     // Pre-render FOUC guard: sets the title-language data attribute on
     // <html> before any content paints. Must stay inline (non-deferred)
@@ -58,7 +85,7 @@
             <a href="/downloads" class="{% if page == "downloads" %}active{% endif %}">Downloads</a>
             <a href="/settings" class="{% if page == "settings" %}active{% endif %}">Settings</a>
             <a href="/system" class="{% if page == "system" %}active{% endif %}">System</a>
-            <a href="/logout" class="nav-logout">Logout</a>
+            <a href="/logout" class="nav-logout" hx-boost="false">Logout</a>
         </div>
     </nav>
     <main class="content">
@@ -72,15 +99,10 @@
        — it lives in a Settings-page footer when needed. Icons are
        inline SVG so no asset pipeline is required.
 
-       Phase A of the hx-boost rollout (per /home/john/Documents/
-       ryokan-roadmap/hx_boost_rollout_plan.md): this nav region is
-       opted into `hx-boost` while the desktop top-nav stays on plain
-       `<a>` navigation. Five anchor links, no forms, all targets are
-       top-level pages with distinct per-page CSS — narrow blast
-       radius for validating that `htmx-ext-head-support` correctly
-       swaps the `<head>` between pages on every boosted nav. Phase D
-       moves this attribute to `<body>` for site-wide coverage. #}
-    <nav class="mobile-tabbar" aria-label="Primary" hx-boost="true">
+       (`hx-boost="true"` was on this nav during Phase A of the
+       hx-boost rollout. Now lives on `<body>` for site-wide coverage,
+       so the per-element attribute is redundant.) #}
+    <nav class="mobile-tabbar" aria-label="Primary">
         <a href="/" class="mobile-tab {% if page == "library" %}active{% endif %}" aria-label="Library">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
             <span class="mobile-tab-label">Library</span>
@@ -189,25 +211,21 @@
          window.ryokanToast({kind, title, body, duration}). -->
     <div class="ryokan-toast-stack" id="ryokan-toast-stack" aria-live="polite" aria-atomic="false"></div>
 
-    {# HTMX migration (issue #129, Phase 0) — vendored htmx 2.0.9 core
-       + SSE extension. Loaded but NOT yet driving any behavior. Phase 1+
-       wires `hx-*` attributes per-form/per-tab; Phase 0 only ships the
-       foundation so subsequent phases can land cleanly. Must load before
-       base.js so any custom JS that references `htmx.*` (Phase 4 SSE
-       progress, etc.) sees the global on first paint.
+    {# HTMX vendored assets — htmx 2.0.9 core, SSE extension (used by
+       a small set of long-running progress endpoints), head-support
+       extension (the head-merge prerequisite for hx-boost), and the
+       page_lifecycle helper (mount/unmount per-page polling on every
+       boosted swap). All `defer`'d so they evaluate after the body
+       parses but in source order — load chain: htmx core → SSE +
+       head-support extensions → page_lifecycle → base.js. base.js
+       references `window.htmx` from its `[data-ts]` refresh hook
+       and from the `htmx:confirm` bridge for hx-* form-confirm
+       interception, so it must load last.
 
-       Phase A of the hx-boost rollout (2026-04-29) wires
-       `htmx-ext-head-support` and opts the mobile-tabbar nav into
-       `hx-boost` — see the `hx-ext` attribute on `<body>` and the
-       `hx-boost` attribute on `<nav class="mobile-tabbar">` above.
-       Attempt-1 of body-wide boost (pre-rollout) was reverted because
-       boost-only swaps body content and leaves `{% block page_css %}`
-       from the prior page in place, so per-page CSS (series.css,
-       settings.css, etc.) didn't load and pages rendered unstyled.
-       The extension fixes that by diff-merging the response's
-       `<head>` against the document's. Body-wide boost lands in
-       Phase D once the per-page-init audit (Phase B) and the
-       redirect-handler audit (Phase C) close out. #}
+       Body-wide `hx-boost="true"` (Phase D of the rollout, see
+       `<body>` above) means every plain `<a>` and `<form>` runs
+       through htmx by default. Per-page `hx-boost="false"` opt-outs
+       are documented at each opt-out site. #}
     <script src="/static/vendor/htmx-2.0.9.min.js" defer></script>
     <script src="/static/vendor/htmx-ext-sse-2.2.4.min.js" defer></script>
     <script src="/static/vendor/htmx-ext-head-support-2.0.5.min.js" defer></script>

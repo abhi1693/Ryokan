@@ -120,6 +120,11 @@ name = "htmx_browser_e2e_boost_phase_b"
 path = "tests/htmx_browser_e2e_boost_phase_b.rs"
 required-features = ["test-support", "browser-e2e"]
 
+[[test]]
+name = "htmx_browser_e2e_boost_phase_d"
+path = "tests/htmx_browser_e2e_boost_phase_d.rs"
+required-features = ["test-support", "browser-e2e"]
+
 [dependencies]
 # Web framework + async runtime
 axum = { version = "0.8", features = ["macros"] }
@@ -139,7 +144,7 @@ tower-http = { version = "0.6", features = ["fs", "trace", "compression-br", "co
 # call `template.render()` directly and wrap the result in `Html(..)`
 # themselves, which is what this codebase already does — so the axum
 # integration just vanishes on the bump.
-askama = "0.15"
+askama = "0.16"
 
 # Database
 # default-features = false drops sqlx's `any`/`macros`/`migrate`/`json`
