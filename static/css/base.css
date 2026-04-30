@@ -465,7 +465,13 @@ a:hover {
 
 .folder-select {
     padding: 5px 10px;
-    background: var(--bg);
+    /* Longhand `background-color` (not the `background:` shorthand)
+     * so the global `select { background-image: ...chevron... }` rule
+     * in forms.css survives the cascade. The shorthand resets
+     * `background-image` to `initial` (none) as part of its semantics
+     * — applying it here was clobbering the chevron on every
+     * `.folder-select` element. */
+    background-color: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text);

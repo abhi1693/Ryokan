@@ -465,12 +465,26 @@
  * etc.) keep working — they just paint their text/border/bg, while
  * this rule paints the chevron and reserves space for it. */
 select {
+    /* `-moz-appearance` is the Firefox-specific knob; modern Firefox
+     * also honors the unprefixed `appearance` but older + some Linux
+     * builds still need the prefix to fully strip the native control
+     * widget. Ship both for belt-and-suspenders coverage. Without
+     * Firefox actually stripping the native control, both the native
+     * chevron AND our SVG would render side-by-side on focus (the
+     * "two chevrons" symptom from the first iteration of this fix). */
     -webkit-appearance: none;
+    -moz-appearance: none;
     appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a7a96' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 10px center;
-    background-size: 14px;
+    /* `!important` on `background-image` because per-page rules like
+     * `.folder-select { background: var(--bg) }` (shorthand) reset
+     * `background-image` as part of cascade semantics. We've fixed
+     * the known offenders to use `background-color:` longhand, but
+     * any future rule that uses the shorthand on a select would
+     * silently lose the chevron without this guard. */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a7a96' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 10px center !important;
+    background-size: 14px !important;
     padding-right: 30px;
 }
 
@@ -480,6 +494,17 @@ select:focus {
      * with the focused stroke color, since CSS can't recolor a data-
      * URI image with `filter` without affecting the rest of the
      * select. */
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cba6f7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cba6f7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") !important;
+}
+
+/* Firefox doesn't render `background-image` on `<select>` elements
+ * unless you also strip its internal padding via `text-indent` and
+ * suppress the focus dotted ring on the option text. Without this
+ * the chevron would be hidden behind Firefox's own option-padding
+ * region in some versions. The `0` text-indent is a no-op visually
+ * but force-resets any inherited text-indent that might shove the
+ * chevron offscreen. */
+select::-ms-expand {
+    display: none;
 }
 
