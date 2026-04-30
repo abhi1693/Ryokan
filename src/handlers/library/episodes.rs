@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use axum::{
     Json,
     extract::{Path, State},
+    http::HeaderValue,
+    response::{IntoResponse, Response},
 };
+use axum_htmx::HxRequest;
 use serde::Serialize;
 
 use crate::AppState;
@@ -191,13 +194,24 @@ pub(super) async fn remove_stamped_source_paths(sources: &[String]) -> Vec<std::
 )]
 pub async fn delete_episode_file(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Path((request_id, episode_number)): Path<(i64, i32)>,
-) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    let json_err = |status: axum::http::StatusCode, msg: &str| {
-        (
-            status,
-            Json(serde_json::json!({"ok": false, "message": msg})),
-        )
+) -> Response {
+    // The route serves both the legacy JSON shape (POST `/api/...` from
+    // a non-htmx caller — kept for any external programmatic consumer)
+    // and the migration's declarative shape (htmx `hx-post` from the
+    // episode-detail modal). Empty body + an `HX-Trigger` header
+    // carrying the result is the canonical "modal-footer button row
+    // doesn't grow to fit the message" pattern from the indexer / DC
+    // test handlers — the JS-side row update + toast then key off the
+    // trigger event.
+    let json_err = |status: axum::http::StatusCode, msg: &str| -> Response {
+        if is_htmx {
+            episode_delete_trigger(status, episode_number, false, msg)
+        } else {
+            let body = Json(serde_json::json!({"ok": false, "message": msg}));
+            (status, body).into_response()
+        }
     };
 
     let (tracked_row, _, _detail) = match resolve_series_context(&state.db, request_id).await {
@@ -578,16 +592,76 @@ pub async fn delete_episode_file(
             )
             .await;
 
-            (
-                axum::http::StatusCode::OK,
-                Json(serde_json::json!({
-                    "ok": true,
-                    "deleted": file.filename,
-                    "qbit_removed": qbit_removed,
-                })),
-            )
+            if is_htmx {
+                let msg = if qbit_removed.is_empty() {
+                    format!("Episode {} file removed.", episode_number)
+                } else {
+                    format!(
+                        "Episode {} file removed; {} torrent(s) removed from client.",
+                        episode_number,
+                        qbit_removed.len()
+                    )
+                };
+                episode_delete_trigger(axum::http::StatusCode::OK, episode_number, true, &msg)
+            } else {
+                (
+                    axum::http::StatusCode::OK,
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "deleted": file.filename,
+                        "qbit_removed": qbit_removed,
+                    })),
+                )
+                    .into_response()
+            }
         }
     }
+}
+
+/// Build the HTMX response for `delete_episode_file`. Mirrors the
+/// `indexer_test_trigger` / `dc_test_result_response` shape: an empty
+/// body (so the modal-footer button row doesn't reflow to fit the
+/// message) plus an `HX-Trigger` header carrying a JSON payload. The
+/// frontend listener in `static/js/series.js` (`ryokan-episode-deleted`)
+/// reads `event.detail` and runs the row update plus the toast.
+///
+/// **ASCII-only payload, deliberately**. HTTP headers carry no charset
+/// metadata, so any non-ASCII byte round-trips as Latin-1 and either
+/// produces mojibake in the toast or — worse — makes htmx fail to
+/// parse the header value as JSON, in which case the `CustomEvent`
+/// never fires and the JS listener never runs (file deletes silently
+/// without the row stamp or toast). Same constraint as the indexer /
+/// DC test handlers; recorded in the `feedback_hx_trigger_ascii_only`
+/// memory. We **deliberately do NOT echo torrent names back** — group
+/// tags / show titles regularly contain em-dashes, kanji, or other
+/// non-ASCII; the count is enough for the toast wording. Errors from
+/// upstream services flow through `message`, so the helper sanitizes
+/// it to ASCII as a defensive step.
+fn episode_delete_trigger(
+    status: axum::http::StatusCode,
+    episode_number: i32,
+    ok: bool,
+    message: &str,
+) -> Response {
+    let safe_message: String = message
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '?' })
+        .collect();
+    let payload = serde_json::json!({
+        "ryokan-episode-deleted": {
+            "ok": ok,
+            "episode_number": episode_number,
+            "message": safe_message,
+        }
+    });
+    let mut resp = Response::new(axum::body::Body::empty());
+    *resp.status_mut() = status;
+    let header_value = payload
+        .to_string()
+        .parse()
+        .unwrap_or_else(|_| HeaderValue::from_static("ryokan-episode-deleted"));
+    resp.headers_mut().insert("HX-Trigger", header_value);
+    resp
 }
 
 /// Cancel an in-flight grab for an episode: remove the torrent from
@@ -1480,23 +1554,70 @@ mod tests {
 
         #[tokio::test]
         async fn delete_episode_file_on_unknown_series_returns_error_status() {
-            // `delete_episode_file` returns `(StatusCode, Json<Value>)`
-            // directly — no Result wrapper — with an `ok: false` body.
-            // The specific status depends on the resolve path: in
-            // an offline test env, `resolve_series_context` fails
-            // before reaching the "series not in library" branch
-            // (AniList unreachable → 502). Either way, the handler
-            // must emit a 4xx/5xx with a structured JSON body so
-            // the UI can show the reason; silently succeeding on an
-            // unknown id would delete phantom files.
+            // `delete_episode_file` returns `Response` (the htmx-aware
+            // body shape: htmx path emits empty body + `HX-Trigger`,
+            // non-htmx path emits the JSON `{ok, message}` shape). The
+            // specific status depends on the resolve path: in an
+            // offline test env, `resolve_series_context` fails before
+            // reaching the "series not in library" branch (AniList
+            // unreachable → 502). Either way, the handler must emit a
+            // 4xx/5xx with a structured body so the UI can show the
+            // reason; silently succeeding on an unknown id would delete
+            // phantom files.
+            //
+            // We exercise the non-htmx path here because it preserves a
+            // JSON body we can parse for the structured-error contract;
+            // the htmx path is empty-body-by-design and is covered by
+            // the trigger-payload assertions below.
             let db = in_memory_pool().await;
             let state = build_test_app_state(db, None);
-            let (status, body) = delete_episode_file(State(state), Path((99_999, 1))).await;
+            let resp = delete_episode_file(State(state), HxRequest(false), Path((99_999, 1))).await;
             assert!(
-                status.is_client_error() || status.is_server_error(),
-                "unknown series must be an error status, got {status}"
+                resp.status().is_client_error() || resp.status().is_server_error(),
+                "unknown series must be an error status, got {}",
+                resp.status()
             );
-            assert_eq!(body.0["ok"], false);
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("body collect");
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("non-htmx error path returns JSON");
+            assert_eq!(body["ok"], false);
+        }
+
+        #[tokio::test]
+        async fn delete_episode_file_htmx_path_emits_empty_body_with_trigger() {
+            // Companion to the assertion above: the htmx path
+            // (`HxRequest(true)`) replaces the JSON body with an
+            // `HX-Trigger` header carrying the structured payload
+            // (`ryokan-episode-deleted` event with `ok`, `episode_number`,
+            // `message`). The frontend listener in `static/js/series.js`
+            // keys off this event for the toast + row update. Empty body
+            // is load-bearing — the modal footer button row would reflow
+            // for any text-bearing response.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let resp = delete_episode_file(State(state), HxRequest(true), Path((99_999, 1))).await;
+            assert!(
+                resp.status().is_client_error() || resp.status().is_server_error(),
+                "unknown series under htmx must still be an error status, got {}",
+                resp.status()
+            );
+            let trigger = resp
+                .headers()
+                .get("HX-Trigger")
+                .expect("htmx error path must carry HX-Trigger")
+                .to_str()
+                .unwrap()
+                .to_string();
+            let payload: serde_json::Value =
+                serde_json::from_str(&trigger).expect("trigger header is JSON");
+            assert_eq!(payload["ryokan-episode-deleted"]["ok"], false);
+            assert_eq!(payload["ryokan-episode-deleted"]["episode_number"], 1);
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("body collect");
+            assert!(bytes.is_empty(), "htmx response body must be empty");
         }
 
         // `series_episodes_json` + `mark_episode_failed` are

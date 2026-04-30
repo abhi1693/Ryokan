@@ -287,7 +287,13 @@ window.ryokanWaitForIndexerTest = function (btn) {
 // `protocol_for_kind` so the protocol-mismatch guard at save time
 // doesn't reject inputs the form description encouraged the user
 // to enter.
-const DC_KIND_COPY = {
+// `var` (not `const`) at module scope is deliberate across every per-
+// page JS file: htmx body-swap re-executes the inserted `<script>` tag
+// on every navigation back to a previously-visited page, and a
+// `let`/`const` redeclaration is a parser-stage SyntaxError that
+// rejects the whole file. See `feedback_no_module_scope_dom_under_boost`
+// memory and the matching note at the top of `system.js`.
+var DC_KIND_COPY = {
     qbittorrent: {
         url_placeholder: 'http://localhost:8080',
         url_hint: "Point at qBittorrent's Web UI base. Ryokan handles the API path internally.",
@@ -540,7 +546,7 @@ function openIndexerAddModal(slug, name) {
 // path conventions. Without this, both kinds shared the torznab-
 // only hint copy, which read incorrectly when the user picked
 // newznab.
-const INDEXER_KIND_COPY = {
+var INDEXER_KIND_COPY = {
     torznab: {
         url_placeholder: 'https://prowlarr.local/{N}/api',
         api_key_hint: "Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them. Find this key in Prowlarr Settings → General (or Jackett's UI).",
@@ -950,7 +956,7 @@ function buildCfImportResolvePayload(form) {
 // Origin of the gh-pages-hosted broker page that AL/MAL redirect to
 // after user approval. The postMessage receiver below validates
 // `event.origin` against this value before reading any data.
-const EXT_BROKER_ORIGIN = 'https://johnthreekay.github.io';
+var EXT_BROKER_ORIGIN = 'https://johnthreekay.github.io';
 
 // Single in-flight link attempt at module scope. Holds the
 // {handler, timer, provider} for the active OAuth flow so a second
@@ -960,7 +966,7 @@ const EXT_BROKER_ORIGIN = 'https://johnthreekay.github.io';
 // both listeners alive — and since both modals share fixed input
 // IDs, the AL postMessage would auto-fill the MAL modal and
 // trigger an AL submit while the user was looking at MAL.
-let _extLinkAttempt = null;
+var _extLinkAttempt = null;
 
 function clearExtLinkAttempt() {
     if (!_extLinkAttempt) return;
@@ -1229,7 +1235,7 @@ function syncWatchListNow() {
         });
 }
 
-let _extPrefsSaveTimer = null;
+var _extPrefsSaveTimer = null;
 function saveExternalAccountPrefs() {
     // Debounce so the user toggling three checkboxes in a row doesn't
     // fire three POSTs back-to-back.

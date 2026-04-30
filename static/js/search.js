@@ -32,10 +32,10 @@
 // right before this file loads) and gates execution on the presence of
 // the `#results-body` element.
 
-const searchState = window.searchState || { hasMore: false, totalResults: 0, searched: false };
-let nextPage = 2;
-let hasMore = !!searchState.hasMore;
-let totalResults = Number(searchState.totalResults) || 0;
+var searchState = window.searchState || { hasMore: false, totalResults: 0, searched: false };
+var nextPage = 2;
+var hasMore = !!searchState.hasMore;
+var totalResults = Number(searchState.totalResults) || 0;
 
 // Handle prefill from library "Search Nyaa" button.
 (function () {

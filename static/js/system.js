@@ -17,11 +17,18 @@ document.addEventListener('click', function (ev) {
     menu.classList.remove('open');
 });
 
-let pollTimer = null;
+// `var` (not `let`) at module scope is deliberate across every per-page
+// JS file: htmx body-swap re-executes the inserted `<script>` tag when
+// the user navigates back to a previously-visited page, but the prior
+// declarations still occupy the global scope. A `let` / `const`
+// redeclaration is a parser-stage SyntaxError — the whole file is
+// rejected and the lifecycle registration never runs. `var` redeclares
+// silently. See `feedback_no_module_scope_dom_under_boost` memory.
+var pollTimer = null;
 // Initial "latest seen" log id is read from the first rendered row's
 // data-id attribute (server-side Askama writes one on every <tr>) so the
 // JS stays free of Askama templating. 0 when the logs tab isn't rendered.
-let latestId = (function () {
+var latestId = (function () {
     const firstRow = document.querySelector('#log-tbody tr[data-id]');
     return firstRow ? parseInt(firstRow.dataset.id, 10) || 0 : 0;
 })();
