@@ -12,7 +12,27 @@
        captured at first visit instead of refetching, leaving the
        page showing stale content. #}
     <meta name="htmx-config" content='{"historyEnableCache":false}'>
+    {# Tells the browser to use dark variants for the default UA chrome
+       (scrollbars, form controls, focus rings) before any of our CSS
+       loads. Without this hint, the user briefly sees white scrollbars
+       on a dark page during the flash window between first paint and
+       full external CSS application. #}
+    <meta name="color-scheme" content="dark">
     <title>Ryokan{% block title %}{% endblock %}</title>
+    {# Critical inline CSS — paint background + base text color + body
+       font on the *very first paint*, before any external stylesheet
+       has finished arriving. Five render-blocking `<link>` tags + a
+       body-opening inline script (the title-language guard below)
+       leave a perceptible gap where the page would otherwise paint
+       white-on-default-serif before flipping to its real dark theme.
+       Keep this block tiny (< 1 KB) — anything beyond bg+font is just
+       extra bytes blocking the network round-trip for the real CSS.
+       Values mirror `:root` in `static/css/base.css`; if you re-theme
+       the dark palette there, mirror the bg + text changes here too. #}
+    <style>
+        html { background: #0f0f13; color: #d4d4e0; color-scheme: dark; }
+        body { margin: 0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 1.5; }
+    </style>
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/topbar.css">
     <link rel="stylesheet" href="/static/css/forms.css">
