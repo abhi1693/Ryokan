@@ -200,6 +200,15 @@ fn count_redirects_excluding_test_modules(contents: &str) -> usize {
     // backwards from `abs` to find the line start, then check
     // whether the prefix begins with `//` (line comment) — that
     // catches both `// regular` and `/// doc` and `//!` module-doc.
+    //
+    // Limitation: only matches LINE-PREFIX comments. A line shaped
+    // like `let x = 1; // see Redirect::to docs` would (incorrectly)
+    // count the `Redirect::to` in the trailing comment. No such
+    // cases exist in the source today; if one ever surfaces as a
+    // false-positive audit failure, either rewrite the comment to
+    // not name the symbol or extend this filter to scan from the
+    // line start for the first `//` and treat anything after as a
+    // comment range.
     let line_starts_with_comment = |abs: usize| -> bool {
         let mut start = abs;
         while start > 0 && bytes[start - 1] != b'\n' {

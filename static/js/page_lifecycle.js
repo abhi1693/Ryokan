@@ -71,13 +71,26 @@
 
     function applyLifecycle() {
         for (const reg of registry) {
-            const isActive = !!reg.check();
+            // Wrap check() so a future page whose `check` throws
+            // (e.g. `document.getElementById(...).dataset.bar`
+            // dereferencing null) can't break sibling registrations
+            // by aborting the loop. Mirrors the mount/unmount
+            // try/catch posture below — `htmx.onLoad`'s own internal
+            // error handling has the same shape.
+            let isActive;
+            try {
+                isActive = !!reg.check();
+            } catch (e) {
+                if (window.console && console.error) {
+                    console.error('ryokanRegisterPageInit check failed for', reg.name, e);
+                }
+                continue;
+            }
             if (isActive && !reg.wasActive) {
                 try { reg.mount(); } catch (e) {
                     // A page's mount throwing must not prevent
                     // sibling registrations from being processed.
-                    // Log and continue — same posture as
-                    // `htmx.onLoad`'s own internal error handling.
+                    // Log and continue.
                     if (window.console && console.error) {
                         console.error('ryokanRegisterPageInit mount failed for', reg.name, e);
                     }

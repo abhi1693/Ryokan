@@ -63,12 +63,40 @@ pub fn htmx_aware_redirect_from_req(
 /// query-string values that came from user input.
 pub fn htmx_aware_redirect(is_htmx: bool, url: &str) -> Response {
     if is_htmx {
-        let mut resp = Response::new(axum::body::Body::empty());
-        *resp.status_mut() = StatusCode::OK;
-        if let Ok(value) = url.parse() {
-            resp.headers_mut().insert("HX-Redirect", value);
+        match url.parse() {
+            Ok(value) => {
+                let mut resp = Response::new(axum::body::Body::empty());
+                *resp.status_mut() = StatusCode::OK;
+                resp.headers_mut().insert("HX-Redirect", value);
+                resp
+            }
+            Err(e) => {
+                // `HeaderValue::parse` rejected the URL — almost
+                // always an ASCII control character (newline, CR,
+                // null) the caller forgot to escape (non-ASCII /
+                // 0x80–0xFF bytes do parse fine, those are fine
+                // for opaque Latin-1 header values).
+                //
+                // Falling through to `Redirect::to(url)` is NOT
+                // safe — axum's `Redirect::to` does
+                // `Uri::try_from(url).unwrap()` internally and
+                // panics on the same malformed input. We surface a
+                // 500 instead so the user notices something went
+                // wrong (a silent header-less 200 would leave the
+                // boosted click stuck on the current page with no
+                // feedback) and the URL gets logged so the caller
+                // bug is greppable.
+                tracing::warn!(
+                    url = %url,
+                    error = %e,
+                    "htmx_aware_redirect: HX-Redirect HeaderValue parse failed. \
+                     Caller built a malformed URL — likely an unescaped control \
+                     character in a flash-message value. Returning 500 so the \
+                     bug surfaces to the user instead of silently no-op-ing."
+                );
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
         }
-        resp
     } else {
         Redirect::to(url).into_response()
     }
@@ -123,20 +151,51 @@ mod tests {
         );
     }
 
-    /// Edge case: a URL containing a non-ASCII byte (shouldn't
-    /// happen — callers percent-encode upstream — but we don't
-    /// want to panic if one slips through). The `parse()` call
-    /// returns Err for non-ASCII; we fall back to a header-less
-    /// 200 rather than panicking. htmx without an HX-Redirect
-    /// stays on the current page; degraded but safe.
+    /// Edge case: a URL containing an ASCII control character
+    /// (newline, CR, null) — `HeaderValue::parse` rejects those.
+    /// Non-ASCII bytes (kanji, etc.) actually parse fine since
+    /// `HeaderValue` allows the 0x80-0xFF range as opaque Latin-1.
+    /// The case that DOES trip the parser is a CRLF injection or
+    /// stray newline — should never happen via legitimate callers
+    /// since `urlencoding::encode` escapes them, but we don't want
+    /// the boosted click to silently no-op if one slips through.
+    /// We can't fall through to `Redirect::to(url)` because axum's
+    /// `Redirect::to` ALSO panics on the same malformed input
+    /// (uses `Uri::try_from(url).unwrap()` internally), so the
+    /// helper returns 500 to surface the caller bug visibly.
     #[test]
-    fn htmx_aware_redirect_does_not_panic_on_non_ascii_url() {
+    fn htmx_aware_redirect_returns_500_when_url_rejected_by_header_value() {
+        // ASCII LF (0x0A) is rejected by HeaderValue — it's the
+        // CRLF-injection guard in hyper/http. Real-world trigger is
+        // a caller that built a redirect URL by string-concatenating
+        // an unescaped log message.
+        let url = "/settings?tab=indexers&err=line1\nline2";
+        let resp = htmx_aware_redirect(true, url);
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "rejected URL must surface as 500 (visible to user, logged on server) \
+             — both `HX-Redirect` AND `Redirect::to` reject the same input, so a \
+             header-less 200 silent no-op was the only quieter alternative"
+        );
+        assert!(
+            resp.headers().get("HX-Redirect").is_none(),
+            "fallback path can't set HX-Redirect (the parse just failed)"
+        );
+    }
+
+    /// Sanity check: a URL with non-ASCII bytes (legitimately raw
+    /// UTF-8 from e.g. a release title) does NOT trip the fallback.
+    /// `HeaderValue::parse` accepts the 0x80-0xFF range; the boost
+    /// path keeps emitting `HX-Redirect` cleanly. The test is here
+    /// to document the surface — a future "fail closed on
+    /// non-ASCII" tightening would need a paired test edit.
+    #[test]
+    fn htmx_aware_redirect_handles_non_ascii_url_via_hx_redirect_path() {
         let url = "/settings?tab=indexers&err=漢字";
         let resp = htmx_aware_redirect(true, url);
-        // Either 200 with no header, or 200 with the header set
-        // (depending on what HeaderValue::parse does with this).
-        // The test pins "doesn't panic" — both are acceptable.
         assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("HX-Redirect").is_some());
     }
 
     /// `htmx_aware_redirect_from_req` reads the `HX-Request` header.
