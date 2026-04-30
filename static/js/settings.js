@@ -182,31 +182,40 @@ function openDcAddModal() {
         );
     }
 }
-// Test-connection result — server fires `ryokan-dc-test-result` via
-// HX-Trigger header (empty response body, so the modal footer's button
-// row doesn't grow to fit the message). Convert to a toast that
-// surfaces at the top of the viewport regardless of message length.
-document.body.addEventListener('ryokan-dc-test-result', function (ev) {
-    const detail = ev.detail || {};
-    window.ryokanToast({
-        kind: detail.ok ? 'success' : 'error',
-        title: detail.ok ? 'Connection OK' : 'Connection failed',
-        body: detail.message || '',
+// One-shot guard wraps every `addEventListener` at module scope in this
+// file. hx-boost re-runs the script on each nav-back, so an unguarded
+// `addEventListener` accumulates a copy per visit (Nth visit fires N
+// callbacks). Same pattern applied to the 2 `htmx:afterSettle` and 1
+// `DOMContentLoaded` listeners further down the file.
+if (!window.__ryokanSettingsTriggerListeners) {
+    window.__ryokanSettingsTriggerListeners = true;
+    // Test-connection result — server fires `ryokan-dc-test-result` via
+    // HX-Trigger header (empty response body, so the modal footer's
+    // button row doesn't grow to fit the message). Convert to a toast
+    // that surfaces at the top of the viewport regardless of message
+    // length.
+    document.body.addEventListener('ryokan-dc-test-result', function (ev) {
+        const detail = ev.detail || {};
+        window.ryokanToast({
+            kind: detail.ok ? 'success' : 'error',
+            title: detail.ok ? 'Connection OK' : 'Connection failed',
+            body: detail.message || '',
+        });
     });
-});
-// Indexer Test result — same shape as the DC variant. Server fires
-// `ryokan-indexer-test-result` via HX-Trigger from /api/indexers/test.
-// Used by both the modal-footer Test button (Add and Edit) and the
-// per-card Test button on the configured-indexer cards.
-document.body.addEventListener('ryokan-indexer-test-result', function (ev) {
-    const detail = ev.detail || {};
-    window.ryokanToast({
-        kind: detail.ok ? 'success' : 'error',
-        category: 'indexer',
-        title: detail.ok ? 'Indexer reachable' : 'Indexer test failed',
-        body: detail.message || '',
+    // Indexer Test result — same shape as the DC variant. Server fires
+    // `ryokan-indexer-test-result` via HX-Trigger from /api/indexers/test.
+    // Used by both the modal-footer Test button (Add and Edit) and the
+    // per-card Test button on the configured-indexer cards.
+    document.body.addEventListener('ryokan-indexer-test-result', function (ev) {
+        const detail = ev.detail || {};
+        window.ryokanToast({
+            kind: detail.ok ? 'success' : 'error',
+            category: 'indexer',
+            title: detail.ok ? 'Indexer reachable' : 'Indexer test failed',
+            body: detail.message || '',
+        });
     });
-});
+}
 // Companion to the modal-footer Test button. htmx's `hx-disabled-elt`
 // re-enables the button on htmx:afterRequest automatically, but we
 // also want the button text to flash "Testing…" while the request is
@@ -439,23 +448,33 @@ function bindDcKindCopyToForm(form) {
         applyDcKindCopy(form, kindSelect.value);
     });
 }
-// htmx swaps the modal-body when an Edit/Add modal opens. Run the
-// relabel pass on every fresh body so the initial state matches the
-// pre-selected kind (Edit) or the qBittorrent default (Add).
-document.body.addEventListener('htmx:afterSettle', function(ev) {
-    if (ev.target && ev.target.id === 'dc-modal-body') {
-        const form = ev.target.querySelector('form');
-        if (form) bindDcKindCopyToForm(form);
-    }
-});
-// Initial load (the section partial pre-renders the Add form body so
-// the modal opens fast on first click — see download_clients/list.html
-// `{%~ include "...add_form_body.html" %}`). Apply the relabel pass
-// to that pre-rendered form too so the user sees correct copy if
-// they happen to change kind before any modal swap fires.
-window.addEventListener('DOMContentLoaded', function() {
+// One-shot guard — see top of file for rationale.
+if (!window.__ryokanSettingsDcModalListeners) {
+    window.__ryokanSettingsDcModalListeners = true;
+    // htmx swaps the modal-body when an Edit/Add modal opens. Run the
+    // relabel pass on every fresh body so the initial state matches the
+    // pre-selected kind (Edit) or the qBittorrent default (Add).
+    document.body.addEventListener('htmx:afterSettle', function(ev) {
+        if (ev.target && ev.target.id === 'dc-modal-body') {
+            const form = ev.target.querySelector('form');
+            if (form) bindDcKindCopyToForm(form);
+        }
+    });
+    // Initial load (the section partial pre-renders the Add form body
+    // so the modal opens fast on first click — see
+    // download_clients/list.html
+    // `{%~ include "...add_form_body.html" %}`). Apply the relabel pass
+    // to that pre-rendered form too so the user sees correct copy if
+    // they happen to change kind before any modal swap fires.
+    //
+    // DOMContentLoaded already fired by the time hx-boost re-runs this
+    // file on a nav-back, so the listener attaches but never fires
+    // again. Run the apply directly to cover the boost-nav case.
+    window.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('#dc-modal-body form').forEach(bindDcKindCopyToForm);
+    });
     document.querySelectorAll('#dc-modal-body form').forEach(bindDcKindCopyToForm);
-});
+}
 
 // ── Settings → Indexers shared add/edit modal ─────────────────────
 // Mirrors the DC modal flow. Catalog seed cards →
@@ -574,12 +593,16 @@ function bindIndexerKindCopyToForm(form) {
         applyIndexerKindCopy(form, kindSelect.value);
     });
 }
-document.body.addEventListener('htmx:afterSettle', function(ev) {
-    if (ev.target && ev.target.id === 'indexer-modal-body') {
-        const form = ev.target.querySelector('form');
-        if (form) bindIndexerKindCopyToForm(form);
-    }
-});
+// One-shot guard — see top of file for rationale.
+if (!window.__ryokanSettingsIndexerModalListener) {
+    window.__ryokanSettingsIndexerModalListener = true;
+    document.body.addEventListener('htmx:afterSettle', function(ev) {
+        if (ev.target && ev.target.id === 'indexer-modal-body') {
+            const form = ev.target.querySelector('form');
+            if (form) bindIndexerKindCopyToForm(form);
+        }
+    });
+}
 
 // #11.4 — CF export selector. Radios pick the mode, checkboxes pick the
 // ids, then two actions: download the file (via the existing GET endpoint)

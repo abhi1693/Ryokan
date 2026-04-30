@@ -371,29 +371,38 @@ function markEpisodeFailed(historyId, epNum, btn) {
 // the `ryokan-episode-deleted` listener below). The handler emits an
 // `HX-Trigger: ryokan-episode-deleted` header on both success and
 // failure so a single listener handles toast + row state.
-document.body.addEventListener('ryokan-episode-deleted', function (ev) {
-    const detail = ev.detail || {};
-    const epNum = parseInt(detail.episode_number, 10);
-    if (!detail.ok) {
+//
+// One-shot guard: hx-boost re-evaluates this script on every nav-back
+// to a series page. Without the guard, each visit adds another copy of
+// the listener and a single delete fires N toasts on the Nth visit
+// ("Episode 10 deleted × 7" was the symptom). Same pattern repeated
+// at the other module-scope listeners across system.js / settings.js.
+if (!window.__ryokanSeriesListeners) {
+    window.__ryokanSeriesListeners = true;
+    document.body.addEventListener('ryokan-episode-deleted', function (ev) {
+        const detail = ev.detail || {};
+        const epNum = parseInt(detail.episode_number, 10);
+        if (!detail.ok) {
+            window.ryokanToast({
+                kind: 'error',
+                category: 'library',
+                title: epNum ? `Delete failed for episode ${epNum}` : 'Delete failed',
+                body: detail.message || 'Unknown error',
+            });
+            return;
+        }
+        if (epNum) {
+            updateEpisodeRow(epNum, 'deleted');
+            refreshEpisodeRows({ force: true });
+        }
         window.ryokanToast({
-            kind: 'error',
+            kind: 'success',
             category: 'library',
-            title: epNum ? `Delete failed for episode ${epNum}` : 'Delete failed',
-            body: detail.message || 'Unknown error',
+            title: epNum ? `Episode ${epNum} deleted` : 'Episode deleted',
+            body: detail.message || 'File removed from disk.',
         });
-        return;
-    }
-    if (epNum) {
-        updateEpisodeRow(epNum, 'deleted');
-        refreshEpisodeRows({ force: true });
-    }
-    window.ryokanToast({
-        kind: 'success',
-        category: 'library',
-        title: epNum ? `Episode ${epNum} deleted` : 'Episode deleted',
-        body: detail.message || 'File removed from disk.',
     });
-});
+}
 
 // Cancel an in-flight grab: removes the torrent from qBit (with its
 // partial/complete data), marks the grab 'removed' in the DB, clears

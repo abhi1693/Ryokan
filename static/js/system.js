@@ -1,21 +1,32 @@
 // ── Logs tab ────────────────────────────────────────────────────────────
 
-// Click-outside-to-close for the log-download dropdown. The .open
-// toggle on the trigger button is enough to show the menu; this
-// listener handles dismissal — clicking anywhere outside the menu
-// (or on a menu item, which navigates) closes it.
-document.addEventListener('click', function (ev) {
-    const menu = document.getElementById('log-download-options');
-    if (!menu || !menu.classList.contains('open')) return;
-    // The trigger button is inside .log-download-menu — let its
-    // own click open + immediately re-toggle (don't fight it). For
-    // option clicks, the navigation closes the menu naturally; for
-    // any other click, dismiss.
-    if (ev.target.closest('.log-download-menu') && !ev.target.closest('.log-download-option')) {
-        return;
-    }
-    menu.classList.remove('open');
-});
+// Per-page JS files are re-executed by hx-boost on every nav-back to a
+// previously-visited page (htmx 2.x evaluates inserted `<script src>`
+// tags). Without a one-shot guard around `addEventListener` calls,
+// every visit attaches another copy of the listener — by the Nth visit,
+// every event fires N callbacks. Surfaced as the "Episode 10 deleted ×7"
+// toast spam after my Phase 2 delete migration. Same pattern applied
+// to all module-scope listeners across system.js, settings.js, series.js.
+if (!window.__ryokanSystemListeners) {
+    window.__ryokanSystemListeners = true;
+
+    // Click-outside-to-close for the log-download dropdown. The .open
+    // toggle on the trigger button is enough to show the menu; this
+    // listener handles dismissal — clicking anywhere outside the menu
+    // (or on a menu item, which navigates) closes it.
+    document.addEventListener('click', function (ev) {
+        const menu = document.getElementById('log-download-options');
+        if (!menu || !menu.classList.contains('open')) return;
+        // The trigger button is inside .log-download-menu — let its
+        // own click open + immediately re-toggle (don't fight it). For
+        // option clicks, the navigation closes the menu naturally; for
+        // any other click, dismiss.
+        if (ev.target.closest('.log-download-menu') && !ev.target.closest('.log-download-option')) {
+            return;
+        }
+        menu.classList.remove('open');
+    });
+}
 
 // `var` (not `let`) at module scope is deliberate across every per-page
 // JS file: htmx body-swap re-executes the inserted `<script>` tag when
