@@ -22,6 +22,7 @@ use std::time::Duration;
 mod browser_e2e;
 use browser_e2e::{
     assert_htmx_loaded, open_with_session, seed_user_session, spawn_app, try_connect_browser,
+    wait_for_js_truthy, wait_for_path,
 };
 
 async fn set_desktop_viewport(client: &fantoccini::Client) -> Result<(), String> {
@@ -33,53 +34,6 @@ async fn set_desktop_viewport(client: &fantoccini::Client) -> Result<(), String>
         .set_window_rect(0, 0, 1280, 900)
         .await
         .map_err(|e| format!("set_window_rect: {e}"))
-}
-
-async fn wait_for_path(
-    client: &fantoccini::Client,
-    expected_path: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let current = client
-            .current_url()
-            .await
-            .map_err(|e| format!("current_url: {e}"))?;
-        if current.path() == expected_path {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "timed out waiting for path={expected_path:?} (current path: {:?})",
-                current.path()
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-async fn wait_for_js_truthy(
-    client: &fantoccini::Client,
-    expr: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let result = client
-            .execute(&format!("return !!({expr});"), vec![])
-            .await
-            .map_err(|e| format!("execute {expr:?}: {e}"))?;
-        if result.as_bool().unwrap_or(false) {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "timed out waiting for JS expr to be truthy: {expr:?}"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 /// Click a top-nav link and wait for the URL to update. Top nav uses
@@ -102,16 +56,17 @@ async fn click_top_nav(
     wait_for_path(client, expected_path, Duration::from_secs(5)).await
 }
 
-/// **pentagon-nav** — full coverage that boost works between every
-/// pair of top-level pages. With `<body hx-boost="true">`, navigating
-/// from any of the five top-level pages to any other should swap
-/// body + head and render the destination's CSS correctly.
+/// **pentagon-nav (full 5×4)** — every directed pair of the five
+/// top-level pages, in both directions. With `<body hx-boost="true">`
+/// every transition should be a body+head diff swap, not a real
+/// document load — proven by a window-scoped marker that survives
+/// boosted swaps but a real nav wipes.
 ///
-/// We don't run all 5×4 = 20 transitions (slow); instead pick a
-/// representative chain that hits each page at least once both as
-/// origin and destination. Library → Settings → Search → System →
-/// Downloads → Library is 5 boosted hops touching all 5 routes in
-/// both directions.
+/// Earlier draft of this test ran one 5-hop chain; the reviewer
+/// flagged that an "X→Y is unstyled but only navigating in that
+/// direction" regression could slip through. The 20-transition
+/// matrix runs in ~5s wall-clock against a real LibreWolf and
+/// catches per-direction asymmetries.
 #[tokio::test]
 async fn boost_navigates_pentagon_via_body_level_opt_in() {
     let Ok(client) = try_connect_browser().await else {
@@ -132,47 +87,61 @@ async fn boost_navigates_pentagon_via_body_level_opt_in() {
     let _ = assert_htmx_loaded(&client).await;
 
     // Plant a window marker — boosted nav preserves window scope, so
-    // if we make 5 boosted hops and the marker survives, we know
-    // every hop went through htmx (a real document load would have
-    // wiped it).
+    // if every transition keeps the marker alive, we know each hop
+    // went through htmx (a real document load would have wiped it).
     client
         .execute("window.__phaseDMarker = 'boosted';", vec![])
         .await
         .expect("plant marker");
 
-    // Library → Settings
-    click_top_nav(&client, "/settings", "/settings")
-        .await
-        .expect("nav to settings");
-    // Settings → Search
-    click_top_nav(&client, "/search", "/search")
-        .await
-        .expect("nav to search");
-    // Search → System
-    click_top_nav(&client, "/system", "/system")
-        .await
-        .expect("nav to system");
-    // System → Downloads
-    click_top_nav(&client, "/downloads", "/downloads")
-        .await
-        .expect("nav to downloads");
-    // Downloads → Library
-    click_top_nav(&client, "/", "/")
-        .await
-        .expect("nav back to library");
+    // (path, label) pairs. Every directed pair (origin, dest) where
+    // origin != dest gets one boosted click. After each, the marker
+    // is re-checked — fast-fail diagnostic naming the broken hop.
+    let pages = [
+        ("/", "library"),
+        ("/search", "search"),
+        ("/downloads", "downloads"),
+        ("/settings", "settings"),
+        ("/system", "system"),
+    ];
 
-    // The window marker survives only across boosted swaps. A real
-    // doc load would have wiped it.
-    let marker = client
-        .execute("return window.__phaseDMarker || null;", vec![])
-        .await
-        .expect("read marker");
-    let marker_str = marker.as_str().unwrap_or("");
-    assert_eq!(
-        marker_str, "boosted",
-        "window marker should survive 5 boosted hops; got {marker_str:?} — \
-         one of the top-nav clicks did a real document load (boost off?)"
-    );
+    for &(_, origin_label) in &pages {
+        // Land on origin via direct goto — a fresh boosted nav per
+        // pair starts each transition from a known state.
+        // (Skip the goto on the first iteration since we're
+        //  already on /; the boost-click below covers the move.)
+        for &(dest_path, dest_label) in &pages {
+            if origin_label == dest_label {
+                continue;
+            }
+            // Navigate to the origin via boost (or direct, doesn't
+            // matter — we're testing the final hop).
+            let origin_path = pages
+                .iter()
+                .find(|p| p.1 == origin_label)
+                .map(|p| p.0)
+                .unwrap();
+            click_top_nav(&client, origin_path, origin_path)
+                .await
+                .unwrap_or_else(|e| panic!("nav to origin {origin_label}: {e}"));
+            // Now the discriminating boost-click: origin → dest.
+            click_top_nav(&client, dest_path, dest_path)
+                .await
+                .unwrap_or_else(|e| panic!("nav {origin_label}→{dest_label}: {e}"));
+
+            let marker = client
+                .execute("return window.__phaseDMarker || null;", vec![])
+                .await
+                .expect("read marker");
+            let marker_str = marker.as_str().unwrap_or("");
+            assert_eq!(
+                marker_str, "boosted",
+                "transition {origin_label}→{dest_label}: window marker \
+                 was wiped — that hop did a real document load instead \
+                 of boost-swapping. Got marker={marker_str:?}"
+            );
+        }
+    }
 }
 
 /// **logout-opt-out** — `<a href="/logout" hx-boost="false">` must do
@@ -286,14 +255,46 @@ async fn boosted_nav_to_protected_page_with_invalidated_session_lands_on_login()
         .await
         .expect("invalidated-session click should land on /login");
 
-    // Confirm the login form is rendered (not nested inside a stale
-    // page body).
+    // Confirm the login form is rendered.
     client
         .wait()
         .at_most(Duration::from_secs(5))
         .for_element(Locator::Css("form[action=\"/login\"]"))
         .await
         .expect("login form visible at /login");
+
+    // Discriminating assertion — if the auth middleware had returned
+    // a bare 303 (the pre-Phase-C shape), boost would have followed
+    // it transparently via fetch and inline-swapped /login's body
+    // into the prior page's main. URL would still settle on /login;
+    // login form would still be present (it's in the swapped HTML);
+    // the URL+form-only assertions above would pass even though
+    // boost was nesting.
+    //
+    // What CAN'T survive a nested swap: the prior page's `<nav class="nav">`
+    // topbar. /login is a standalone template (`templates/login.html`,
+    // doesn't extend base.html) so it doesn't render the topbar.
+    // A real nav to /login → topbar gone. A nested boost-follow
+    // would leave the prior page's topbar in place because boost's
+    // default target is body innerHTML and the topbar lives inside
+    // the body of the prior page.
+    let topbar_count = client
+        .execute(
+            "return document.querySelectorAll('nav.nav').length;",
+            vec![],
+        )
+        .await
+        .expect("count nav.nav");
+    let count = topbar_count.as_u64().unwrap_or(99);
+    assert_eq!(
+        count, 0,
+        "post-redirect /login must be a real document load — found \
+         {count} nav.nav element(s) leftover from the prior page, \
+         which means the auth middleware's redirect was followed \
+         via boost (fetch + inline swap) instead of `HX-Redirect` \
+         triggering a real window.location. Phase C's \
+         `htmx_aware_redirect_from_req` may have regressed."
+    );
 }
 
 /// **history-cache-disabled** — `htmx.config.historyEnableCache`

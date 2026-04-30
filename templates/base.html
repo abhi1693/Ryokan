@@ -3,6 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {# Phase D — htmx 2.x reads <meta name="htmx-config"> during init,
+       before any of its own setup runs. This is the canonical way to
+       seed `htmx.config` and replaces the earlier inline-script dance
+       that tried to set the flag inside an `htmx:load` once-listener.
+       The flag matters: without it, browser-back on a dynamic page
+       (Downloads queue / System logs) restores the body snapshot
+       captured at first visit instead of refetching, leaving the
+       page showing stale content. #}
+    <meta name="htmx-config" content='{"historyEnableCache":false}'>
     <title>Ryokan{% block title %}{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/topbar.css">
@@ -30,40 +39,21 @@
        removes ones the new page doesn't reference, leaves shared
        tags in place.
 
-       Per-element `hx-boost="false"` opt-outs:
-         - `<a href="/logout">` (below) — boost would still send the
-           POST equivalent and the cookie-clearing `Set-Cookie` header
-           survives, but bypassing boost on logout sidesteps any
-           swap-then-redirect race against the auth middleware.
-         - `target="_blank"` external links honor the target attr
-           natively in htmx 2.x but a defensive opt-out doesn't hurt
-           if any get added.
+       Per-element `hx-boost="false"` opt-outs in this file:
+         - `<a href="/logout">` (below). `/logout` is a GET handler;
+           boost would send a GET via fetch and inline-swap the
+           response. Bypassing boost sidesteps the history-API write
+           + body-swap racing the 303 + cookie-clear that the auth
+           middleware emits, and a real doc load on this rare path
+           is fine.
+
+       Opt-outs to add IF you ever introduce them (none currently
+       present; documented here so the convention is greppable):
+         - `target="_blank"` external links — htmx 2.x respects the
+           target attr natively but a defensive opt-out doesn't hurt.
          - In-page anchor links (`href="#section"`) — boost may try
-           to fetch the same URL in some htmx versions; opt-out
-           unconditionally is cheaper than chasing per-version. #}
-    <script>
-    // Phase D — disable htmx's history cache for back/forward nav.
-    // Without this, browser-back on a dynamic page (Downloads queue,
-    // System logs) restores a snapshot of the body that was stale at
-    // capture time. Disabling the cache means back/forward refetches
-    // the destination, which is fine: we already have head-support
-    // for the head merge and per-page lifecycle for any side-effects
-    // (poller mounts, etc.). Set before htmx boots so the config is
-    // applied on the first nav.
-    if (typeof htmx === 'undefined') {
-        // htmx loads via `defer` after this inline script. Stash the
-        // config on a future-htmx-readable global; htmx 2.x checks
-        // window.htmx.config at first use, so an early config write
-        // is propagated.
-        document.addEventListener('htmx:load', function () {
-            if (window.htmx && window.htmx.config) {
-                window.htmx.config.historyEnableCache = false;
-            }
-        }, { once: true });
-    } else {
-        window.htmx.config.historyEnableCache = false;
-    }
-    </script>
+           to fetch the same URL in some htmx versions; cheaper to
+           opt-out than version-chase. #}
     <script>
     // Pre-render FOUC guard: sets the title-language data attribute on
     // <html> before any content paints. Must stay inline (non-deferred)

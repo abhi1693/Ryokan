@@ -23,6 +23,7 @@ use std::time::Duration;
 mod browser_e2e;
 use browser_e2e::{
     assert_htmx_loaded, open_with_session, seed_user_session, spawn_app, try_connect_browser,
+    wait_for_js_truthy, wait_for_path,
 };
 
 async fn set_mobile_viewport(client: &fantoccini::Client) -> Result<(), String> {
@@ -32,63 +33,9 @@ async fn set_mobile_viewport(client: &fantoccini::Client) -> Result<(), String> 
         .map_err(|e| format!("set_window_rect: {e}"))
 }
 
-async fn wait_for_path(
-    client: &fantoccini::Client,
-    expected_path: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let current = client
-            .current_url()
-            .await
-            .map_err(|e| format!("current_url: {e}"))?;
-        if current.path() == expected_path {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "timed out waiting for path={expected_path:?} (current path: {:?})",
-                current.path()
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 /// Click the boosted mobile-tabbar link at `href` and wait for the
 /// URL to update. Useful for chained navigations where each step
 /// must finish before the next click.
-/// Poll a JS expression until it returns truthy, or timeout. The
-/// `boosted_nav_out_of_downloads_clears_queue_poller` test races
-/// the assertion against downloads.js's deferred execution; a
-/// fixed sleep is brittle (defer ordering can take more than a
-/// few hundred ms on cold-start). Polling a JS truthiness
-/// expression converges fast and degrades to a clear timeout
-/// error on real failures.
-async fn wait_for_js_truthy(
-    client: &fantoccini::Client,
-    expr: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let result = client
-            .execute(&format!("return !!({expr});"), vec![])
-            .await
-            .map_err(|e| format!("execute {expr:?}: {e}"))?;
-        if result.as_bool().unwrap_or(false) {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "timed out waiting for JS expr to be truthy: {expr:?}"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 async fn click_tabbar_link(
     client: &fantoccini::Client,
     href: &str,

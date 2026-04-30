@@ -475,11 +475,16 @@ mod e2e {
             .route("/", get(crate::handlers::library::pages::index))
             .route("/search", get(crate::handlers::search::search_page))
             .route("/system", get(crate::handlers::system::system_page))
-            // Phase D's logout-flow test follows the GET-→ /logout
+            // Phase D's logout-flow test follows the GET → /logout
             // → 303 /login chain, so the logout handler needs to be
             // reachable. /logout must be inside the protected layer
             // (the auth middleware reads the cookie before clearing
             // it); the production main.rs mounts it the same way.
+            // The test exercises the REAL cookie-clear path —
+            // `handlers::auth::logout` emits `Set-Cookie: Max-Age=0`
+            // identically here as in production, so the assertion
+            // that subsequent navs land on `/login` reflects the
+            // genuine middleware redirect, not a mocked path.
             .route("/logout", get(crate::handlers::auth::logout))
             // Issue #129 Phase 1 completion — per-tab subform handlers
             // (`/settings/general`, `/settings/quality`,
