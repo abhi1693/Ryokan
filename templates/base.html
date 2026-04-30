@@ -1,5 +1,15 @@
 <!DOCTYPE html>
-<html lang="en">
+{# `data-title-language` rendered server-side onto <html> so the
+   matching `.title-option[data-title-lang="X"]` CSS rule applies
+   from the very first paint. The inline body-script below still
+   runs to honor a localStorage override (per-browser preference set
+   from Settings), but the synchronous server-render means the
+   English-only fallback only shows in the rare case where (a)
+   server preference is unset AND (b) JS hasn't run yet — instead
+   of always flashing English-then-real-language as it did before.
+   Pattern borrowed from simple-login/app's `data-theme` cookie
+   handoff: server is the authoritative source on cold load. #}
+<html lang="en"{% if !title_language.is_empty() %} data-title-language="{{ title_language }}"{% endif %}>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
