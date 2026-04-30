@@ -745,6 +745,16 @@ window.ryokanCopy = function (text, btn) {
                 el.textContent = rel;
             }
             el.setAttribute('title', abs);
+            // Stamp the "rendered" marker so the CSS rule
+            // `[data-ts]:not([data-ts-rendered]) { visibility: hidden }`
+            // in base.css flips the element visible. Without this
+            // marker (and the matching CSS rule), the raw `data-ts`
+            // textContent flashes briefly between body-swap and the
+            // first refresh tick — visible on every boost-nav to
+            // /search, /downloads, /series. The visibility-hidden
+            // approach preserves layout (column widths don't reflow)
+            // so the flip is just a content reveal, no jolt.
+            el.setAttribute('data-ts-rendered', '1');
         });
     }
 

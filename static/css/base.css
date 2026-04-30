@@ -128,6 +128,27 @@
     navigation: auto;
 }
 
+/* `[data-ts]` is the relative-timestamp idiom: server emits the raw
+ * timestamp in `data-ts` AND in `textContent`, then `base.js`'s
+ * refresh hook (wired to `htmx.onLoad`) replaces the textContent
+ * with a humanized "4h ago" string and stamps `data-ts-rendered=1`
+ * on the element. Without this rule, every page render briefly
+ * showed the raw `2026-04-15 21:41:38`-style timestamp before the
+ * refresh fired — visible flash of date format on every boost-nav
+ * to /search, /downloads, /series, etc. `visibility: hidden`
+ * preserves layout (cells keep their reserved width) so the column
+ * doesn't reflow when the relative time appears. Once JS sets
+ * `data-ts-rendered=1` the element flips visible. The brief empty
+ * cell is much less jarring than the wrong-text flash.
+ *
+ * Falls back gracefully when JS doesn't run (vendor 404, etc.):
+ * `<noscript>` styles in base.html could override this, but in
+ * practice anyone with JS disabled deeply enough that base.js
+ * never runs has bigger problems with the rest of Ryokan. */
+[data-ts]:not([data-ts-rendered]) {
+    visibility: hidden;
+}
+
 body {
     background: var(--bg);
     color: var(--text);
