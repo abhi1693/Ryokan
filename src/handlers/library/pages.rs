@@ -224,6 +224,16 @@ pub async fn index(
 /// `/library/review` used to render its own page. It's now a System
 /// tab (`/system?tab=review`) — keep this as a 308 redirect so
 /// anything bookmarked, linked, or cached still resolves.
+///
+/// Phase C of the hx-boost rollout (per
+/// /home/john/Documents/ryokan-roadmap/hx_boost_rollout_plan.md):
+/// stays as a plain `Redirect::permanent`. No form-POST reaches this
+/// route (it's a GET-only legacy URL), and a boosted nav follows the
+/// 308 cleanly to the destination page where head-support handles
+/// the head merge. The nesting bug only fires when htmx swaps a
+/// page's HTML into a form-target on the SAME page; here the
+/// destination is a top-level page render with no form context to
+/// nest into.
 pub async fn needs_review_page() -> axum::response::Redirect {
     axum::response::Redirect::permanent("/system?tab=review")
 }

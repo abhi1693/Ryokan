@@ -5,6 +5,7 @@ pub mod help;
 pub mod library;
 pub mod oauth;
 pub mod progress;
+pub mod responses;
 pub mod search;
 pub mod settings;
 pub mod system;

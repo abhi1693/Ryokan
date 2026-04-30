@@ -225,27 +225,42 @@ pub async fn settings_download_clients_upsert(
     HxRequest(is_htmx): HxRequest,
     Form(form): Form<DownloadClientUpsertForm>,
 ) -> Response {
-    // Validation errors fall back to the form-POST redirect path even
-    // for HTMX callers — htmx 2.x's default error policy is skip-the-
-    // swap on 4xx, so returning a redirect from the htmx form actually
-    // works (the browser follows the redirect). The new tab path
-    // replaces the legacy `?tab=integrations` redirect destination.
+    // Validation errors route through `htmx_aware_redirect`: HTMX
+    // callers get `HX-Redirect: /settings?tab=downloads&err=...` so
+    // htmx triggers a real client-side navigation; non-HTMX callers
+    // get a standard 303. The pre-Phase-A comment claiming "htmx
+    // skips the swap on 4xx so a 303 works" was wrong post-boost —
+    // boost intercepts every form-POST, follows the 3xx via fetch,
+    // and inline-swaps the destination's HTML into the form's
+    // target. The HX-Redirect header is the correct shape.
     let name = form.name.trim();
     if name.is_empty() {
-        return Redirect::to("/settings?tab=downloads&err=Name+required").into_response();
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            "/settings?tab=downloads&err=Name+required",
+        );
     }
     if !is_known_kind(&form.kind) {
-        return Redirect::to("/settings?tab=downloads&err=Invalid+client+kind").into_response();
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            "/settings?tab=downloads&err=Invalid+client+kind",
+        );
     }
     let url = form.url.trim();
     if url.is_empty() {
-        return Redirect::to("/settings?tab=downloads&err=URL+required").into_response();
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            "/settings?tab=downloads&err=URL+required",
+        );
     }
     // Permissive parse — each client impl normalizes the URL itself
     // (prepending `http://` for scheme-less local addresses), so we
     // only reject inputs the url crate can't make sense of at all.
     if reqwest::Url::parse(url).is_err() && reqwest::Url::parse(&format!("http://{url}")).is_err() {
-        return Redirect::to("/settings?tab=downloads&err=Invalid+URL+syntax").into_response();
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            "/settings?tab=downloads&err=Invalid+URL+syntax",
+        );
     }
 
     let payload = DownloadClientForm {
@@ -304,7 +319,10 @@ pub async fn settings_download_clients_upsert(
                 &e.to_string(),
             )
             .await;
-            Redirect::to("/settings?tab=downloads&err=Save+failed").into_response()
+            crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                "/settings?tab=downloads&err=Save+failed",
+            )
         }
     }
 }
@@ -431,7 +449,10 @@ pub async fn settings_download_clients_set_default(
                 &e.to_string(),
             )
             .await;
-            Redirect::to("/settings?tab=downloads&err=Save+failed").into_response()
+            crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                "/settings?tab=downloads&err=Save+failed",
+            )
         }
     }
 }
@@ -721,8 +742,9 @@ pub struct NyaaPinForm {
 )]
 pub async fn settings_indexers_nyaa_pin(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<NyaaPinForm>,
-) -> Redirect {
+) -> Response {
     let pin: Option<i64> = form.download_client_id.as_deref().and_then(|s| {
         let trimmed = s.trim();
         if trimmed.is_empty() {
@@ -751,7 +773,10 @@ pub async fn settings_indexers_nyaa_pin(
                     "Couldn't verify protocol pin (DB error: {e}); please retry."
                 ))
                 .into_owned();
-                return Redirect::to(&format!("/settings?tab=indexers&err={msg}"));
+                return crate::handlers::responses::htmx_aware_redirect(
+                    is_htmx,
+                    &format!("/settings?tab=indexers&err={msg}"),
+                );
             }
         };
         if let Some(row) = row
@@ -764,7 +789,10 @@ pub async fn settings_indexers_nyaa_pin(
                 row.kind, row.kind
             ))
             .into_owned();
-            return Redirect::to(&format!("/settings?tab=indexers&err={msg}"));
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &format!("/settings?tab=indexers&err={msg}"),
+            );
         }
     }
     let result = sqlx::query("UPDATE config SET nyaa_download_client_id = ? WHERE id = 1")
@@ -780,7 +808,10 @@ pub async fn settings_indexers_nyaa_pin(
                 &format!("download_client_id={pin:?}"),
             )
             .await;
-            Redirect::to("/settings?tab=indexers&msg=Nyaa+pin+updated")
+            crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                "/settings?tab=indexers&msg=Nyaa+pin+updated",
+            )
         }
         Err(e) => {
             logger::error(
@@ -790,7 +821,10 @@ pub async fn settings_indexers_nyaa_pin(
                 &e.to_string(),
             )
             .await;
-            Redirect::to("/settings?tab=indexers&err=Save+failed")
+            crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                "/settings?tab=indexers&err=Save+failed",
+            )
         }
     }
 }
@@ -1101,6 +1135,7 @@ mod tests {
 
         let _ = settings_indexers_nyaa_pin(
             State(state.clone()),
+            HxRequest(false),
             Form(NyaaPinForm {
                 download_client_id: Some(id.to_string()),
             }),
@@ -1115,6 +1150,7 @@ mod tests {
 
         let _ = settings_indexers_nyaa_pin(
             State(state.clone()),
+            HxRequest(false),
             Form(NyaaPinForm {
                 download_client_id: Some(String::new()),
             }),
@@ -1156,6 +1192,7 @@ mod tests {
         let state = build_test_app_state(db, None);
         let resp = settings_indexers_nyaa_pin(
             State(state.clone()),
+            HxRequest(false),
             Form(NyaaPinForm {
                 download_client_id: Some(sab.to_string()),
             }),
@@ -1215,6 +1252,7 @@ mod tests {
         db.close().await;
         let resp = settings_indexers_nyaa_pin(
             State(state.clone()),
+            HxRequest(false),
             Form(NyaaPinForm {
                 download_client_id: Some(sab.to_string()),
             }),

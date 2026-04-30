@@ -2016,15 +2016,16 @@ pub struct GroupDeleteForm {
 /// regardless so the user sees the updated list.
 pub async fn settings_groups_upsert(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<GroupUpsertForm>,
-) -> Redirect {
+) -> Response {
     let name = form.group_name.trim();
     if name.is_empty() {
-        return Redirect::to("/settings?tab=groups");
+        return crate::handlers::responses::htmx_aware_redirect(is_htmx, "/settings?tab=groups");
     }
     let source = Source::from_str(&form.source);
     if source == Source::Unknown {
-        return Redirect::to("/settings?tab=groups");
+        return crate::handlers::responses::htmx_aware_redirect(is_htmx, "/settings?tab=groups");
     }
     let confidence = form.confidence.unwrap_or(0.95).clamp(0.0, 1.0);
     let notes = form.notes.unwrap_or_default();
@@ -2050,7 +2051,7 @@ pub async fn settings_groups_upsert(
             .await;
         }
     }
-    Redirect::to("/settings?tab=groups")
+    crate::handlers::responses::htmx_aware_redirect(is_htmx, "/settings?tab=groups")
 }
 
 /// Delete a row from `group_source_map` by group name. Works on both seeded
