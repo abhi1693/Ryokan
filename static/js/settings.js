@@ -115,9 +115,20 @@ function closeCfEditorModal() {
 // already rendered the pre-filled form inside the modal markup, so
 // this is just a display flip. Also handle backdrop click + Escape
 // to dismiss.
-(function() {
-    if (window.__ryokanCfEditorModalInit) return;
-    window.__ryokanCfEditorModalInit = true;
+//
+// Two distinct concerns here, gated separately under hx-boost:
+// 1. **Auto-open** runs on every navigation. CF cards link via plain
+//    `<a href="?edit_id=N">` and rely on the server re-rendering the
+//    form pre-filled — the JS just flips `display:flex`. The whole
+//    body is re-rendered on each boost-nav with the new card's data,
+//    so this MUST fire fresh every time. Earlier the guard wrapped
+//    both pieces and clicking a second CF card after the first did
+//    nothing — modal stayed hidden until full refresh.
+// 2. **Backdrop click + Escape listeners** are bound to long-lived
+//    elements (the modal's containing div is fresh each visit, but
+//    `document` persists). Listener-attach is gated by the singleton
+//    flag so we don't accumulate Escape handlers across visits.
+(function autoOpenCfEditorOnEditIdParam() {
     const modal = document.getElementById('cf-editor-modal');
     if (!modal) return;
     const params = new URLSearchParams(window.location.search);
@@ -127,8 +138,12 @@ function closeCfEditorModal() {
     modal.addEventListener('click', function(ev) {
         if (ev.target === modal) closeCfEditorModal();
     });
+    if (window.__ryokanCfEditorEscBound) return;
+    window.__ryokanCfEditorEscBound = true;
     document.addEventListener('keydown', function(ev) {
-        if (ev.key === 'Escape' && modal.style.display !== 'none') closeCfEditorModal();
+        const m = document.getElementById('cf-editor-modal');
+        if (!m) return;
+        if (ev.key === 'Escape' && m.style.display !== 'none') closeCfEditorModal();
     });
 })();
 

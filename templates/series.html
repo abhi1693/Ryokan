@@ -1,6 +1,5 @@
 {% extends "base.html" %}
-{% block page_css %}<link rel="stylesheet" href="/static/css/pages/series.css">
-<link rel="stylesheet" href="/static/css/pages/grab_picker.css">{% endblock %}
+{# Per-page CSS now bundled in base.html — see comment there. #}
 
 {% block title %} - {% if title_language == "romaji" %}{% if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else %}{{ detail.title_native }}{% endif %}{% else if title_language == "native" %}{% if !detail.title_native.is_empty() %}{{ detail.title_native }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_english }}{% endif %}{% else %}{% if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_native }}{% endif %}{% endif %}{% endblock %}
 
