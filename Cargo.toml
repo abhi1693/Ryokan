@@ -139,7 +139,7 @@ tower-http = { version = "0.6", features = ["fs", "trace", "compression-br", "co
 # call `template.render()` directly and wrap the result in `Html(..)`
 # themselves, which is what this codebase already does — so the axum
 # integration just vanishes on the bump.
-askama = "0.15"
+askama = "0.16"
 
 # Database
 # default-features = false drops sqlx's `any`/`macros`/`migrate`/`json`
