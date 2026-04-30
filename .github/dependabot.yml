@@ -26,6 +26,22 @@ updates:
         update-types:
           - minor
           - patch
+    # `dtolnay/rust-toolchain` is intentionally pinned to whatever
+    # `package.rust-version` (Cargo.toml) declares as MSRV — the
+    # `msrv` job in `.github/workflows/rust.yml` exists *because* the
+    # pin matches MSRV. Bumping the pin without first deciding to
+    # raise MSRV is a category error, not a routine update.
+    #
+    # Dependabot also reads the action's branch list as a sorted
+    # version stream, but `dtolnay/rust-toolchain` ships placeholder
+    # branches (1.96, 1.97, ..., 1.100) before the corresponding Rust
+    # release exists, so dependabot picks up bogus future versions
+    # (PR 135 was 1.95.0 → 1.100.0 when 1.95.0 was the actual latest
+    # Rust release). Ignore the dependency entirely; MSRV bumps go
+    # through a manual edit of both `rust-version` and the workflow
+    # together.
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
     commit-message:
       prefix: chore(ci)
       include: scope
