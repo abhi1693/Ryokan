@@ -440,3 +440,46 @@
     }
 }
 
+/* ─── Native <select> chevron replacement ─────────────────────────────
+ *
+ * Firefox has a known bug where the native chevron decoration on
+ * `<select>` elements disappears after a body swap (boost-nav) — the
+ * select's option text and click behavior survive intact, but the
+ * little down-arrow that signals "this is a dropdown" goes missing
+ * until a full document reload restores the native control. The
+ * chevron is part of the OS/browser's native form-widget rendering
+ * pipeline; htmx 2.x's body swap doesn't tell the widget it was
+ * re-attached, so the decoration just doesn't re-paint.
+ *
+ * Workaround: own the chevron in CSS. `appearance: none` strips the
+ * native control entirely (so there's no native chevron to lose),
+ * and a data-URI SVG `background-image` paints our own chevron in
+ * its place. Since the chevron is CSS-rendered, it survives every
+ * DOM mutation that `<select>` does — no boost-nav fragility.
+ *
+ * Color is `--text-dim` (URL-encoded as `%237a7a96`); dimensions and
+ * padding-right=28px leave room for the chevron without overlapping
+ * option text. Applies globally to every `<select>` in the app so we
+ * don't have to per-class-style-update each new dropdown. The
+ * existing per-element rules (`.folder-select`, `.log-filter-select`,
+ * etc.) keep working — they just paint their text/border/bg, while
+ * this rule paints the chevron and reserves space for it. */
+select {
+    -webkit-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a7a96' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 14px;
+    padding-right: 30px;
+}
+
+select:focus {
+    /* Tint the chevron with --accent on focus for the same visual
+     * cue the native chevron used to give. Re-emit the same SVG
+     * with the focused stroke color, since CSS can't recolor a data-
+     * URI image with `filter` without affecting the rest of the
+     * select. */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cba6f7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+}
+
