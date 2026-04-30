@@ -94,8 +94,14 @@
     cursor: pointer;
 }
 
+/* Strip the default UA focus ring on every focus; gate the accent
+ * border tint on `:focus-visible` (keyboard-only) so a mouse click
+ * + option-pick doesn't stick the purple border. Mirrors
+ * `.folder-select` in base.css. */
 .log-filter-select:focus {
     outline: none;
+}
+.log-filter-select:focus-visible {
     border-color: var(--accent);
 }
 

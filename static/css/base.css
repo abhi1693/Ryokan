@@ -480,7 +480,13 @@ a:hover {
     max-width: 260px;
 }
 
-.folder-select:focus { outline: none; border-color: var(--accent); }
+/* Strip the default UA focus ring on every focus. The accent border
+ * tint is gated on `:focus-visible` (keyboard-only) so mouse clicks
+ * + option-pick don't stick the purple border until the user clicks
+ * elsewhere. Same rationale + treatment as the chevron rule in
+ * forms.css; see the comment there for the full story. */
+.folder-select:focus { outline: none; }
+.folder-select:focus-visible { border-color: var(--accent); }
 
 .season-header-right {
     display: flex;
