@@ -502,11 +502,24 @@ function renderScoreBreakdown(r) {
             sortRows(tbody, key, dir);
         }
     }
-    // hx-boost re-runs this script on every nav, but DOMContentLoaded
-    // only fires on the very first full page load — after that, a
-    // listener attached to it never executes. Bind directly when the
-    // DOM is already parsed (which it always is after the first paint).
-    if (document.readyState === 'loading') {
+    // Use the page-lifecycle helper so the bind fires AFTER htmx
+    // settles each body swap. Direct script-execution-time binding
+    // was racy under boost: the script tag runs as part of htmx's
+    // swap evaluation and the table elements aren't always queryable
+    // yet by the time the script reaches the binding code. The
+    // lifecycle helper wires through `htmx.onLoad`, which fires
+    // *after* the swap completes and the DOM is settled.
+    //
+    // `dataset.sortBound` per-th guard inside `bindSortHandlers`
+    // makes the mount idempotent, so re-firing on every htmx.onLoad
+    // (including on this same page if the user does an in-place
+    // refresh of just the results table) doesn't accumulate listeners.
+    if (typeof window.ryokanRegisterPageInit === 'function') {
+        window.ryokanRegisterPageInit('search-sort', {
+            check: function () { return !!document.getElementById('results-table'); },
+            mount: bindSortHandlers,
+        });
+    } else if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', bindSortHandlers);
     } else {
         bindSortHandlers();

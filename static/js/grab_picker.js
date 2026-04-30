@@ -640,7 +640,25 @@
             btn.addEventListener('click', () => applyFilter(btn.dataset.grabPickerAction));
         });
     }
-    if (document.readyState === 'loading') {
+    // Wire through the page-lifecycle helper so the bind fires
+    // AFTER htmx settles each body swap. Direct script-execution-time
+    // binding was racy under boost — the modal element wasn't always
+    // queryable yet when the script reached the binding code, so on
+    // a boost-nav from another page the close / confirm / view /
+    // Escape / filter handlers never attached and the picker was
+    // unresponsive. Lifecycle helper wires through `htmx.onLoad`,
+    // which fires after the swap completes.
+    //
+    // The per-element `dataset.gpBound` guards in
+    // `bindGrabPickerHandlers` make the mount idempotent, so
+    // re-firing on every htmx.onLoad (including in-place refreshes
+    // of just the modal markup) doesn't accumulate listeners.
+    if (typeof window.ryokanRegisterPageInit === 'function') {
+        window.ryokanRegisterPageInit('grab-picker', {
+            check: function () { return !!document.getElementById('grab-picker-modal'); },
+            mount: bindGrabPickerHandlers,
+        });
+    } else if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', bindGrabPickerHandlers);
     } else {
         bindGrabPickerHandlers();
