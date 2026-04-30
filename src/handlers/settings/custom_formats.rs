@@ -182,15 +182,15 @@ const DEFAULTS_JSON: &str = include_str!("../../../static/default_custom_formats
 )]
 pub async fn settings_custom_formats_upsert(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<CustomFormatUpsertForm>,
-) -> Redirect {
+) -> Response {
     let name = form.name.trim();
     if name.is_empty() {
-        return Redirect::to(&cf_redirect(
-            form.id,
-            None,
-            Some("Custom Format name cannot be blank."),
-        ));
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(form.id, None, Some("Custom Format name cannot be blank.")),
+        );
     }
     let trash_id = form
         .trash_id
@@ -200,11 +200,10 @@ pub async fn settings_custom_formats_upsert(
     let json_trimmed = form.json.trim();
 
     if let Err(e) = cf_service::compile_from_json(json_trimmed, form.score, form.id.unwrap_or(0)) {
-        return Redirect::to(&cf_redirect(
-            form.id,
-            None,
-            Some(&format!("Parse error: {e}")),
-        ));
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(form.id, None, Some(&format!("Parse error: {e}"))),
+        );
     }
 
     let save_result = if let Some(id) = form.id {
@@ -233,7 +232,10 @@ pub async fn settings_custom_formats_upsert(
                 "",
             )
             .await;
-            Redirect::to(&cf_redirect(None, Some(&format!("Saved '{name}'.")), None))
+            crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(None, Some(&format!("Saved '{name}'.")), None),
+            )
         }
         Err(e) => {
             logger::error(
@@ -243,11 +245,10 @@ pub async fn settings_custom_formats_upsert(
                 &e.to_string(),
             )
             .await;
-            Redirect::to(&cf_redirect(
-                form.id,
-                None,
-                Some(&format!("Database error: {e}")),
-            ))
+            crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(form.id, None, Some(&format!("Database error: {e}"))),
+            )
         }
     }
 }
@@ -353,11 +354,15 @@ pub async fn settings_custom_formats_delete(
 )]
 pub async fn settings_custom_formats_minimum_score(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<CustomFormatMinScoreForm>,
-) -> Redirect {
+) -> Response {
     let existing = config::get_config(&state.db).await.ok().flatten();
     let Some(mut cfg) = existing else {
-        return Redirect::to(&cf_redirect(None, None, Some("Config not initialized.")));
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, None, Some("Config not initialized.")),
+        );
     };
 
     let trimmed = form.minimum_score.trim();
@@ -367,11 +372,14 @@ pub async fn settings_custom_formats_minimum_score(
         match trimmed.parse::<i32>() {
             Ok(n) => n,
             Err(_) => {
-                return Redirect::to(&cf_redirect(
-                    None,
-                    None,
-                    Some("Minimum score must be an integer (leave blank for 'no floor')."),
-                ));
+                return crate::handlers::responses::htmx_aware_redirect(
+                    is_htmx,
+                    &cf_redirect(
+                        None,
+                        None,
+                        Some("Minimum score must be an integer (leave blank for 'no floor')."),
+                    ),
+                );
             }
         }
     };
@@ -384,9 +392,15 @@ pub async fn settings_custom_formats_minimum_score(
             } else {
                 format!("Minimum score set to {new_floor}.")
             };
-            Redirect::to(&cf_redirect(None, Some(&msg), None))
+            crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(None, Some(&msg), None),
+            )
         }
-        Err(e) => Redirect::to(&cf_redirect(None, None, Some(&format!("Save failed: {e}")))),
+        Err(e) => crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, None, Some(&format!("Save failed: {e}"))),
+        ),
     }
 }
 
@@ -562,42 +576,52 @@ fn import_summary(
 )]
 pub async fn settings_custom_formats_import(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<CustomFormatImportForm>,
 ) -> Response {
     let payload = form.payload.trim();
     if payload.is_empty() {
-        return Redirect::to(&cf_redirect(None, None, Some("Import payload is empty.")))
-            .into_response();
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, None, Some("Import payload is empty.")),
+        );
     }
 
     let value: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(e) => {
-            return Redirect::to(&cf_redirect(
-                None,
-                None,
-                Some(&format!("Import failed: invalid JSON ({e})")),
-            ))
-            .into_response();
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(
+                    None,
+                    None,
+                    Some(&format!("Import failed: invalid JSON ({e})")),
+                ),
+            );
         }
     };
 
     let entries: Vec<serde_json::Value> = match normalize_cf_import_entries(value) {
         Ok(entries) => entries,
         Err(msg) => {
-            return Redirect::to(&cf_redirect(None, None, Some(&msg))).into_response();
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(None, None, Some(&msg)),
+            );
         }
     };
 
     let existing_rows = match cf_model::list_with_scores(&state.db).await {
         Ok(rows) => rows,
         Err(e) => {
-            return Redirect::to(&cf_redirect(
-                None,
-                None,
-                Some(&format!("Failed to read existing CFs: {e}")),
-            ))
-            .into_response();
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(
+                    None,
+                    None,
+                    Some(&format!("Failed to read existing CFs: {e}")),
+                ),
+            );
         }
     };
     let existing_by_name: HashMap<String, i64> =
@@ -680,9 +704,15 @@ pub async fn settings_custom_formats_import(
 
     let summary = import_summary(imported, skipped, failed, first_error);
     if imported == 0 && failed > 0 {
-        Redirect::to(&cf_redirect(None, None, Some(&summary))).into_response()
+        crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, None, Some(&summary)),
+        )
     } else {
-        Redirect::to(&cf_redirect(None, Some(&summary), None)).into_response()
+        crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, Some(&summary), None),
+        )
     }
 }
 
@@ -743,43 +773,52 @@ fn parse_collision_decisions(decisions: &str, renames: &str) -> HashMap<usize, C
 )]
 pub async fn settings_custom_formats_import_resolve(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<CustomFormatImportResolveForm>,
-) -> Redirect {
+) -> Response {
     let payload = form.payload.trim();
     if payload.is_empty() {
-        return Redirect::to(&cf_redirect(
-            None,
-            None,
-            Some("Import resolve: payload is empty."),
-        ));
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, None, Some("Import resolve: payload is empty.")),
+        );
     }
 
     let value: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(e) => {
-            return Redirect::to(&cf_redirect(
-                None,
-                None,
-                Some(&format!("Import resolve: invalid JSON ({e})")),
-            ));
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(
+                    None,
+                    None,
+                    Some(&format!("Import resolve: invalid JSON ({e})")),
+                ),
+            );
         }
     };
 
     let entries: Vec<serde_json::Value> = match normalize_cf_import_entries(value) {
         Ok(entries) => entries,
         Err(msg) => {
-            return Redirect::to(&cf_redirect(None, None, Some(&msg)));
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(None, None, Some(&msg)),
+            );
         }
     };
 
     let existing_rows = match cf_model::list_with_scores(&state.db).await {
         Ok(rows) => rows,
         Err(e) => {
-            return Redirect::to(&cf_redirect(
-                None,
-                None,
-                Some(&format!("Failed to read existing CFs: {e}")),
-            ));
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(
+                    None,
+                    None,
+                    Some(&format!("Failed to read existing CFs: {e}")),
+                ),
+            );
         }
     };
     let existing_by_name: HashMap<String, i64> =
@@ -808,9 +847,15 @@ pub async fn settings_custom_formats_import_resolve(
 
     let summary = import_summary(imported, skipped, failed, first_error);
     if imported == 0 && failed > 0 {
-        Redirect::to(&cf_redirect(None, None, Some(&summary)))
+        crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, None, Some(&summary)),
+        )
     } else {
-        Redirect::to(&cf_redirect(None, Some(&summary), None))
+        crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, Some(&summary), None),
+        )
     }
 }
 
@@ -969,10 +1014,18 @@ async fn reset_defaults_core(state: &AppState) -> Result<(u64, InstallDefaultsRe
         (status = 303, description = "Redirect back to the Custom Formats settings tab"),
     ),
 )]
-pub async fn settings_custom_formats_install_defaults(State(state): State<AppState>) -> Redirect {
+pub async fn settings_custom_formats_install_defaults(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+) -> Response {
     let report = match install_default_cfs_core(&state).await {
         Ok(r) => r,
-        Err(msg) => return Redirect::to(&cf_redirect(None, None, Some(&msg))),
+        Err(msg) => {
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(None, None, Some(&msg)),
+            );
+        }
     };
 
     if report.installed > 0 {
@@ -1001,9 +1054,15 @@ pub async fn settings_custom_formats_install_defaults(State(state): State<AppSta
     };
 
     if report.installed == 0 && report.failed > 0 {
-        Redirect::to(&cf_redirect(None, None, Some(&summary)))
+        crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, None, Some(&summary)),
+        )
     } else {
-        Redirect::to(&cf_redirect(None, Some(&summary), None))
+        crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, Some(&summary), None),
+        )
     }
 }
 
@@ -1018,10 +1077,18 @@ pub async fn settings_custom_formats_install_defaults(State(state): State<AppSta
         (status = 303, description = "Redirect back to the Custom Formats settings tab"),
     ),
 )]
-pub async fn settings_custom_formats_reset_defaults(State(state): State<AppState>) -> Redirect {
+pub async fn settings_custom_formats_reset_defaults(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+) -> Response {
     let (deleted, report) = match reset_defaults_core(&state).await {
         Ok(pair) => pair,
-        Err(msg) => return Redirect::to(&cf_redirect(None, None, Some(&msg))),
+        Err(msg) => {
+            return crate::handlers::responses::htmx_aware_redirect(
+                is_htmx,
+                &cf_redirect(None, None, Some(&msg)),
+            );
+        }
     };
 
     cf_service::rebuild_cf_cache(&state.custom_formats, &state.db).await;
@@ -1052,9 +1119,15 @@ pub async fn settings_custom_formats_reset_defaults(State(state): State<AppState
     };
 
     if report.failed > 0 && report.installed == 0 {
-        Redirect::to(&cf_redirect(None, None, Some(&summary)))
+        crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, None, Some(&summary)),
+        )
     } else {
-        Redirect::to(&cf_redirect(None, Some(&summary), None))
+        crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            &cf_redirect(None, Some(&summary), None),
+        )
     }
 }
 

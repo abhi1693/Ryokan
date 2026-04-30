@@ -46,6 +46,16 @@ path = "tests/htmx_settings_delete.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "htmx_settings_modal_handlers"
+path = "tests/htmx_settings_modal_handlers.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "htmx_redirect_audit"
+path = "tests/htmx_redirect_audit.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "htmx_grab_bag"
 path = "tests/htmx_grab_bag.rs"
 required-features = ["test-support"]
@@ -98,6 +108,16 @@ required-features = ["test-support", "browser-e2e"]
 [[test]]
 name = "htmx_browser_e2e_settings_modals"
 path = "tests/htmx_browser_e2e_settings_modals.rs"
+required-features = ["test-support", "browser-e2e"]
+
+[[test]]
+name = "htmx_browser_e2e_boost_phase_a"
+path = "tests/htmx_browser_e2e_boost_phase_a.rs"
+required-features = ["test-support", "browser-e2e"]
+
+[[test]]
+name = "htmx_browser_e2e_boost_phase_b"
+path = "tests/htmx_browser_e2e_boost_phase_b.rs"
 required-features = ["test-support", "browser-e2e"]
 
 [dependencies]
@@ -203,7 +223,7 @@ regex-lite = "0.1"
 # do not support — fancy-regex adds PCRE-style backtracking. We keep
 # regex-lite as the default for Ryokan's own internal regexes because
 # they don't need look-around and we want the linear-time guarantee.
-fancy-regex = "0.17"
+fancy-regex = "0.18"
 sha2 = "0.11"
 ammonia = "4"
 

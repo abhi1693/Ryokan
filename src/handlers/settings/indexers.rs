@@ -280,25 +280,12 @@ pub async fn settings_indexers_upsert(
 }
 
 /// Send the user back to the Indexers tab with `&err=<msg>` flashed.
-/// HTMX path uses `HX-Redirect: /settings?tab=indexers&err=…` so htmx
-/// does a full client-side navigation; without this, htmx silently
-/// follows a 303 with `fetch` and swaps the resulting full-page
-/// HTML into the form's `hx-target="#indexer-section"`, producing a
-/// nested-page render (duplicate "Settings" h2 + tabs inside the
-/// fieldset). The non-HTMX path keeps the standard 303 so the
-/// progressive-enhancement form-POST still works without JS.
+/// Thin wrapper around [`crate::handlers::responses::htmx_aware_redirect`]
+/// — kept for the prefix-encoded ergonomic at the existing call
+/// sites. The shared helper handles the HX-Redirect-vs-303 split.
 fn error_redirect(is_htmx: bool, encoded_msg: &str) -> Response {
     let url = format!("/settings?tab=indexers&err={encoded_msg}");
-    if is_htmx {
-        let mut resp = Response::new(axum::body::Body::empty());
-        *resp.status_mut() = StatusCode::OK;
-        if let Ok(value) = url.parse() {
-            resp.headers_mut().insert("HX-Redirect", value);
-        }
-        resp
-    } else {
-        Redirect::to(&url).into_response()
-    }
+    crate::handlers::responses::htmx_aware_redirect(is_htmx, &url)
 }
 
 #[utoipa::path(

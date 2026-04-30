@@ -180,15 +180,43 @@ function deleteTorrent(hash) {
     });
 }
 
-// Only start the queue poller when the queue tab is rendered.
-// Skip the immediate loadQueue() — the server-rendered queue table
-// is already correct on first paint, so an immediate JS render just
-// causes a visible flash (any markup divergence between the template
-// and `renderQueue()` flickers as the JS render overwrites the
-// container). The 5s interval handles live updates from there.
-if (document.getElementById('queue-container')) {
-    setInterval(loadQueue, 5000);
-}
+// Page-lifecycle-aware queue poller. Phase B of the hx-boost rollout:
+// boost-swaps don't trigger DOMContentLoaded, so the previous
+// module-scope `if (...) setInterval(loadQueue, 5000)` would run
+// once on initial document load and never again. Worse, on
+// Library → Downloads → Library → Downloads ping-pong the second
+// Downloads landing started a SECOND interval on top of the first
+// (never the same handle, no way to clear), creating a multiplicative
+// poller leak.
+//
+// `ryokanRegisterPageInit` (page_lifecycle.js) wires `mount` /
+// `unmount` to htmx.onLoad: every load OR boosted swap re-checks
+// the registered pages, calls `mount` when entering and `unmount`
+// when leaving. Skip the immediate loadQueue() — the server-rendered
+// queue table is already correct on first paint, so an immediate JS
+// render just causes a visible flash (markup divergence between the
+// template and `renderQueue()` flickers as the JS render overwrites
+// the container). The 5s interval handles live updates from there.
+window.ryokanRegisterPageInit('downloads-queue', {
+    check: function () {
+        return !!document.getElementById('queue-container');
+    },
+    mount: function () {
+        if (window.__downloadsQueuePoller) {
+            // Defensive — if some unexpected path left a handle
+            // dangling (e.g., a browser back-forward cache restore
+            // skipped the unmount), clear it before starting fresh.
+            clearInterval(window.__downloadsQueuePoller);
+        }
+        window.__downloadsQueuePoller = setInterval(loadQueue, 5000);
+    },
+    unmount: function () {
+        if (window.__downloadsQueuePoller) {
+            clearInterval(window.__downloadsQueuePoller);
+            window.__downloadsQueuePoller = null;
+        }
+    },
+});
 
 // ── History tab ─────────────────────────────────────────────────────────
 

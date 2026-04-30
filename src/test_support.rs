@@ -466,6 +466,12 @@ mod e2e {
                 "/settings",
                 get(crate::handlers::settings::settings_page),
             )
+            // hx-boost rollout Phase A — Library index page mounted
+            // so the boost browser-e2e tests can navigate
+            // Library ↔ Settings via the boosted mobile-tabbar and
+            // assert the head-merge picked up each page's distinct
+            // `{% block page_css %}` link.
+            .route("/", get(crate::handlers::library::pages::index))
             // Issue #129 Phase 1 completion — per-tab subform handlers
             // (`/settings/general`, `/settings/quality`,
             // `/settings/integrations`). Mounted here so the
@@ -505,6 +511,26 @@ mod e2e {
             .route(
                 "/settings/indexers/{id}/edit-form",
                 axum::routing::get(crate::handlers::settings::indexers::settings_indexers_edit_form),
+            )
+            // SAB cleanup PR — modal-form endpoints used by the
+            // browser-e2e tests in
+            // `tests/htmx_browser_e2e_settings_modals.rs`. The
+            // production `/api/download-clients/add-form` and
+            // `/api/indexers/test` are mounted in main.rs's
+            // `protected_routes`; the test harness needs them too so
+            // browser navigations / fetches against the test app
+            // hit the real handlers rather than 404 with an empty
+            // body (which Firefox renders as the empty-plaintext
+            // sentinel that bit the test on first authoring).
+            .route(
+                "/api/download-clients/add-form",
+                axum::routing::get(
+                    crate::handlers::settings::download_clients::settings_download_clients_add_form,
+                ),
+            )
+            .route(
+                "/api/indexers/test",
+                post(crate::handlers::settings::indexers::settings_indexers_test_stateless),
             )
             .route(
                 "/settings/download-clients/delete",

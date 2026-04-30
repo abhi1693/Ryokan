@@ -450,7 +450,16 @@ pub async fn require_auth(
                     .users_exist
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            Ok(false) => return Redirect::to("/setup").into_response(),
+            // hx-boost rollout Phase C — auth middleware redirects must
+            // emit `HX-Redirect: ...` for boosted callers (boost arrives
+            // here on a session-expired page click), or htmx will
+            // inline-swap the `/setup`/`/login` page HTML into the
+            // prior page's body. `htmx_aware_redirect_from_req` reads
+            // the `HX-Request` header off the raw request; unauth
+            // browser nav still gets the standard 303.
+            Ok(false) => {
+                return crate::handlers::responses::htmx_aware_redirect_from_req(&req, "/setup");
+            }
             Err(_) => {}
         }
     }
@@ -458,7 +467,7 @@ pub async fn require_auth(
     // Check session cookie.
     let token = match get_session_token(&req) {
         Some(t) => t,
-        None => return Redirect::to("/login").into_response(),
+        None => return crate::handlers::responses::htmx_aware_redirect_from_req(&req, "/login"),
     };
 
     match session::validate_session(&state.db, &token).await {
@@ -475,7 +484,7 @@ pub async fn require_auth(
             }
             next.run(req).await
         }
-        _ => Redirect::to("/login").into_response(),
+        _ => crate::handlers::responses::htmx_aware_redirect_from_req(&req, "/login"),
     }
 }
 

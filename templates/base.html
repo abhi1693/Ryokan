@@ -11,7 +11,22 @@
     <link rel="stylesheet" href="/static/css/modals.css">
     {% block page_css %}{% endblock %}
 </head>
-<body>
+<body hx-ext="head-support">
+    {# `hx-ext="head-support"` opts the document into the
+       `htmx-ext-head-support` extension (vendored at
+       `static/vendor/htmx-ext-head-support-2.0.5.min.js`). The
+       extension diffs the response's `<head>` against the current
+       document's head: adds new `<link>` / `<script>` tags from the
+       new page, removes ones the new page doesn't reference, leaves
+       shared tags in place. This is the prerequisite for the
+       hx-boost rollout — without head-merging, navigating between
+       pages with different `{% block page_css %}` would leave the
+       prior page's CSS stuck in the head and the new page would
+       render unstyled (the same regression that killed the
+       attempt-1 boost rollout). The extension is a no-op until an
+       ancestor element opts into `hx-boost` or until an `hx-*`
+       request returns content with a `<head>` block; loading the
+       script with no boost wired in yet is harmless. #}
     <script>
     // Pre-render FOUC guard: sets the title-language data attribute on
     // <html> before any content paints. Must stay inline (non-deferred)
@@ -55,8 +70,17 @@
        exactly one nav is visible at any width. Five slots: Library,
        Search, Downloads, Settings, System. Logout doesn't get a tab
        — it lives in a Settings-page footer when needed. Icons are
-       inline SVG so no asset pipeline is required. #}
-    <nav class="mobile-tabbar" aria-label="Primary">
+       inline SVG so no asset pipeline is required.
+
+       Phase A of the hx-boost rollout (per /home/john/Documents/
+       ryokan-roadmap/hx_boost_rollout_plan.md): this nav region is
+       opted into `hx-boost` while the desktop top-nav stays on plain
+       `<a>` navigation. Five anchor links, no forms, all targets are
+       top-level pages with distinct per-page CSS — narrow blast
+       radius for validating that `htmx-ext-head-support` correctly
+       swaps the `<head>` between pages on every boosted nav. Phase D
+       moves this attribute to `<body>` for site-wide coverage. #}
+    <nav class="mobile-tabbar" aria-label="Primary" hx-boost="true">
         <a href="/" class="mobile-tab {% if page == "library" %}active{% endif %}" aria-label="Library">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
             <span class="mobile-tab-label">Library</span>
@@ -172,16 +196,22 @@
        base.js so any custom JS that references `htmx.*` (Phase 4 SSE
        progress, etc.) sees the global on first paint.
 
-       NOTE: a prior version of this file added `hx-boost="true"` to
-       <body>. That was reverted because boost swaps the entire body
-       and leaves the <head> block-css from `{% block page_css %}` from
-       the prior page intact, so per-page CSS (series.css, settings.css,
-       etc.) doesn't load on a boosted nav and pages render unstyled.
-       Re-introducing boost requires either `hx-target="main"` +
-       `htmx-ext-head-support` or a fundamentally different approach;
-       deferred to its own carefully-scoped phase. #}
+       Phase A of the hx-boost rollout (2026-04-29) wires
+       `htmx-ext-head-support` and opts the mobile-tabbar nav into
+       `hx-boost` — see the `hx-ext` attribute on `<body>` and the
+       `hx-boost` attribute on `<nav class="mobile-tabbar">` above.
+       Attempt-1 of body-wide boost (pre-rollout) was reverted because
+       boost-only swaps body content and leaves `{% block page_css %}`
+       from the prior page in place, so per-page CSS (series.css,
+       settings.css, etc.) didn't load and pages rendered unstyled.
+       The extension fixes that by diff-merging the response's
+       `<head>` against the document's. Body-wide boost lands in
+       Phase D once the per-page-init audit (Phase B) and the
+       redirect-handler audit (Phase C) close out. #}
     <script src="/static/vendor/htmx-2.0.9.min.js" defer></script>
     <script src="/static/vendor/htmx-ext-sse-2.2.4.min.js" defer></script>
+    <script src="/static/vendor/htmx-ext-head-support-2.0.5.min.js" defer></script>
+    <script src="/static/js/page_lifecycle.js" defer></script>
     <script src="/static/js/base.js" defer></script>
 </body>
 </html>

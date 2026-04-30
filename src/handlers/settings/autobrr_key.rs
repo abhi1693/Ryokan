@@ -11,11 +11,13 @@
 //! prompt) to mint a new key, which invalidates any existing
 //! autobrr deployments using the old one.
 
-use axum::{extract::State, response::Redirect};
+use axum::{extract::State, response::Response};
+use axum_htmx::HxRequest;
 use base64::Engine;
 use rand::Rng;
 
 use crate::AppState;
+use crate::handlers::responses::htmx_aware_redirect;
 use crate::models::config;
 use crate::models::log::LogCategory;
 use crate::services::logger;
@@ -41,7 +43,10 @@ fn generate_key() -> String {
         (status = 303, description = "Redirect back to the indexers tab"),
     ),
 )]
-pub async fn settings_autobrr_regenerate_key(State(state): State<AppState>) -> Redirect {
+pub async fn settings_autobrr_regenerate_key(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+) -> Response {
     // Read the existing config to preserve every other field —
     // this handler must rotate ONLY the autobrr_api_key.
     let mut cfg = match config::get_config(&state.db).await {
@@ -63,7 +68,10 @@ pub async fn settings_autobrr_regenerate_key(State(state): State<AppState>) -> R
             &e.to_string(),
         )
         .await;
-        return Redirect::to("/settings?tab=indexers&err=autobrr+key+rotation+failed");
+        return htmx_aware_redirect(
+            is_htmx,
+            "/settings?tab=indexers&err=autobrr+key+rotation+failed",
+        );
     }
     logger::info(
         &state.db,
@@ -72,7 +80,10 @@ pub async fn settings_autobrr_regenerate_key(State(state): State<AppState>) -> R
         "",
     )
     .await;
-    Redirect::to("/settings?tab=indexers&msg=autobrr+key+regenerated")
+    htmx_aware_redirect(
+        is_htmx,
+        "/settings?tab=indexers&msg=autobrr+key+regenerated",
+    )
 }
 
 #[cfg(test)]

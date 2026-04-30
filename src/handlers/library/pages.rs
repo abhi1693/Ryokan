@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use askama::Template;
 use axum::{
     extract::{Path, State},
-    response::Html,
+    response::{Html, IntoResponse},
 };
 use sqlx::SqlitePool;
 
@@ -222,10 +222,42 @@ pub async fn index(
 }
 
 /// `/library/review` used to render its own page. It's now a System
-/// tab (`/system?tab=review`) — keep this as a 308 redirect so
-/// anything bookmarked, linked, or cached still resolves.
-pub async fn needs_review_page() -> axum::response::Redirect {
-    axum::response::Redirect::permanent("/system?tab=review")
+/// tab (`/system?tab=review`) — redirect there so anything
+/// bookmarked, linked, or cached still resolves.
+///
+/// Phase C / D of the hx-boost rollout: under `hx-boost` an `<a>`
+/// click is fetched with `fetch`, which transparently follows 3xx
+/// redirects — htmx never sees the redirect, only the final
+/// destination's HTML. The pushState'd URL stays at the ORIGINAL
+/// click target (`/library/review`) while the rendered content is
+/// the destination (`/system?tab=review`), producing an awkward
+/// URL/content mismatch in the address bar.
+///
+/// `htmx_aware_redirect_from_req` solves this: HTMX callers get
+/// `200 OK` with `HX-Redirect: /system?tab=review`, which htmx
+/// translates into a real `window.location` navigation that updates
+/// both URL and content together. Plain (non-HTMX) callers — direct
+/// browser nav, bookmarks, third-party links — fall through to the
+/// `Redirect::permanent` path so search-engine cache invalidation
+/// and deep-linking still work the way 308 promises.
+pub async fn needs_review_page(
+    req: axum::http::Request<axum::body::Body>,
+) -> axum::response::Response {
+    let is_htmx = req
+        .headers()
+        .get("HX-Request")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if is_htmx {
+        crate::handlers::responses::htmx_aware_redirect(true, "/system?tab=review")
+    } else {
+        // Non-HTMX path keeps the 308 (vs the helper's 303) so
+        // search engines and HTTP caches treat the redirect as
+        // permanent — a 303 from `htmx_aware_redirect` would invite
+        // re-fetching `/library/review` indefinitely.
+        axum::response::Redirect::permanent("/system?tab=review").into_response()
+    }
 }
 
 pub async fn series_detail(

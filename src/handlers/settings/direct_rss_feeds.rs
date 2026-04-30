@@ -13,12 +13,11 @@
 //! frontend and leave the test pill stuck spinning — same class
 //! of regression as the `sync_now` JSON-body fix (PR #94 r2).
 
-use axum::{
-    Form, Json,
-    extract::State,
-    response::{IntoResponse, Redirect, Response},
-};
+use axum::{Form, Json, extract::State, response::Response};
+use axum_htmx::HxRequest;
 use serde::Deserialize;
+
+use crate::handlers::responses::htmx_aware_redirect;
 
 use crate::AppState;
 use crate::models::direct_rss_feeds::{
@@ -78,13 +77,14 @@ fn parse_optional_i64(s: &Option<String>) -> Option<i64> {
 )]
 pub async fn settings_direct_rss_feeds_upsert(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<DirectRssFeedUpsertForm>,
 ) -> Response {
     let name = form.name.trim().to_string();
     let url = form.url.trim().to_string();
     if name.is_empty() || url.is_empty() {
         let msg = urlencoding::encode("Direct RSS feed: name and URL are required.").into_owned();
-        return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+        return htmx_aware_redirect(is_htmx, &format!("/settings?tab=indexers&err={msg}"));
     }
 
     let download_client_id = parse_optional_i64(&form.download_client_id);
@@ -124,7 +124,7 @@ pub async fn settings_direct_rss_feeds_upsert(
                     "Couldn't verify protocol pin (DB error: {e}); please retry."
                 ))
                 .into_owned();
-                return Redirect::to(&format!("/settings?tab=indexers&err={msg}")).into_response();
+                return htmx_aware_redirect(is_htmx, &format!("/settings?tab=indexers&err={msg}"));
             }
         };
         if let Some(feed_row) = feed_row
@@ -139,8 +139,10 @@ pub async fn settings_direct_rss_feeds_upsert(
                             "Couldn't verify protocol pin (DB error: {e}); please retry."
                         ))
                         .into_owned();
-                        return Redirect::to(&format!("/settings?tab=indexers&err={msg}"))
-                            .into_response();
+                        return htmx_aware_redirect(
+                            is_htmx,
+                            &format!("/settings?tab=indexers&err={msg}"),
+                        );
                     }
                 };
             if let Some(client_row) = client_row {
@@ -159,8 +161,10 @@ pub async fn settings_direct_rss_feeds_upsert(
                         cp
                     ))
                     .into_owned();
-                    return Redirect::to(&format!("/settings?tab=indexers&err={msg}"))
-                        .into_response();
+                    return htmx_aware_redirect(
+                        is_htmx,
+                        &format!("/settings?tab=indexers&err={msg}"),
+                    );
                 }
             }
         }
@@ -195,12 +199,12 @@ pub async fn settings_direct_rss_feeds_upsert(
             .await;
             let msg =
                 urlencoding::encode(&format!("Direct RSS feed '{name}' {verb}.")).into_owned();
-            Redirect::to(&format!("/settings?tab=indexers&msg={msg}")).into_response()
+            htmx_aware_redirect(is_htmx, &format!("/settings?tab=indexers&msg={msg}"))
         }
         Err(e) => {
             let err =
                 urlencoding::encode(&format!("Direct RSS feed save failed: {e}")).into_owned();
-            Redirect::to(&format!("/settings?tab=indexers&err={err}")).into_response()
+            htmx_aware_redirect(is_htmx, &format!("/settings?tab=indexers&err={err}"))
         }
     }
 }
@@ -217,6 +221,7 @@ pub async fn settings_direct_rss_feeds_upsert(
 )]
 pub async fn settings_direct_rss_feeds_delete(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Form(form): Form<DirectRssFeedDeleteForm>,
 ) -> Response {
     let name = match get_by_id(&state.db, form.id).await {
@@ -234,11 +239,11 @@ pub async fn settings_direct_rss_feeds_delete(
             .await;
             let msg =
                 urlencoding::encode(&format!("Direct RSS feed '{name}' deleted.")).into_owned();
-            Redirect::to(&format!("/settings?tab=indexers&msg={msg}")).into_response()
+            htmx_aware_redirect(is_htmx, &format!("/settings?tab=indexers&msg={msg}"))
         }
         Err(e) => {
             let err = urlencoding::encode(&format!("Delete failed: {e}")).into_owned();
-            Redirect::to(&format!("/settings?tab=indexers&err={err}")).into_response()
+            htmx_aware_redirect(is_htmx, &format!("/settings?tab=indexers&err={err}"))
         }
     }
 }
@@ -369,12 +374,14 @@ pub async fn settings_direct_rss_feeds_test(
 mod tests {
     use super::*;
     use crate::test_support::{build_test_app_state, in_memory_pool};
+    use axum::response::IntoResponse;
 
     #[tokio::test]
     async fn upsert_rejects_empty_name_or_url() {
         let state = build_test_app_state(in_memory_pool().await, None);
         let resp = settings_direct_rss_feeds_upsert(
             State(state),
+            HxRequest(false),
             Form(DirectRssFeedUpsertForm {
                 id: None,
                 name: "".into(),
@@ -402,6 +409,7 @@ mod tests {
         let state = build_test_app_state(db.clone(), None);
         let _ = settings_direct_rss_feeds_upsert(
             State(state),
+            HxRequest(false),
             Form(DirectRssFeedUpsertForm {
                 id: None,
                 name: "SubsPlease 1080p".into(),
@@ -495,6 +503,7 @@ mod tests {
         let state = build_test_app_state(db.clone(), None);
         let resp = settings_direct_rss_feeds_upsert(
             State(state),
+            HxRequest(false),
             Form(DirectRssFeedUpsertForm {
                 id: Some(feed_id),
                 name: "SubsPlease".into(),
@@ -567,6 +576,7 @@ mod tests {
         let state = build_test_app_state(db.clone(), None);
         let _ = settings_direct_rss_feeds_upsert(
             State(state),
+            HxRequest(false),
             Form(DirectRssFeedUpsertForm {
                 id: Some(feed_id),
                 name: "SubsPlease".into(),
@@ -623,6 +633,7 @@ mod tests {
         let state = build_test_app_state(db.clone(), None);
         let _ = settings_direct_rss_feeds_upsert(
             State(state),
+            HxRequest(false),
             Form(DirectRssFeedUpsertForm {
                 id: Some(feed_id),
                 name: "Untested".into(),
