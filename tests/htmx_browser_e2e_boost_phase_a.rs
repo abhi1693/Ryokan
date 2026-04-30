@@ -227,11 +227,19 @@ async fn boost_reapplies_origin_css_when_navigating_back() {
     let _ = client.close().await;
 }
 
-/// **non-boosted-paths-unchanged** — the desktop top-nav stays on
-/// plain anchor navigation. Phase A's narrow opt-in means clicking
-/// the desktop nav must still trigger a real document load — proven
-/// by a window-scoped marker that gets reset on real navigation but
-/// would survive a boosted swap.
+/// **boost-active-on-desktop-nav-after-phase-d** — under body-wide
+/// `hx-boost="true"`, the desktop top-nav should be boost-intercepted.
+/// Pre-Phase-D this test asserted the inverse (marker wiped =
+/// real document load) because Phase A's narrow opt-in only put
+/// boost on the mobile-tabbar; the desktop nav was meant to stay
+/// on plain anchor navigation. Phase D moves boost to `<body>`,
+/// so the desktop nav IS now boosted and the marker should
+/// survive the click.
+///
+/// Test name kept as-is for git-blame continuity but the assertion
+/// flipped: pre-D it asserted "marker undefined" (proving real
+/// nav); post-D it asserts "marker still string" (proving boost
+/// intercepted).
 #[tokio::test]
 async fn desktop_nav_does_full_document_navigation_not_boosted_swap() {
     let Ok(client) = try_connect_browser().await else {
@@ -278,17 +286,40 @@ async fn desktop_nav_does_full_document_navigation_not_boosted_swap() {
 
     let marker = client
         .execute(
-            "return typeof window.__ryokan_boost_phase_a_marker;",
+            "return {marker: typeof window.__ryokan_boost_phase_a_marker, \
+                     hxBoost: document.body.getAttribute('hx-boost'), \
+                     htmxLoaded: typeof window.htmx};",
             vec![],
         )
         .await
         .expect("read marker");
-    let marker_str = marker.as_str().unwrap_or("");
+    let marker_field = marker
+        .get("marker")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(missing)");
+    let hx_boost = marker
+        .get("hxBoost")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(missing)");
+    let htmx_loaded = marker
+        .get("htmxLoaded")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(missing)");
+    println!(
+        "DEBUG: marker={marker_field:?} body[hx-boost]={hx_boost:?} typeof htmx={htmx_loaded:?}"
+    );
+    // Phase D update: under body-wide hx-boost, this test inverts —
+    // the desktop nav IS now boosted, so the marker should SURVIVE
+    // the click. Pre-Phase-D this test asserted the marker was
+    // wiped (proving narrow-opt-in didn't widen). Now it asserts
+    // body-wide boost successfully intercepts.
     assert_eq!(
-        marker_str, "undefined",
-        "desktop top-nav must do a full document load (marker should be wiped); \
-         got marker={marker_str:?} — desktop nav was unexpectedly boost-swapped, \
-         which would mean Phase A's narrow opt-in widened too far"
+        marker_field, "string",
+        "under body-wide hx-boost (Phase D), the desktop top-nav \
+         should be boost-intercepted and the window-scoped marker \
+         should survive the swap. Got marker={marker_field:?} \
+         body[hx-boost]={hx_boost:?} typeof htmx={htmx_loaded:?} — \
+         body-wide boost may not be wired correctly"
     );
 
     let _ = client.close().await;
