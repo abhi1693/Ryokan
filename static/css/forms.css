@@ -488,12 +488,20 @@ select {
     padding-right: 30px;
 }
 
-select:focus {
-    /* Tint the chevron with --accent on focus for the same visual
-     * cue the native chevron used to give. Re-emit the same SVG
-     * with the focused stroke color, since CSS can't recolor a data-
-     * URI image with `filter` without affecting the rest of the
-     * select. */
+select:focus-visible {
+    /* `:focus-visible` (not `:focus`) deliberately. A native `<select>`
+     * retains focus after a mouse-click + option-pick, so a `:focus`
+     * rule keeps the chevron purple until the user clicks somewhere
+     * else — felt like a stuck UI state. `:focus-visible` only
+     * matches when focus arrived via the keyboard (Tab), which is
+     * exactly the case where an accessibility cue *is* needed.
+     * Mouse-clicked selects skip the purple state entirely; selecting
+     * an option leaves the chevron in its default gray, which feels
+     * right for the modal-style "open dropdown, pick, close" flow.
+     *
+     * Tints the chevron with --accent. Re-emit the same SVG with the
+     * focused stroke color, since CSS can't recolor a data-URI image
+     * with `filter` without affecting the rest of the select. */
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cba6f7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") !important;
 }
 
