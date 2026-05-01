@@ -80,13 +80,19 @@
                         </div>
                     </td>
                     <td class="col-size">{{ r.size }}</td>
-                    {# Date column intentionally renders the raw upload date
-                       string from Nyaa ("YYYY-MM-DD HH:MM" UTC) without the
-                       global `[data-ts]` relative-time treatment from
-                       base.js — the column otherwise mixes "5d ago" /
-                       absolute date depending on age, which reads as
+                    {# Date column. Nyaa publishes "YYYY-MM-DD HH:MM" in UTC.
+                       The cell text is converted to the viewer's local
+                       timezone client-side by `renderLocalDates()` in
+                       search.js (which also sets the `title` attribute to
+                       the original UTC string). Server-side default = the
+                       raw UTC string so the cell has *something* to show
+                       before the script runs (no FOUC); the conversion is
+                       a textContent overwrite, not a layout change. The
+                       global `[data-ts]` "5d ago" treatment from base.js is
+                       deliberately not used here — it mixes "5d ago" /
+                       absolute date depending on age and reads as
                        inconsistent across rows. #}
-                    <td class="col-date">{% if !r.upload_date.is_empty() %}{{ r.upload_date }}{% else %}—{% endif %}</td>
+                    <td class="col-date">{% if !r.upload_date.is_empty() %}<span data-utc="{{ r.upload_date }}">{{ r.upload_date }}</span>{% else %}—{% endif %}</td>
                     <td class="col-seed"><span class="seed-count">{{ r.seeders }}</span></td>
                     <td class="col-leech"><span class="leech-count">{{ r.leechers }}</span></td>
                     <td class="col-dl"><span class="dl-count">{{ r.downloads }}</span></td>

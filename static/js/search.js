@@ -105,9 +105,15 @@ function loadMore() {
 
                 const scoreBreakdownHtml = renderScoreBreakdown(r);
                 // Mirror the server-rendered shape in templates/search.html:
-                // raw "YYYY-MM-DD HH:MM" string, no `data-ts` so the global
-                // relative-time renderer in base.js doesn't touch it.
-                const dateCell = r.upload_date ? escHtml(r.upload_date) : '—';
+                // a `[data-utc]` span carrying the raw UTC string. The
+                // page-load + paginated-load passes through
+                // `renderLocalDates()` to overwrite the textContent with
+                // local time and `title` with the UTC marker. No
+                // `data-ts` — the global relative-time renderer in
+                // base.js otherwise mixes "5d ago" / absolute date.
+                const dateCell = r.upload_date
+                    ? `<span data-utc="${escAttr(r.upload_date)}">${escHtml(r.upload_date)}</span>`
+                    : '—';
 
                 // Table row (desktop).
                 const tr = document.createElement('tr');
@@ -177,6 +183,12 @@ function loadMore() {
                 }
             }
 
+            // Convert any new `[data-utc]` cells to local time +
+            // UTC tooltip. The page-1 render is handled by the
+            // DOMContentLoaded pass; this is the paginated-append
+            // pass.
+            renderLocalDates();
+
             totalResults += results.length;
             nextPage++;
             document.getElementById('results-count').textContent = `${totalResults} results`;
@@ -220,6 +232,17 @@ function grabRelease(url, btn) {
         && typeof window.openGrabPicker === 'function'
         && row && row.dataset.infoHash;
     if (canPicker) {
+        // Capture the row's hash + URL for the post-picker Cancel
+        // wire-up. The picker confirms via `/api/grab/confirm` (not
+        // `/api/grab`), so the post-`/api/grab` Cancel logic below
+        // wouldn't otherwise fire — we hand `onConfirm` to the
+        // picker so the original row's Grab button still flips into
+        // Cancel state once a batch grab lands. For BT releases
+        // `row.dataset.infoHash` IS the canonical id qBit knows the
+        // torrent by, so cancel via /api/downloads/delete with this
+        // hash works the same as the direct-grab path.
+        const cancelHashFromRow = row && row.dataset.infoHash || '';
+        const grabUrlFromRow = url;
         window.openGrabPicker(url, {
             title: row.dataset.name || '',
             size: row.dataset.sizeHuman || '',
@@ -231,6 +254,10 @@ function grabRelease(url, btn) {
             // the listing's flag instead of a file-count proxy (which
             // mis-flags .mkv+.ass+.srt single-episode releases).
             isBatch: isBatch,
+            onConfirm: function () {
+                if (!cancelHashFromRow) return;
+                flipGrabButtonToCancel(btn, cancelHashFromRow, grabUrlFromRow);
+            },
         });
         return;
     }
@@ -282,18 +309,7 @@ function grabRelease(url, btn) {
         // wouldn't match the row's hash.
         const cancelHash = hash || (row && row.dataset.infoHash) || '';
         if (cancelHash) {
-            btn.disabled = false;
-            btn.classList.remove('btn-success');
-            btn.classList.add('btn-cancel');
-            btn.textContent = 'Cancel';
-            btn.dataset.cancelHash = cancelHash;
-            // Capture the original grab URL on the button so the
-            // post-cancel reset can re-wire `onclick` back to a
-            // working "Grab" — assigning `btn.onclick` replaces the
-            // inline `onclick="grabRelease(...)"` from the template,
-            // so we can't recover it later without saving it now.
-            btn.dataset.grabUrl = url;
-            btn.onclick = function () { cancelGrabbedRelease(cancelHash, btn); };
+            flipGrabButtonToCancel(btn, cancelHash, url);
         } else {
             // Empty canonical id (rare — magnet add that returned
             // nothing). Fall back to the legacy "Sent" lock so the
@@ -358,6 +374,23 @@ function grabRelease(url, btn) {
             });
         }
     });
+}
+
+// Convert a Grab button into the post-grab Cancel state. Used by
+// both the direct `/api/grab` path and the picker `onConfirm`
+// callback so a search-row Grab button gets the same Cancel UX
+// regardless of which grab pipeline served the request. Captures
+// the original URL on the button so the post-cancel reset can
+// rewire a fresh "Grab" click — assigning `btn.onclick` clobbers
+// the inline `onclick="grabRelease(...)"` from the template.
+function flipGrabButtonToCancel(btn, cancelHash, grabUrl) {
+    btn.disabled = false;
+    btn.classList.remove('btn-success');
+    btn.classList.add('btn-cancel');
+    btn.textContent = 'Cancel';
+    btn.dataset.cancelHash = cancelHash;
+    btn.dataset.grabUrl = grabUrl || '';
+    btn.onclick = function () { cancelGrabbedRelease(cancelHash, btn); };
 }
 
 // Cancel a release the user just grabbed via the search-page Grab
@@ -694,3 +727,42 @@ function renderScoreBreakdown(r) {
         bindSortHandlers();
     }
 })();
+
+// ── Local-time rendering for `[data-utc]` cells ────────────────────
+//
+// Nyaa publishes upload timestamps in UTC ("YYYY-MM-DD HH:MM"). The
+// search-page date column shows them in the viewer's local timezone
+// instead, with the original UTC string available on hover via the
+// `title` attribute. Idempotent: a `data-utc-rendered` marker
+// prevents re-conversion of an already-localized cell when the
+// renderer fires again (boost-nav, htmx swap, paginated load).
+function renderLocalDates() {
+    const pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+    document.querySelectorAll('[data-utc]').forEach(function (el) {
+        if (el.dataset.utcRendered === '1') return;
+        const utc = el.getAttribute('data-utc');
+        // Match Nyaa's "YYYY-MM-DD HH:MM" (with optional :SS). Treat
+        // as UTC because Nyaa renders in UTC by site convention even
+        // though the wire format omits a `Z`.
+        const m = utc && utc.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+        if (!m) return;
+        const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)));
+        if (isNaN(d.getTime())) return;
+        const local = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+            + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+        el.textContent = local;
+        el.title = utc + ' UTC';
+        el.dataset.utcRendered = '1';
+    });
+}
+window.ryokanRenderLocalDates = renderLocalDates;
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', renderLocalDates);
+} else {
+    renderLocalDates();
+}
+// Re-render on htmx swaps so a boost-nav back to /search picks up
+// any new rows. Idempotent via the `data-utc-rendered` marker.
+if (window.htmx && typeof window.htmx.onLoad === 'function') {
+    window.htmx.onLoad(renderLocalDates);
+}
