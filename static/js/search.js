@@ -183,11 +183,11 @@ function loadMore() {
                 }
             }
 
-            // Convert any new `[data-utc]` cells to local time +
-            // UTC tooltip. The page-1 render is handled by the
-            // DOMContentLoaded pass; this is the paginated-append
-            // pass.
-            renderLocalDates();
+            // Render any new `[data-utc]` cells (date-only text,
+            // full UTC datetime on hover). The page-1 render is
+            // handled by the DOMContentLoaded pass; this is the
+            // paginated-append pass.
+            renderUploadDates();
 
             totalResults += results.length;
             nextPage++;
@@ -728,41 +728,41 @@ function renderScoreBreakdown(r) {
     }
 })();
 
-// ── Local-time rendering for `[data-utc]` cells ────────────────────
+// ── Date column rendering for `[data-utc]` cells ───────────────────
 //
-// Nyaa publishes upload timestamps in UTC ("YYYY-MM-DD HH:MM"). The
-// search-page date column shows them in the viewer's local timezone
-// instead, with the original UTC string available on hover via the
-// `title` attribute. Idempotent: a `data-utc-rendered` marker
-// prevents re-conversion of an already-localized cell when the
-// renderer fires again (boost-nav, htmx swap, paginated load).
-function renderLocalDates() {
-    const pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+// Nyaa publishes upload timestamps as "YYYY-MM-DD HH:MM" UTC. The
+// search-page date column shows just the date portion (YYYY-MM-DD)
+// in the cell, with the full UTC datetime on hover via the `title`
+// attribute. No timezone conversion — keeps the column visually
+// uniform across rows (no "5d ago" / absolute date mixing) and
+// keeps the data clearly UTC for users who want to see the exact
+// upload time. Idempotent: a `data-utc-rendered` marker prevents
+// re-rendering an already-rendered cell on boost-nav / htmx swap /
+// paginated append.
+function renderUploadDates() {
     document.querySelectorAll('[data-utc]').forEach(function (el) {
         if (el.dataset.utcRendered === '1') return;
         const utc = el.getAttribute('data-utc');
-        // Match Nyaa's "YYYY-MM-DD HH:MM" (with optional :SS). Treat
-        // as UTC because Nyaa renders in UTC by site convention even
-        // though the wire format omits a `Z`.
-        const m = utc && utc.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
-        if (!m) return;
-        const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)));
-        if (isNaN(d.getTime())) return;
-        const local = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
-            + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-        el.textContent = local;
+        if (!utc) return;
+        // Strip the time portion: "YYYY-MM-DD HH:MM" → "YYYY-MM-DD".
+        // The first 10 chars are always the date when Nyaa's format
+        // is well-formed. Fall back to the full string if the shape
+        // doesn't match (defensive — a malformed cell still shows
+        // *something* readable).
+        const m = utc.match(/^(\d{4}-\d{2}-\d{2})/);
+        el.textContent = m ? m[1] : utc;
         el.title = utc + ' UTC';
         el.dataset.utcRendered = '1';
     });
 }
-window.ryokanRenderLocalDates = renderLocalDates;
+window.ryokanRenderUploadDates = renderUploadDates;
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', renderLocalDates);
+    document.addEventListener('DOMContentLoaded', renderUploadDates);
 } else {
-    renderLocalDates();
+    renderUploadDates();
 }
 // Re-render on htmx swaps so a boost-nav back to /search picks up
 // any new rows. Idempotent via the `data-utc-rendered` marker.
 if (window.htmx && typeof window.htmx.onLoad === 'function') {
-    window.htmx.onLoad(renderLocalDates);
+    window.htmx.onLoad(renderUploadDates);
 }
