@@ -217,9 +217,13 @@
 </div>
 
 <script>
-// Server state handoff for index.js — must come before the defer'd
-// external script so window.initialTitleLanguage is set when it loads.
+// Server state handoff for index.js — synchronous inline so
+// `window.initialTitleLanguage` is set before any defer script runs.
+// Stays in the content block (not page_js) because it must execute
+// before index.js, but the order works either way: inline body
+// scripts run during parsing, defer scripts run after parsing.
 window.initialTitleLanguage = '{{ title_language }}';
 </script>
-<script src="/static/js/index.js" defer></script>
 {% endblock %}
+
+{% block page_js %}<script src="/static/js/index.js" defer></script>{% endblock %}

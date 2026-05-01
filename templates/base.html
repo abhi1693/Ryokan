@@ -292,5 +292,20 @@
     <script src="/static/vendor/htmx-ext-head-support-2.0.5.min.js" defer></script>
     <script src="/static/js/page_lifecycle.js" defer></script>
     <script src="/static/js/base.js" defer></script>
+    {# Per-page scripts must load AFTER `page_lifecycle.js` + `base.js`
+       because they call `window.ryokanRegisterPageInit`,
+       `window.ryokanProgressToast`, `window.ryokanToast`, etc. defined
+       in those base files. With `defer` attribute, scripts execute
+       in document-tree order — and per-page scripts placed inside
+       `{% block content %}` end up *before* these bottom-of-body
+       scripts, so `downloads.js` would run before `page_lifecycle.js`
+       and TypeError on the undefined `ryokanRegisterPageInit`,
+       silently aborting the rest of the file (the function-decl
+       hoisting masks it visually since `loadQueue`/`renderQueue` are
+       still defined, but the registration call never lands).
+       Surfaced by the boost-phase-b regression test on direct
+       /downloads load. Per-page templates render their script tags
+       into this block so they execute LAST. #}
+    {% block page_js %}{% endblock %}
 </body>
 </html>

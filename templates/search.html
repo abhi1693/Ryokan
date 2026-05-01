@@ -148,8 +148,9 @@ window.searchState = {
     grabPreviewMode: {% if grab_preview_mode == "never" %}"never"{% else %}"batches_only"{% endif %},
 };
 </script>
-<script src="/static/js/grab_picker.js" defer></script>
-<script src="/static/js/search.js" defer></script>
 
 {% include "partials/grab_picker_modal.html" %}
 {% endblock %}
+
+{% block page_js %}<script src="/static/js/grab_picker.js" defer></script>
+<script src="/static/js/search.js" defer></script>{% endblock %}
