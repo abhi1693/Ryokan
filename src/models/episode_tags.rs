@@ -770,6 +770,42 @@ pub async fn mark_grab_history_replaced(
     Ok(())
 }
 
+/// Flip the latest `completed` (or in-flight `grabbed`) grab_history
+/// row for (series_id, ep) to `removed` — the per-episode counterpart
+/// of `grabbed_torrents::mark_removed`. Called by `delete_episode_file`
+/// (user removed the file from disk via the modal) and by the bulk
+/// removal sweep further down. Mirrors `mark_grab_history_replaced`'s
+/// shape; the `state IN (...)` filter is the difference: replaced
+/// only fires from a successful upgrade-import (so the prior row is
+/// always `completed`), while removal can land on either an in-flight
+/// `grabbed` row OR an already-`completed` row depending on whether
+/// post-processing has moved the file yet.
+///
+/// Older entries from prior grab cycles stay as-is — they've already
+/// gone through their own lifecycle (`replaced`, `failed`, etc.).
+pub async fn mark_grab_history_removed(
+    db: &SqlitePool,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE episode_grab_history
+         SET state = 'removed'
+         WHERE id = (
+             SELECT id FROM episode_grab_history
+             WHERE series_id = ? AND episode_number = ?
+               AND state IN ('grabbed', 'completed')
+             ORDER BY grabbed_at DESC
+             LIMIT 1
+         )",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Clear episode quality tags and mark grab history as "removed" for all episodes
 /// associated with a grabbed torrent (identified by series_id + episode_numbers).
 ///
@@ -796,10 +832,17 @@ pub async fn clear_tags_for_removal(
         .execute(db)
         .await?;
 
-        // Mark any "grabbed" history entries for this episode as "removed".
+        // Mark any in-flight `grabbed` OR already-imported `completed`
+        // history entries for this episode as `removed`. Earlier this
+        // filter only matched `state = 'grabbed'`, so a user delete
+        // landing AFTER post-processing had advanced the row to
+        // `completed` left the history showing a stale "completed"
+        // forever — visible in the episode-detail Grab History modal
+        // even though the file was gone from disk.
         sqlx::query(
             "UPDATE episode_grab_history SET state = 'removed'
-             WHERE series_id = ? AND episode_number = ? AND state = 'grabbed'",
+             WHERE series_id = ? AND episode_number = ?
+               AND state IN ('grabbed', 'completed')",
         )
         .bind(series_id)
         .bind(ep)
@@ -884,6 +927,64 @@ mod tests {
             evidence: Vec::new(),
             decision_rule: crate::services::source::DecisionRule::Empty,
         }
+    }
+
+    /// Regression: `mark_grab_history_removed` must flip the latest
+    /// `completed` row to `removed`. Earlier the deletion path only
+    /// ran an UPDATE filtered by `state = 'grabbed'`, which left the
+    /// post-processed `completed` row stuck in `completed` state in
+    /// the Grab History modal forever after the user removed the file.
+    /// Reproduced against `data/ryokan.db`'s ep 12 of Mob Psycho III.
+    #[tokio::test]
+    async fn mark_grab_history_removed_flips_latest_completed_row() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        // Seed two history rows for episode 5: an older `completed`
+        // (from a re-grab cycle) plus the latest `completed`. The
+        // helper should only flip the latest, leaving the older
+        // historical entry untouched.
+        sqlx::query(
+            "INSERT INTO episode_grab_history
+                (series_id, episode_number, quality_tag, release_title, state, grabbed_at)
+             VALUES (?, ?, ?, ?, 'completed', '2026-01-01 00:00:00')",
+        )
+        .bind(sid)
+        .bind(5)
+        .bind("WEB-1080p")
+        .bind("[Group] Old Release")
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO episode_grab_history
+                (series_id, episode_number, quality_tag, release_title, state, grabbed_at)
+             VALUES (?, ?, ?, ?, 'completed', '2026-05-01 00:00:00')",
+        )
+        .bind(sid)
+        .bind(5)
+        .bind("BD-1080p")
+        .bind("[Group] Latest Release")
+        .execute(&db)
+        .await
+        .unwrap();
+
+        mark_grab_history_removed(&db, sid, 5).await.unwrap();
+
+        let states: Vec<(String, String)> = sqlx::query_as(
+            "SELECT release_title, state FROM episode_grab_history
+             WHERE series_id = ? AND episode_number = ?
+             ORDER BY grabbed_at ASC",
+        )
+        .bind(sid)
+        .bind(5)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].1, "completed", "older row stays completed");
+        assert_eq!(states[1].1, "removed", "latest row flips to removed");
     }
 
     /// Bug A: clear_tags_for_removal previously deleted every row

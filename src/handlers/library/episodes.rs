@@ -316,6 +316,17 @@ pub async fn delete_episode_file(
             }
 
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
+            // `clear_episode_tag` only touches `episode_quality_tags`;
+            // it leaves the `episode_grab_history` row untouched. After
+            // a delete the latest history entry for this episode should
+            // flip from `completed` (or `grabbed` if post-processing
+            // hadn't landed yet) to `removed` so the Grab History modal
+            // reflects the deletion. Without this call the modal kept
+            // showing the stale `completed` state indefinitely while
+            // the file was already gone from disk.
+            let _ =
+                episode_tags::mark_grab_history_removed(&state.db, tracked.id, episode_number)
+                    .await;
 
             let imported_grabs =
                 grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
