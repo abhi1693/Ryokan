@@ -467,6 +467,71 @@ window.addEventListener('DOMContentLoaded', function () {
         axum::http::StatusCode::OK
     }
 
+    /// Browser-e2e fixture for the per-episode delete HX-Trigger
+    /// listener (Phase 2 migration in PR `ac19049`). The fixture
+    /// renders a minimal `.episode-table` with a single on-disk row
+    /// for episode 5, plus the empty `series-data` element series.js
+    /// expects (Proxy-wrapped, so undefined values are tolerated).
+    /// The test then dispatches a synthetic
+    /// `ryokan-episode-deleted` CustomEvent on `document.body` and
+    /// asserts the row's classList flips from `ep-row-have` to
+    /// `ep-row-missing` — proves the singleton-guarded listener
+    /// in series.js is wired and `updateEpisodeRow` is reachable.
+    ///
+    /// Why narrower than a full delete-flow test: a full flow needs
+    /// a tempfile-backed media root, the series-page render, the
+    /// htmx:confirm bridge round-trip, and the actual delete handler
+    /// (which has its own handler-level coverage). The flow's most
+    /// failure-prone link under hx-boost is the JS-side HX-Trigger
+    /// wire — that's what this fixture isolates.
+    #[derive(Template)]
+    #[template(
+        source = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Episode-delete listener fixture</title>
+<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+<script src="/static/js/page_lifecycle.js"></script>
+<script src="/static/js/base.js"></script>
+</head>
+<body>
+<!-- series.js's `SD` Proxy reads `series-data`'s dataset on every
+     property access; an empty element with no data-* keys returns
+     undefined for every key, which the listener tolerates (it
+     never calls `SD.id` synchronously — only inside the
+     `refreshEpisodeRows` fetch path that we don't exercise). -->
+<div id="series-data"></div>
+<table class="episode-table">
+    <tbody>
+        <tr class="ep-row-have" data-test-id="row-5">
+            <td class="ep-col-status">
+                <span class="ep-status-icon ep-have">on disk</span>
+            </td>
+            <td class="ep-col-num">5</td>
+            <td class="ep-col-quality">
+                <span class="tag tag-quality">WEB-1080p</span>
+            </td>
+        </tr>
+    </tbody>
+</table>
+<div id="ryokan-toast-stack"></div>
+<script src="/static/js/series.js"></script>
+</body>
+</html>
+"##,
+        ext = "html"
+    )]
+    struct EpisodeDeleteListenerFixturePage;
+
+    pub(crate) async fn episode_delete_listener_fixture()
+    -> Result<Html<String>, (axum::http::StatusCode, String)> {
+        let html = EpisodeDeleteListenerFixturePage
+            .render()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Html(html))
+    }
+
     pub(crate) async fn fixture_page(
         axum::extract::State(state): axum::extract::State<AppState>,
         Query(q): Query<FixtureQuery>,
@@ -520,6 +585,15 @@ window.addEventListener('DOMContentLoaded', function () {
             // to coordinate timing across the EventSource handshake.
             .route("/__test/progress-toast-fixture", get(progress_toast_fixture))
             .route("/__test/progress-emit", post(progress_seed_events))
+            // Per-episode delete HX-Trigger listener fixture (Phase 2
+            // migration in PR `ac19049`). Minimal episode-table with
+            // one row + series.js loaded; the test dispatches a
+            // synthetic `ryokan-episode-deleted` event and asserts
+            // the row flips state.
+            .route(
+                "/__test/episode-delete-listener-fixture",
+                get(episode_delete_listener_fixture),
+            )
             // Real production SSE handler so the fixture page's
             // EventSource connects to the same code path the
             // production frontend uses.

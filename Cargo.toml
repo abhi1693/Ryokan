@@ -116,6 +116,11 @@ path = "tests/htmx_browser_e2e_progress_sse.rs"
 required-features = ["test-support", "browser-e2e"]
 
 [[test]]
+name = "htmx_browser_e2e_episode_delete"
+path = "tests/htmx_browser_e2e_episode_delete.rs"
+required-features = ["test-support", "browser-e2e"]
+
+[[test]]
 name = "htmx_browser_e2e_boost_phase_a"
 path = "tests/htmx_browser_e2e_boost_phase_a.rs"
 required-features = ["test-support", "browser-e2e"]
