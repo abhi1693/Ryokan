@@ -1640,6 +1640,129 @@ mod tests {
         // tests) or seeding the provider_metadata_cache table,
         // which is a separate plan item.
 
+        // ─── cancel_pending_episode (DB-only paths) ─────────────────
+        //
+        // The full happy-path test (`d2_d3_cancel_pending_deletes_from_client`
+        // above) is `#[ignore]`d on a live qBit. These cover the DB-only
+        // branches that don't need a download client — important
+        // because the handler routes through `state.resolve_grab_client`
+        // which returns `None` when no client is configured, and the
+        // delete still needs to flip the grab's state to `removed`.
+
+        #[tokio::test]
+        async fn cancel_pending_episode_returns_400_for_unknown_series() {
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let (status, body) = cancel_pending_episode(State(state), Path((99_999, 1))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body.0["ok"], false);
+            assert!(
+                body.0["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("not in library"),
+                "message must explain the missing-series cause: {body:?}",
+                body = body.0
+            );
+        }
+
+        #[tokio::test]
+        async fn cancel_pending_episode_returns_404_when_no_pending_grab() {
+            let db = in_memory_pool().await;
+            let anilist_id: i64 = 200;
+            let _ = seed_series(&db, anilist_id, "Tracked, no grabs").await;
+            let state = build_test_app_state(db, None);
+
+            let (status, body) = cancel_pending_episode(State(state), Path((anilist_id, 5))).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "tracked series with no pending grab + no stuck-grabbed tag must 404 — anything else means the no-op path silently \"succeeded\""
+            );
+            assert_eq!(body.0["ok"], false);
+        }
+
+        #[tokio::test]
+        async fn cancel_pending_episode_flips_grab_state_to_removed_when_no_client() {
+            // Without a configured download client,
+            // `resolve_grab_client` returns None and the handler skips
+            // the client.delete call. The DB-side state flip
+            // (mark_removed) must STILL run so the upgrade sweep
+            // doesn't see this as a still-pending grab and re-grab on
+            // its next cycle. Pin that contract.
+            let db = in_memory_pool().await;
+            let anilist_id: i64 = 300;
+            let series_id = seed_series(&db, anilist_id, "Cancel-no-client").await;
+            let test_hash = "deadbeef00000000000000000000000000000000";
+            // `seed_grabbed_torrent` returns the grab id via
+            // `last_insert_rowid()`, which is connection-local in
+            // sqlx's SQLite pool — under contention it can come back
+            // from a different connection than the INSERT and read 0.
+            // Look the row up by hash instead so the test is
+            // deterministic across connection-pool churn.
+            let _ = crate::test_support::seed_grabbed_torrent(
+                &db,
+                series_id,
+                test_hash,
+                "[Group] Cancel-no-client - 03.mkv",
+                &[3],
+            )
+            .await;
+            let state = build_test_app_state(db.clone(), None);
+
+            let (status, body) = cancel_pending_episode(State(state), Path((anilist_id, 3))).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "no-client path must still 200 + flip the grab state — got status={status} body={body}",
+                body = body.0
+            );
+            assert_eq!(body.0["cancelled"], 1);
+
+            let final_state: String =
+                sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE hash = ?")
+                    .bind(test_hash)
+                    .fetch_one(&db)
+                    .await
+                    .expect("fetch grab state by hash");
+            assert_eq!(
+                final_state, "removed",
+                "cancel must flip pending grab to 'removed' even when no client is configured"
+            );
+        }
+
+        // ─── episode_download_progress (DB-only) ────────────────────
+
+        #[tokio::test]
+        async fn episode_download_progress_returns_400_for_unknown_series() {
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            // Avoid `.expect_err` since the Ok branch's
+            // `Json<Vec<EpisodeProgress>>` doesn't derive Debug. A
+            // plain match dodges the Debug bound and reads cleaner
+            // for a binary status assertion.
+            match episode_download_progress(State(state), Path(99_999)).await {
+                Err((status, _)) => assert_eq!(status, StatusCode::BAD_REQUEST),
+                Ok(_) => panic!("unknown series must return Err, not Ok"),
+            }
+        }
+
+        #[tokio::test]
+        async fn episode_download_progress_returns_empty_for_tracked_series_with_no_pending_grabs()
+        {
+            let db = in_memory_pool().await;
+            let anilist_id: i64 = 400;
+            let _ = seed_series(&db, anilist_id, "Tracked, no pending").await;
+            let state = build_test_app_state(db, None);
+
+            let result = episode_download_progress(State(state), Path(anilist_id)).await;
+            let AxumJson(progress) = result.expect("tracked series must succeed");
+            assert!(
+                progress.is_empty(),
+                "no pending grabs → empty list (NOT a 500 — the polling loop in series.js calls this every 5s and a 500 would spam the console)"
+            );
+        }
+
         #[test]
         fn episode_progress_wire_shape_carries_both_state_fields() {
             // The series-page download-progress poller (series.js)
