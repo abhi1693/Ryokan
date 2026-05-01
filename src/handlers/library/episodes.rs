@@ -666,10 +666,20 @@ fn episode_delete_trigger(
     });
     let mut resp = Response::new(axum::body::Body::empty());
     *resp.status_mut() = status;
-    let header_value = payload
+    // The parse can't actually fail: `safe_message` is ASCII-only by
+    // construction (the `c.is_ascii()` filter above), `episode_number`
+    // serializes to an integer literal, `ok` to a bool literal — so
+    // the resulting JSON is guaranteed to be valid HTTP-header bytes.
+    // `.expect()` is honest about that contract; the prior fallback
+    // (degrade to bare event-name) silently produced an `event.detail
+    // = "ryokan-episode-deleted"` *string* on the JS side, and the
+    // listener would land in its error branch with "Unknown error"
+    // copy. Better to crash loudly than to ship a parse-failure path
+    // that's reachable by no real input.
+    let header_value: HeaderValue = payload
         .to_string()
         .parse()
-        .unwrap_or_else(|_| HeaderValue::from_static("ryokan-episode-deleted"));
+        .expect("ASCII-sanitized JSON must parse as a HeaderValue");
     resp.headers_mut().insert("HX-Trigger", header_value);
     resp
 }

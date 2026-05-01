@@ -61,6 +61,13 @@ pub async fn poll_progress(
 /// 500 ms is below human-perceivable for toast updates. If the latency
 /// becomes a concern (e.g. the SSE endpoint gets reused for tighter
 /// real-time signals), swap to per-job `tokio::sync::Notify` here.
+/// Avoid "optimizing" with exponential backoff without measuring first.
+/// A long-running auto-search produces 120 wakeups across a minute of
+/// idle, which sounds like a lot but each wakeup is a `tokio::sleep`
+/// plus a quick mutex-guarded `Vec::skip(cursor).cloned()` over a
+/// typical 0–5-event buffer. Keepalive every `SSE_KEEPALIVE_INTERVAL`
+/// is the real proxy-disconnect backstop; the inner-poll cadence is
+/// only about user-visible latency on event arrival.
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Cap on how long the stream waits for new events before sending a

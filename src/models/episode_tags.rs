@@ -987,6 +987,55 @@ mod tests {
         assert_eq!(states[1].1, "removed", "latest row flips to removed");
     }
 
+    /// Companion to `mark_grab_history_removed_flips_latest_completed_row`
+    /// — pins the same `state IN ('grabbed', 'completed')` filter
+    /// broadening on the bulk-removal path. Earlier the WHERE clause
+    /// was `state = 'grabbed'` only, so a `clear_tags_for_removal`
+    /// call landing AFTER post-processing had advanced a history row
+    /// to `completed` left the row stuck at `completed` in the
+    /// Grab History modal.
+    #[tokio::test]
+    async fn clear_tags_for_removal_flips_completed_history_to_removed() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        // Pre-seed an `episode_grab_history` row in `state = 'completed'`
+        // — the pre-fix WHERE clause would skip this; the broadened
+        // clause must flip it.
+        sqlx::query(
+            "INSERT INTO episode_grab_history
+                (series_id, episode_number, quality_tag, release_title, state, grabbed_at)
+             VALUES (?, ?, ?, ?, 'completed', '2026-04-25 00:00:00')",
+        )
+        .bind(sid)
+        .bind(7)
+        .bind("BD-1080p")
+        .bind("[Group] Pre-completed Release")
+        .execute(&db)
+        .await
+        .unwrap();
+
+        clear_tags_for_removal(&db, sid, &[7])
+            .await
+            .expect("clear tags for removal");
+
+        let states: Vec<String> = sqlx::query_scalar(
+            "SELECT state FROM episode_grab_history
+             WHERE series_id = ? AND episode_number = ?",
+        )
+        .bind(sid)
+        .bind(7)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            states,
+            vec!["removed".to_string()],
+            "completed history row must flip to 'removed' under the broadened filter"
+        );
+    }
+
     /// Bug A: clear_tags_for_removal previously deleted every row
     /// regardless of manual_override. Blocklisting a release would
     /// silently destroy a user's pinned classification.
