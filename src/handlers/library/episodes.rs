@@ -324,9 +324,8 @@ pub async fn delete_episode_file(
             // reflects the deletion. Without this call the modal kept
             // showing the stale `completed` state indefinitely while
             // the file was already gone from disk.
-            let _ =
-                episode_tags::mark_grab_history_removed(&state.db, tracked.id, episode_number)
-                    .await;
+            let _ = episode_tags::mark_grab_history_removed(&state.db, tracked.id, episode_number)
+                .await;
 
             let imported_grabs =
                 grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
