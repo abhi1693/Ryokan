@@ -117,19 +117,15 @@ impl LibraryLinkOutcome {
         }
     }
 
-    /// User-facing series title for the toast — for the linked /
-    /// added variants only. `None` for the no-match variants.
-    pub fn series_title(&self) -> Option<&str> {
-        match self {
-            Self::LinkedExisting { series, .. }
-            | Self::LinkedByAnilist { series, .. }
-            | Self::AutoAdded { series, .. } => Some(&series.title),
-            Self::AmbiguousMatch { al_title, .. } | Self::AutoAddDisabled { al_title, .. } => {
-                Some(al_title)
-            }
-            Self::NoMatch { .. } => None,
-        }
-    }
+    // No `series_title()` helper. Callers that need a display title
+    // for the toast / log line must derive it from the user's
+    // current `config.title_language` via [`pick_title`] over the
+    // series's per-language slots (or use the AL-derived `al_title`
+    // for the no-link branches, which the resolver already picked
+    // with the current pref). The `series.title` column is frozen
+    // in whatever language was active at series-add time, so
+    // returning it as the canonical display would silently regress
+    // the toast for users who later change their title preference.
 }
 
 /// anitomy-extract the `AnimeTitle` token from a release title. anitomy
@@ -209,7 +205,14 @@ fn al_entry_shares_token(parsed: &str, entry: &anilist::AnimeEntry) -> bool {
 /// `pref` matches `config.title_language` ("english" / "romaji" /
 /// "native"); any other value is treated as "english" — same
 /// coercion `handlers/settings/mod.rs::settings_submit` does on save.
-fn pick_title<'a>(
+///
+/// `pub` so the grab handler can derive a fresh display title for
+/// the toast: `series.title` is the persisted column captured at
+/// series-add time and doesn't update when the user later changes
+/// `config.title_language`, so picking from the per-language slots
+/// at render time is the only way to keep the toast in sync with
+/// the current preference.
+pub fn pick_title<'a>(
     pref: &str,
     title_english: &'a str,
     title_romaji: &'a str,
@@ -252,7 +255,9 @@ fn detail_display_title<'a>(pref: &str, detail: &'a anilist::AnimeDetail) -> &'a
 /// Read `config.title_language` once. Used by the resolver to pick
 /// the right slot from AL responses for both the persisted
 /// `series.title` (auto-add path) and the toast text (all paths).
-async fn title_language(db: &sqlx::SqlitePool) -> String {
+/// `pub` so the grab handler can read the same setting before
+/// rendering toast copy.
+pub async fn title_language(db: &sqlx::SqlitePool) -> String {
     config::get_config(db)
         .await
         .ok()

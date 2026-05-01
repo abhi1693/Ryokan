@@ -568,10 +568,48 @@ pub async fn grab_release(
         .as_ref()
         .map(|o| o.tag())
         .unwrap_or("not_attempted");
-    let series_title = link_outcome
-        .as_ref()
-        .and_then(|o| o.series_title())
-        .map(|s| s.to_string());
+    // Derive the toast's series title from the user's CURRENT
+    // `config.title_language` preference, picking from
+    // `series.title_english` / `_romaji` / `_native` rather than the
+    // `series.title` column (which was frozen in whatever language
+    // was active at series-add time and doesn't update on later
+    // preference changes). For the AL-only branches the
+    // `al_title` was already derived with the current pref inside
+    // the resolver, so no second pick is needed there.
+    let title_pref = crate::services::library_link::title_language(&state.db).await;
+    let series_title: Option<String> = match &link_outcome {
+        Some(crate::services::library_link::LibraryLinkOutcome::LinkedExisting {
+            series, ..
+        })
+        | Some(crate::services::library_link::LibraryLinkOutcome::LinkedByAnilist {
+            series, ..
+        })
+        | Some(crate::services::library_link::LibraryLinkOutcome::AutoAdded { series, .. }) => {
+            let picked = crate::services::library_link::pick_title(
+                &title_pref,
+                &series.title_english,
+                &series.title_romaji,
+                &series.title_native,
+            );
+            // pick_title can return "" only when all three slots are
+            // empty — degenerate; fall back to the persisted
+            // series.title rather than emitting an empty toast.
+            Some(if picked.is_empty() {
+                series.title.clone()
+            } else {
+                picked.to_string()
+            })
+        }
+        Some(crate::services::library_link::LibraryLinkOutcome::AmbiguousMatch {
+            al_title,
+            ..
+        })
+        | Some(crate::services::library_link::LibraryLinkOutcome::AutoAddDisabled {
+            al_title,
+            ..
+        }) => Some(al_title.clone()),
+        Some(crate::services::library_link::LibraryLinkOutcome::NoMatch { .. }) | None => None,
+    };
     let detail = match &link_outcome {
         Some(crate::services::library_link::LibraryLinkOutcome::AmbiguousMatch {
             parsed_title,
