@@ -2582,6 +2582,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         }
     }
 
+    // Manual search → grab auto-add toggle. Default 1 (ON) so the
+    // search-page Grab button auto-adds matched series via AL when no
+    // existing library row matches — pre-1.7 the no-match path was a
+    // silent no-op (grab succeeded in the download client but no
+    // library row was created). Users who want the legacy behavior can
+    // flip it off in Settings → General.
+    sqlx::query("ALTER TABLE config ADD COLUMN manual_search_auto_add INTEGER NOT NULL DEFAULT 1")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

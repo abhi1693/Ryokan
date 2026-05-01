@@ -251,18 +251,86 @@ function grabRelease(url, btn) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload),
     })
-    .then(resp => {
-        if (resp.ok) {
-            btn.textContent = 'Sent';
-            btn.classList.add('btn-success');
-        } else {
+    .then(resp => resp.ok ? resp.json().then(body => ({ok: true, body})) : resp.text().then(text => ({ok: false, body: text})))
+    .then(result => {
+        // Outcome → button copy + toast. The `link_status` tag comes
+        // from the `LibraryLinkOutcome::tag()` impl in
+        // `services::library_link.rs`; new tags there MUST be added
+        // here too or the toast falls through to the generic "Sent"
+        // copy. Series title (when applicable) is rendered into the
+        // toast body so the user sees what got linked or added.
+        if (!result.ok) {
             btn.textContent = 'Error';
             btn.classList.add('btn-error');
+            if (window.ryokanToast) {
+                window.ryokanToast({
+                    kind: 'error',
+                    title: 'Grab failed',
+                    body: typeof result.body === 'string' ? result.body : 'Download client rejected the request.',
+                    category: 'grab',
+                });
+            }
+            return;
+        }
+        const {link_status, series_title, detail} = result.body || {};
+        btn.textContent = 'Sent';
+        btn.classList.add('btn-success');
+        if (!window.ryokanToast) return;
+        if (link_status === 'linked' && series_title) {
+            window.ryokanToast({
+                kind: 'success',
+                title: 'Grabbed',
+                body: 'Linked to ' + series_title,
+                category: 'grab',
+            });
+        } else if (link_status === 'added' && series_title) {
+            window.ryokanToast({
+                kind: 'success',
+                title: 'Grabbed and added to library',
+                body: series_title,
+                category: 'grab',
+            });
+        } else if (link_status === 'auto_add_disabled') {
+            window.ryokanToast({
+                kind: 'warn',
+                title: 'Grabbed (no library link)',
+                body: detail || 'Auto-add toggle is off in Settings.',
+                category: 'grab',
+            });
+        } else if (link_status === 'ambiguous') {
+            window.ryokanToast({
+                kind: 'warn',
+                title: 'Grabbed (no library link)',
+                body: detail || 'AniList match was ambiguous.',
+                category: 'grab',
+            });
+        } else if (link_status === 'no_match') {
+            window.ryokanToast({
+                kind: 'warn',
+                title: 'Grabbed (no library link)',
+                body: detail || 'No library or AniList match.',
+                category: 'grab',
+            });
+        } else {
+            // 'not_attempted' (no title/hash on the form) — bare grab.
+            window.ryokanToast({
+                kind: 'success',
+                title: 'Grabbed',
+                category: 'grab',
+            });
         }
     })
     .catch(() => {
         btn.textContent = 'Error';
         btn.classList.add('btn-error');
+        if (window.ryokanToast) {
+            window.ryokanToast({
+                kind: 'error',
+                title: 'Grab failed',
+                body: 'Network error.',
+                category: 'grab',
+            });
+        }
     });
 }
 

@@ -340,163 +340,265 @@ pub async fn grab_release(
     )
     .await;
 
-    // Library linkage (#6d) — fire-and-forget so the user sees
-    // "grabbed" immediately while the library bookkeeping runs in the
-    // background. Only runs when the frontend passed a title (so we
-    // have something to match) and info_hash (so grabbed_torrents has
-    // a stable primary key). Matching against the existing library
-    // reuses the RSS matcher — no AniList calls, no HTTP, just the
-    // alias/fuzzy-match pass.
-    // Persist the client-returned canonical id (BT: equals info_hash;
-    // SAB: nzo_id) so post-processing's `list_scoped` matching works
-    // for both protocols. The pre-add `info_hash` is only the
-    // pre-computed BT shape; SAB grabs would silently never import
-    // if we recorded it instead of the returned id.
-    if let (Some(title), hash) = (form.title.clone(), canonical_id.clone())
-        && !title.is_empty()
-        && !hash.is_empty()
-    {
-        let is_batch = form.is_batch.unwrap_or(false);
-        let state_task = state.clone();
-        let client_task = client.clone();
-        tokio::spawn(async move {
-            let Some((series, eps)) =
-                crate::services::rss::match_library_title(&state_task.db, &title, is_batch).await
-            else {
-                // No library match. Grab succeeds without series
-                // attribution. Auto-adding the series via AniList is
-                // scoped out for this pass — it needs care around
-                // rate limits, duplicate detection, and provider
-                // fallbacks.
-                return;
-            };
-            // Record the grab against the matched series. Episode
-            // numbers come from the RSS matcher's resolved_eps
-            // (absolute or season-relative, whichever fired).
-            let grab_id = crate::models::grabbed_torrents::record_grab(
-                &state_task.db,
-                &hash,
-                &title,
-                series.id,
-                &eps,
-                is_batch,
-            )
-            .await
-            .ok()
-            .flatten();
-            if let Some(gid) = grab_id {
-                let _ = crate::models::grabbed_torrents::set_download_client(
-                    &state_task.db,
-                    gid,
-                    Some(dispatch_client_id),
-                )
+    // Library linkage. Pre-1.7 this was a fire-and-forget spawn that
+    // only matched against the existing library via the RSS-style
+    // fuzzy title matcher and silently no-op'd on miss. Now resolved
+    // synchronously through `library_link::resolve_or_add_series_for_grab`
+    // so the response can carry the linked / auto-added series title
+    // for the search-page toast. The chain is fuzzy-match → anitomy
+    // parse → AL search → AL-ID lookup → auto-add (gated by
+    // `config.manual_search_auto_add`, default ON). See module docs.
+    //
+    // The canonical id is the client-returned hash (BT: equals
+    // info_hash; SAB: nzo_id) so post-processing's `list_scoped`
+    // matching works for both protocols. Pre-add `info_hash` is only
+    // the pre-computed BT shape; SAB grabs would silently never
+    // import if we recorded that instead of the returned id.
+    let title = form.title.clone().unwrap_or_default();
+    let is_batch = form.is_batch.unwrap_or(false);
+    let hash = canonical_id.clone();
+    let mut link_outcome: Option<crate::services::library_link::LibraryLinkOutcome> = None;
+    if !title.is_empty() && !hash.is_empty() {
+        let outcome =
+            crate::services::library_link::resolve_or_add_series_for_grab(&state, &title, is_batch)
                 .await;
-            }
 
-            // Populate episode_quality_tags so the series page shows
-            // each grabbed episode in 'grabbed' state right away.
-            let classification = crate::services::source::classify_release(
-                &state_task.db,
-                &title,
-                None,
-                Some(crate::services::source::NyaaContext {
-                    info_hash: &hash,
-                    view_url: "",
-                    is_batch,
-                }),
-                Some(crate::services::source::SeriesContext {
-                    status: &series.status,
-                    season_year: series.season_year,
-                    end_year: series.end_year,
-                }),
-            )
-            .await;
-            for ep in &eps {
-                let _ = crate::models::episode_tags::record_grab(
-                    &state_task.db,
-                    series.id,
-                    *ep,
-                    &classification,
+        // Apply linkage side effects on the three "linked" branches.
+        // Ambiguous / disabled / no-match get logged but produce no
+        // grabbed_torrents row — that's the right behavior for the
+        // user's "auto-add toggle off" / "AL match too weak" cases.
+        match &outcome {
+            crate::services::library_link::LibraryLinkOutcome::LinkedExisting {
+                series,
+                episode_numbers,
+            }
+            | crate::services::library_link::LibraryLinkOutcome::LinkedByAnilist {
+                series,
+                episode_numbers,
+            }
+            | crate::services::library_link::LibraryLinkOutcome::AutoAdded {
+                series,
+                episode_numbers,
+            } => {
+                let was_added = matches!(
+                    &outcome,
+                    crate::services::library_link::LibraryLinkOutcome::AutoAdded { .. }
+                );
+                let grab_id = crate::models::grabbed_torrents::record_grab(
+                    &state.db,
+                    &hash,
                     &title,
-                    "",
-                    0,
+                    series.id,
+                    episode_numbers,
                     is_batch,
                 )
-                .await;
-            }
-
-            logger::info(
-                &state_task.db,
-                LogCategory::Grab,
-                &format!(
-                    "Manual grab linked to series: {} ({} ep{})",
-                    series.title,
-                    eps.len(),
-                    if eps.len() == 1 { "" } else { "s" }
-                ),
-                &title,
-            )
-            .await;
-
-            // Batch grabs get sibling-series detection via auto_expand
-            // at metadata-available time — same path RSS + auto-search
-            // use. Skipped when the series's provider_id is negative
-            // (Jikan-fallback sentinel, no AL graph to walk).
-            if is_batch
-                && series.anilist_id > 0
-                && let Some(grab_id) = grab_id
-            {
-                let db_expand = state_task.db.clone();
-                let client_expand = client_task.clone();
-                let hash_expand = hash.clone();
-                let title_expand = title.clone();
-                let series_id_expand = series.id;
-                let provider_id_expand = series.anilist_id;
-                let ep_list_expand = eps.clone();
-                let classification_expand = classification.clone();
-                tokio::spawn(async move {
-                    let detail = match crate::models::metadata_cache::get_by_provider_id(
-                        &db_expand,
-                        provider_id_expand,
-                    )
-                    .await
-                    {
-                        Ok(Some(row)) => row.detail,
-                        _ => return,
-                    };
-                    let files = match crate::services::download_client::wait_for_files(
-                        &*client_expand,
-                        &hash_expand,
-                        std::time::Duration::from_secs(180),
-                    )
-                    .await
-                    {
-                        Ok(files) => files,
-                        Err(_) => return,
-                    };
-                    let filenames: Vec<String> = files.into_iter().map(|f| f.name).collect();
-                    let ctx = crate::services::auto_expand::AutoExpandGrabContext {
-                        classification: classification_expand,
-                        release_group: String::new(),
-                        size_bytes: 0,
-                    };
-                    crate::services::auto_expand::expand_from_files(
-                        &db_expand,
-                        &filenames,
-                        &detail,
-                        series_id_expand,
-                        &ep_list_expand,
-                        grab_id,
-                        &title_expand,
-                        &ctx,
+                .await
+                .ok()
+                .flatten();
+                if let Some(gid) = grab_id {
+                    let _ = crate::models::grabbed_torrents::set_download_client(
+                        &state.db,
+                        gid,
+                        Some(dispatch_client_id),
                     )
                     .await;
-                });
+                }
+
+                // Populate episode_quality_tags so the series page
+                // shows each grabbed episode in 'grabbed' state right
+                // away (don't wait for post-processing).
+                let classification = crate::services::source::classify_release(
+                    &state.db,
+                    &title,
+                    None,
+                    Some(crate::services::source::NyaaContext {
+                        info_hash: &hash,
+                        view_url: "",
+                        is_batch,
+                    }),
+                    Some(crate::services::source::SeriesContext {
+                        status: &series.status,
+                        season_year: series.season_year,
+                        end_year: series.end_year,
+                    }),
+                )
+                .await;
+                for ep in episode_numbers {
+                    let _ = crate::models::episode_tags::record_grab(
+                        &state.db,
+                        series.id,
+                        *ep,
+                        &classification,
+                        &title,
+                        "",
+                        0,
+                        is_batch,
+                    )
+                    .await;
+                }
+
+                let action = if was_added {
+                    "auto-added series and linked"
+                } else {
+                    "linked to series"
+                };
+                logger::info(
+                    &state.db,
+                    LogCategory::Grab,
+                    &format!(
+                        "Manual grab {}: {} ({} ep{})",
+                        action,
+                        series.title,
+                        episode_numbers.len(),
+                        if episode_numbers.len() == 1 { "" } else { "s" }
+                    ),
+                    &title,
+                )
+                .await;
+
+                // Batch grabs get sibling-series detection via
+                // auto_expand at metadata-available time — same path
+                // RSS + auto-search use. Skipped when the series's
+                // provider_id is negative (Jikan-fallback sentinel,
+                // no AL graph to walk). The 180s metadata wait is
+                // why this stays in a `tokio::spawn`.
+                if is_batch
+                    && series.anilist_id > 0
+                    && let Some(grab_id) = grab_id
+                {
+                    let db_expand = state.db.clone();
+                    let client_expand = client.clone();
+                    let hash_expand = hash.clone();
+                    let title_expand = title.clone();
+                    let series_id_expand = series.id;
+                    let provider_id_expand = series.anilist_id;
+                    let ep_list_expand = episode_numbers.clone();
+                    let classification_expand = classification.clone();
+                    tokio::spawn(async move {
+                        let detail = match crate::models::metadata_cache::get_by_provider_id(
+                            &db_expand,
+                            provider_id_expand,
+                        )
+                        .await
+                        {
+                            Ok(Some(row)) => row.detail,
+                            _ => return,
+                        };
+                        let files = match crate::services::download_client::wait_for_files(
+                            &*client_expand,
+                            &hash_expand,
+                            std::time::Duration::from_secs(180),
+                        )
+                        .await
+                        {
+                            Ok(files) => files,
+                            Err(_) => return,
+                        };
+                        let filenames: Vec<String> = files.into_iter().map(|f| f.name).collect();
+                        let ctx = crate::services::auto_expand::AutoExpandGrabContext {
+                            classification: classification_expand,
+                            release_group: String::new(),
+                            size_bytes: 0,
+                        };
+                        crate::services::auto_expand::expand_from_files(
+                            &db_expand,
+                            &filenames,
+                            &detail,
+                            series_id_expand,
+                            &ep_list_expand,
+                            grab_id,
+                            &title_expand,
+                            &ctx,
+                        )
+                        .await;
+                    });
+                }
             }
-        });
+            crate::services::library_link::LibraryLinkOutcome::AmbiguousMatch {
+                parsed_title,
+                al_title,
+            } => {
+                logger::info(
+                    &state.db,
+                    LogCategory::Grab,
+                    &format!(
+                        "Manual grab not linked: AL match for \"{}\" was ambiguous (\"{}\")",
+                        parsed_title, al_title
+                    ),
+                    &title,
+                )
+                .await;
+            }
+            crate::services::library_link::LibraryLinkOutcome::AutoAddDisabled {
+                al_title, ..
+            } => {
+                logger::info(
+                    &state.db,
+                    LogCategory::Grab,
+                    &format!(
+                        "Manual grab not auto-added (toggle off): AL match \"{}\"",
+                        al_title
+                    ),
+                    &title,
+                )
+                .await;
+            }
+            crate::services::library_link::LibraryLinkOutcome::NoMatch { parsed_title } => {
+                logger::info(
+                    &state.db,
+                    LogCategory::Grab,
+                    &format!(
+                        "Manual grab not linked: no library or AL match (parsed=\"{}\")",
+                        parsed_title.as_deref().unwrap_or("")
+                    ),
+                    &title,
+                )
+                .await;
+            }
+        }
+
+        link_outcome = Some(outcome);
     }
 
-    Ok(Json(serde_json::json!({"ok": true})))
+    // Build the response so the frontend toast can surface the
+    // linkage outcome with the resolved series title. New `tag()`
+    // strings on `LibraryLinkOutcome` MUST be matched in
+    // `static/js/search.js` or the toast falls back to "Sent".
+    let link_status = link_outcome
+        .as_ref()
+        .map(|o| o.tag())
+        .unwrap_or("not_attempted");
+    let series_title = link_outcome
+        .as_ref()
+        .and_then(|o| o.series_title())
+        .map(|s| s.to_string());
+    let detail = match &link_outcome {
+        Some(crate::services::library_link::LibraryLinkOutcome::AmbiguousMatch {
+            parsed_title,
+            al_title,
+        }) => Some(format!(
+            "Parsed \"{}\" matched AL \"{}\" but tokens did not overlap",
+            parsed_title, al_title
+        )),
+        Some(crate::services::library_link::LibraryLinkOutcome::AutoAddDisabled {
+            al_title,
+            ..
+        }) => Some(format!("AL match \"{}\"; auto-add toggle is off", al_title)),
+        Some(crate::services::library_link::LibraryLinkOutcome::NoMatch { parsed_title }) => {
+            Some(format!(
+                "No library or AL match (parsed=\"{}\")",
+                parsed_title.as_deref().unwrap_or("")
+            ))
+        }
+        _ => None,
+    };
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "link_status": link_status,
+        "series_title": series_title,
+        "detail": detail,
+    })))
 }
 
 #[utoipa::path(

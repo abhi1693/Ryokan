@@ -57,7 +57,18 @@
                     <input type="checkbox" name="search_on_monitoring_change" id="search_on_monitoring_change" {% if config.search_on_monitoring_change %}checked{% endif %}>
                     <span>Auto-search when monitoring changes</span>
                 </label>
-                <span class="form-hint">When you change a series's monitoring mode (e.g. <code>none</code> → <code>all</code>), Ryokan will run a background auto-search for the newly-monitored aired episodes. Off by default — turn on if you want monitoring changes to immediately start grabbing. Narrowing transitions (<code>all</code> → <code>missing</code>, <code>any</code> → <code>none</code>) are a no-op.</span>
+                <span class="form-hint">When you change a series's monitoring mode (e.g. <code>none</code> → <code>all</code>), Ryokan will run a background auto-search for the newly-monitored aired episodes. Off by default; turn on if you want monitoring changes to immediately start grabbing. Narrowing transitions (<code>all</code> → <code>missing</code>, <code>any</code> → <code>none</code>) are a no-op.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Manual search</legend>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="manual_search_auto_add" id="manual_search_auto_add" {% if config.manual_search_auto_add %}checked{% endif %}>
+                    <span>Auto-add series to library on grab</span>
+                </label>
+                <span class="form-hint">When you grab a release from the manual search page, Ryokan resolves the release title via anitomy and AniList to find the matching series. If it isn't already in your library, the series is added automatically and the grab is linked to it. Off keeps the legacy behavior: the grab succeeds in the download client but no library row is created.</span>
             </div>
         </fieldset>
 
