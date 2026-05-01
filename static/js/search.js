@@ -104,9 +104,10 @@ function loadMore() {
                 const grabBtn = grabUrl ? `<button class="btn btn-grab" onclick="grabRelease('${escAttr(grabUrl)}', this)">Grab</button>` : '';
 
                 const scoreBreakdownHtml = renderScoreBreakdown(r);
-                const dateCell = r.upload_date
-                    ? `<span data-ts="${escAttr(r.upload_date)}">${escHtml(r.upload_date)}</span>`
-                    : '—';
+                // Mirror the server-rendered shape in templates/search.html:
+                // raw "YYYY-MM-DD HH:MM" string, no `data-ts` so the global
+                // relative-time renderer in base.js doesn't touch it.
+                const dateCell = r.upload_date ? escHtml(r.upload_date) : '—';
 
                 // Table row (desktop).
                 const tr = document.createElement('tr');
@@ -272,9 +273,34 @@ function grabRelease(url, btn) {
             }
             return;
         }
-        const {link_status, series_title, detail} = result.body || {};
-        btn.textContent = 'Sent';
-        btn.classList.add('btn-success');
+        const {link_status, series_title, detail, hash} = result.body || {};
+        // Convert the Grab button into a Cancel button so users can
+        // unwind a manual-search grab without leaving the page. The
+        // canonical hash from the response is preferred over the
+        // row's pre-add `data-info-hash` because BT hashes happen to
+        // be the same shape but SAB grabs return an `nzo_id` that
+        // wouldn't match the row's hash.
+        const cancelHash = hash || (row && row.dataset.infoHash) || '';
+        if (cancelHash) {
+            btn.disabled = false;
+            btn.classList.remove('btn-success');
+            btn.classList.add('btn-cancel');
+            btn.textContent = 'Cancel';
+            btn.dataset.cancelHash = cancelHash;
+            // Capture the original grab URL on the button so the
+            // post-cancel reset can re-wire `onclick` back to a
+            // working "Grab" — assigning `btn.onclick` replaces the
+            // inline `onclick="grabRelease(...)"` from the template,
+            // so we can't recover it later without saving it now.
+            btn.dataset.grabUrl = url;
+            btn.onclick = function () { cancelGrabbedRelease(cancelHash, btn); };
+        } else {
+            // Empty canonical id (rare — magnet add that returned
+            // nothing). Fall back to the legacy "Sent" lock so the
+            // button isn't clickable into a useless cancel call.
+            btn.textContent = 'Sent';
+            btn.classList.add('btn-success');
+        }
         if (!window.ryokanToast) return;
         if (link_status === 'linked' && series_title) {
             window.ryokanToast({
@@ -332,6 +358,81 @@ function grabRelease(url, btn) {
             });
         }
     });
+}
+
+// Cancel a release the user just grabbed via the search-page Grab
+// button. Hits the same endpoint the Downloads-page delete button
+// uses (`/api/downloads/delete`), routed by hash. The handler's
+// `resolve_client_for_hash` will dispatch to whichever client the
+// grab landed in (BT default, SAB by `SABnzbd_nzo_` prefix, or the
+// per-grab `download_client_id` stamp written when the grab linked
+// to a library series). The confirm modal includes a checkbox for
+// removing files; for an in-flight torrent / queued NZB the file
+// barely exists yet so the default (off) is the safe pick — a
+// re-grab of the same release re-uses the same path.
+function cancelGrabbedRelease(hash, btn) {
+    if (!hash) return;
+    const doDelete = function (deleteFiles) {
+        btn.disabled = true;
+        btn.textContent = 'Cancelling...';
+        fetch('/api/downloads/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({hash: hash, delete_files: !!deleteFiles}),
+        })
+        .then(function (resp) {
+            if (!resp.ok) throw new Error('cancel failed');
+            // Reset the button so the user can re-grab if they want.
+            // Re-wiring `onclick` is necessary because the conversion
+            // to Cancel replaced the inline `onclick="grabRelease(..)"`;
+            // setting it to null would leave the button inert.
+            const grabUrl = btn.dataset.grabUrl || '';
+            btn.disabled = false;
+            btn.textContent = 'Grab';
+            btn.classList.remove('btn-cancel', 'btn-success', 'btn-error');
+            btn.onclick = function () { grabRelease(grabUrl, btn); };
+            delete btn.dataset.cancelHash;
+            if (window.ryokanToast) {
+                window.ryokanToast({
+                    kind: 'success',
+                    title: 'Cancelled',
+                    body: 'Removed from download client',
+                    category: 'grab',
+                });
+            }
+        })
+        .catch(function () {
+            btn.disabled = false;
+            btn.textContent = 'Cancel';
+            if (window.ryokanToast) {
+                window.ryokanToast({
+                    kind: 'error',
+                    title: 'Cancel failed',
+                    body: 'Could not remove from download client. Try the Downloads page.',
+                    category: 'grab',
+                });
+            }
+        });
+    };
+    if (window.ryokanConfirm) {
+        window.ryokanConfirm({
+            title: 'Cancel grab',
+            body: 'Remove this release from the download client?',
+            yesLabel: 'Cancel grab',
+            noLabel: 'Keep',
+            extras: [{id: 'deleteFiles', label: 'Also delete downloaded files', default: false}],
+        }).then(function (res) {
+            if (!res.ok) return;
+            doDelete(res.extras && res.extras.deleteFiles);
+        });
+    } else {
+        // Fallback for the (impossible-in-practice) case where base.js
+        // hasn't loaded — behave like a plain confirm dialog so the
+        // button still works.
+        if (window.confirm('Remove this release from the download client?')) {
+            doDelete(false);
+        }
+    }
 }
 
 function escHtml(s) {

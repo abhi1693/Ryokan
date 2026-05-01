@@ -598,6 +598,14 @@ pub async fn grab_release(
         "link_status": link_status,
         "series_title": series_title,
         "detail": detail,
+        // Canonical id from the download client (BT: info_hash; SAB:
+        // nzo_id). The frontend stores it on the Grab button so the
+        // post-grab "Cancel" action knows what to delete via
+        // /api/downloads/delete. Without this, manual-search SAB
+        // grabs (when newznab indexers are wired up to the search
+        // page) couldn't cancel — `row.dataset.infoHash` is the
+        // pre-add BT hash, useless for SAB queue lookups.
+        "hash": canonical_id,
     })))
 }
 

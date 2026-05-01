@@ -198,29 +198,67 @@ fn al_entry_shares_token(parsed: &str, entry: &anilist::AnimeEntry) -> bool {
     .any(|slot| !slot.is_empty() && share_substantive_token(parsed, slot))
 }
 
-/// Pick the best display title from an `AnimeEntry` for toast / log
-/// rendering. English > romaji > native, falling back through the
-/// chain when slots are empty (AL entries can omit any slot).
-fn best_entry_title(entry: &anilist::AnimeEntry) -> &str {
-    if !entry.title_english.is_empty() {
-        &entry.title_english
-    } else if !entry.title_romaji.is_empty() {
-        &entry.title_romaji
-    } else {
-        &entry.title_native
-    }
+/// Pick the user-preferred title slot from a candidate's three
+/// title strings, falling back through the chain when the requested
+/// slot is empty (AL entries can omit any slot — most commonly
+/// `title_english` for unlicensed series). The fallback chain
+/// preserves user intent: a user who picked "english" but grabs an
+/// untranslated doujin still gets a usable display title (romaji →
+/// native), not an empty one.
+///
+/// `pref` matches `config.title_language` ("english" / "romaji" /
+/// "native"); any other value is treated as "english" — same
+/// coercion `handlers/settings/mod.rs::settings_submit` does on save.
+fn pick_title<'a>(
+    pref: &str,
+    title_english: &'a str,
+    title_romaji: &'a str,
+    title_native: &'a str,
+) -> &'a str {
+    let chain: [&str; 3] = match pref {
+        "romaji" => [title_romaji, title_english, title_native],
+        "native" => [title_native, title_romaji, title_english],
+        _ => [title_english, title_romaji, title_native],
+    };
+    chain.into_iter().find(|s| !s.is_empty()).unwrap_or("")
 }
 
-/// Same shape as `best_entry_title` but for `AnimeDetail`. Picks the
-/// display title used as the series's `title` field after upsert.
-fn best_detail_title(detail: &anilist::AnimeDetail) -> &str {
-    if !detail.title_english.is_empty() {
-        &detail.title_english
-    } else if !detail.title_romaji.is_empty() {
-        &detail.title_romaji
-    } else {
-        &detail.title_native
-    }
+/// Pick the user-preferred display title from an `AnimeEntry`. Used
+/// for toast / log rendering on the no-link branches of the resolver
+/// (Ambiguous / AutoAddDisabled) so the user sees the AL hit's title
+/// in their preferred language, not a hardcoded English fallback.
+fn entry_display_title<'a>(pref: &str, entry: &'a anilist::AnimeEntry) -> &'a str {
+    pick_title(
+        pref,
+        &entry.title_english,
+        &entry.title_romaji,
+        &entry.title_native,
+    )
+}
+
+/// Pick the user-preferred display title from an `AnimeDetail`. Used
+/// for the auto-add path's `series.title` (persisted column) so the
+/// library card / detail page show the user-preferred title rather
+/// than always English.
+fn detail_display_title<'a>(pref: &str, detail: &'a anilist::AnimeDetail) -> &'a str {
+    pick_title(
+        pref,
+        &detail.title_english,
+        &detail.title_romaji,
+        &detail.title_native,
+    )
+}
+
+/// Read `config.title_language` once. Used by the resolver to pick
+/// the right slot from AL responses for both the persisted
+/// `series.title` (auto-add path) and the toast text (all paths).
+async fn title_language(db: &sqlx::SqlitePool) -> String {
+    config::get_config(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.title_language)
+        .unwrap_or_else(|| "english".to_string())
 }
 
 /// Derive episode numbers for a grab the same way
@@ -268,6 +306,13 @@ pub async fn resolve_or_add_series_for_grab(
         return LibraryLinkOutcome::NoMatch { parsed_title: None };
     };
 
+    // Read the user's preferred title language once — used both for
+    // the persisted `series.title` on the auto-add branch and for
+    // the surfaced AL-title text on the no-link branches (Ambiguous
+    // / AutoAddDisabled). Keeping a single read at the top so the
+    // toast and DB row always agree on which slot to render.
+    let title_pref = title_language(&state.db).await;
+
     // 3. AL search. `search_anime` already covers AL→Jikan fallback +
     //    caching internally, so a transient AL outage doesn't kill
     //    this path.
@@ -295,7 +340,7 @@ pub async fn resolve_or_add_series_for_grab(
     if !al_entry_shares_token(&parsed_title, &top) {
         return LibraryLinkOutcome::AmbiguousMatch {
             parsed_title,
-            al_title: best_entry_title(&top).to_string(),
+            al_title: entry_display_title(&title_pref, &top).to_string(),
         };
     }
 
@@ -311,7 +356,7 @@ pub async fn resolve_or_add_series_for_grab(
     if !auto_add {
         return LibraryLinkOutcome::AutoAddDisabled {
             al_id: top.id,
-            al_title: best_entry_title(&top).to_string(),
+            al_title: entry_display_title(&title_pref, &top).to_string(),
         };
     }
 
@@ -340,7 +385,7 @@ pub async fn resolve_or_add_series_for_grab(
         }
     };
 
-    let display_title = best_detail_title(&detail).to_string();
+    let display_title = detail_display_title(&title_pref, &detail).to_string();
     let core = series::SeriesCore {
         anilist_id: detail.id,
         mal_id: detail.id_mal,
@@ -472,6 +517,49 @@ mod tests {
         // "OP" and "ED" are 2 chars — should not produce a spurious
         // match between unrelated openings.
         assert!(!share_substantive_token("OP NCOP", "ED NCED"));
+    }
+
+    #[test]
+    fn pick_title_returns_user_preferred_slot_when_filled() {
+        assert_eq!(
+            pick_title("english", "Eng", "Rom", "Nat"),
+            "Eng",
+            "english pref → english slot"
+        );
+        assert_eq!(
+            pick_title("romaji", "Eng", "Rom", "Nat"),
+            "Rom",
+            "romaji pref → romaji slot"
+        );
+        assert_eq!(
+            pick_title("native", "Eng", "Rom", "Nat"),
+            "Nat",
+            "native pref → native slot"
+        );
+    }
+
+    #[test]
+    fn pick_title_falls_back_through_chain_when_preferred_slot_empty() {
+        // English-pref user grabbing an unlicensed series with no
+        // English title falls back to romaji, not an empty string.
+        assert_eq!(
+            pick_title("english", "", "Romaji Title", "ロマジ"),
+            "Romaji Title"
+        );
+        // Romaji-pref user with a series AL only carries native for.
+        // Romaji empty → falls back through english (also empty in
+        // this test case) → native.
+        assert_eq!(pick_title("romaji", "", "", "ネイティブ"), "ネイティブ");
+        // Unknown pref string coerces to english (settings handler
+        // does the same coercion on save).
+        assert_eq!(pick_title("klingon", "Eng", "Rom", "Nat"), "Eng");
+    }
+
+    #[test]
+    fn pick_title_returns_empty_when_all_slots_empty() {
+        // No usable title at all — caller is responsible for
+        // checking `.is_empty()` before persisting / rendering.
+        assert_eq!(pick_title("english", "", "", ""), "");
     }
 
     #[test]
