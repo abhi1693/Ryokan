@@ -346,6 +346,13 @@ function grabRelease(url, btn) {
                 body: detail || 'AniList match was ambiguous.',
                 category: 'grab',
             });
+        } else if (link_status === 'detail_fetch_failed') {
+            window.ryokanToast({
+                kind: 'warn',
+                title: 'Grabbed (link pending)',
+                body: detail || 'AniList match found but detail fetch failed; will retry on next sync.',
+                category: 'grab',
+            });
         } else if (link_status === 'no_match') {
             window.ryokanToast({
                 kind: 'warn',
@@ -383,6 +390,18 @@ function grabRelease(url, btn) {
 // the original URL on the button so the post-cancel reset can
 // rewire a fresh "Grab" click — assigning `btn.onclick` clobbers
 // the inline `onclick="grabRelease(...)"` from the template.
+//
+// **Re-render assumption:** this works because the search results
+// table appends new rows on `loadMore()` paginated load but never
+// re-renders existing ones; the swapped-in onclick survives for the
+// life of the row. If a future change ever re-renders existing
+// rows in place (e.g. live-update of seed counts via SSE), the
+// post-grab Cancel state would silently revert to a fresh Grab
+// button mid-operation. Re-binding the onclick from a row-mutation
+// observer would fix that — but until such a change lands, the
+// simpler shape is fine. `cancelGrabbedRelease` correctly re-wires
+// `onclick` back to `grabRelease` after a successful cancel, so
+// the round-trip is intact.
 function flipGrabButtonToCancel(btn, cancelHash, grabUrl) {
     btn.disabled = false;
     btn.classList.remove('btn-success');

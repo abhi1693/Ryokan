@@ -543,6 +543,21 @@ pub async fn grab_release(
                 )
                 .await;
             }
+            crate::services::library_link::LibraryLinkOutcome::DetailFetchFailed {
+                al_title,
+                ..
+            } => {
+                logger::info(
+                    &state.db,
+                    LogCategory::Grab,
+                    &format!(
+                        "Manual grab not linked: AL detail fetch failed for matched series \"{}\"",
+                        al_title
+                    ),
+                    &title,
+                )
+                .await;
+            }
             crate::services::library_link::LibraryLinkOutcome::NoMatch { parsed_title } => {
                 logger::info(
                     &state.db,
@@ -607,6 +622,10 @@ pub async fn grab_release(
         | Some(crate::services::library_link::LibraryLinkOutcome::AutoAddDisabled {
             al_title,
             ..
+        })
+        | Some(crate::services::library_link::LibraryLinkOutcome::DetailFetchFailed {
+            al_title,
+            ..
         }) => Some(al_title.clone()),
         Some(crate::services::library_link::LibraryLinkOutcome::NoMatch { .. }) | None => None,
     };
@@ -622,6 +641,13 @@ pub async fn grab_release(
             al_title,
             ..
         }) => Some(format!("AL match \"{}\"; auto-add toggle is off", al_title)),
+        Some(crate::services::library_link::LibraryLinkOutcome::DetailFetchFailed {
+            al_title,
+            ..
+        }) => Some(format!(
+            "Matched AL \"{}\" but detail fetch failed; will retry on next sync",
+            al_title
+        )),
         Some(crate::services::library_link::LibraryLinkOutcome::NoMatch { parsed_title }) => {
             Some(format!(
                 "No library or AL match (parsed=\"{}\")",

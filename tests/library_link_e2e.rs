@@ -7,13 +7,27 @@
 //! here — that branch doesn't hit the wiremock at all but we want one
 //! integration assertion that it short-circuits as expected.
 
+use std::sync::LazyLock;
+
 use ryokan::models::{config, series};
 use ryokan::services::anilist;
 use ryokan::services::library_link::{LibraryLinkOutcome, resolve_or_add_series_for_grab};
 use ryokan::test_support::{build_test_app_state, in_memory_pool, seed_series};
 use serde_json::json;
+use tokio::sync::Mutex;
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// One-at-a-time gate around `RYOKAN_ANILIST_API_BASE` writes so
+/// nextest's parallel-by-default scheduler can't race two tests on
+/// the process-wide env var. Without this, two tests racing
+/// `set_var` would overwrite each other's wiremock URIs and one
+/// would route AL requests to the *other* test's mock — producing
+/// nondeterministic flakes that nextest retries may or may not
+/// absorb. Same pattern + rationale as
+/// `tests/metadata_sync_e2e.rs::ENV_LOCK` and
+/// `tests/external_sync_e2e.rs::ENV_LOCK`.
+static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// AL `Page.media` search response shape — matches the
 /// `query ($search) { Page(...) { media(search:..., sort: SEARCH_MATCH) }}`
@@ -112,6 +126,7 @@ fn teardown() {
 
 #[tokio::test]
 async fn linked_existing_short_circuits_without_al_call() {
+    let _gate = ENV_LOCK.lock().await;
     // Wiremock is live but no expectations set; if the resolver hits
     // it, the test still passes (any-method any-path falls back to
     // 404), but the assertion below — that the seeded fuzzy-matched
@@ -148,6 +163,7 @@ async fn linked_existing_short_circuits_without_al_call() {
 
 #[tokio::test]
 async fn linked_by_anilist_finds_existing_series_via_al_id() {
+    let _gate = ENV_LOCK.lock().await;
     let mock = al_mock_server().await;
     // Search returns id=999. The local series is seeded with that
     // id but a title the fuzzy matcher won't catch (different
@@ -191,6 +207,7 @@ async fn linked_by_anilist_finds_existing_series_via_al_id() {
 
 #[tokio::test]
 async fn auto_added_inserts_series_and_links_when_toggle_on() {
+    let _gate = ENV_LOCK.lock().await;
     let mock = al_mock_server().await;
     Mock::given(method("POST"))
         .and(path("/"))
@@ -244,6 +261,7 @@ async fn auto_added_inserts_series_and_links_when_toggle_on() {
 
 #[tokio::test]
 async fn auto_add_disabled_returns_disabled_outcome_without_upsert() {
+    let _gate = ENV_LOCK.lock().await;
     let mock = al_mock_server().await;
     Mock::given(method("POST"))
         .and(path("/"))
@@ -285,6 +303,7 @@ async fn auto_add_disabled_returns_disabled_outcome_without_upsert() {
 
 #[tokio::test]
 async fn ambiguous_match_refuses_unrelated_al_top_hit() {
+    let _gate = ENV_LOCK.lock().await;
     // AL search returns a series whose title shares no substantive
     // tokens with the parsed title. Resolver should refuse to
     // auto-add and surface AmbiguousMatch.
@@ -332,7 +351,70 @@ async fn ambiguous_match_refuses_unrelated_al_top_hit() {
 }
 
 #[tokio::test]
+async fn detail_fetch_failed_when_al_search_hits_but_detail_5xxs() {
+    let _gate = ENV_LOCK.lock().await;
+    // AL search returns a hit; the second-stage detail fetch fails
+    // (HTTP 503 — transient outage between the two requests). The
+    // resolver must surface DetailFetchFailed (not NoMatch) so the
+    // toast can honestly say "matched on AniList but couldn't fetch
+    // details" rather than implying the show isn't on AL at all.
+    let mock = al_mock_server().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("SEARCH_MATCH"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(search_response_for(
+                444,
+                "Frieren: Beyond Journey's End",
+                "Frieren: Beyond Journey's End",
+                "葬送のフリーレン",
+            )),
+        )
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("Media(id:"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&mock)
+        .await;
+
+    let db = in_memory_pool().await;
+    let state = build_test_app_state(db.clone(), None);
+    // Pre-state: no series row for id=444.
+    assert!(
+        series::get_by_anilist_id(&db, 444).await.unwrap().is_none(),
+        "pre-condition: no series row for id=444"
+    );
+
+    let outcome =
+        resolve_or_add_series_for_grab(&state, "[SubsPlease] Frieren - 01 [1080p].mkv", false)
+            .await;
+
+    match outcome {
+        LibraryLinkOutcome::DetailFetchFailed { al_id, al_title } => {
+            assert_eq!(al_id, 444);
+            assert!(
+                al_title.to_lowercase().contains("frieren"),
+                "al_title should carry the matched series's display name; got {al_title:?}"
+            );
+        }
+        other => panic!(
+            "expected DetailFetchFailed (search hit + detail 5xx), got {:?}",
+            other
+        ),
+    }
+    // No upsert side effect — detail fetch failed before upsert.
+    assert!(
+        series::get_by_anilist_id(&db, 444).await.unwrap().is_none(),
+        "DetailFetchFailed outcome must NOT have written a series row"
+    );
+    teardown();
+}
+
+#[tokio::test]
 async fn no_match_when_al_search_empty() {
+    let _gate = ENV_LOCK.lock().await;
     let mock = al_mock_server().await;
     Mock::given(method("POST"))
         .and(path("/"))

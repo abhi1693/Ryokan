@@ -95,6 +95,16 @@ pub enum LibraryLinkOutcome {
     /// the toast can suggest "found <Title> on AL — flip the toggle
     /// to add automatically."
     AutoAddDisabled { al_id: i64, al_title: String },
+    /// AL search returned a viable candidate. Both the safety check
+    /// and the auto-add toggle passed, but the second-stage
+    /// `get_anime_detail` fetch failed (transient AL outage between
+    /// the two requests). The grab succeeded in the download
+    /// client; a follow-up sync pass will retry the link when AL
+    /// is reachable. Distinct from `NoMatch` because AL *did*
+    /// match: confusing the user into thinking their show isn't on
+    /// AL would push them toward "fix the metadata" workflows that
+    /// don't apply here.
+    DetailFetchFailed { al_id: i64, al_title: String },
     /// No fuzzy match, anitomy gave up or returned a useless title,
     /// and AL search came up empty. The grab succeeds in the
     /// download client but no library bookkeeping happens.
@@ -113,6 +123,7 @@ impl LibraryLinkOutcome {
             Self::AutoAdded { .. } => "added",
             Self::AmbiguousMatch { .. } => "ambiguous",
             Self::AutoAddDisabled { .. } => "auto_add_disabled",
+            Self::DetailFetchFailed { .. } => "detail_fetch_failed",
             Self::NoMatch { .. } => "no_match",
         }
     }
@@ -270,13 +281,19 @@ pub async fn title_language(db: &sqlx::SqlitePool) -> String {
 /// `interactive::batch_episode_numbers` does: parse explicit numbers
 /// out of the title; when batch and parse came up empty, fall back
 /// to `1..=episodes` so a no-suffix complete-series release gets
-/// every episode tagged. Capped at 1000 so a garbage AniList record
-/// can't spawn a million `episode_quality_tags` rows.
+/// every episode tagged. Capped at 1000 — a garbage AniList record
+/// reporting tens of thousands of episodes shouldn't spawn millions
+/// of `episode_quality_tags` rows. Pre-fix the cap zeroed the result
+/// (silently dropped the fallback), which left grabs with no
+/// per-episode tag rows and no breadcrumb pointing at why; truncate
+/// to the cap instead so the protective intent fires without losing
+/// the fallback's purpose entirely.
 fn parse_grab_episodes(
     title: &str,
     is_batch: bool,
     fallback_episode_count: Option<i32>,
 ) -> Vec<i32> {
+    const FALLBACK_CAP: i32 = 1000;
     let mut ep_nums: Vec<i32> = auto_search::parse_release_numbers(title)
         .into_iter()
         .collect();
@@ -284,9 +301,9 @@ fn parse_grab_episodes(
         && ep_nums.is_empty()
         && let Some(total) = fallback_episode_count
         && total > 0
-        && total <= 1000
     {
-        ep_nums = (1..=total).collect();
+        let bounded = total.min(FALLBACK_CAP);
+        ep_nums = (1..=bounded).collect();
     }
     ep_nums.sort_unstable();
     ep_nums
@@ -365,12 +382,13 @@ pub async fn resolve_or_add_series_for_grab(
         };
     }
 
-    // 7. Fetch full detail + upsert. Detail-fetch failure here is a
-    //    hard fail — we can't synthesize a SeriesCore without it.
-    //    Surface as NoMatch so the grab still succeeds in the
-    //    download client (already happened upstream of this
-    //    function); a follow-up sync pass will retry when AL is
-    //    available.
+    // 7. Fetch full detail + upsert. Detail-fetch failure here is
+    //    distinct from "no AL match" — search did match, the second
+    //    stage just couldn't reach AL. Surfacing as
+    //    `DetailFetchFailed` (rather than `NoMatch`) keeps the toast
+    //    honest and avoids pushing users toward
+    //    "fix-the-metadata" workflows that don't apply when the
+    //    show *is* on AL but the resolver hit a transient outage.
     let detail = match anilist::get_anime_detail(top.id).await {
         Ok(d) => d,
         Err(e) => {
@@ -384,8 +402,9 @@ pub async fn resolve_or_add_series_for_grab(
                 &e,
             )
             .await;
-            return LibraryLinkOutcome::NoMatch {
-                parsed_title: Some(parsed_title),
+            return LibraryLinkOutcome::DetailFetchFailed {
+                al_id: top.id,
+                al_title: entry_display_title(&title_pref, &top).to_string(),
             };
         }
     };
@@ -415,16 +434,22 @@ pub async fn resolve_or_add_series_for_grab(
                 &e.to_string(),
             )
             .await;
-            return LibraryLinkOutcome::NoMatch {
-                parsed_title: Some(parsed_title),
+            // Same reasoning as the detail-fetch branch above —
+            // the AL match was correct; only persistence failed,
+            // so the toast should point at the resolver problem
+            // rather than imply AL didn't match.
+            return LibraryLinkOutcome::DetailFetchFailed {
+                al_id: top.id,
+                al_title: entry_display_title(&title_pref, &top).to_string(),
             };
         }
     };
     let series_row = match series::get_by_id(&state.db, id).await {
         Ok(Some(s)) => s,
         _ => {
-            return LibraryLinkOutcome::NoMatch {
-                parsed_title: Some(parsed_title),
+            return LibraryLinkOutcome::DetailFetchFailed {
+                al_id: top.id,
+                al_title: entry_display_title(&title_pref, &top).to_string(),
             };
         }
     };
@@ -575,11 +600,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_grab_episodes_caps_oversized_fallback() {
+    fn parse_grab_episodes_truncates_oversized_fallback_to_cap() {
+        // A garbage AniList record reporting 100k episodes shouldn't
+        // spawn a million tag rows — truncate to the 1000-row cap
+        // rather than zero out the fallback. Pre-fix this returned
+        // empty, leaving the grab with no per-episode tags and no
+        // breadcrumb pointing at why.
         let eps = parse_grab_episodes("[Vodes] Some Series (BDRip)", true, Some(100_000));
-        assert!(
-            eps.is_empty(),
-            "fallback >1000 should be ignored to avoid spawning a million tag rows"
+        assert_eq!(
+            eps,
+            (1..=1000).collect::<Vec<i32>>(),
+            "fallback >1000 should truncate to the 1000-cap, not zero out"
         );
     }
 
