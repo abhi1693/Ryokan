@@ -102,3 +102,94 @@ async fn indexer_edit_modal_loads_populated_form() {
 
     let _ = client.close().await;
 }
+
+/// Stale-id edit-form fetch must render the inline modal-error
+/// partial, NOT silently leave the modal body unchanged. Pin the
+/// browser-side observable behavior of the
+/// "always-200 with error rendered inline" pattern shipped in
+/// PR `0b1757c`.
+///
+/// Why browser-driven: handler-level tests (in
+/// `tests/htmx_settings_modal_handlers.rs`) already pin the
+/// response wire-shape (200 + error string in body). The browser-e2e
+/// adds value by verifying that:
+///   1. the JS-driven `htmx.ajax()` call from `openIndexerEditModal`
+///      *actually swaps* the response into `#indexer-modal-body`
+///      (htmx 2.x's default policy skips swap on non-2xx — a future
+///      regression that puts the handler back to 404 would surface
+///      here as "modal body unchanged" while the handler-test
+///      passes if checking only the wire shape on 200).
+///   2. the swap target id (`#indexer-modal-body`) actually exists
+///      in the rendered settings page; a typo in either side would
+///      break the test deterministically.
+#[tokio::test]
+async fn indexer_edit_modal_stale_id_renders_error_partial() {
+    let Ok(client) = try_connect_browser().await else {
+        return; // WebDriver unreachable — skip.
+    };
+
+    let db = in_memory_pool().await;
+    let state = build_test_app_state(db.clone(), None);
+    let session = seed_user_session(&db).await;
+    // Seed a real indexer so the page has something to render — the
+    // stale-id modal trigger uses a hardcoded 99999 below.
+    let _ = seed_indexer(&db, "Real Indexer").await;
+    let addr = spawn_app(state).await;
+
+    open_with_session(&client, addr, &session, "/settings?tab=indexers")
+        .await
+        .expect("open settings");
+    let _ = assert_htmx_loaded(&client).await;
+
+    // Bypass card click and JS-trigger the edit-modal opener directly
+    // with a known-stale id (99999). Functionally equivalent to the
+    // user clicking Edit on a card that was deleted in another tab
+    // before their click landed — the row no longer exists.
+    let opened: serde_json::Value = client
+        .execute(
+            r#"
+            if (typeof window.openIndexerEditModal !== 'function') {
+                return {ok:false, err:'openIndexerEditModal missing — settings.js not loaded'};
+            }
+            window.openIndexerEditModal(99999, 'Stale Indexer');
+            return {ok:true};
+            "#,
+            vec![],
+        )
+        .await
+        .expect("invoke openIndexerEditModal");
+    assert_eq!(
+        opened.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "openIndexerEditModal entry-point must exist; got: {opened}"
+    );
+
+    // Wait for the modal body to populate with the error partial.
+    // The error blurb's copy comes from the handler in
+    // `src/handlers/settings/indexers.rs`; the first sentence is the
+    // load-bearing user-visible string we pin.
+    let modal_body = client
+        .wait()
+        .at_most(Duration::from_secs(5))
+        .for_element(Locator::Css("#indexer-modal-body"))
+        .await
+        .expect("modal body present");
+    // Poll the body's text until the error blurb arrives — the
+    // htmx.ajax() round-trip is async and the test must not race
+    // against it.
+    let mut found = false;
+    for _ in 0..20 {
+        let text = modal_body.text().await.unwrap_or_default();
+        if text.contains("no longer exists") {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        found,
+        "stale-id edit-form must render the inline error partial; modal body never showed the expected error string"
+    );
+
+    let _ = client.close().await;
+}
