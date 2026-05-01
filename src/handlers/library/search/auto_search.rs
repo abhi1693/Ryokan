@@ -261,10 +261,22 @@ async fn run_auto_search_targets_with_upgrades(
         crate::services::source::ClassificationResult,
     >,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
-    let qbit = state.default_download_client().await.ok_or((
-        axum::http::StatusCode::BAD_REQUEST,
-        "Download client not configured".to_string(),
-    ))?;
+    // Up-front configuration check — fail fast if NO client is
+    // configured at all. The per-release dispatch below resolves the
+    // *correct* client (torrent vs usenet) based on
+    // `result.indexer_id` so an NZB grab from a SAB-pinned indexer
+    // dispatches to SAB, not to qBit. A function-scope binding to
+    // `default_download_client()` here would hard-route every grab
+    // through the torrent default and silently mis-route NZBs into
+    // qBit's `add_torrent` (which reports success on the URL fetch
+    // but never produces an infohash → grab row lands with `hash=""`
+    // → reconcile loop marks it removed after 30s).
+    if state.default_download_client().await.is_none() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Download client not configured".to_string(),
+        ));
+    }
 
     let cfg = config::get_config(&state.db)
         .await
@@ -438,6 +450,36 @@ async fn run_auto_search_targets_with_upgrades(
                 } else {
                     result.torrent.clone()
                 };
+                // Per-release client routing: the indexer the release
+                // came from carries a `download_client_id` pin in
+                // multi-client setups. Resolve through
+                // `client_for_indexer_with_id` so a torznab indexer
+                // pinned to qBit dispatches to qBit and a newznab
+                // indexer pinned to SAB dispatches to SAB. Without
+                // this, NZB grabs from a SAB-pinned indexer routed
+                // through `default_download_client()` (the *torrent*
+                // default) and silently mis-fired into qBit. Returns
+                // the resolved client + the persisted dispatch id so
+                // the grab row can stamp `download_client_id` for
+                // delete-routing later.
+                let (qbit, dispatch_client_id) =
+                    match state.client_for_indexer_with_id(result.indexer_id).await {
+                        Some(pair) => pair,
+                        None => {
+                            logger::warn(
+                            &state.db,
+                            LogCategory::AutoSearch,
+                            &format!(
+                                "{}: indexer pin resolved to no client (or no client configured)",
+                                label
+                            ),
+                            &result.title,
+                        )
+                        .await;
+                            skipped.push(format!("{}: no download client for indexer", label));
+                            continue;
+                        }
+                    };
                 if url.is_empty() {
                     logger::warn(
                         &state.db,
@@ -601,6 +643,21 @@ async fn run_auto_search_targets_with_upgrades(
                                     gid,
                                     result.indexer_id,
                                     respected,
+                                )
+                                .await;
+                                // Stamp the resolved download_client_id
+                                // on the grab row so the per-grab
+                                // routing in `delete_episode_file` /
+                                // `cancel_pending_episode` (via
+                                // `state.resolve_grab_client`) sends
+                                // the eventual delete to the SAME
+                                // client that received the add.
+                                // Mirrors the manual grab handler in
+                                // `handlers/library/search/grab.rs`.
+                                let _ = crate::models::grabbed_torrents::set_download_client(
+                                    &state.db,
+                                    gid,
+                                    Some(dispatch_client_id),
                                 )
                                 .await;
                             }
