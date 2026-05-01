@@ -61,6 +61,23 @@ impl IndexerEditFormPartial {
     }
 }
 
+/// Inline error partial rendered into `#indexer-modal-body` when the
+/// edit form fetch fails. Mirrors `ModalErrorPartial` in
+/// `download_clients.rs` for the same reason — htmx 2.x skips the
+/// swap on 4xx/5xx, leaving the user staring at the prior form
+/// while the modal title says "Editing FooIndexer".
+#[derive(Template)]
+#[template(path = "partials/settings/modal_error.html")]
+struct ModalErrorPartial {
+    message: String,
+}
+
+impl ModalErrorPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
 /// Add form body — modal content for the Add flow. Returned by
 /// `GET /settings/indexers/add-form?template=<slug>` and swapped
 /// into `#indexer-modal-body` when the user clicks one of the
@@ -488,8 +505,15 @@ pub async fn settings_indexers_edit_form(
             }
             .into_html_ok()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, "Indexer not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(None) => ModalErrorPartial {
+            message: "This indexer no longer exists. It may have been deleted in another tab."
+                .into(),
+        }
+        .into_html_ok(),
+        Err(e) => ModalErrorPartial {
+            message: format!("Failed to load indexer: {e}"),
+        }
+        .into_html_ok(),
     }
 }
 

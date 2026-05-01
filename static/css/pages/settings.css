@@ -38,10 +38,6 @@ fieldset legend {
     display: block;
 }
 
-.settings-tabs {
-    margin-bottom: 24px;
-}
-
 .settings-version {
     font-family: var(--font-mono);
     font-size: 13px;
