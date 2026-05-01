@@ -1747,4 +1747,142 @@ mod tests {
             );
         }
     }
+
+    // ─── settings_custom_formats_minimum_score handler tests ────────
+    //
+    // The CF minimum-score floor is a one-input form on the Custom
+    // Formats tab; saved via `POST /settings/custom-formats/minimum-score`
+    // with a single `minimum_score` field. Three branches matter:
+    // empty (clear → i32::MIN), non-integer (validation reject), and
+    // valid integer (persist). All three return through
+    // `htmx_aware_redirect` so the htmx and non-htmx paths produce
+    // different status codes — verify both shapes.
+    mod minimum_score_handler {
+        use super::*;
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+        use axum::extract::{Form, State};
+        use axum::http::StatusCode;
+        use axum_htmx::HxRequest;
+
+        async fn seed_default_config(db: &sqlx::SqlitePool) {
+            // The handler bails with "Config not initialized" if no row
+            // exists; tests of the validation + save paths need the
+            // baseline config row first.
+            let cfg = config::Config::default();
+            config::save_config(db, &cfg)
+                .await
+                .expect("seed default config");
+        }
+
+        #[tokio::test]
+        async fn minimum_score_empty_input_clears_floor_to_i32_min() {
+            let db = in_memory_pool().await;
+            seed_default_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+
+            let resp = settings_custom_formats_minimum_score(
+                State(state),
+                HxRequest(false),
+                Form(CustomFormatMinScoreForm {
+                    minimum_score: String::new(),
+                }),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::SEE_OTHER,
+                "non-htmx path goes through htmx_aware_redirect → 303"
+            );
+
+            let cfg = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config row");
+            assert_eq!(
+                cfg.custom_format_minimum_score,
+                i32::MIN,
+                "empty input must clear the floor (sentinel = i32::MIN)"
+            );
+        }
+
+        #[tokio::test]
+        async fn minimum_score_invalid_input_does_not_mutate_config() {
+            let db = in_memory_pool().await;
+            seed_default_config(&db).await;
+            let baseline = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("seeded")
+                .custom_format_minimum_score;
+            let state = build_test_app_state(db.clone(), None);
+
+            let resp = settings_custom_formats_minimum_score(
+                State(state),
+                HxRequest(false),
+                Form(CustomFormatMinScoreForm {
+                    minimum_score: "not-a-number".to_string(),
+                }),
+            )
+            .await;
+            // Validation-fail goes through htmx_aware_redirect with a
+            // user-facing &err= message; the redirect is still 303.
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+            // Critical: a parse failure must NOT silently overwrite
+            // the existing floor with i32::MIN or 0. Reject + leave
+            // current value intact.
+            let cfg = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config still present");
+            assert_eq!(
+                cfg.custom_format_minimum_score,
+                baseline,
+                "validation failure must leave config unchanged; was {baseline}, now {after}",
+                after = cfg.custom_format_minimum_score
+            );
+        }
+
+        #[tokio::test]
+        async fn minimum_score_valid_integer_persists_and_htmx_path_uses_hx_redirect() {
+            let db = in_memory_pool().await;
+            seed_default_config(&db).await;
+            let state = build_test_app_state(db.clone(), None);
+
+            let resp = settings_custom_formats_minimum_score(
+                State(state),
+                HxRequest(true),
+                Form(CustomFormatMinScoreForm {
+                    minimum_score: "150".to_string(),
+                }),
+            )
+            .await;
+            // HTMX path through `htmx_aware_redirect` is 200 +
+            // HX-Redirect header (NOT 303 — htmx 2.x follows 303s
+            // via fetch and inline-swaps the destination, which
+            // would nest the destination page inside the prior page).
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "htmx path must be 200 + HX-Redirect, not 303"
+            );
+            let hx_redirect = resp
+                .headers()
+                .get("HX-Redirect")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(
+                hx_redirect.contains("custom_formats"),
+                "HX-Redirect must point back to the CF tab; got: {hx_redirect:?}"
+            );
+
+            let cfg = config::get_config(&db)
+                .await
+                .expect("get_config")
+                .expect("config persisted");
+            assert_eq!(
+                cfg.custom_format_minimum_score, 150,
+                "valid integer must round-trip through save_config"
+            );
+        }
+    }
 }
