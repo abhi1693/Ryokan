@@ -955,6 +955,10 @@ async fn main() {
             "/api/progress/{job_id}",
             get(handlers::progress::poll_progress),
         )
+        .route(
+            "/api/progress/{job_id}/stream",
+            get(handlers::progress::stream_progress),
+        )
         .route("/media/art/{cache_key}", get(handlers::media::artwork))
         .route("/logout", get(handlers::auth::logout))
         // SwaggerUI/OpenAPI live behind the auth wall: the OpenAPI doc
