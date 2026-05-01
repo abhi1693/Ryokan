@@ -231,9 +231,20 @@ function renderGrabHistory(entries, epNum) {
             : e.state === 'replaced' ? 'grab-state-replaced'
             : e.state === 'completed' ? 'grab-state-completed'
             : 'grab-state-grabbed';
-        // Only active 'grabbed' rows can be manually failed — once
-        // post-processing flips to 'completed' the user should delete
-        // the file or trigger an upgrade instead.
+        // Only active 'grabbed' rows expose action buttons:
+        //   - Cancel: delete from download client + mark removed.
+        //     Same backend as the modal-footer Cancel Pending button
+        //     (POST /api/series/<id>/cancel-pending/<ep>) — exposing
+        //     it here means the user doesn't need the table-row
+        //     `ep-row-queued` class to be in sync to act on a grab.
+        //     Manual-search grabs and stale page state both hit
+        //     that desync; surfacing the action on the history row
+        //     is the reliable seat.
+        //   - Mark Failed: flag the grab as failed without touching
+        //     the download client. For when the torrent is fine but
+        //     the grab is silently dead (rare drift case).
+        // Once post-processing flips to 'completed' the user should
+        // delete the file or trigger an upgrade instead.
         const canFail = e.state === 'grabbed';
         // File name column: shows the post-processed on-disk basename
         // once post-processing lands the file. Before that it's still
@@ -261,7 +272,10 @@ function renderGrabHistory(entries, epNum) {
             <td style="white-space:nowrap;color:var(--text-dim)">${sizeCell}</td>
             <td style="white-space:nowrap;color:var(--text-dim)">${escHtml(e.grabbed_at)}</td>
             <td class="${stateClass}">${escHtml(e.state)}</td>
-            <td>${canFail ? `<button class="btn-mark-failed" onclick="markEpisodeFailed(${e.id}, ${epNum}, this)">Mark Failed</button>` : ''}</td>
+            <td>${canFail ? `
+                <button class="btn-cancel-grab" onclick="cancelGrabFromHistory(${epNum}, this)">Cancel</button>
+                <button class="btn-mark-failed" onclick="markEpisodeFailed(${e.id}, ${epNum}, this)">Mark Failed</button>
+            ` : ''}</td>
         </tr>`;
     }
     html += '</tbody></table></div>';
@@ -402,6 +416,72 @@ if (!window.__ryokanSeriesListeners) {
             body: detail.message || 'File removed from disk.',
         });
     });
+}
+
+// Per-grab-history-row Cancel button. Same backend as
+// `cancelPendingEpisode()` — cancels all pending grabs for the
+// episode (in practice usually one) — but exposed inline on the
+// grab history row so the user can act on a grab without depending
+// on the table-row `ep-row-queued` class being in sync. The
+// table-row class can lag behind reality after a manual-search
+// grab on a different page, or when the series page hasn't polled
+// since the grab landed; the history row's `state === 'grabbed'`
+// is read straight from the DB on modal open, so it's always the
+// authoritative seat for the action.
+async function cancelGrabFromHistory(epNum, btn) {
+    const confirmed = await window.ryokanConfirm({
+        title: 'Cancel grab',
+        body: `Remove the in-flight torrent for Episode ${epNum} from the download client and mark the grab cancelled? This will delete any partial download and will not trigger a re-search.`,
+        yesLabel: 'Cancel grab',
+        noLabel: 'Keep',
+        danger: true,
+    });
+    if (!confirmed.ok) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Cancelling…';
+    try {
+        const r = await fetch(
+            `/api/series/${SD.id}/cancel-pending/${epNum}`,
+            { method: 'POST', headers: {'Content-Type': 'application/json'} }
+        );
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Cancel failed');
+        // Close the modal — same shape as cancelPendingEpisode. The
+        // grab-history table is regenerated on next open from
+        // /api/series/<id>/grab-history/<ep>, which will now reflect
+        // the 'removed' state. Refreshing the underlying episode
+        // table is critical so the row's `ep-row-queued` class falls
+        // off and the row reflects the cancellation visually.
+        const modal = document.getElementById('ep-detail-modal');
+        if (modal) modal.style.display = 'none';
+        if (typeof updateEpisodeRow === 'function') {
+            updateEpisodeRow(epNum, 'deleted');
+        }
+        if (typeof refreshEpisodeRows === 'function') {
+            refreshEpisodeRows({ force: true });
+        }
+        if (window.ryokanToast) {
+            window.ryokanToast({
+                kind: 'success',
+                category: 'library',
+                title: `Episode ${epNum} cancelled`,
+                body: `${data.cancelled || 0} pending grab(s) removed.`,
+            });
+        }
+    } catch (err) {
+        btn.disabled = false;
+        btn.textContent = original;
+        if (window.ryokanToast) {
+            window.ryokanToast({
+                kind: 'error',
+                category: 'library',
+                title: `Cancel failed for episode ${epNum}`,
+                body: err && err.message ? err.message : 'Unknown error',
+            });
+        }
+    }
 }
 
 // Cancel an in-flight grab: removes the torrent from qBit (with its

@@ -1122,6 +1122,27 @@
 
 .btn-mark-failed:disabled { opacity: 0.5; cursor: default; }
 
+/* Per-grab Cancel button on the grab history row. Same red-tinted
+   shape as Mark Failed (sibling action, both destructive) but with
+   a slightly heavier border so the user can tell them apart at a
+   glance — Cancel is the more aggressive action (touches the
+   download client). */
+.btn-cancel-grab {
+    font-size: 11px;
+    padding: 3px 8px;
+    margin-right: 4px;
+    background: rgba(211, 125, 125, 0.15);
+    color: var(--red);
+    border: 1px solid rgba(211, 125, 125, 0.5);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn-cancel-grab:hover { background: rgba(211, 125, 125, 0.3); }
+
+.btn-cancel-grab:disabled { opacity: 0.5; cursor: default; }
+
 .interactive-search-table {
     width: 100%;
     border-collapse: collapse;
