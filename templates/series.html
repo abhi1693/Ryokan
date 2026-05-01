@@ -1,6 +1,5 @@
 {% extends "base.html" %}
-{% block page_css %}<link rel="stylesheet" href="/static/css/pages/series.css">
-<link rel="stylesheet" href="/static/css/pages/grab_picker.css">{% endblock %}
+{# Per-page CSS now bundled in base.html — see comment there. #}
 
 {% block title %} - {% if title_language == "romaji" %}{% if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else %}{{ detail.title_native }}{% endif %}{% else if title_language == "native" %}{% if !detail.title_native.is_empty() %}{{ detail.title_native }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_english }}{% endif %}{% else %}{% if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_native }}{% endif %}{% endif %}{% endblock %}
 
@@ -468,7 +467,21 @@
             <div id="ep-detail-body" class="ep-detail-info"></div>
         </div>
         <div class="modal-footer" id="ep-detail-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;align-items:center">
-            <button class="btn-delete-file" id="btn-delete-file" style="display:none" onclick="deleteEpisodeFile()">
+            {# HTMX migration (issue #129, Phase 2): per-episode delete is
+               wired declaratively. The `hx-post` URL is set per-modal-open
+               in `series.js::showEpisodeDetail` so the singleton button
+               carries the correct episode number; `data-ryokan-confirm-*`
+               attrs route through the htmx:confirm bridge in `base.js`,
+               and the empty 200 + `HX-Trigger: ryokan-episode-deleted`
+               from the handler drives the toast + row update via the
+               listener in `series.js`. The `hx-on::after-request` handler
+               closes the modal on success. #}
+            <button class="btn-delete-file" id="btn-delete-file" style="display:none"
+                hx-swap="none"
+                data-ryokan-confirm-title="Delete episode file"
+                data-ryokan-confirm-yes="Delete"
+                data-ryokan-confirm-danger="1"
+                hx-on::after-request="if (event.detail.successful) document.getElementById('ep-detail-modal').style.display='none'">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
                 Delete File
             </button>
@@ -634,8 +647,9 @@
 window.POST_PROCESSING_ENABLED = {% if post_processing_enabled %}true{% else %}false{% endif %};
 window.GRAB_PREVIEW_MODE = {% if grab_preview_mode == "never" %}"never"{% else %}"batches_only"{% endif %};
 </script>
-<script src="/static/js/grab_picker.js" defer></script>
-<script src="/static/js/series.js" defer></script>
 
 {% include "partials/grab_picker_modal.html" %}
 {% endblock %}
+
+{% block page_js %}<script src="/static/js/grab_picker.js" defer></script>
+<script src="/static/js/series.js" defer></script>{% endblock %}

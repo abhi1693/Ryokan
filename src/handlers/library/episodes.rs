@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use axum::{
     Json,
     extract::{Path, State},
+    http::HeaderValue,
+    response::{IntoResponse, Response},
 };
+use axum_htmx::HxRequest;
 use serde::Serialize;
 
 use crate::AppState;
@@ -191,13 +194,24 @@ pub(super) async fn remove_stamped_source_paths(sources: &[String]) -> Vec<std::
 )]
 pub async fn delete_episode_file(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Path((request_id, episode_number)): Path<(i64, i32)>,
-) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    let json_err = |status: axum::http::StatusCode, msg: &str| {
-        (
-            status,
-            Json(serde_json::json!({"ok": false, "message": msg})),
-        )
+) -> Response {
+    // The route serves both the legacy JSON shape (POST `/api/...` from
+    // a non-htmx caller — kept for any external programmatic consumer)
+    // and the migration's declarative shape (htmx `hx-post` from the
+    // episode-detail modal). Empty body + an `HX-Trigger` header
+    // carrying the result is the canonical "modal-footer button row
+    // doesn't grow to fit the message" pattern from the indexer / DC
+    // test handlers — the JS-side row update + toast then key off the
+    // trigger event.
+    let json_err = |status: axum::http::StatusCode, msg: &str| -> Response {
+        if is_htmx {
+            episode_delete_trigger(status, episode_number, false, msg)
+        } else {
+            let body = Json(serde_json::json!({"ok": false, "message": msg}));
+            (status, body).into_response()
+        }
     };
 
     let (tracked_row, _, _detail) = match resolve_series_context(&state.db, request_id).await {
@@ -302,6 +316,16 @@ pub async fn delete_episode_file(
             }
 
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
+            // `clear_episode_tag` only touches `episode_quality_tags`;
+            // it leaves the `episode_grab_history` row untouched. After
+            // a delete the latest history entry for this episode should
+            // flip from `completed` (or `grabbed` if post-processing
+            // hadn't landed yet) to `removed` so the Grab History modal
+            // reflects the deletion. Without this call the modal kept
+            // showing the stale `completed` state indefinitely while
+            // the file was already gone from disk.
+            let _ = episode_tags::mark_grab_history_removed(&state.db, tracked.id, episode_number)
+                .await;
 
             let imported_grabs =
                 grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number)
@@ -578,16 +602,86 @@ pub async fn delete_episode_file(
             )
             .await;
 
-            (
-                axum::http::StatusCode::OK,
-                Json(serde_json::json!({
-                    "ok": true,
-                    "deleted": file.filename,
-                    "qbit_removed": qbit_removed,
-                })),
-            )
+            if is_htmx {
+                let msg = if qbit_removed.is_empty() {
+                    format!("Episode {} file removed.", episode_number)
+                } else {
+                    format!(
+                        "Episode {} file removed; {} torrent(s) removed from client.",
+                        episode_number,
+                        qbit_removed.len()
+                    )
+                };
+                episode_delete_trigger(axum::http::StatusCode::OK, episode_number, true, &msg)
+            } else {
+                (
+                    axum::http::StatusCode::OK,
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "deleted": file.filename,
+                        "qbit_removed": qbit_removed,
+                    })),
+                )
+                    .into_response()
+            }
         }
     }
+}
+
+/// Build the HTMX response for `delete_episode_file`. Mirrors the
+/// `indexer_test_trigger` / `dc_test_result_response` shape: an empty
+/// body (so the modal-footer button row doesn't reflow to fit the
+/// message) plus an `HX-Trigger` header carrying a JSON payload. The
+/// frontend listener in `static/js/series.js` (`ryokan-episode-deleted`)
+/// reads `event.detail` and runs the row update plus the toast.
+///
+/// **ASCII-only payload, deliberately**. HTTP headers carry no charset
+/// metadata, so any non-ASCII byte round-trips as Latin-1 and either
+/// produces mojibake in the toast or — worse — makes htmx fail to
+/// parse the header value as JSON, in which case the `CustomEvent`
+/// never fires and the JS listener never runs (file deletes silently
+/// without the row stamp or toast). Same constraint as the indexer /
+/// DC test handlers; recorded in the `feedback_hx_trigger_ascii_only`
+/// memory. We **deliberately do NOT echo torrent names back** — group
+/// tags / show titles regularly contain em-dashes, kanji, or other
+/// non-ASCII; the count is enough for the toast wording. Errors from
+/// upstream services flow through `message`, so the helper sanitizes
+/// it to ASCII as a defensive step.
+fn episode_delete_trigger(
+    status: axum::http::StatusCode,
+    episode_number: i32,
+    ok: bool,
+    message: &str,
+) -> Response {
+    let safe_message: String = message
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '?' })
+        .collect();
+    let payload = serde_json::json!({
+        "ryokan-episode-deleted": {
+            "ok": ok,
+            "episode_number": episode_number,
+            "message": safe_message,
+        }
+    });
+    let mut resp = Response::new(axum::body::Body::empty());
+    *resp.status_mut() = status;
+    // The parse can't actually fail: `safe_message` is ASCII-only by
+    // construction (the `c.is_ascii()` filter above), `episode_number`
+    // serializes to an integer literal, `ok` to a bool literal — so
+    // the resulting JSON is guaranteed to be valid HTTP-header bytes.
+    // `.expect()` is honest about that contract; the prior fallback
+    // (degrade to bare event-name) silently produced an `event.detail
+    // = "ryokan-episode-deleted"` *string* on the JS side, and the
+    // listener would land in its error branch with "Unknown error"
+    // copy. Better to crash loudly than to ship a parse-failure path
+    // that's reachable by no real input.
+    let header_value: HeaderValue = payload
+        .to_string()
+        .parse()
+        .expect("ASCII-sanitized JSON must parse as a HeaderValue");
+    resp.headers_mut().insert("HX-Trigger", header_value);
+    resp
 }
 
 /// Cancel an in-flight grab for an episode: remove the torrent from
@@ -1480,23 +1574,70 @@ mod tests {
 
         #[tokio::test]
         async fn delete_episode_file_on_unknown_series_returns_error_status() {
-            // `delete_episode_file` returns `(StatusCode, Json<Value>)`
-            // directly — no Result wrapper — with an `ok: false` body.
-            // The specific status depends on the resolve path: in
-            // an offline test env, `resolve_series_context` fails
-            // before reaching the "series not in library" branch
-            // (AniList unreachable → 502). Either way, the handler
-            // must emit a 4xx/5xx with a structured JSON body so
-            // the UI can show the reason; silently succeeding on an
-            // unknown id would delete phantom files.
+            // `delete_episode_file` returns `Response` (the htmx-aware
+            // body shape: htmx path emits empty body + `HX-Trigger`,
+            // non-htmx path emits the JSON `{ok, message}` shape). The
+            // specific status depends on the resolve path: in an
+            // offline test env, `resolve_series_context` fails before
+            // reaching the "series not in library" branch (AniList
+            // unreachable → 502). Either way, the handler must emit a
+            // 4xx/5xx with a structured body so the UI can show the
+            // reason; silently succeeding on an unknown id would delete
+            // phantom files.
+            //
+            // We exercise the non-htmx path here because it preserves a
+            // JSON body we can parse for the structured-error contract;
+            // the htmx path is empty-body-by-design and is covered by
+            // the trigger-payload assertions below.
             let db = in_memory_pool().await;
             let state = build_test_app_state(db, None);
-            let (status, body) = delete_episode_file(State(state), Path((99_999, 1))).await;
+            let resp = delete_episode_file(State(state), HxRequest(false), Path((99_999, 1))).await;
             assert!(
-                status.is_client_error() || status.is_server_error(),
-                "unknown series must be an error status, got {status}"
+                resp.status().is_client_error() || resp.status().is_server_error(),
+                "unknown series must be an error status, got {}",
+                resp.status()
             );
-            assert_eq!(body.0["ok"], false);
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("body collect");
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("non-htmx error path returns JSON");
+            assert_eq!(body["ok"], false);
+        }
+
+        #[tokio::test]
+        async fn delete_episode_file_htmx_path_emits_empty_body_with_trigger() {
+            // Companion to the assertion above: the htmx path
+            // (`HxRequest(true)`) replaces the JSON body with an
+            // `HX-Trigger` header carrying the structured payload
+            // (`ryokan-episode-deleted` event with `ok`, `episode_number`,
+            // `message`). The frontend listener in `static/js/series.js`
+            // keys off this event for the toast + row update. Empty body
+            // is load-bearing — the modal footer button row would reflow
+            // for any text-bearing response.
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let resp = delete_episode_file(State(state), HxRequest(true), Path((99_999, 1))).await;
+            assert!(
+                resp.status().is_client_error() || resp.status().is_server_error(),
+                "unknown series under htmx must still be an error status, got {}",
+                resp.status()
+            );
+            let trigger = resp
+                .headers()
+                .get("HX-Trigger")
+                .expect("htmx error path must carry HX-Trigger")
+                .to_str()
+                .unwrap()
+                .to_string();
+            let payload: serde_json::Value =
+                serde_json::from_str(&trigger).expect("trigger header is JSON");
+            assert_eq!(payload["ryokan-episode-deleted"]["ok"], false);
+            assert_eq!(payload["ryokan-episode-deleted"]["episode_number"], 1);
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .expect("body collect");
+            assert!(bytes.is_empty(), "htmx response body must be empty");
         }
 
         // `series_episodes_json` + `mark_episode_failed` are
@@ -1508,6 +1649,129 @@ mod tests {
         // (punted with the rest of the HTTP-backed provider
         // tests) or seeding the provider_metadata_cache table,
         // which is a separate plan item.
+
+        // ─── cancel_pending_episode (DB-only paths) ─────────────────
+        //
+        // The full happy-path test (`d2_d3_cancel_pending_deletes_from_client`
+        // above) is `#[ignore]`d on a live qBit. These cover the DB-only
+        // branches that don't need a download client — important
+        // because the handler routes through `state.resolve_grab_client`
+        // which returns `None` when no client is configured, and the
+        // delete still needs to flip the grab's state to `removed`.
+
+        #[tokio::test]
+        async fn cancel_pending_episode_returns_400_for_unknown_series() {
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            let (status, body) = cancel_pending_episode(State(state), Path((99_999, 1))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body.0["ok"], false);
+            assert!(
+                body.0["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("not in library"),
+                "message must explain the missing-series cause: {body:?}",
+                body = body.0
+            );
+        }
+
+        #[tokio::test]
+        async fn cancel_pending_episode_returns_404_when_no_pending_grab() {
+            let db = in_memory_pool().await;
+            let anilist_id: i64 = 200;
+            let _ = seed_series(&db, anilist_id, "Tracked, no grabs").await;
+            let state = build_test_app_state(db, None);
+
+            let (status, body) = cancel_pending_episode(State(state), Path((anilist_id, 5))).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "tracked series with no pending grab + no stuck-grabbed tag must 404 — anything else means the no-op path silently \"succeeded\""
+            );
+            assert_eq!(body.0["ok"], false);
+        }
+
+        #[tokio::test]
+        async fn cancel_pending_episode_flips_grab_state_to_removed_when_no_client() {
+            // Without a configured download client,
+            // `resolve_grab_client` returns None and the handler skips
+            // the client.delete call. The DB-side state flip
+            // (mark_removed) must STILL run so the upgrade sweep
+            // doesn't see this as a still-pending grab and re-grab on
+            // its next cycle. Pin that contract.
+            let db = in_memory_pool().await;
+            let anilist_id: i64 = 300;
+            let series_id = seed_series(&db, anilist_id, "Cancel-no-client").await;
+            let test_hash = "deadbeef00000000000000000000000000000000";
+            // `seed_grabbed_torrent` returns the grab id via
+            // `last_insert_rowid()`, which is connection-local in
+            // sqlx's SQLite pool — under contention it can come back
+            // from a different connection than the INSERT and read 0.
+            // Look the row up by hash instead so the test is
+            // deterministic across connection-pool churn.
+            let _ = crate::test_support::seed_grabbed_torrent(
+                &db,
+                series_id,
+                test_hash,
+                "[Group] Cancel-no-client - 03.mkv",
+                &[3],
+            )
+            .await;
+            let state = build_test_app_state(db.clone(), None);
+
+            let (status, body) = cancel_pending_episode(State(state), Path((anilist_id, 3))).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "no-client path must still 200 + flip the grab state — got status={status} body={body}",
+                body = body.0
+            );
+            assert_eq!(body.0["cancelled"], 1);
+
+            let final_state: String =
+                sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE hash = ?")
+                    .bind(test_hash)
+                    .fetch_one(&db)
+                    .await
+                    .expect("fetch grab state by hash");
+            assert_eq!(
+                final_state, "removed",
+                "cancel must flip pending grab to 'removed' even when no client is configured"
+            );
+        }
+
+        // ─── episode_download_progress (DB-only) ────────────────────
+
+        #[tokio::test]
+        async fn episode_download_progress_returns_400_for_unknown_series() {
+            let db = in_memory_pool().await;
+            let state = build_test_app_state(db, None);
+            // Avoid `.expect_err` since the Ok branch's
+            // `Json<Vec<EpisodeProgress>>` doesn't derive Debug. A
+            // plain match dodges the Debug bound and reads cleaner
+            // for a binary status assertion.
+            match episode_download_progress(State(state), Path(99_999)).await {
+                Err((status, _)) => assert_eq!(status, StatusCode::BAD_REQUEST),
+                Ok(_) => panic!("unknown series must return Err, not Ok"),
+            }
+        }
+
+        #[tokio::test]
+        async fn episode_download_progress_returns_empty_for_tracked_series_with_no_pending_grabs()
+        {
+            let db = in_memory_pool().await;
+            let anilist_id: i64 = 400;
+            let _ = seed_series(&db, anilist_id, "Tracked, no pending").await;
+            let state = build_test_app_state(db, None);
+
+            let result = episode_download_progress(State(state), Path(anilist_id)).await;
+            let AxumJson(progress) = result.expect("tracked series must succeed");
+            assert!(
+                progress.is_empty(),
+                "no pending grabs → empty list (NOT a 500 — the polling loop in series.js calls this every 5s and a 500 would spam the console)"
+            );
+        }
 
         #[test]
         fn episode_progress_wire_shape_carries_both_state_fields() {

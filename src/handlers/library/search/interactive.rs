@@ -90,10 +90,12 @@ pub async fn search_batch_releases(
     )
     .await;
 
-    let qbit = state.default_download_client().await.ok_or({
+    // Up-front "any client configured?" check. The per-release client
+    // resolution lives below in the `Some(result)` arm so a newznab
+    // (NZB) result from a SAB-pinned indexer routes to SAB instead of
+    // the torrent default — see `auto_search.rs` for the same fix.
+    if state.default_download_client().await.is_none() {
         if let Some(h) = &progress_handle {
-            // Fire-and-forget: we're about to Err-return, so the
-            // toast is the only surface that tells the user why.
             let h = h.clone();
             tokio::spawn(async move {
                 h.emit(
@@ -106,11 +108,11 @@ pub async fn search_batch_releases(
                 .await;
             });
         }
-        (
+        return Err((
             axum::http::StatusCode::BAD_REQUEST,
             "Download client not configured".to_string(),
-        )
-    })?;
+        ));
+    }
 
     match best {
         None => {
@@ -124,6 +126,34 @@ pub async fn search_batch_releases(
             ))
         }
         Some(result) => {
+            // Per-release client routing: resolve through the indexer
+            // pin so an NZB result from a newznab (SAB-pinned)
+            // indexer dispatches to SAB, not to the torrent default.
+            // Mirrors `run_auto_search_targets_with_upgrades` and the
+            // manual-grab handler in `grab.rs`.
+            let (qbit, dispatch_client_id) =
+                match state.client_for_indexer_with_id(result.indexer_id).await {
+                    Some(pair) => pair,
+                    None => {
+                        if let Some(h) = &progress_handle {
+                            let h = h.clone();
+                            tokio::spawn(async move {
+                                h.emit(
+                                    "error",
+                                    "error",
+                                    "No download client configured for this indexer",
+                                    None,
+                                    true,
+                                )
+                                .await;
+                            });
+                        }
+                        return Err((
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "No download client configured for this indexer".to_string(),
+                        ));
+                    }
+                };
             let url = if !result.magnet.is_empty() {
                 result.magnet.clone()
             } else {
@@ -218,7 +248,7 @@ pub async fn search_batch_releases(
                 // Capped at 1000 so a garbage AniList record can't
                 // spawn a million rows.
                 let ep_nums = batch_episode_numbers(&result.title, &detail);
-                let _ = crate::models::grabbed_torrents::record_grab(
+                let grab_id = crate::models::grabbed_torrents::record_grab(
                     &state.db,
                     &result.info_hash,
                     &result.title,
@@ -226,7 +256,21 @@ pub async fn search_batch_releases(
                     &ep_nums,
                     result.is_batch,
                 )
-                .await;
+                .await
+                .ok()
+                .flatten();
+                // Stamp the resolved download_client_id on the grab
+                // row so per-grab delete routing
+                // (`state.resolve_grab_client`) sends the eventual
+                // delete to the same client that received the add.
+                if let Some(gid) = grab_id {
+                    let _ = crate::models::grabbed_torrents::set_download_client(
+                        &state.db,
+                        gid,
+                        Some(dispatch_client_id),
+                    )
+                    .await;
+                }
                 for ep_num in &ep_nums {
                     let _ = episode_tags::record_grab(
                         &state.db,

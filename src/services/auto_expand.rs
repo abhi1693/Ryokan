@@ -165,12 +165,21 @@ pub async fn expand_from_files(
     let expanded_parent =
         auto_search::expand_parent_with_transitive_relations(parent_detail, &neighbor_details);
     let siblings = auto_search::detect_sibling_entries_in_pack(filenames, &expanded_parent);
+
+    // No early bail when `siblings.is_empty()` — the parent-file walk
+    // below still needs to run so the grab row's `episode_numbers` +
+    // `is_batch` get corrected from the discovered file shape. A
+    // single-series BD batch (no siblings) is the common case for the
+    // Houseki no Kuni / Land of the Lustrous bug: title carries no
+    // batch keyword + no episode range, `record_grab` registered
+    // `[1]` + `is_batch=false`, post-processing's `grab_claims_episode`
+    // guard then rejects every file beyond ep 1.
     if siblings.is_empty() {
         logger::info(
             db,
             LogCategory::Library,
             &format!(
-                "Auto-expand: no siblings detected in pack '{}'",
+                "Auto-expand: no siblings detected in pack '{}', running parent-coverage pass",
                 torrent_title
             ),
             &format!(
@@ -181,7 +190,6 @@ pub async fn expand_from_files(
             ),
         )
         .await;
-        return 0;
     }
 
     let siblings_considered = siblings.len();
@@ -358,8 +366,21 @@ pub async fn expand_from_files(
     // row never renders in the UI until post-processing imports the
     // file. Write the overflow tag rows now so the user sees a
     // "downloading" row for ep 13 the moment the pack is queued.
+    //
+    // While walking parent files, also accumulate the full set of
+    // episode numbers actually present so we can correct the grab
+    // row's `episode_numbers` + `is_batch` once we know the true
+    // file shape. Without that correction, post-processing's
+    // `grab_claims_episode` guard rejects every parent file beyond
+    // what the grab originally registered (BD batches with no
+    // episode-range or batch keyword in the title — like
+    // "[Arid] Land of the Lustrous [BDRip 1080p Hi10 FLAC]" —
+    // come in as `episode_numbers=[1], is_batch=0` and post-
+    // processing only imports ep 1).
     let parent_eps_covered: std::collections::HashSet<i32> =
         parent_episode_numbers.iter().copied().collect();
+    let mut all_parent_eps: std::collections::BTreeSet<i32> =
+        parent_eps_covered.iter().copied().collect();
     for &file_idx in &parent_file_indices {
         let Some(name) = filenames.get(file_idx) else {
             continue;
@@ -367,7 +388,11 @@ pub async fn expand_from_files(
         let Some((_, raw_ep)) = media::parse_episode_number(&name.to_ascii_lowercase()) else {
             continue;
         };
-        if raw_ep <= 0 || parent_eps_covered.contains(&raw_ep) {
+        if raw_ep <= 0 {
+            continue;
+        }
+        all_parent_eps.insert(raw_ep);
+        if parent_eps_covered.contains(&raw_ep) {
             continue;
         }
         if let Err(e) = episode_tags::record_grab(
@@ -393,6 +418,32 @@ pub async fn expand_from_files(
             )
             .await;
         }
+    }
+
+    // Correct the grab row's `episode_numbers` + `is_batch` if the
+    // discovered file set goes beyond what `record_grab` originally
+    // wrote. Drives post-processing's `grab_claims_episode` guard so
+    // every parent file imports correctly even when title-based batch
+    // detection missed (no `[BD]` / `Batch` / `Complete` / episode-
+    // range token, common with BD release groups like Arid / Legion).
+    //
+    // Filter on `> 1` so a single-episode grab whose file count is 1
+    // doesn't get falsely flagged as `is_batch=true`.
+    let parent_ep_vec: Vec<i32> = all_parent_eps.iter().copied().collect();
+    if parent_ep_vec.len() > 1
+        && let Err(e) =
+            grabbed_torrents::update_episode_coverage(db, grab_id, &parent_ep_vec, true).await
+    {
+        logger::warn(
+            db,
+            LogCategory::Library,
+            &format!(
+                "Auto-expand: failed to update grab {} episode coverage (parent {})",
+                grab_id, parent_series_id,
+            ),
+            &format!("{}: {}", torrent_title, e),
+        )
+        .await;
     }
 
     if !routes.is_empty() && !parent_file_indices.is_empty() {
@@ -740,5 +791,113 @@ mod tests {
             "grabbed",
             "ep 13 tag should start in 'grabbed' state (post-processing will flip to 'completed')"
         );
+    }
+
+    /// Regression for the Land of the Lustrous (Houseki no Kuni) case:
+    /// Seerr-driven add → auto_search picked the [Arid] BD batch
+    /// release. The release title carries no episode-range token and
+    /// no "[BD]"/"Batch"/"Complete" keyword, so:
+    ///   - `parse_release_numbers` returns empty,
+    ///   - `batch_episode_numbers` falls back to `[1]`,
+    ///   - `detect_batch_from_title` returns false.
+    ///
+    /// The grab row lands as `episode_numbers=[1], is_batch=0`, and
+    /// post-processing's `grab_claims_episode` guard rejects every
+    /// file beyond ep 1 — eps 2..=12 land on disk via the auto-expand
+    /// overflow path but their history rows stay stuck at `grabbed`
+    /// because post-processing never imports their files.
+    ///
+    /// `expand_from_files` should observe the actual file shape
+    /// (12 episode files for the parent series) and overwrite the
+    /// grab row's `episode_numbers` + `is_batch` so the post-
+    /// processing guard sees the full picture when the torrent lands.
+    #[tokio::test]
+    async fn expand_corrects_grab_row_when_title_misses_batch_indicators() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::models::migrate(&db).await.expect("migrate");
+
+        let (parent_id, _) = series::upsert(
+            &db,
+            series::SeriesCore {
+                anilist_id: 99041,
+                mal_id: None,
+                title: "Land of the Lustrous",
+                title_romaji: "Houseki no Kuni",
+                title_english: "Land of the Lustrous",
+                title_native: "",
+                cover_url: "",
+                format: "TV",
+                status: "FINISHED",
+                episodes: Some(12),
+                season_year: Some(2017),
+                end_year: Some(2017),
+            },
+        )
+        .await
+        .expect("parent upsert");
+
+        // record_grab simulates the title-only registration: episode_numbers=[1]
+        // (the auto_search target ep) and is_batch=false (title-detect missed).
+        let torrent_title =
+            "[Arid] Land of the Lustrous [Dual-Audio][BDRip 1080p Hi10 FLAC] | Houseki no Kuni";
+        let grab_id = grabbed_torrents::record_grab(
+            &db,
+            "9a73f66894222116fd1f306331bfa3c8c4834af0",
+            torrent_title,
+            parent_id,
+            &[1],
+            false,
+        )
+        .await
+        .expect("record_grab")
+        .expect("grab inserted");
+
+        let parent_detail = empty_anime_detail(99041, "Land of the Lustrous", Some(12));
+        let filenames: Vec<String> = (1..=12)
+            .map(|n| {
+                format!(
+                    "[Arid] Land of the Lustrous - {:02} (BD 1080p Hi10 FLAC).mkv",
+                    n
+                )
+            })
+            .collect();
+        let parent_episode_numbers: Vec<i32> = vec![1]; // mirrors batch_episode_numbers' fallback
+
+        let ctx = AutoExpandGrabContext {
+            classification: ClassificationResult::unknown(),
+            release_group: String::new(),
+            size_bytes: 0,
+        };
+
+        expand_from_files(
+            &db,
+            &filenames,
+            &parent_detail,
+            parent_id,
+            &parent_episode_numbers,
+            grab_id,
+            torrent_title,
+            &ctx,
+        )
+        .await;
+
+        // The grab row's episode_numbers should now cover 1..=12 (the
+        // discovered set) and is_batch should be true.
+        let row: (String, i64) =
+            sqlx::query_as("SELECT episode_numbers, is_batch FROM grabbed_torrents WHERE id = ?")
+                .bind(grab_id)
+                .fetch_one(&db)
+                .await
+                .expect("fetch grab row");
+        let eps: Vec<i32> =
+            serde_json::from_str(&row.0).expect("episode_numbers parses as JSON array");
+        assert_eq!(
+            eps,
+            (1..=12).collect::<Vec<i32>>(),
+            "grab row should be corrected to cover all 12 discovered episodes"
+        );
+        assert_eq!(row.1, 1, "grab row should be flipped to is_batch=true");
     }
 }

@@ -2,7 +2,17 @@
 // series.js. Kept duplicated rather than hoisted into base.js because
 // most pages have no need for the override vocabulary; the duplication
 // is short and grep-friendly.
-const REVIEW_OVERRIDE_SOURCE_MAP = {
+//
+// `var` (not `const`) at module scope is deliberate across every per-
+// page JS file: htmx body-swap re-executes the inserted `<script>` tag
+// when the user navigates back to a page they previously visited, but
+// the original declarations still occupy the global scope. A `let` /
+// `const` redeclaration is a *parser-stage* SyntaxError — the whole
+// file is rejected, taking every event listener and
+// `ryokanRegisterPageInit` call with it. `var` redeclares silently so
+// the file evaluates fine on the second pass. The lifecycle helper
+// handles per-page mount / unmount of pollers + listeners.
+var REVIEW_OVERRIDE_SOURCE_MAP = {
     bluray_bdmv: { source: 'BluRay', is_remux: false, is_bdmv: true,  web_kind: '' },
     bluray_remux:{ source: 'BluRay', is_remux: true,  is_bdmv: false, web_kind: '' },
     bluray:      { source: 'BluRay', is_remux: false, is_bdmv: false, web_kind: '' },
@@ -27,6 +37,12 @@ const REVIEW_OVERRIDE_SOURCE_MAP = {
     const bulkSource = document.getElementById('review-bulk-source');
     const bulkResolution = document.getElementById('review-bulk-resolution');
     if (!bar || !selectAll || !applyBtn) return;
+    // Element-bound listeners (selectAll/clearBtn/applyBtn) attach to
+    // these specific DOM nodes; on a hx-boost nav-back, these elements
+    // are fresh nodes that need fresh listeners. The document-scoped
+    // listeners (`change` / `keydown` event delegation) are gated by a
+    // separate singleton guard further down — `document` persists
+    // across body swaps so re-attaching there would accumulate.
 
     function rowChecks() {
         return Array.from(document.querySelectorAll('.review-row-check'));

@@ -581,35 +581,86 @@
         });
     };
 
-    // ─── Global handlers (wired once on DOMContentLoaded) ──────────
-
-    document.addEventListener('DOMContentLoaded', () => {
+    // ─── Global handlers ───────────────────────────────────────────
+    //
+    // hx-boost re-runs this script on every nav-back, but
+    // DOMContentLoaded only fires on the very first full page load —
+    // after that, a listener attached to it never executes. Without
+    // the readyState check the grab-picker modal's close / confirm /
+    // view / Escape / filter handlers would fail to bind on every
+    // revisit and the modal would be unresponsive.
+    //
+    // Per-element `dataset.bound` guards prevent the per-button
+    // listeners from accumulating; `__ryokanGrabPickerKeyHandlerBound`
+    // gates the document-level keydown listener since `document`
+    // persists across body swaps.
+    function bindGrabPickerHandlers() {
         const close = $('grab-picker-close');
         const backdrop = $('grab-picker-modal');
         const confirm = $('grab-picker-confirm');
         const flatBtn = $('grab-picker-view-flat');
         const treeBtn = $('grab-picker-view-tree');
 
-        if (close) close.addEventListener('click', closeModal);
-        if (backdrop) backdrop.addEventListener('click', ev => {
-            if (ev.target === backdrop) closeModal();
-        });
-        if (confirm) confirm.addEventListener('click', confirmGrab);
-        if (flatBtn) flatBtn.addEventListener('click', () => {
+        function bindOnce(el, ev, handler) {
+            if (!el || el.dataset.gpBound === '1') return;
+            el.dataset.gpBound = '1';
+            el.addEventListener(ev, handler);
+        }
+        bindOnce(close, 'click', closeModal);
+        if (backdrop && backdrop.dataset.gpBound !== '1') {
+            backdrop.dataset.gpBound = '1';
+            backdrop.addEventListener('click', ev => {
+                if (ev.target === backdrop) closeModal();
+            });
+        }
+        bindOnce(confirm, 'click', confirmGrab);
+        bindOnce(flatBtn, 'click', () => {
             if (session) { session.view = 'flat'; renderFileList(); }
         });
-        if (treeBtn) treeBtn.addEventListener('click', () => {
+        bindOnce(treeBtn, 'click', () => {
             if (session) { session.view = 'tree'; renderFileList(); }
         });
 
-        document.addEventListener('keydown', ev => {
-            if (!session) return;
-            if (ev.key === 'Escape') closeModal();
-        });
+        if (!window.__ryokanGrabPickerKeyHandlerBound) {
+            window.__ryokanGrabPickerKeyHandlerBound = true;
+            document.addEventListener('keydown', ev => {
+                if (!session) return;
+                if (ev.key === 'Escape') closeModal();
+            });
+        }
 
-        // Toolbar filter buttons.
+        // Toolbar filter buttons. The buttons themselves are part of
+        // the grab-picker modal markup so they're fresh elements on
+        // each page render; per-element guards here prevent N×M
+        // accumulation if the modal is re-rendered without the page
+        // navigating.
         document.querySelectorAll('[data-grab-picker-action]').forEach(btn => {
+            if (btn.dataset.gpBound === '1') return;
+            btn.dataset.gpBound = '1';
             btn.addEventListener('click', () => applyFilter(btn.dataset.grabPickerAction));
         });
-    });
+    }
+    // Wire through the page-lifecycle helper so the bind fires
+    // AFTER htmx settles each body swap. Direct script-execution-time
+    // binding was racy under boost — the modal element wasn't always
+    // queryable yet when the script reached the binding code, so on
+    // a boost-nav from another page the close / confirm / view /
+    // Escape / filter handlers never attached and the picker was
+    // unresponsive. Lifecycle helper wires through `htmx.onLoad`,
+    // which fires after the swap completes.
+    //
+    // The per-element `dataset.gpBound` guards in
+    // `bindGrabPickerHandlers` make the mount idempotent, so
+    // re-firing on every htmx.onLoad (including in-place refreshes
+    // of just the modal markup) doesn't accumulate listeners.
+    if (typeof window.ryokanRegisterPageInit === 'function') {
+        window.ryokanRegisterPageInit('grab-picker', {
+            check: function () { return !!document.getElementById('grab-picker-modal'); },
+            mount: bindGrabPickerHandlers,
+        });
+    } else if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bindGrabPickerHandlers);
+    } else {
+        bindGrabPickerHandlers();
+    }
 })();

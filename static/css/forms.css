@@ -129,6 +129,14 @@
 
 .btn-grab.btn-error { border-color: var(--red); color: var(--red); }
 
+/* Post-grab Cancel state — search.js flips the Grab button into
+   this on a successful grab so users can immediately undo without
+   navigating to /downloads. Color matches `.btn-grab.btn-error` so
+   the destructive intent is obvious; full hover treatment too so
+   the button doesn't look stuck in a non-interactive state. */
+.btn-grab.btn-cancel { border-color: var(--red); color: var(--red); }
+.btn-grab.btn-cancel:hover { background: rgba(211, 125, 125, 0.15); }
+
 .alert {
     padding: 12px 16px;
     border-radius: var(--radius);
@@ -438,5 +446,81 @@
     .checkbox-label {
         padding: 8px 0;
     }
+}
+
+/* ─── Native <select> chevron replacement ─────────────────────────────
+ *
+ * Firefox has a known bug where the native chevron decoration on
+ * `<select>` elements disappears after a body swap (boost-nav) — the
+ * select's option text and click behavior survive intact, but the
+ * little down-arrow that signals "this is a dropdown" goes missing
+ * until a full document reload restores the native control. The
+ * chevron is part of the OS/browser's native form-widget rendering
+ * pipeline; htmx 2.x's body swap doesn't tell the widget it was
+ * re-attached, so the decoration just doesn't re-paint.
+ *
+ * Workaround: own the chevron in CSS. `appearance: none` strips the
+ * native control entirely (so there's no native chevron to lose),
+ * and a data-URI SVG `background-image` paints our own chevron in
+ * its place. Since the chevron is CSS-rendered, it survives every
+ * DOM mutation that `<select>` does — no boost-nav fragility.
+ *
+ * Color is `--text-dim` (URL-encoded as `%237a7a96`); dimensions and
+ * padding-right=28px leave room for the chevron without overlapping
+ * option text. Applies globally to every `<select>` in the app so we
+ * don't have to per-class-style-update each new dropdown. The
+ * existing per-element rules (`.folder-select`, `.log-filter-select`,
+ * etc.) keep working — they just paint their text/border/bg, while
+ * this rule paints the chevron and reserves space for it. */
+select {
+    /* `-moz-appearance` is the Firefox-specific knob; modern Firefox
+     * also honors the unprefixed `appearance` but older + some Linux
+     * builds still need the prefix to fully strip the native control
+     * widget. Ship both for belt-and-suspenders coverage. Without
+     * Firefox actually stripping the native control, both the native
+     * chevron AND our SVG would render side-by-side on focus (the
+     * "two chevrons" symptom from the first iteration of this fix). */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    /* `!important` on `background-image` because per-page rules like
+     * `.folder-select { background: var(--bg) }` (shorthand) reset
+     * `background-image` as part of cascade semantics. We've fixed
+     * the known offenders to use `background-color:` longhand, but
+     * any future rule that uses the shorthand on a select would
+     * silently lose the chevron without this guard. */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a7a96' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 10px center !important;
+    background-size: 14px !important;
+    padding-right: 30px;
+}
+
+select:focus-visible {
+    /* `:focus-visible` (not `:focus`) deliberately. A native `<select>`
+     * retains focus after a mouse-click + option-pick, so a `:focus`
+     * rule keeps the chevron purple until the user clicks somewhere
+     * else — felt like a stuck UI state. `:focus-visible` only
+     * matches when focus arrived via the keyboard (Tab), which is
+     * exactly the case where an accessibility cue *is* needed.
+     * Mouse-clicked selects skip the purple state entirely; selecting
+     * an option leaves the chevron in its default gray, which feels
+     * right for the modal-style "open dropdown, pick, close" flow.
+     *
+     * Tints the chevron with --accent. Re-emit the same SVG with the
+     * focused stroke color, since CSS can't recolor a data-URI image
+     * with `filter` without affecting the rest of the select. */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cba6f7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") !important;
+}
+
+/* Firefox doesn't render `background-image` on `<select>` elements
+ * unless you also strip its internal padding via `text-indent` and
+ * suppress the focus dotted ring on the option text. Without this
+ * the chevron would be hidden behind Firefox's own option-padding
+ * region in some versions. The `0` text-indent is a no-op visually
+ * but force-resets any inherited text-indent that might shove the
+ * chevron offscreen. */
+select::-ms-expand {
+    display: none;
 }
 

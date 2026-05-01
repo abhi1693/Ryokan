@@ -80,7 +80,11 @@
 }
 
 .log-filter-select {
-    background: var(--bg-elevated);
+    /* `background-color:` longhand, not the shorthand — see
+     * `.folder-select` in base.css for the rationale. The shorthand
+     * resets `background-image` to none, clobbering the global chevron
+     * rule from forms.css. */
+    background-color: var(--bg-elevated);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -90,8 +94,14 @@
     cursor: pointer;
 }
 
+/* Strip the default UA focus ring on every focus; gate the accent
+ * border tint on `:focus-visible` (keyboard-only) so a mouse click
+ * + option-pick doesn't stick the purple border. Mirrors
+ * `.folder-select` in base.css. */
 .log-filter-select:focus {
     outline: none;
+}
+.log-filter-select:focus-visible {
     border-color: var(--accent);
 }
 

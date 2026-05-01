@@ -44,7 +44,35 @@
             mount: options.mount || function () {},
             unmount: options.unmount || function () {},
         };
-        registry.push(reg);
+        // Dedupe by name. Per-page scripts re-execute on every boost-
+        // nav, so without dedup each visit pushes a *new* registration
+        // — after N visits, N copies of the same page mount fire on
+        // every htmx.onLoad. Worse, the OLDEST registration's `mount`
+        // captures stale closures from the first visit (e.g. a
+        // grab_picker.js IIFE on visit 1 created `closeModal` /
+        // `confirmGrab` referencing visit 1's `let session = null`;
+        // on visit N, calling that `closeModal` operates on visit 1's
+        // session variable while `window.openGrabPicker` mutates
+        // visit N's). Because the per-element `dataset.bound` guards
+        // make only the *first* bind actually attach handlers, the
+        // user ends up with stale-closure handlers on a fresh DOM
+        // element + a `window.foo` API talking to a different state
+        // — every interaction silently does nothing.
+        //
+        // Replacing by name means the latest registration always
+        // wins. Its closures match the currently-mutating
+        // `window.foo` API, and stale registrations are GC'd.
+        const existing = registry.findIndex(r => r.name === name);
+        if (existing >= 0) {
+            // Carry forward `wasActive` so a re-registration during
+            // an already-mounted state doesn't trip a duplicate
+            // mount on the next lifecycle pass. The new mount/unmount
+            // closures take over from here.
+            reg.wasActive = registry[existing].wasActive;
+            registry[existing] = reg;
+        } else {
+            registry.push(reg);
+        }
         // Immediate-reconcile: per-page scripts load AFTER
         // page_lifecycle.js (defer ordering). htmx.onLoad already
         // fired its initial-document pass before this registration
@@ -52,7 +80,15 @@
         // wouldn't fire until the FIRST boosted swap. That breaks
         // direct-URL loads where the page IS active right now —
         // the poller never starts. Run the check + mount inline.
-        if (document.readyState !== 'loading') {
+        //
+        // Skip the immediate mount if `wasActive` carried forward
+        // from a prior registration of the same name — that means
+        // the page is already mounted under the old closures and
+        // we're just swapping in new ones; calling mount() again
+        // here would double-attach (the per-element dataset guards
+        // would no-op the bind, but the new closure-captured state
+        // would still drift from the live mounted state).
+        if (document.readyState !== 'loading' && !reg.wasActive) {
             try {
                 if (reg.check()) {
                     reg.mount();

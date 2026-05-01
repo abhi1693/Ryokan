@@ -542,6 +542,51 @@ pub async fn set_indexer_attribution(
     Ok(())
 }
 
+/// Update an existing grab row's batch metadata after auto-expand
+/// inspected the actual file list and found more episodes than the
+/// title-based `record_grab` registered. The motivating case: a BD
+/// batch like "[Arid] Land of the Lustrous [Dual-Audio][BDRip 1080p
+/// Hi10 FLAC] | Houseki no Kuni" has no episode-range token in the
+/// title, so `parse_release_numbers` returns empty and
+/// `batch_episode_numbers` falls back to `[1]`; `detect_batch_from_title`
+/// also misses it (no `[bd]` / `(bd)` / `season pack` / `batch` /
+/// `complete` keyword). The grab row lands as
+/// `episode_numbers=[1], is_batch=0`, and post-processing's
+/// `grab_claims_episode` guard rejects every file beyond ep 1 — the
+/// remaining 11 episodes' history rows stay stuck at `grabbed`
+/// forever even though the files imported to disk fine via
+/// auto-expand's overflow path.
+///
+/// auto-expand has the actual file list at grab time. Once it walks
+/// the parent files and discovers the real episode coverage, call
+/// this helper to overwrite the grab row's `episode_numbers` (sorted,
+/// deduped) and `is_batch` flag so post-processing's guard sees the
+/// full picture when the torrent finally lands.
+///
+/// No-op (or a tightening) if `episode_numbers` is empty / single —
+/// don't unset is_batch on a row that auto-expand legitimately
+/// observed as single-file (would clobber the search-time classification
+/// for an already-correct row).
+pub async fn update_episode_coverage(
+    db: &SqlitePool,
+    grab_id: i64,
+    episode_numbers: &[i32],
+    is_batch: bool,
+) -> Result<(), sqlx::Error> {
+    let mut sorted: Vec<i32> = episode_numbers.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let eps_json = serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string());
+    let is_batch_i = if is_batch { 1_i64 } else { 0_i64 };
+    sqlx::query("UPDATE grabbed_torrents SET episode_numbers = ?, is_batch = ? WHERE id = ?")
+        .bind(&eps_json)
+        .bind(is_batch_i)
+        .bind(grab_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Multi-client refactor — stamp the `download_clients.id` that
 /// received the grab. NULL means "no pool entry at grab time" and
 /// post-processing falls back to the current default. Called from

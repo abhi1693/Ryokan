@@ -1,0 +1,16 @@
+{# Inline error blurb for modal-body fetch handlers (DC edit-form,
+   indexer edit-form, etc.). Always rendered with a 200 status so
+   htmx 2.x's default "skip swap on 4xx/5xx" policy doesn't leave
+   the modal body showing the previous form while the user sees
+   "Editing FooClient" in the header but no fields below. The
+   user gets a visible reason, the modal stays usable (Cancel
+   button still works to close), and the next-attempt loop is
+   obvious from the message. #}
+<div class="modal-body" style="padding:24px;text-align:center">
+    <p style="color:var(--red);font-size:14px;margin:0 0 8px 0">
+        {{ message }}
+    </p>
+    <p style="color:var(--text-dim);font-size:12px;margin:0">
+        Close this dialog and try again. If the problem persists, check System &rarr; Logs.
+    </p>
+</div>

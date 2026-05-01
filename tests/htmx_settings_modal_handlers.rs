@@ -20,9 +20,12 @@ use axum::extract::{Form, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
-use ryokan::handlers::settings::download_clients::settings_download_clients_add_form;
+use axum::extract::Path as AxumPath;
+use ryokan::handlers::settings::download_clients::{
+    settings_download_clients_add_form, settings_download_clients_edit_form,
+};
 use ryokan::handlers::settings::indexers::{
-    IndexerStatelessTestForm, settings_indexers_test_stateless,
+    IndexerStatelessTestForm, settings_indexers_edit_form, settings_indexers_test_stateless,
 };
 use ryokan::models::download_clients::{DownloadClientForm, insert as insert_dc};
 use ryokan::test_support::{build_test_app_state, in_memory_pool};
@@ -165,4 +168,66 @@ async fn add_dl_client_form_marks_first_of_both_protocols_when_pool_empty() {
 
     assert!(html.contains("data-first-torrent=\"1\""));
     assert!(html.contains("data-first-usenet=\"1\""));
+}
+
+/// `GET /settings/download-clients/{id}/edit-form` for an unknown id
+/// must return **200** with an inline error partial — NOT a 404.
+///
+/// Why: the JS-side `openDcEditModal` invokes `htmx.ajax()` to swap the
+/// response into `#dc-modal-body`. htmx 2.x's default error policy
+/// skips the swap on any non-2xx, so a 404 leaves the modal showing
+/// the *previous* form body while the modal title reads "Editing
+/// FooClient" — silent breakage with no error indicator.
+///
+/// The handler now returns `ModalErrorPartial` (a 200 with a visible
+/// error blurb in the modal body); this test pins that contract so a
+/// future refactor can't reintroduce the 404 path.
+#[tokio::test]
+async fn dc_edit_form_unknown_id_returns_200_with_error_partial() {
+    let db = in_memory_pool().await;
+    let state = build_test_app_state(db, None);
+    let resp = settings_download_clients_edit_form(State(state), AxumPath(99_999))
+        .await
+        .into_response();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "stale-id edit-form fetch must return 200 (htmx skips swap on non-2xx, leaving silent UI breakage)"
+    );
+    let body_bytes = to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .expect("read body");
+    let html = std::str::from_utf8(&body_bytes).expect("utf-8");
+    assert!(
+        html.contains("no longer exists") || html.contains("Failed to load"),
+        "modal-error partial must explain the failure visibly; got: {html}"
+    );
+}
+
+/// Symmetric coverage for `GET /settings/indexers/{id}/edit-form` —
+/// same htmx-swap-on-non-2xx silent-failure shape, same fix
+/// (`ModalErrorPartial` returned with status 200), same regression
+/// guard.
+#[tokio::test]
+async fn indexer_edit_form_unknown_id_returns_200_with_error_partial() {
+    let db = in_memory_pool().await;
+    let state = build_test_app_state(db, None);
+    let resp = settings_indexers_edit_form(State(state), AxumPath(99_999))
+        .await
+        .into_response();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "stale-id edit-form fetch must return 200 — htmx 2.x skips swap on 4xx/5xx"
+    );
+    let body_bytes = to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .expect("read body");
+    let html = std::str::from_utf8(&body_bytes).expect("utf-8");
+    assert!(
+        html.contains("no longer exists") || html.contains("Failed to load"),
+        "modal-error partial must explain the failure visibly; got: {html}"
+    );
 }

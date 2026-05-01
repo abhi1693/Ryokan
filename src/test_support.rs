@@ -384,6 +384,154 @@ mod e2e {
         Ok(Html(html))
     }
 
+    /// Browser-e2e fixture for the SSE progress toast. The page loads
+    /// `base.js` (which exposes `ryokanProgressToast`) and calls it
+    /// against a known `progress_id` baked into the page from the
+    /// query string. The SSE endpoint at
+    /// `/api/progress/{job_id}/stream` is mounted on the e2e router
+    /// so the toast actually opens an EventSource at the real handler.
+    /// A separate `__test/progress-emit` endpoint pre-seeds the
+    /// registry with a deterministic 3-event sequence so the test can
+    /// assert the toast progresses through info → info → success
+    /// (terminal) and finalizes.
+    #[derive(Template)]
+    #[template(
+        source = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Progress-toast fixture</title>
+<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+<script src="/static/js/page_lifecycle.js"></script>
+<script src="/static/js/base.js"></script>
+</head>
+<body>
+<div id="ryokan-toast-stack"></div>
+<script>
+window.addEventListener('DOMContentLoaded', function () {
+    window.__ryokanTestToast = window.ryokanProgressToast({
+        progressId: "{{ progress_id }}",
+        title: 'Initializing',
+        category: 'auto_search',
+    });
+});
+</script>
+</body>
+</html>
+"##,
+        ext = "html"
+    )]
+    struct ProgressToastFixturePage {
+        progress_id: String,
+    }
+
+    #[derive(Deserialize)]
+    pub(crate) struct ProgressFixtureQuery {
+        pub progress_id: String,
+    }
+
+    pub(crate) async fn progress_toast_fixture(
+        Query(q): Query<ProgressFixtureQuery>,
+    ) -> Result<Html<String>, (axum::http::StatusCode, String)> {
+        let html = ProgressToastFixturePage {
+            progress_id: q.progress_id,
+        }
+        .render()
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Html(html))
+    }
+
+    /// Pre-seed a deterministic 3-event sequence into the progress
+    /// registry. Test calls this BEFORE opening the fixture page so
+    /// the events are buffered when the EventSource connects — the
+    /// stream then drains the buffer and closes on the terminal
+    /// event without needing the test to coordinate emit timing.
+    pub(crate) async fn progress_seed_events(
+        axum::extract::State(state): axum::extract::State<AppState>,
+        Query(q): Query<ProgressFixtureQuery>,
+    ) -> axum::http::StatusCode {
+        let handle = state.progress.register(q.progress_id.clone()).await;
+        crate::services::progress::scope(handle, async {
+            crate::services::progress::emit("search", "info", "Searching", None, false).await;
+            crate::services::progress::emit("score", "info", "Scoring", None, false).await;
+            crate::services::progress::emit(
+                "done",
+                "success",
+                "All done",
+                Some("3 episodes grabbed".into()),
+                true,
+            )
+            .await;
+        })
+        .await;
+        axum::http::StatusCode::OK
+    }
+
+    /// Browser-e2e fixture for the per-episode delete HX-Trigger
+    /// listener (Phase 2 migration in PR `ac19049`). The fixture
+    /// renders a minimal `.episode-table` with a single on-disk row
+    /// for episode 5, plus the empty `series-data` element series.js
+    /// expects (Proxy-wrapped, so undefined values are tolerated).
+    /// The test then dispatches a synthetic
+    /// `ryokan-episode-deleted` CustomEvent on `document.body` and
+    /// asserts the row's classList flips from `ep-row-have` to
+    /// `ep-row-missing` — proves the singleton-guarded listener
+    /// in series.js is wired and `updateEpisodeRow` is reachable.
+    ///
+    /// Why narrower than a full delete-flow test: a full flow needs
+    /// a tempfile-backed media root, the series-page render, the
+    /// htmx:confirm bridge round-trip, and the actual delete handler
+    /// (which has its own handler-level coverage). The flow's most
+    /// failure-prone link under hx-boost is the JS-side HX-Trigger
+    /// wire — that's what this fixture isolates.
+    #[derive(Template)]
+    #[template(
+        source = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Episode-delete listener fixture</title>
+<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+<script src="/static/js/page_lifecycle.js"></script>
+<script src="/static/js/base.js"></script>
+</head>
+<body>
+<!-- series.js's `SD` Proxy reads `series-data`'s dataset on every
+     property access; an empty element with no data-* keys returns
+     undefined for every key, which the listener tolerates (it
+     never calls `SD.id` synchronously — only inside the
+     `refreshEpisodeRows` fetch path that we don't exercise). -->
+<div id="series-data"></div>
+<table class="episode-table">
+    <tbody>
+        <tr class="ep-row-have" data-test-id="row-5">
+            <td class="ep-col-status">
+                <span class="ep-status-icon ep-have">on disk</span>
+            </td>
+            <td class="ep-col-num">5</td>
+            <td class="ep-col-quality">
+                <span class="tag tag-quality">WEB-1080p</span>
+            </td>
+        </tr>
+    </tbody>
+</table>
+<div id="ryokan-toast-stack"></div>
+<script src="/static/js/series.js"></script>
+</body>
+</html>
+"##,
+        ext = "html"
+    )]
+    struct EpisodeDeleteListenerFixturePage;
+
+    pub(crate) async fn episode_delete_listener_fixture()
+    -> Result<Html<String>, (axum::http::StatusCode, String)> {
+        let html = EpisodeDeleteListenerFixturePage
+            .render()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Html(html))
+    }
+
     pub(crate) async fn fixture_page(
         axum::extract::State(state): axum::extract::State<AppState>,
         Query(q): Query<FixtureQuery>,
@@ -429,6 +577,33 @@ mod e2e {
             .route(
                 "/__test/connection-test-fixture",
                 get(connection_test_fixture),
+            )
+            // SSE progress-toast fixture (issue #129 Phase 3 / v1.6.5
+            // SSE migration). The fixture page opens
+            // `ryokanProgressToast` against a known progress_id; the
+            // emit endpoint pre-seeds events so the test doesn't need
+            // to coordinate timing across the EventSource handshake.
+            .route("/__test/progress-toast-fixture", get(progress_toast_fixture))
+            .route("/__test/progress-emit", post(progress_seed_events))
+            // Per-episode delete HX-Trigger listener fixture (Phase 2
+            // migration in PR `ac19049`). Minimal episode-table with
+            // one row + series.js loaded; the test dispatches a
+            // synthetic `ryokan-episode-deleted` event and asserts
+            // the row flips state.
+            .route(
+                "/__test/episode-delete-listener-fixture",
+                get(episode_delete_listener_fixture),
+            )
+            // Real production SSE handler so the fixture page's
+            // EventSource connects to the same code path the
+            // production frontend uses.
+            .route(
+                "/api/progress/{job_id}/stream",
+                get(crate::handlers::progress::stream_progress),
+            )
+            .route(
+                "/api/progress/{job_id}",
+                get(crate::handlers::progress::poll_progress),
             )
             .route(
                 "/api/library/episode-monitoring",

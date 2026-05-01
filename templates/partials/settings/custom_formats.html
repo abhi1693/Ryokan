@@ -137,7 +137,17 @@
        hx-* attribute later) would silently start intercepting the
        editor's clicks. Defensive: today nothing inside hits an hx-*
        parent so this is a no-op, but it locks in the boundary. #}
-    <div class="modal-backdrop" id="cf-editor-modal" style="display:none" hx-disable>
+    {# Server-render `display:flex` directly when this page is in
+       edit mode (`?edit_id=N` query → handler hands us
+       `custom_format_edit = Some(...)`). The previous JS-driven
+       auto-open relied on reading `window.location.search` from an
+       inline IIFE, but htmx pushes the URL *after* it evaluates
+       inserted body scripts on a boost-nav, so the IIFE saw the
+       old URL on first card click and left the modal hidden — only
+       a hard refresh would land it on a URL where the IIFE could
+       see `edit_id`. Letting the server own the open/closed initial
+       state cuts JS out of the timing-sensitive path entirely. #}
+    <div class="modal-backdrop" id="cf-editor-modal" style="display:{% if let Some(_) = custom_format_edit %}flex{% else %}none{% endif %}" hx-disable>
         <div class="modal cf-editor-modal" style="max-width:780px"
              role="dialog" aria-modal="true" aria-labelledby="cf-editor-modal-title">
             <div class="modal-header">

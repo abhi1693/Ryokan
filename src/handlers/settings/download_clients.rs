@@ -111,6 +111,24 @@ impl DownloadClientEditFormPartial {
     }
 }
 
+/// Inline error blurb rendered into `#dc-modal-body` when the edit
+/// form fetch fails (404 stale-id, 500 DB error). Returns 200 + an
+/// error partial INSTEAD of the prior 4xx/5xx because htmx 2.x's
+/// default error policy skips the swap on non-200, leaving the
+/// modal body showing the previous form while the modal title says
+/// "Editing FooClient" — silent breakage.
+#[derive(Template)]
+#[template(path = "partials/settings/modal_error.html")]
+struct ModalErrorPartial {
+    message: String,
+}
+
+impl ModalErrorPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
 /// Add form body — symmetric with the edit form but for fresh
 /// inserts. Returned by `GET /api/download-clients/add-form`;
 /// swapped into `#dc-modal-body` when the user clicks the "+
@@ -633,8 +651,16 @@ pub async fn settings_download_clients_edit_form(
             }
             .into_html_ok()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, "Download client not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(None) => ModalErrorPartial {
+            message:
+                "This download client no longer exists. It may have been deleted in another tab."
+                    .into(),
+        }
+        .into_html_ok(),
+        Err(e) => ModalErrorPartial {
+            message: format!("Failed to load download client: {e}"),
+        }
+        .into_html_ok(),
     }
 }
 

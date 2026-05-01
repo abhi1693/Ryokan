@@ -1,7 +1,7 @@
 // Server state handoff: window.initialTitleLanguage is set inline in
 // index.html before this file loads. Fall back to empty string so
 // `getTitleByLang` below still has something to compare against.
-const initialTitleLanguage = window.initialTitleLanguage || '';
+var initialTitleLanguage = window.initialTitleLanguage || '';
 
 // Live client-side library search. The full library is in the DOM
 // after page load, so substring-matching titles + toggling display
@@ -17,7 +17,7 @@ const initialTitleLanguage = window.initialTitleLanguage || '';
 // cheap on a few hundred series but a power user with thousands
 // would feel the per-keystroke layout thrash from the
 // `style.display = 'none'` writes.
-let _liveSearchTimer = null;
+var _liveSearchTimer = null;
 function liveLibrarySearch(input) {
     if (_liveSearchTimer) clearTimeout(_liveSearchTimer);
     _liveSearchTimer = setTimeout(() => {
@@ -122,7 +122,7 @@ function getTitleByLang(entry, lang) {
 // to MAL via the toggle in the Add Series modal. The selection is
 // remembered across modal opens within the page session, but resets on
 // a hard reload (no localStorage — explicit-each-session by design).
-let currentSearchSource = 'al';
+var currentSearchSource = 'al';
 
 function setSearchSource(btn) {
     currentSearchSource = btn.dataset.source;
@@ -204,8 +204,8 @@ function searchAnilist() {
         });
 }
 
-let _pendingSeriesId = null;
-let _selectedMonitorMode = 'all';
+var _pendingSeriesId = null;
+var _selectedMonitorMode = 'all';
 
 function addSeries(anilistId, btn) {
     const entry = JSON.parse(btn.dataset.entry);

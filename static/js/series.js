@@ -1,4 +1,24 @@
-const SD = document.getElementById('series-data').dataset;
+// Per-series data lookup. Was previously a module-scope const that
+// snapshotted `series-data`'s dataset at script-load time. That broke
+// under body-wide hx-boost (PR 140): navigating from Series A to Series
+// B swaps the body in place — including the `<script src="series.js">`
+// tag — but htmx 2.x does NOT re-execute scripts on swap. The `const`
+// kept its reference to Series A's (now-stale) dataset, so every
+// `SD.id`-keyed fetch on Series B's page hit Series A's API
+// (cross-series grab history, wrong-target deletes, etc.).
+//
+// A Proxy that reads `document.getElementById('series-data')?.dataset`
+// fresh on every property access keeps all the existing `SD.foo`
+// callsites unchanged while making them boost-safe. The element lookup
+// is microsecond-fast and dataset returns a live DOMStringMap, so the
+// performance cost is negligible compared to the network calls these
+// values feed into.
+var SD = new Proxy({}, {
+    get(_target, prop) {
+        const el = document.getElementById('series-data');
+        return el ? el.dataset[prop] : undefined;
+    },
+});
 
 // Title-language switching is handled entirely by CSS via the
 // `html[data-title-language]` attribute set by the inline head script in
@@ -57,7 +77,7 @@ function monitorAll(dbId) { toggleMonitorAll(dbId, false); }
 // at `/api/library/episode-monitoring` returns the swapped button HTML
 // for HX-Request, JSON otherwise (preserving the API contract).
 
-let _currentEpNum = null;
+var _currentEpNum = null;
 
 // Restore a footer button (Delete File / Cancel Pending) to its
 // ready-to-click shape on every modal open. The fetch success path
@@ -98,8 +118,33 @@ function showEpisodeDetail(epNum, btn) {
     resetFooterButton(deleteBtn);
     resetFooterButton(cancelBtn);
 
-    // Show/hide delete button
-    if (deleteBtn) deleteBtn.style.display = onDisk ? '' : 'none';
+    // Show/hide delete button + wire the per-modal hx-post URL.
+    // The button is a singleton in the modal footer (one element across
+    // every episode's modal open), so each open re-points its `hx-post`
+    // at the current episode's delete endpoint and refreshes the
+    // confirm-bridge body copy. `htmx.process()` re-binds the new attrs
+    // — without it, htmx caches the original (empty) attrs from page
+    // load and the click no-ops. Confirm bridge picks up the data-
+    // attrs automatically via its body-level `htmx:confirm` listener
+    // in base.js; toast + row update fire from the
+    // `ryokan-episode-deleted` event listener at the bottom of this
+    // file.
+    if (deleteBtn) {
+        deleteBtn.style.display = onDisk ? '' : 'none';
+        if (onDisk) {
+            deleteBtn.setAttribute(
+                'hx-post',
+                `/api/series/${SD.id}/delete-file/${epNum}`,
+            );
+            deleteBtn.setAttribute(
+                'data-ryokan-confirm-body',
+                `Delete the file for Episode ${epNum} from disk? This cannot be undone.`,
+            );
+            if (window.htmx && typeof window.htmx.process === 'function') {
+                window.htmx.process(deleteBtn);
+            }
+        }
+    }
     // Cancel-pending button: visible when the episode row is in the
     // 'grabbed' state (torrent sent but post-processing hasn't landed
     // yet). Detect via the `ep-row-queued` class that updateEpisodeRow
@@ -186,9 +231,20 @@ function renderGrabHistory(entries, epNum) {
             : e.state === 'replaced' ? 'grab-state-replaced'
             : e.state === 'completed' ? 'grab-state-completed'
             : 'grab-state-grabbed';
-        // Only active 'grabbed' rows can be manually failed — once
-        // post-processing flips to 'completed' the user should delete
-        // the file or trigger an upgrade instead.
+        // Only active 'grabbed' rows expose action buttons:
+        //   - Cancel: delete from download client + mark removed.
+        //     Same backend as the modal-footer Cancel Pending button
+        //     (POST /api/series/<id>/cancel-pending/<ep>) — exposing
+        //     it here means the user doesn't need the table-row
+        //     `ep-row-queued` class to be in sync to act on a grab.
+        //     Manual-search grabs and stale page state both hit
+        //     that desync; surfacing the action on the history row
+        //     is the reliable seat.
+        //   - Mark Failed: flag the grab as failed without touching
+        //     the download client. For when the torrent is fine but
+        //     the grab is silently dead (rare drift case).
+        // Once post-processing flips to 'completed' the user should
+        // delete the file or trigger an upgrade instead.
         const canFail = e.state === 'grabbed';
         // File name column: shows the post-processed on-disk basename
         // once post-processing lands the file. Before that it's still
@@ -216,7 +272,10 @@ function renderGrabHistory(entries, epNum) {
             <td style="white-space:nowrap;color:var(--text-dim)">${sizeCell}</td>
             <td style="white-space:nowrap;color:var(--text-dim)">${escHtml(e.grabbed_at)}</td>
             <td class="${stateClass}">${escHtml(e.state)}</td>
-            <td>${canFail ? `<button class="btn-mark-failed" onclick="markEpisodeFailed(${e.id}, ${epNum}, this)">Mark Failed</button>` : ''}</td>
+            <td>${canFail ? `
+                <button class="btn-cancel-grab" onclick="cancelGrabFromHistory(${epNum}, this)">Cancel</button>
+                <button class="btn-mark-failed" onclick="markEpisodeFailed(${e.id}, ${epNum}, this)">Mark Failed</button>
+            ` : ''}</td>
         </tr>`;
     }
     html += '</tbody></table></div>';
@@ -317,48 +376,119 @@ function markEpisodeFailed(historyId, epNum, btn) {
     });
 }
 
-async function deleteEpisodeFile() {
-    const epNum = _currentEpNum;
-    if (!epNum) return;
-    const confirmed = await window.ryokanConfirm({
-        title: 'Delete episode file',
-        body: `Delete the file for Episode ${epNum} from disk? This cannot be undone.`,
-        yesLabel: 'Delete',
-    });
-    if (!confirmed.ok) return;
-    const btn = document.getElementById('btn-delete-file');
-    if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
-    fetch(`/api/series/${SD.id}/delete-file/${epNum}`, { method: 'POST', headers: {'Content-Type': 'application/json'} })
-        .then(async r => {
-            let data = {};
-            try { data = await r.json(); } catch (_) {}
-            if (!r.ok) throw new Error(data.message || 'Delete failed');
-            document.getElementById('ep-detail-modal').style.display = 'none';
-            updateEpisodeRow(epNum, 'deleted');
-            refreshEpisodeRows({ force: true });
-            window.ryokanToast({
-                kind: 'success',
-                category: 'library',
-                title: `Episode ${epNum} deleted`,
-                body: 'File removed from disk.',
-            });
-        })
-        .catch(err => {
-            if (btn) { btn.disabled = false; btn.textContent = 'Delete File'; }
+// Per-episode delete is wired declaratively: the `#btn-delete-file`
+// in the modal footer carries `hx-post` (URL set per-modal-open in
+// `showEpisodeDetail`), `data-ryokan-confirm-*` (routed through the
+// htmx:confirm bridge in `base.js`), `hx-on::after-request` (closes
+// the modal on success), and `hx-swap="none"` (the empty 200 response
+// from the handler has no body to swap — the row update happens via
+// the `ryokan-episode-deleted` listener below). The handler emits an
+// `HX-Trigger: ryokan-episode-deleted` header on both success and
+// failure so a single listener handles toast + row state.
+//
+// One-shot guard: hx-boost re-evaluates this script on every nav-back
+// to a series page. Without the guard, each visit adds another copy of
+// the listener and a single delete fires N toasts on the Nth visit
+// ("Episode 10 deleted × 7" was the symptom). Same pattern repeated
+// at the other module-scope listeners across system.js / settings.js.
+if (!window.__ryokanSeriesListeners) {
+    window.__ryokanSeriesListeners = true;
+    document.body.addEventListener('ryokan-episode-deleted', function (ev) {
+        const detail = ev.detail || {};
+        const epNum = parseInt(detail.episode_number, 10);
+        if (!detail.ok) {
             window.ryokanToast({
                 kind: 'error',
                 category: 'library',
-                title: `Delete failed for episode ${epNum}`,
+                title: epNum ? `Delete failed for episode ${epNum}` : 'Delete failed',
+                body: detail.message || 'Unknown error',
+            });
+            return;
+        }
+        if (epNum) {
+            updateEpisodeRow(epNum, 'deleted');
+            refreshEpisodeRows({ force: true });
+        }
+        window.ryokanToast({
+            kind: 'success',
+            category: 'library',
+            title: epNum ? `Episode ${epNum} deleted` : 'Episode deleted',
+            body: detail.message || 'File removed from disk.',
+        });
+    });
+}
+
+// Per-grab-history-row Cancel button. Same backend as
+// `cancelPendingEpisode()` — cancels all pending grabs for the
+// episode (in practice usually one) — but exposed inline on the
+// grab history row so the user can act on a grab without depending
+// on the table-row `ep-row-queued` class being in sync. The
+// table-row class can lag behind reality after a manual-search
+// grab on a different page, or when the series page hasn't polled
+// since the grab landed; the history row's `state === 'grabbed'`
+// is read straight from the DB on modal open, so it's always the
+// authoritative seat for the action.
+async function cancelGrabFromHistory(epNum, btn) {
+    const confirmed = await window.ryokanConfirm({
+        title: 'Cancel grab',
+        body: `Remove the in-flight torrent for Episode ${epNum} from the download client and mark the grab cancelled? This will delete any partial download and will not trigger a re-search.`,
+        yesLabel: 'Cancel grab',
+        noLabel: 'Keep',
+        danger: true,
+    });
+    if (!confirmed.ok) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Cancelling…';
+    try {
+        const r = await fetch(
+            `/api/series/${SD.id}/cancel-pending/${epNum}`,
+            { method: 'POST', headers: {'Content-Type': 'application/json'} }
+        );
+        let data = {};
+        try { data = await r.json(); } catch (_) {}
+        if (!r.ok) throw new Error(data.message || 'Cancel failed');
+        // Close the modal — same shape as cancelPendingEpisode. The
+        // grab-history table is regenerated on next open from
+        // /api/series/<id>/grab-history/<ep>, which will now reflect
+        // the 'removed' state. Refreshing the underlying episode
+        // table is critical so the row's `ep-row-queued` class falls
+        // off and the row reflects the cancellation visually.
+        const modal = document.getElementById('ep-detail-modal');
+        if (modal) modal.style.display = 'none';
+        if (typeof updateEpisodeRow === 'function') {
+            updateEpisodeRow(epNum, 'deleted');
+        }
+        if (typeof refreshEpisodeRows === 'function') {
+            refreshEpisodeRows({ force: true });
+        }
+        if (window.ryokanToast) {
+            window.ryokanToast({
+                kind: 'success',
+                category: 'library',
+                title: `Episode ${epNum} cancelled`,
+                body: `${data.cancelled || 0} pending grab(s) removed.`,
+            });
+        }
+    } catch (err) {
+        btn.disabled = false;
+        btn.textContent = original;
+        if (window.ryokanToast) {
+            window.ryokanToast({
+                kind: 'error',
+                category: 'library',
+                title: `Cancel failed for episode ${epNum}`,
                 body: err && err.message ? err.message : 'Unknown error',
             });
-        });
+        }
+    }
 }
 
 // Cancel an in-flight grab: removes the torrent from qBit (with its
 // partial/complete data), marks the grab 'removed' in the DB, clears
 // the episode's quality tag. Does NOT trigger a re-search — the user
-// wanted to drop this one, not find a replacement. Mirrors
-// `deleteEpisodeFile` for the pending-grab state.
+// wanted to drop this one, not find a replacement. The pending-grab
+// equivalent of the (now declarative) per-episode delete flow above.
 async function cancelPendingEpisode() {
     const epNum = _currentEpNum;
     if (!epNum) return;
@@ -512,6 +642,8 @@ function renderScoreDetails(r, scoreClass) {
 // breakdown silently opened offscreen and looked like nothing happened
 // when you clicked the score badge.
 (function () {
+    if (window.__ryokanScoreBreakdownInit) return;
+    window.__ryokanScoreBreakdownInit = true;
     function closeAllOpenBreakdowns(except) {
         document.querySelectorAll('details.score-details[open]').forEach(function (d) {
             if (d !== except) d.removeAttribute('open');
@@ -640,8 +772,8 @@ function searchBatchReleases(btn) {
     });
 }
 
-let _isearchEpNum = null;
-let _isearchResults = [];
+var _isearchEpNum = null;
+var _isearchResults = [];
 
 function openInteractiveSearch(epNum, btn) {
     _isearchEpNum = epNum;
@@ -800,7 +932,7 @@ function closeInteractiveSearch(e) {
 // isearch-modal element so the UI only has one modal to style. The results
 // render is nearly identical but routes its Grab action to /grab-batch
 // instead of the per-episode /grab endpoint.
-let _ibatchResults = [];
+var _ibatchResults = [];
 
 function openInteractiveBatchSearch(btn) {
     _ibatchResults = [];
@@ -942,9 +1074,9 @@ function setBusyButton(btn, busy, busyLabel) {
     }
 }
 
-const SEARCH_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
-const SUCCESS_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
-const ERROR_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
+var SEARCH_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
+var SUCCESS_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
+var ERROR_ICON_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
 
 function setEpisodeButtonState(btn, state, title) {
     if (!btn) return;
@@ -1083,13 +1215,13 @@ function setMonitoring(mode) {
     });
 }
 
-let overrideTargetEpisode = null;
+var overrideTargetEpisode = null;
 
 // Composite dropdown key ↔ backend quartet. Each entry maps the <select>'s
 // value to the {source, is_remux, is_bdmv, web_kind} payload that the
 // /api/library/manual-override handler expects. Centralising the mapping
 // here means the HTML options and the POST body can't drift apart.
-const OVERRIDE_SOURCE_MAP = {
+var OVERRIDE_SOURCE_MAP = {
     bluray_bdmv: { source: 'BluRay', is_remux: false, is_bdmv: true,  web_kind: '' },
     bluray_remux:{ source: 'BluRay', is_remux: true,  is_bdmv: false, web_kind: '' },
     bluray:      { source: 'BluRay', is_remux: false, is_bdmv: false, web_kind: '' },
@@ -1606,16 +1738,26 @@ function updateEpisodeRow(epNum, state, group) {
         btnLeft.addEventListener('click', () => scrollByViewport(-1));
         btnRight.addEventListener('click', () => scrollByViewport(1));
         track.addEventListener('scroll', updateButtons, { passive: true });
-        window.addEventListener('resize', updateButtons);
+        // Per-section resize listener used to attach to `window` here.
+        // Under body-wide hx-boost, the script re-runs on every nav-back
+        // and a fresh `window.resize` listener attached for each visit
+        // (window persists across body swaps even when the section DOM
+        // doesn't). After N visits, N closures captured stale section
+        // refs and fired on every resize. Use ResizeObserver on `track`
+        // instead — the observer is GC'd with the detached section,
+        // so no cross-visit accumulation.
+        if (typeof ResizeObserver !== 'undefined') {
+            new ResizeObserver(updateButtons).observe(track);
+        }
 
         updateButtons();
     });
 })();
 
 // --- Episode download progress polling ---
-let dlPollTimer = null;
-let dlPollActive = false;
-let dlRefreshing = false;
+var dlPollTimer = null;
+var dlPollActive = false;
+var dlRefreshing = false;
 
 function formatDlSpeed(bps) {
     if (bps <= 0) return '';
@@ -1630,9 +1772,9 @@ function escapeHtml(s) {
     return div.innerHTML;
 }
 
-const STATUS_ICON_HAVE = '<span class="ep-status-icon ep-have" title="On disk"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></span>';
-const STATUS_ICON_MISSING = '<span class="ep-status-icon ep-missing" title="Missing"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>';
-const DL_PROGRESS_HTML_ZERO = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
+var STATUS_ICON_HAVE = '<span class="ep-status-icon ep-have" title="On disk"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></span>';
+var STATUS_ICON_MISSING = '<span class="ep-status-icon ep-missing" title="Missing"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>';
+var DL_PROGRESS_HTML_ZERO = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
 
 // Sync the episode table with the server's authoritative state.
 //
@@ -1830,8 +1972,22 @@ function pollDownloadProgress() {
         .catch(() => {});
 }
 
-// Start polling if the series is tracked
+// Start polling if the series is tracked. The 5s interval polls the
+// per-series download-progress endpoint to update the in-row queue
+// progress bars; `pollDownloadProgress` clears its own interval when
+// nothing is downloading. Wrapped in a singleton-clear pattern: htmx
+// body-swap re-runs this script on every nav-back to a series page,
+// and a fresh `setInterval` here without clearing the previous one
+// would stack — N visits = N parallel pollers all hitting the same
+// API every 5s. Clearing any prior `dlPollTimer` first means the most
+// recent visit wins; the variable is module-scope so the prior
+// execution's value survives the new file run (this is one of the few
+// places where the cross-execution `var` carryover is *desirable*).
 if (SD.dbId) {
+    if (dlPollTimer) {
+        clearInterval(dlPollTimer);
+        dlPollTimer = null;
+    }
     pollDownloadProgress();
     dlPollActive = true;
     dlPollTimer = setInterval(pollDownloadProgress, 5000);

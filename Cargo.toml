@@ -1,6 +1,6 @@
 [package]
 name = "ryokan"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 rust-version = "1.95"
 
@@ -66,6 +66,11 @@ path = "tests/external_sync_e2e.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "library_link_e2e"
+path = "tests/library_link_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "metadata_sync_e2e"
 path = "tests/metadata_sync_e2e.rs"
 required-features = ["test-support"]
@@ -108,6 +113,16 @@ required-features = ["test-support", "browser-e2e"]
 [[test]]
 name = "htmx_browser_e2e_settings_modals"
 path = "tests/htmx_browser_e2e_settings_modals.rs"
+required-features = ["test-support", "browser-e2e"]
+
+[[test]]
+name = "htmx_browser_e2e_progress_sse"
+path = "tests/htmx_browser_e2e_progress_sse.rs"
+required-features = ["test-support", "browser-e2e"]
+
+[[test]]
+name = "htmx_browser_e2e_episode_delete"
+path = "tests/htmx_browser_e2e_episode_delete.rs"
 required-features = ["test-support", "browser-e2e"]
 
 [[test]]

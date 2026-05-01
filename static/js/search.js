@@ -32,10 +32,10 @@
 // right before this file loads) and gates execution on the presence of
 // the `#results-body` element.
 
-const searchState = window.searchState || { hasMore: false, totalResults: 0, searched: false };
-let nextPage = 2;
-let hasMore = !!searchState.hasMore;
-let totalResults = Number(searchState.totalResults) || 0;
+var searchState = window.searchState || { hasMore: false, totalResults: 0, searched: false };
+var nextPage = 2;
+var hasMore = !!searchState.hasMore;
+var totalResults = Number(searchState.totalResults) || 0;
 
 // Handle prefill from library "Search Nyaa" button.
 (function () {
@@ -104,8 +104,15 @@ function loadMore() {
                 const grabBtn = grabUrl ? `<button class="btn btn-grab" onclick="grabRelease('${escAttr(grabUrl)}', this)">Grab</button>` : '';
 
                 const scoreBreakdownHtml = renderScoreBreakdown(r);
+                // Mirror the server-rendered shape in templates/search.html:
+                // a `[data-utc]` span carrying the raw UTC string. The
+                // page-load + paginated-load passes through
+                // `renderLocalDates()` to overwrite the textContent with
+                // local time and `title` with the UTC marker. No
+                // `data-ts` — the global relative-time renderer in
+                // base.js otherwise mixes "5d ago" / absolute date.
                 const dateCell = r.upload_date
-                    ? `<span data-ts="${escAttr(r.upload_date)}">${escHtml(r.upload_date)}</span>`
+                    ? `<span data-utc="${escAttr(r.upload_date)}">${escHtml(r.upload_date)}</span>`
                     : '—';
 
                 // Table row (desktop).
@@ -176,6 +183,12 @@ function loadMore() {
                 }
             }
 
+            // Render any new `[data-utc]` cells (date-only text,
+            // full UTC datetime on hover). The page-1 render is
+            // handled by the DOMContentLoaded pass; this is the
+            // paginated-append pass.
+            renderUploadDates();
+
             totalResults += results.length;
             nextPage++;
             document.getElementById('results-count').textContent = `${totalResults} results`;
@@ -219,6 +232,17 @@ function grabRelease(url, btn) {
         && typeof window.openGrabPicker === 'function'
         && row && row.dataset.infoHash;
     if (canPicker) {
+        // Capture the row's hash + URL for the post-picker Cancel
+        // wire-up. The picker confirms via `/api/grab/confirm` (not
+        // `/api/grab`), so the post-`/api/grab` Cancel logic below
+        // wouldn't otherwise fire — we hand `onConfirm` to the
+        // picker so the original row's Grab button still flips into
+        // Cancel state once a batch grab lands. For BT releases
+        // `row.dataset.infoHash` IS the canonical id qBit knows the
+        // torrent by, so cancel via /api/downloads/delete with this
+        // hash works the same as the direct-grab path.
+        const cancelHashFromRow = row && row.dataset.infoHash || '';
+        const grabUrlFromRow = url;
         window.openGrabPicker(url, {
             title: row.dataset.name || '',
             size: row.dataset.sizeHuman || '',
@@ -230,6 +254,10 @@ function grabRelease(url, btn) {
             // the listing's flag instead of a file-count proxy (which
             // mis-flags .mkv+.ass+.srt single-episode releases).
             isBatch: isBatch,
+            onConfirm: function () {
+                if (!cancelHashFromRow) return;
+                flipGrabButtonToCancel(btn, cancelHashFromRow, grabUrlFromRow);
+            },
         });
         return;
     }
@@ -251,19 +279,212 @@ function grabRelease(url, btn) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload),
     })
-    .then(resp => {
-        if (resp.ok) {
-            btn.textContent = 'Sent';
-            btn.classList.add('btn-success');
-        } else {
+    .then(resp => resp.ok ? resp.json().then(body => ({ok: true, body})) : resp.text().then(text => ({ok: false, body: text})))
+    .then(result => {
+        // Outcome → button copy + toast. The `link_status` tag comes
+        // from the `LibraryLinkOutcome::tag()` impl in
+        // `services::library_link.rs`; new tags there MUST be added
+        // here too or the toast falls through to the generic "Sent"
+        // copy. Series title (when applicable) is rendered into the
+        // toast body so the user sees what got linked or added.
+        if (!result.ok) {
             btn.textContent = 'Error';
             btn.classList.add('btn-error');
+            if (window.ryokanToast) {
+                window.ryokanToast({
+                    kind: 'error',
+                    title: 'Grab failed',
+                    body: typeof result.body === 'string' ? result.body : 'Download client rejected the request.',
+                    category: 'grab',
+                });
+            }
+            return;
+        }
+        const {link_status, series_title, detail, hash} = result.body || {};
+        // Convert the Grab button into a Cancel button so users can
+        // unwind a manual-search grab without leaving the page. The
+        // canonical hash from the response is preferred over the
+        // row's pre-add `data-info-hash` because BT hashes happen to
+        // be the same shape but SAB grabs return an `nzo_id` that
+        // wouldn't match the row's hash.
+        const cancelHash = hash || (row && row.dataset.infoHash) || '';
+        if (cancelHash) {
+            flipGrabButtonToCancel(btn, cancelHash, url);
+        } else {
+            // Empty canonical id (rare — magnet add that returned
+            // nothing). Fall back to the legacy "Sent" lock so the
+            // button isn't clickable into a useless cancel call.
+            btn.textContent = 'Sent';
+            btn.classList.add('btn-success');
+        }
+        if (!window.ryokanToast) return;
+        if (link_status === 'linked' && series_title) {
+            window.ryokanToast({
+                kind: 'success',
+                title: 'Grabbed',
+                body: 'Linked to ' + series_title,
+                category: 'grab',
+            });
+        } else if (link_status === 'added' && series_title) {
+            window.ryokanToast({
+                kind: 'success',
+                title: 'Grabbed and added to library',
+                body: series_title,
+                category: 'grab',
+            });
+        } else if (link_status === 'auto_add_disabled') {
+            window.ryokanToast({
+                kind: 'warn',
+                title: 'Grabbed (no library link)',
+                body: detail || 'Auto-add toggle is off in Settings.',
+                category: 'grab',
+            });
+        } else if (link_status === 'ambiguous') {
+            window.ryokanToast({
+                kind: 'warn',
+                title: 'Grabbed (no library link)',
+                body: detail || 'AniList match was ambiguous.',
+                category: 'grab',
+            });
+        } else if (link_status === 'detail_fetch_failed') {
+            window.ryokanToast({
+                kind: 'warn',
+                title: 'Grabbed (link pending)',
+                body: detail || 'AniList match found but detail fetch failed; will retry on next sync.',
+                category: 'grab',
+            });
+        } else if (link_status === 'no_match') {
+            window.ryokanToast({
+                kind: 'warn',
+                title: 'Grabbed (no library link)',
+                body: detail || 'No library or AniList match.',
+                category: 'grab',
+            });
+        } else {
+            // 'not_attempted' (no title/hash on the form) — bare grab.
+            window.ryokanToast({
+                kind: 'success',
+                title: 'Grabbed',
+                category: 'grab',
+            });
         }
     })
     .catch(() => {
         btn.textContent = 'Error';
         btn.classList.add('btn-error');
+        if (window.ryokanToast) {
+            window.ryokanToast({
+                kind: 'error',
+                title: 'Grab failed',
+                body: 'Network error.',
+                category: 'grab',
+            });
+        }
     });
+}
+
+// Convert a Grab button into the post-grab Cancel state. Used by
+// both the direct `/api/grab` path and the picker `onConfirm`
+// callback so a search-row Grab button gets the same Cancel UX
+// regardless of which grab pipeline served the request. Captures
+// the original URL on the button so the post-cancel reset can
+// rewire a fresh "Grab" click — assigning `btn.onclick` clobbers
+// the inline `onclick="grabRelease(...)"` from the template.
+//
+// **Re-render assumption:** this works because the search results
+// table appends new rows on `loadMore()` paginated load but never
+// re-renders existing ones; the swapped-in onclick survives for the
+// life of the row. If a future change ever re-renders existing
+// rows in place (e.g. live-update of seed counts via SSE), the
+// post-grab Cancel state would silently revert to a fresh Grab
+// button mid-operation. Re-binding the onclick from a row-mutation
+// observer would fix that — but until such a change lands, the
+// simpler shape is fine. `cancelGrabbedRelease` correctly re-wires
+// `onclick` back to `grabRelease` after a successful cancel, so
+// the round-trip is intact.
+function flipGrabButtonToCancel(btn, cancelHash, grabUrl) {
+    btn.disabled = false;
+    btn.classList.remove('btn-success');
+    btn.classList.add('btn-cancel');
+    btn.textContent = 'Cancel';
+    btn.dataset.cancelHash = cancelHash;
+    btn.dataset.grabUrl = grabUrl || '';
+    btn.onclick = function () { cancelGrabbedRelease(cancelHash, btn); };
+}
+
+// Cancel a release the user just grabbed via the search-page Grab
+// button. Hits the same endpoint the Downloads-page delete button
+// uses (`/api/downloads/delete`), routed by hash. The handler's
+// `resolve_client_for_hash` will dispatch to whichever client the
+// grab landed in (BT default, SAB by `SABnzbd_nzo_` prefix, or the
+// per-grab `download_client_id` stamp written when the grab linked
+// to a library series). The confirm modal includes a checkbox for
+// removing files; for an in-flight torrent / queued NZB the file
+// barely exists yet so the default (off) is the safe pick — a
+// re-grab of the same release re-uses the same path.
+function cancelGrabbedRelease(hash, btn) {
+    if (!hash) return;
+    const doDelete = function (deleteFiles) {
+        btn.disabled = true;
+        btn.textContent = 'Cancelling...';
+        fetch('/api/downloads/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({hash: hash, delete_files: !!deleteFiles}),
+        })
+        .then(function (resp) {
+            if (!resp.ok) throw new Error('cancel failed');
+            // Reset the button so the user can re-grab if they want.
+            // Re-wiring `onclick` is necessary because the conversion
+            // to Cancel replaced the inline `onclick="grabRelease(..)"`;
+            // setting it to null would leave the button inert.
+            const grabUrl = btn.dataset.grabUrl || '';
+            btn.disabled = false;
+            btn.textContent = 'Grab';
+            btn.classList.remove('btn-cancel', 'btn-success', 'btn-error');
+            btn.onclick = function () { grabRelease(grabUrl, btn); };
+            delete btn.dataset.cancelHash;
+            if (window.ryokanToast) {
+                window.ryokanToast({
+                    kind: 'success',
+                    title: 'Cancelled',
+                    body: 'Removed from download client',
+                    category: 'grab',
+                });
+            }
+        })
+        .catch(function () {
+            btn.disabled = false;
+            btn.textContent = 'Cancel';
+            if (window.ryokanToast) {
+                window.ryokanToast({
+                    kind: 'error',
+                    title: 'Cancel failed',
+                    body: 'Could not remove from download client. Try the Downloads page.',
+                    category: 'grab',
+                });
+            }
+        });
+    };
+    if (window.ryokanConfirm) {
+        window.ryokanConfirm({
+            title: 'Cancel grab',
+            body: 'Remove this release from the download client?',
+            yesLabel: 'Cancel grab',
+            noLabel: 'Keep',
+            extras: [{id: 'deleteFiles', label: 'Also delete downloaded files', default: false}],
+        }).then(function (res) {
+            if (!res.ok) return;
+            doDelete(res.extras && res.extras.deleteFiles);
+        });
+    } else {
+        // Fallback for the (impossible-in-practice) case where base.js
+        // hasn't loaded — behave like a plain confirm dialog so the
+        // button still works.
+        if (window.confirm('Remove this release from the download client?')) {
+            doDelete(false);
+        }
+    }
 }
 
 function escHtml(s) {
@@ -321,6 +542,8 @@ function renderScoreBreakdown(r) {
 // logic — one direction is easier to reason about and predictable for
 // both keyboard and touch users.
 (function () {
+    if (window.__ryokanSearchScoreBreakdownInit) return;
+    window.__ryokanSearchScoreBreakdownInit = true;
     function closeAllOpenBreakdowns(except) {
         document.querySelectorAll('details.score-details[open]').forEach(function (d) {
             if (d !== except) d.removeAttribute('open');
@@ -456,12 +679,17 @@ function renderScoreBreakdown(r) {
         tbody.appendChild(frag);
     }
 
-    document.addEventListener('DOMContentLoaded', function () {
+    function bindSortHandlers() {
         const table = document.getElementById('results-table');
         if (!table) return;
         const tbody = document.getElementById('results-body');
         if (!tbody) return;
         table.querySelectorAll('th.sortable').forEach(function (th) {
+            // Per-th `dataset.bound` guard: under hx-boost the IIFE
+            // re-runs and we'd otherwise add another click listener
+            // every visit.
+            if (th.dataset.sortBound === '1') return;
+            th.dataset.sortBound = '1';
             th.addEventListener('click', function () {
                 const key = th.dataset.sortKey;
                 const wasAsc = th.classList.contains('sort-asc');
@@ -494,5 +722,66 @@ function renderScoreBreakdown(r) {
             const dir = initial.classList.contains('sort-asc') ? 'asc' : 'desc';
             sortRows(tbody, key, dir);
         }
-    });
+    }
+    // Use the page-lifecycle helper so the bind fires AFTER htmx
+    // settles each body swap. Direct script-execution-time binding
+    // was racy under boost: the script tag runs as part of htmx's
+    // swap evaluation and the table elements aren't always queryable
+    // yet by the time the script reaches the binding code. The
+    // lifecycle helper wires through `htmx.onLoad`, which fires
+    // *after* the swap completes and the DOM is settled.
+    //
+    // `dataset.sortBound` per-th guard inside `bindSortHandlers`
+    // makes the mount idempotent, so re-firing on every htmx.onLoad
+    // (including on this same page if the user does an in-place
+    // refresh of just the results table) doesn't accumulate listeners.
+    if (typeof window.ryokanRegisterPageInit === 'function') {
+        window.ryokanRegisterPageInit('search-sort', {
+            check: function () { return !!document.getElementById('results-table'); },
+            mount: bindSortHandlers,
+        });
+    } else if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bindSortHandlers);
+    } else {
+        bindSortHandlers();
+    }
 })();
+
+// ── Date column rendering for `[data-utc]` cells ───────────────────
+//
+// Nyaa publishes upload timestamps as "YYYY-MM-DD HH:MM" UTC. The
+// search-page date column shows just the date portion (YYYY-MM-DD)
+// in the cell, with the full UTC datetime on hover via the `title`
+// attribute. No timezone conversion — keeps the column visually
+// uniform across rows (no "5d ago" / absolute date mixing) and
+// keeps the data clearly UTC for users who want to see the exact
+// upload time. Idempotent: a `data-utc-rendered` marker prevents
+// re-rendering an already-rendered cell on boost-nav / htmx swap /
+// paginated append.
+function renderUploadDates() {
+    document.querySelectorAll('[data-utc]').forEach(function (el) {
+        if (el.dataset.utcRendered === '1') return;
+        const utc = el.getAttribute('data-utc');
+        if (!utc) return;
+        // Strip the time portion: "YYYY-MM-DD HH:MM" → "YYYY-MM-DD".
+        // The first 10 chars are always the date when Nyaa's format
+        // is well-formed. Fall back to the full string if the shape
+        // doesn't match (defensive — a malformed cell still shows
+        // *something* readable).
+        const m = utc.match(/^(\d{4}-\d{2}-\d{2})/);
+        el.textContent = m ? m[1] : utc;
+        el.title = utc + ' UTC';
+        el.dataset.utcRendered = '1';
+    });
+}
+window.ryokanRenderUploadDates = renderUploadDates;
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', renderUploadDates);
+} else {
+    renderUploadDates();
+}
+// Re-render on htmx swaps so a boost-nav back to /search picks up
+// any new rows. Idempotent via the `data-utc-rendered` marker.
+if (window.htmx && typeof window.htmx.onLoad === 'function') {
+    window.htmx.onLoad(renderUploadDates);
+}

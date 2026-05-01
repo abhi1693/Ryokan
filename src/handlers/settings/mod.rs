@@ -381,6 +381,10 @@ pub struct SettingsForm {
     /// #1.3.0 — opt-in: trigger auto-search when a series's
     /// monitoring mode changes. Default off. Settings → General.
     search_on_monitoring_change: Option<String>,
+    /// 1.7 — opt-out for the manual-search-page auto-add path.
+    /// Settings → General.
+    #[serde(default)]
+    manual_search_auto_add: Option<String>,
     prefer_subs: String,
     sonarr_enabled: Option<String>,
     sonarr_api_key: Option<String>,
@@ -572,6 +576,11 @@ pub struct GeneralForm {
     /// mode changes. Default off.
     #[serde(default)]
     search_on_monitoring_change: Option<String>,
+    /// 1.7 — opt-out for the manual-search-page auto-add path.
+    /// Default ON; flipped off here keeps the legacy 1.0–1.6 silent
+    /// no-op when a grabbed release isn't in the library yet.
+    #[serde(default)]
+    manual_search_auto_add: Option<String>,
 }
 
 #[derive(Template)]
@@ -1305,6 +1314,20 @@ pub async fn settings_submit(
         nyaa_download_client_id: existing_cfg
             .as_ref()
             .and_then(|c| c.nyaa_download_client_id),
+        // Manual-search auto-add toggle is owned by the General tab.
+        // Same submit→bool pattern as `search_on_monitoring_change`:
+        // when the General tab POSTs, an unchecked box is absent from
+        // the form (HTML form semantics for checkboxes); for any
+        // other tab, preserve the existing value so a Quality-tab
+        // save doesn't accidentally flip it off.
+        manual_search_auto_add: if form.tab.as_deref() == Some("general") {
+            form.manual_search_auto_add.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.manual_search_auto_add)
+                .unwrap_or(true)
+        },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());
@@ -1538,6 +1561,7 @@ pub async fn settings_general_submit(
             _ => "hardlink".to_string(),
         },
         search_on_monitoring_change: form.search_on_monitoring_change.is_some(),
+        manual_search_auto_add: form.manual_search_auto_add.is_some(),
         // Everything else: preserved verbatim.
         ..existing_cfg
     };
@@ -2963,7 +2987,8 @@ mod tests {
                     disable_nyaa_rss: Some(String::new()), // submit→true, seed=false
                     post_processing_enabled: None, // submit→false, seed=true
                     post_processing_mode: "move".to_string(), // seed=copy
-                    search_on_monitoring_change: None, // submit→false, seed=true
+                    search_on_monitoring_change: None,
+                    manual_search_auto_add: None, // submit→false, seed=true
                 }),
             )
             .await
@@ -3174,6 +3199,7 @@ mod tests {
                     post_processing_enabled: None,
                     post_processing_mode: "hardlink".to_string(),
                     search_on_monitoring_change: None,
+                    manual_search_auto_add: None,
                 }),
             )
             .await
@@ -3207,6 +3233,7 @@ mod tests {
                     post_processing_enabled: None,
                     post_processing_mode: "hardlink".to_string(),
                     search_on_monitoring_change: None,
+                    manual_search_auto_add: None,
                 }),
             )
             .await
@@ -3243,6 +3270,7 @@ mod tests {
                     post_processing_enabled: None,
                     post_processing_mode: "hardlink".to_string(),
                     search_on_monitoring_change: None,
+                    manual_search_auto_add: None,
                 }),
             )
             .await
@@ -3289,6 +3317,7 @@ mod tests {
                     post_processing_enabled: None,
                     post_processing_mode: "garbage".to_string(),
                     search_on_monitoring_change: None,
+                    manual_search_auto_add: None,
                 }),
             )
             .await
@@ -3317,6 +3346,7 @@ mod tests {
                     post_processing_enabled: None,
                     post_processing_mode: "hardlink".to_string(),
                     search_on_monitoring_change: None,
+                    manual_search_auto_add: None,
                 }),
             )
             .await
@@ -3735,6 +3765,7 @@ mod tests {
                     post_processing_enabled: None,
                     post_processing_mode: "hardlink".to_string(),
                     search_on_monitoring_change: None,
+                    manual_search_auto_add: None,
                 }),
             );
             let quality = settings_quality_submit(
@@ -3789,6 +3820,7 @@ mod tests {
                     post_processing_enabled: None,
                     post_processing_mode: "hardlink".to_string(),
                     search_on_monitoring_change: None,
+                    manual_search_auto_add: None,
                 }),
             )
             .await

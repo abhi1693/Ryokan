@@ -439,75 +439,142 @@ window.ryokanProgressToast = function (opts) {
         // System → Logs that gets immediately superseded.
         log: false,
     });
-    let cursor = 0;
     let stopped = false;
-    // Poll interval: 500ms is fast enough that users see updates
-    // within ~half the visual debounce window of typical UI spinners,
-    // but slow enough that an unattended tab doesn't burn a request
-    // per frame. Backoff to 2s after the first successful terminal
-    // read so a frontend that failed to catch the terminal event
-    // still doesn't keep hammering after the job has been swept.
-    function schedule(ms) {
-        if (stopped) return;
-        setTimeout(tick, ms);
+    let lastTerminal = null;
+    // Apply a single ProgressEvent to the toast; track terminal so
+    // close() can fire onTerminal + finalize cleanly. Shared between
+    // the SSE and the polling-fallback code paths.
+    function consumeEvent(ev) {
+        toast.update({kind: ev.kind, title: ev.title, body: ev.body || ''});
+        if (ev.terminal) lastTerminal = ev;
     }
-    function tick() {
+    function close() {
         if (stopped) return;
-        fetch('/api/progress/' + encodeURIComponent(opts.progressId) + '?since=' + cursor, {
-            credentials: 'same-origin',
-        }).then(function (r) {
-            if (r.status === 404) {
-                // Job swept or never existed. Treat as a silent stop —
-                // the trigger response flow will still give us a final
-                // state via its own then/catch.
-                stopped = true;
-                return null;
-            }
-            if (!r.ok) throw new Error('progress poll HTTP ' + r.status);
-            return r.json();
-        }).then(function (payload) {
-            if (!payload) return;
-            cursor = payload.next_cursor;
-            let last = null;
-            for (let i = 0; i < payload.events.length; i++) {
-                const ev = payload.events[i];
-                toast.update({kind: ev.kind, title: ev.title, body: ev.body || ''});
-                if (ev.terminal) last = ev;
-            }
-            if (payload.terminal || last) {
-                stopped = true;
-                if (last) {
-                    toast.finalize({kind: last.kind, title: last.title, body: last.body || ''});
-                } else {
-                    // Terminal flag set but no terminal event in this
-                    // batch — shouldn't happen, but don't lock up
-                    // if it does.
-                    toast.finalize({});
-                }
-                if (typeof opts.onTerminal === 'function') {
-                    try { opts.onTerminal(last || {}); }
-                    catch (e) { console.warn('[ryokanProgressToast] onTerminal threw:', e); }
-                }
-                return;
-            }
-            schedule(500);
-        }).catch(function (err) {
-            console.warn('[ryokanProgressToast] poll failed:', err);
-            // Network hiccup: back off to avoid flooding. Don't stop —
-            // the job might still complete and the next tick will
-            // catch up.
-            schedule(2000);
-        });
+        stopped = true;
+        // Always finalize so a sticky toast can't get orphaned. Two
+        // cases land here:
+        //   1. Normal completion: `lastTerminal` carries the success/
+        //      error event the server emitted; pass it verbatim.
+        //   2. Stream ended without a terminal (e.g. job swept after
+        //      we lost connection, server closed cleanly because
+        //      poll() returned None). Pass an empty descriptor so the
+        //      toast un-stickies and dismisses on its normal timeout.
+        // Skipping finalize in case 2 was an earlier bug that left
+        // the toast stuck across the entire user session.
+        if (lastTerminal) {
+            toast.finalize({kind: lastTerminal.kind, title: lastTerminal.title, body: lastTerminal.body || ''});
+        } else {
+            toast.finalize({});
+        }
+        if (typeof opts.onTerminal === 'function') {
+            try { opts.onTerminal(lastTerminal || {}); }
+            catch (e) { console.warn('[ryokanProgressToast] onTerminal threw:', e); }
+        }
     }
-    schedule(500);
+
+    // SSE-first path. EventSource is universal in modern browsers and
+    // gives us push-driven updates without burning a request per
+    // 500 ms tick. The server endpoint at
+    // `/api/progress/{id}/stream` (`stream_progress` in
+    // `src/handlers/progress.rs`) drains the same in-memory buffer
+    // the polling endpoint uses, so the two sides are interchangeable
+    // and any failure in the SSE path falls back to polling on the
+    // legacy endpoint without state loss.
+    let es = null;
+    let fellBackToPolling = false;
+    function startPolling() {
+        if (fellBackToPolling || stopped) return;
+        fellBackToPolling = true;
+        let cursor = 0;
+        function schedule(ms) {
+            if (stopped) return;
+            setTimeout(tick, ms);
+        }
+        function tick() {
+            if (stopped) return;
+            fetch('/api/progress/' + encodeURIComponent(opts.progressId) + '?since=' + cursor, {
+                credentials: 'same-origin',
+            }).then(function (r) {
+                if (r.status === 404) { close(); return null; }
+                if (!r.ok) throw new Error('progress poll HTTP ' + r.status);
+                return r.json();
+            }).then(function (payload) {
+                if (!payload) return;
+                cursor = payload.next_cursor;
+                for (let i = 0; i < payload.events.length; i++) {
+                    consumeEvent(payload.events[i]);
+                }
+                if (payload.terminal || lastTerminal) { close(); return; }
+                schedule(500);
+            }).catch(function (err) {
+                console.warn('[ryokanProgressToast] poll failed:', err);
+                schedule(2000);
+            });
+        }
+        schedule(500);
+    }
+
+    if (typeof EventSource === 'function') {
+        try {
+            es = new EventSource('/api/progress/' + encodeURIComponent(opts.progressId) + '/stream');
+            // Server emits each event as `event: progress` with a JSON
+            // payload. EventSource fires one MessageEvent per SSE event
+            // when listening on the named event type.
+            es.addEventListener('progress', function (msg) {
+                if (stopped) return;
+                let ev;
+                try { ev = JSON.parse(msg.data); }
+                catch (e) { console.warn('[ryokanProgressToast] bad SSE payload:', e); return; }
+                consumeEvent(ev);
+                if (ev.terminal) {
+                    if (es) { es.close(); es = null; }
+                    close();
+                }
+            });
+            // EventSource auto-reconnects on transient errors. We get
+            // notified via `onerror` for *any* error, including the
+            // terminal close where the server cleanly ends the stream
+            // — Firefox + Chrome both fire `onerror` then move
+            // readyState to CLOSED. If we already saw the terminal
+            // event, that's expected; otherwise fall back to polling
+            // on the legacy endpoint so a 404 / proxy interruption /
+            // 500 doesn't strand the toast.
+            es.addEventListener('error', function () {
+                if (stopped) return;
+                // readyState 2 = CLOSED. Browsers set this for both
+                // server-side EOF and unrecoverable errors.
+                if (es && es.readyState === 2) {
+                    es.close();
+                    es = null;
+                    if (lastTerminal) {
+                        close();
+                    } else {
+                        // Stream closed without a terminal event —
+                        // fall through to polling so we don't lose
+                        // the job's final state.
+                        startPolling();
+                    }
+                }
+            });
+        } catch (e) {
+            console.warn('[ryokanProgressToast] EventSource construct failed:', e);
+            startPolling();
+        }
+    } else {
+        // Browser without EventSource (none in our supported set
+        // today, but cheap defensive fallback).
+        startPolling();
+    }
     return {
         dismiss: function () {
             stopped = true;
+            if (es) { es.close(); es = null; }
             toast.dismiss();
         },
         update: function (p) { toast.update(p); },
         finalize: function (p) {
             stopped = true;
+            if (es) { es.close(); es = null; }
             toast.finalize(p);
         },
     };
@@ -745,6 +812,16 @@ window.ryokanCopy = function (text, btn) {
                 el.textContent = rel;
             }
             el.setAttribute('title', abs);
+            // Stamp the "rendered" marker so the CSS rule
+            // `[data-ts]:not([data-ts-rendered]) { visibility: hidden }`
+            // in base.css flips the element visible. Without this
+            // marker (and the matching CSS rule), the raw `data-ts`
+            // textContent flashes briefly between body-swap and the
+            // first refresh tick — visible on every boost-nav to
+            // /search, /downloads, /series. The visibility-hidden
+            // approach preserves layout (column widths don't reflow)
+            // so the flip is just a content reveal, no jolt.
+            el.setAttribute('data-ts-rendered', '1');
         });
     }
 

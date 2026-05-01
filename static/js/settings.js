@@ -111,22 +111,32 @@ function closeCfEditorModal() {
         el.classList.remove('cf-card-selected');
     });
 }
-// Auto-open on load when the URL carries ?edit_id=N — the server
-// already rendered the pre-filled form inside the modal markup, so
-// this is just a display flip. Also handle backdrop click + Escape
-// to dismiss.
+// CF editor modal open/close lifecycle is now mostly server-driven:
+// the partial template renders `display:flex` when the handler set
+// `custom_format_edit = Some(...)` (i.e. the URL had `?edit_id=N`).
+// The JS-side dance of reading `window.location.search` from an
+// inline IIFE got into trouble under hx-boost — htmx pushes the URL
+// *after* inserted body scripts evaluate, so on a boost-nav the IIFE
+// would see the previous page's URL and leave the modal hidden until
+// the user did a hard refresh. Letting the server own the initial
+// display state sidesteps the timing problem entirely.
+//
+// What's left for JS: backdrop click + Escape dismissal. Backdrop
+// listener attaches per visit (modal element is fresh each render);
+// Escape listener is gated so it doesn't accumulate on `document`.
 (function() {
     const modal = document.getElementById('cf-editor-modal');
-    if (!modal) return;
-    const params = new URLSearchParams(window.location.search);
-    if (params.has('edit_id')) {
-        modal.style.display = 'flex';
+    if (modal) {
+        modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) closeCfEditorModal();
+        });
     }
-    modal.addEventListener('click', function(ev) {
-        if (ev.target === modal) closeCfEditorModal();
-    });
+    if (window.__ryokanCfEditorEscBound) return;
+    window.__ryokanCfEditorEscBound = true;
     document.addEventListener('keydown', function(ev) {
-        if (ev.key === 'Escape' && modal.style.display !== 'none') closeCfEditorModal();
+        const m = document.getElementById('cf-editor-modal');
+        if (!m) return;
+        if (ev.key === 'Escape' && m.style.display !== 'none') closeCfEditorModal();
     });
 })();
 
@@ -182,31 +192,40 @@ function openDcAddModal() {
         );
     }
 }
-// Test-connection result — server fires `ryokan-dc-test-result` via
-// HX-Trigger header (empty response body, so the modal footer's button
-// row doesn't grow to fit the message). Convert to a toast that
-// surfaces at the top of the viewport regardless of message length.
-document.body.addEventListener('ryokan-dc-test-result', function (ev) {
-    const detail = ev.detail || {};
-    window.ryokanToast({
-        kind: detail.ok ? 'success' : 'error',
-        title: detail.ok ? 'Connection OK' : 'Connection failed',
-        body: detail.message || '',
+// One-shot guard wraps every `addEventListener` at module scope in this
+// file. hx-boost re-runs the script on each nav-back, so an unguarded
+// `addEventListener` accumulates a copy per visit (Nth visit fires N
+// callbacks). Same pattern applied to the 2 `htmx:afterSettle` and 1
+// `DOMContentLoaded` listeners further down the file.
+if (!window.__ryokanSettingsTriggerListeners) {
+    window.__ryokanSettingsTriggerListeners = true;
+    // Test-connection result — server fires `ryokan-dc-test-result` via
+    // HX-Trigger header (empty response body, so the modal footer's
+    // button row doesn't grow to fit the message). Convert to a toast
+    // that surfaces at the top of the viewport regardless of message
+    // length.
+    document.body.addEventListener('ryokan-dc-test-result', function (ev) {
+        const detail = ev.detail || {};
+        window.ryokanToast({
+            kind: detail.ok ? 'success' : 'error',
+            title: detail.ok ? 'Connection OK' : 'Connection failed',
+            body: detail.message || '',
+        });
     });
-});
-// Indexer Test result — same shape as the DC variant. Server fires
-// `ryokan-indexer-test-result` via HX-Trigger from /api/indexers/test.
-// Used by both the modal-footer Test button (Add and Edit) and the
-// per-card Test button on the configured-indexer cards.
-document.body.addEventListener('ryokan-indexer-test-result', function (ev) {
-    const detail = ev.detail || {};
-    window.ryokanToast({
-        kind: detail.ok ? 'success' : 'error',
-        category: 'indexer',
-        title: detail.ok ? 'Indexer reachable' : 'Indexer test failed',
-        body: detail.message || '',
+    // Indexer Test result — same shape as the DC variant. Server fires
+    // `ryokan-indexer-test-result` via HX-Trigger from /api/indexers/test.
+    // Used by both the modal-footer Test button (Add and Edit) and the
+    // per-card Test button on the configured-indexer cards.
+    document.body.addEventListener('ryokan-indexer-test-result', function (ev) {
+        const detail = ev.detail || {};
+        window.ryokanToast({
+            kind: detail.ok ? 'success' : 'error',
+            category: 'indexer',
+            title: detail.ok ? 'Indexer reachable' : 'Indexer test failed',
+            body: detail.message || '',
+        });
     });
-});
+}
 // Companion to the modal-footer Test button. htmx's `hx-disabled-elt`
 // re-enables the button on htmx:afterRequest automatically, but we
 // also want the button text to flash "Testing…" while the request is
@@ -249,6 +268,8 @@ window.ryokanWaitForIndexerTest = function (btn) {
         });
     }
     bindDownloadClientModal();
+    if (window.__ryokanDcModalGlobalListeners) return;
+    window.__ryokanDcModalGlobalListeners = true;
     document.body.addEventListener('htmx:afterSwap', function(ev) {
         if (ev.target && ev.target.id === 'dc-section') {
             bindDownloadClientModal();
@@ -287,7 +308,13 @@ window.ryokanWaitForIndexerTest = function (btn) {
 // `protocol_for_kind` so the protocol-mismatch guard at save time
 // doesn't reject inputs the form description encouraged the user
 // to enter.
-const DC_KIND_COPY = {
+// `var` (not `const`) at module scope is deliberate across every per-
+// page JS file: htmx body-swap re-executes the inserted `<script>` tag
+// on every navigation back to a previously-visited page, and a
+// `let`/`const` redeclaration is a parser-stage SyntaxError that
+// rejects the whole file. See `feedback_no_module_scope_dom_under_boost`
+// memory and the matching note at the top of `system.js`.
+var DC_KIND_COPY = {
     qbittorrent: {
         url_placeholder: 'http://localhost:8080',
         url_hint: "Point at qBittorrent's Web UI base. Ryokan handles the API path internally.",
@@ -433,23 +460,33 @@ function bindDcKindCopyToForm(form) {
         applyDcKindCopy(form, kindSelect.value);
     });
 }
-// htmx swaps the modal-body when an Edit/Add modal opens. Run the
-// relabel pass on every fresh body so the initial state matches the
-// pre-selected kind (Edit) or the qBittorrent default (Add).
-document.body.addEventListener('htmx:afterSettle', function(ev) {
-    if (ev.target && ev.target.id === 'dc-modal-body') {
-        const form = ev.target.querySelector('form');
-        if (form) bindDcKindCopyToForm(form);
-    }
-});
-// Initial load (the section partial pre-renders the Add form body so
-// the modal opens fast on first click — see download_clients/list.html
-// `{%~ include "...add_form_body.html" %}`). Apply the relabel pass
-// to that pre-rendered form too so the user sees correct copy if
-// they happen to change kind before any modal swap fires.
-window.addEventListener('DOMContentLoaded', function() {
+// One-shot guard — see top of file for rationale.
+if (!window.__ryokanSettingsDcModalListeners) {
+    window.__ryokanSettingsDcModalListeners = true;
+    // htmx swaps the modal-body when an Edit/Add modal opens. Run the
+    // relabel pass on every fresh body so the initial state matches the
+    // pre-selected kind (Edit) or the qBittorrent default (Add).
+    document.body.addEventListener('htmx:afterSettle', function(ev) {
+        if (ev.target && ev.target.id === 'dc-modal-body') {
+            const form = ev.target.querySelector('form');
+            if (form) bindDcKindCopyToForm(form);
+        }
+    });
+    // Initial load (the section partial pre-renders the Add form body
+    // so the modal opens fast on first click — see
+    // download_clients/list.html
+    // `{%~ include "...add_form_body.html" %}`). Apply the relabel pass
+    // to that pre-rendered form too so the user sees correct copy if
+    // they happen to change kind before any modal swap fires.
+    //
+    // DOMContentLoaded already fired by the time hx-boost re-runs this
+    // file on a nav-back, so the listener attaches but never fires
+    // again. Run the apply directly to cover the boost-nav case.
+    window.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('#dc-modal-body form').forEach(bindDcKindCopyToForm);
+    });
     document.querySelectorAll('#dc-modal-body form').forEach(bindDcKindCopyToForm);
-});
+}
 
 // ── Settings → Indexers shared add/edit modal ─────────────────────
 // Mirrors the DC modal flow. Catalog seed cards →
@@ -517,6 +554,8 @@ function openIndexerAddModal(slug, name) {
         });
     }
     bindIndexerModal();
+    if (window.__ryokanIndexerModalGlobalListeners) return;
+    window.__ryokanIndexerModalGlobalListeners = true;
     document.body.addEventListener('htmx:afterSwap', function(ev) {
         if (ev.target && ev.target.id === 'indexer-section') {
             bindIndexerModal();
@@ -540,7 +579,7 @@ function openIndexerAddModal(slug, name) {
 // path conventions. Without this, both kinds shared the torznab-
 // only hint copy, which read incorrectly when the user picked
 // newznab.
-const INDEXER_KIND_COPY = {
+var INDEXER_KIND_COPY = {
     torznab: {
         url_placeholder: 'https://prowlarr.local/{N}/api',
         api_key_hint: "Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them. Find this key in Prowlarr Settings → General (or Jackett's UI).",
@@ -568,12 +607,16 @@ function bindIndexerKindCopyToForm(form) {
         applyIndexerKindCopy(form, kindSelect.value);
     });
 }
-document.body.addEventListener('htmx:afterSettle', function(ev) {
-    if (ev.target && ev.target.id === 'indexer-modal-body') {
-        const form = ev.target.querySelector('form');
-        if (form) bindIndexerKindCopyToForm(form);
-    }
-});
+// One-shot guard — see top of file for rationale.
+if (!window.__ryokanSettingsIndexerModalListener) {
+    window.__ryokanSettingsIndexerModalListener = true;
+    document.body.addEventListener('htmx:afterSettle', function(ev) {
+        if (ev.target && ev.target.id === 'indexer-modal-body') {
+            const form = ev.target.querySelector('form');
+            if (form) bindIndexerKindCopyToForm(form);
+        }
+    });
+}
 
 // #11.4 — CF export selector. Radios pick the mode, checkboxes pick the
 // ids, then two actions: download the file (via the existing GET endpoint)
@@ -915,6 +958,8 @@ function buildCfImportResolvePayload(form) {
 // close). Clears the flag on submit so the save itself doesn't trigger
 // the prompt.
 (function () {
+    if (window.__ryokanSettingsDirtyGuardInit) return;
+    window.__ryokanSettingsDirtyGuardInit = true;
     const form = document.querySelector('form.settings-form[action="/settings"]');
     if (!form) return;
     let dirty = false;
@@ -950,7 +995,7 @@ function buildCfImportResolvePayload(form) {
 // Origin of the gh-pages-hosted broker page that AL/MAL redirect to
 // after user approval. The postMessage receiver below validates
 // `event.origin` against this value before reading any data.
-const EXT_BROKER_ORIGIN = 'https://johnthreekay.github.io';
+var EXT_BROKER_ORIGIN = 'https://johnthreekay.github.io';
 
 // Single in-flight link attempt at module scope. Holds the
 // {handler, timer, provider} for the active OAuth flow so a second
@@ -960,7 +1005,7 @@ const EXT_BROKER_ORIGIN = 'https://johnthreekay.github.io';
 // both listeners alive — and since both modals share fixed input
 // IDs, the AL postMessage would auto-fill the MAL modal and
 // trigger an AL submit while the user was looking at MAL.
-let _extLinkAttempt = null;
+var _extLinkAttempt = null;
 
 function clearExtLinkAttempt() {
     if (!_extLinkAttempt) return;
@@ -1229,7 +1274,7 @@ function syncWatchListNow() {
         });
 }
 
-let _extPrefsSaveTimer = null;
+var _extPrefsSaveTimer = null;
 function saveExternalAccountPrefs() {
     // Debounce so the user toggling three checkboxes in a row doesn't
     // fire three POSTs back-to-back.
@@ -1262,7 +1307,25 @@ function saveExternalAccountPrefs() {
 // browsing Settings sees "last sync 4 minutes ago" tick over to
 // "5 minutes ago" without reloading. Idempotent: if the page has
 // no marker elements it's a no-op + the timer is skipped.
+//
+// Singleton guard: hx-boost re-runs this script on every nav-back to
+// Settings. Without the guard, each visit starts another `setInterval`
+// + attaches another `DOMContentLoaded` listener (the latter is a
+// harmless no-op on boost-navs — DOMContentLoaded already fired — but
+// the timer accumulation is a real CPU leak). Clear any prior timer
+// so the latest visit wins; the IIFE itself uses an inner early-return
+// guard so its DOMContentLoaded attach + initial tick only fire once.
+if (window.__ryokanSettingsRelativeTimeTimer) {
+    clearInterval(window.__ryokanSettingsRelativeTimeTimer);
+    window.__ryokanSettingsRelativeTimeTimer = null;
+}
 (function () {
+    // First-run-only flag for the DOMContentLoaded listener attach +
+    // initial tick. The setInterval is reset every visit (the outer
+    // clearInterval ensures single-timer semantics).
+    const firstRun = !window.__ryokanSettingsRelativeTimeInit;
+    window.__ryokanSettingsRelativeTimeInit = true;
+
     function humanize(unixTs, nowSec) {
         const delta = Math.max(0, nowSec - unixTs);
         if (delta < 60) return 'Just now';
@@ -1289,12 +1352,19 @@ function saveExternalAccountPrefs() {
 
     // First tick immediately so any clock drift since the
     // server-render gets corrected on page load. Then every 30s.
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', tick);
+    if (firstRun) {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', tick);
+        } else {
+            tick();
+        }
     } else {
+        // Boost-nav re-entry: DOMContentLoaded already fired ages ago
+        // and tick() may not have run since. Run it once so the
+        // freshly-rendered timestamp markers update immediately.
         tick();
     }
-    setInterval(tick, 30 * 1000);
+    window.__ryokanSettingsRelativeTimeTimer = setInterval(tick, 30 * 1000);
 })();
 
 // Per-indexer Download Client dropdown: filter options by protocol so
