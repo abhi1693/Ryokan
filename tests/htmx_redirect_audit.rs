@@ -16,7 +16,7 @@
 //!   boost active; redirects from these are the FIRST page load).
 //! - `src/handlers/auth/mod.rs::setup_submit::Ok(true)` branch — same
 //!   as above.
-//! - `src/handlers/library/pages.rs::needs_review_page` — 308 permanent
+//! - `src/handlers/library/pages/mod.rs::needs_review_page` — 308 permanent
 //!   for a moved URL; documented inline as boost-safe (target is a
 //!   top-level page render, no form context to nest into).
 //! - `src/handlers/responses.rs` — the helper itself uses
@@ -54,7 +54,7 @@ const EXPECTED_REDIRECTS: &[(&str, usize)] = &[
     // All never reached via boost; documented above.
     ("src/handlers/auth/mod.rs", 3),
     // 308 permanent for moved /library/review URL — boost-safe.
-    ("src/handlers/library/pages.rs", 1),
+    ("src/handlers/library/pages/mod.rs", 1),
     // Blocklist row removal — is_htmx branch is the empty 200 swap;
     // `Redirect::to` only fires in the `!is_htmx` arm.
     ("src/handlers/downloads.rs", 1),

@@ -3,7 +3,7 @@
 //! `ClassificationResult`, so these tests drive it directly with
 //! in-memory fixtures — no DB or network.
 
-use super::*;
+use super::super::*;
 use crate::models::episode_tags::EpisodeQualityTag;
 use crate::services::source::DecisionRule;
 

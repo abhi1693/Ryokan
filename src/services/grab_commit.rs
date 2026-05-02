@@ -112,7 +112,29 @@ pub async fn commit_grab_and_expand(
     )
     .await
     {
-        Ok(Some(id)) => id,
+        Ok(Some(id)) => {
+            // Stamp the dispatch client id captured at preview time so
+            // post-processing's `resolve_grab_client` routes the import /
+            // delete back through the same client even if defaults change.
+            // Without this, picker-confirm and walkaway-auto-commit grabs
+            // land NULL-stamped: SAB rows are still rescued by the
+            // `SABnzbd_nzo_` hash heuristic, but a BT grab routed to a
+            // non-default client (e.g. indexer pinned to seedbox-qBit
+            // while local-qBit is the default) silently falls through to
+            // the torrent default at import time.
+            if let Err(e) =
+                grabbed_torrents::set_download_client(&state.db, id, row.download_client_id).await
+            {
+                logger::warn(
+                    &state.db,
+                    LogCategory::Grab,
+                    "set_download_client failed after record_grab",
+                    &format!("{} ({})", e, row.info_hash),
+                )
+                .await;
+            }
+            id
+        }
         Ok(None) => {
             // Dedup hit against an in-flight `pending` row — another
             // flow is mid-commit on this hash. Don't stomp it; the
@@ -408,6 +430,51 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1, "exactly one row should exist after the dedup");
+    }
+
+    #[tokio::test]
+    async fn commit_stamps_download_client_id_from_pending_grab() {
+        // Picker confirm + walkaway auto-commit both flow through this
+        // helper. Without the stamp, post-processing's resolve_grab_client
+        // can't route the import / delete back through the same client
+        // that received the grab — a non-default-client BT pin would
+        // silently fall through to the torrent default at import.
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 500, "Show").await;
+        let state = build_test_app_state(db.clone(), None);
+        let mut row = pending_grab_for(Some(series_id), "stamp-hash");
+        row.download_client_id = Some(7);
+        let id = commit_grab_and_expand(&state, &row, vec![], "[G] Show - 01.mkv", false)
+            .await
+            .expect("commit");
+        let stamped: Option<i64> =
+            sqlx::query_scalar("SELECT download_client_id FROM grabbed_torrents WHERE id = ?")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(stamped, Some(7));
+    }
+
+    #[tokio::test]
+    async fn commit_leaves_download_client_id_null_when_pending_row_has_none() {
+        // Bare-magnet / legacy pending rows with no client capture still
+        // round-trip cleanly: the stamp call writes NULL, which is the
+        // sentinel post-processing's heuristic chain expects.
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 501, "Show").await;
+        let state = build_test_app_state(db.clone(), None);
+        let row = pending_grab_for(Some(series_id), "null-stamp-hash");
+        let id = commit_grab_and_expand(&state, &row, vec![], "[G] Show - 02.mkv", false)
+            .await
+            .expect("commit");
+        let stamped: Option<i64> =
+            sqlx::query_scalar("SELECT download_client_id FROM grabbed_torrents WHERE id = ?")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(stamped, None);
     }
 
     #[tokio::test]

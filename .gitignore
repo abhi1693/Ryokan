@@ -4,5 +4,7 @@
 *.db-shm
 *.db-wal
 .env
-/.claude
+/.claude/*
+!/.claude/agents/
+!/.claude/skills/
 mutants.out/

@@ -1,8 +1,0 @@
----
-source: tests/pr0_foundation.rs
-expression: keys
----
-[
-  "download_client",
-  "jellyfin"
-]
