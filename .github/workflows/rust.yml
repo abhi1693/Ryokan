@@ -10,12 +10,24 @@ concurrency:
   group: rust-${{ github.ref }}
   cancel-in-progress: true
 
+# Default token scope. The fmt/clippy/build/test job only needs to read
+# repo contents — the previous absence of an explicit block defaulted
+# to GitHub's permissive token (write to most scopes), which is
+# excessive for a CI verify pass.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # GitHub's per-job default is 6h; the verify pass should never
+    # exceed ~10 min on ubuntu-latest, so 30 min is a generous ceiling
+    # that still terminates a hung step (e.g. a flaky wiremock binding
+    # eating the runner) before it burns hours of runner minutes.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -72,6 +84,10 @@ jobs:
     # care about here is strictly "does the code compile on 1.95?"
     name: MSRV (1.95)
     runs-on: ubuntu-latest
+    # MSRV build is just `cargo build --workspace --locked` — even on a
+    # cold cache it runs in ~5 min. 20 min ceiling guards against a
+    # hung dep download.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0

@@ -10,6 +10,15 @@ on:
   pull_request_review:
     types: [submitted]
 
+# Two `@claude` mentions in quick succession on the same issue/PR used
+# to spawn parallel runs that fought over the same checkout / branch.
+# Serialize per-issue (or per-PR) so the second comment waits for the
+# first to finish. `cancel-in-progress: false` so a follow-up question
+# doesn't kill an in-progress reply.
+concurrency:
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   claude:
     # Trust gate: the `@claude` string alone is insufficient on a public
@@ -37,6 +46,11 @@ jobs:
         (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
         contains(fromJson('["OWNER"]'), github.event.issue.author_association))
     runs-on: ubuntu-latest
+    # Claude Code typically responds in under 5 min; 30 min is a hard
+    # ceiling against a stuck API call or runaway tool loop. Without
+    # this, a hang inherits GitHub's 6h default and silently bills the
+    # full window before the runner kills it.
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write
