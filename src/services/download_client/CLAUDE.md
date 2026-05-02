@@ -48,9 +48,13 @@ Ryokan and the client don't always see the same filesystem (Docker volumes on di
 
 Do not reintroduce a single shared global remote-path mapping.
 
-## Megapack narrowing
+## Selective downloads — two flows
 
-`add_torrent_with_file_filter` pauses the torrent, waits for metadata, runs the caller's `pick` closure over the file names, sets non-picked files to skip, resumes. Used from the interactive selective-download flow with a **10s** metadata ceiling (the user is waiting). Each impl handles its own wait-and-narrow loop and **must be idempotent on retry**: read each file's `wanted` flag back before changing it so a re-narrow doesn't clobber user edits.
+There are two ways to add a torrent and pick a subset of files. Don't conflate them.
+
+**1. Automated (callback): `add_torrent_with_file_filter`.** Pauses the torrent, waits for metadata, runs the caller's `pick` closure over the file names, sets non-picked files to skip, resumes. Used from auto-search's batch-with-selective branch and `library/search/grab.rs`. **10s** metadata ceiling (the user is waiting). Each impl handles its own wait-and-narrow loop and **must be idempotent on retry**: read each file's `wanted` flag back before changing it so a re-narrow doesn't clobber user edits. The `pick` callback is `&mut dyn FnMut` to keep the trait object-safe.
+
+**2. Interactive (preview→confirm): `add_torrent_paused` + `get_files` + `set_file_wanted` + `resume`.** Used by the grab picker (`handlers/grab.rs:329`). Preview adds the torrent paused, `get_files` lists what's inside, the user picks via the modal UI, confirm calls `set_file_wanted` then `resume`. Reads through `models::pending_grabs` (the preview persists rows there until confirmed/cancelled). The grab-sweep task GC's previews after `HEARTBEAT_TTL_SECS + SWEEP_INTERVAL ≈ 2 min` of inactivity. SAB has a private `add_torrent_paused_returning_id` so the impl can capture the `nzo_id` from the paused-add path.
 
 Distinct from `services::auto_expand` (sibling-series detection inside a batch pack — different problem, different code path).
 
