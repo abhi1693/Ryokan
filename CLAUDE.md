@@ -126,25 +126,11 @@ Defined in `src/lib.rs`. Fields:
 
 ## Background tasks
 
-Each runs as a `tokio::spawn` loop in `main.rs` wrapped in `supervise()`, which catches panics/join errors, logs them, and respawns. **Restart policy is exponential backoff**, not flat 5s: `MIN_BACKOFF = 5s`, `MAX_BACKOFF = 30 min`, `HEALTHY_RUNTIME = 60s`. Healthy ≥60s run resets to 5s; <60s exit doubles up to 30 min. Two layers of status tracking:
+Each runs as a `tokio::spawn` loop in `main.rs` wrapped in `supervise()`. The supervised list (10 tasks: `progress_sweep`, `rss_sync`, `post_processing`, `grab_sweep`, `external_sync`, `cleanup`, `library_classify`, `metadata_refresh`, `upgrade_search`, `anibridge_refresh`) and intervals are inline in `main.rs` — grep `supervise(&` for the canonical names. Non-obvious bits the code doesn't explain on its own:
 
-- **`scheduled_task_runs` DB table** — historical record (when did task X last run? success/failure?). Read by the System page for the per-task history pane.
-- **`AppState.tasks: TaskRegistry`** — in-memory live status (`running` / `backoff`, restart count, last exit kind, current backoff). Lock-free hot path — supervise grabs an `Arc<TaskState>` once at register time and mutates atomics; snapshot read happens on `/api/system/tasks`. The exit-kind enum distinguishes `Normal` (returned `()` from outer loop — shouldn't happen with `loop { … }` shape) from `Panic` (real bug to investigate).
-
-| Task | Interval |
-|---|---|
-| `progress_sweep` (drop terminal jobs >60s past final event) | 30s |
-| `rss_sync` | 60s |
-| `post_processing` | 60s |
-| `grab_sweep` (auto-commit grabs after `HEARTBEAT_TTL_SECS + SWEEP_INTERVAL ≈ 2 min`) | 60s |
-| `external_sync` (AL/MAL watch-list) | user-configurable 15min–7d, 30min default |
-| `cleanup` (log rotation, stale rows, login-throttle prune) | 1h |
-| `library_classify` | 6h |
-| `metadata_refresh` | 12h |
-| `upgrade_search` | 24h |
-| `anibridge_refresh` (TMDB↔AniList map rebuild) | 24h |
-
-`external_sync` quirks: 1-min outer tick re-reads `config.external_sync_interval_minutes` (Settings change takes effect within 60s); extra `consecutive_errors`-driven exponential skip (2^errors intervals, capped at 5 → 32× multiplier, with outer 24h ceiling so a 7-day cadence can't get pushed seven months by five errors); `has_linked_account` early-out so no `scheduled_task_runs` row burns when no account is linked.
+- **Restart policy is exponential backoff**, not flat 5s: `MIN_BACKOFF = 5s`, `MAX_BACKOFF = 30 min`, `HEALTHY_RUNTIME = 60s`. Healthy ≥60s run resets to 5s; <60s exit doubles up to 30 min.
+- **Two layers of status tracking** — `scheduled_task_runs` DB table is the historical record (System page per-task history pane); `AppState.tasks: TaskRegistry` is the in-memory live status served at `/api/system/tasks` (lock-free atomics, snapshot-on-read).
+- **`external_sync` quirks**: 1-min outer tick re-reads `config.external_sync_interval_minutes` (Settings change takes effect within 60s); `consecutive_errors`-driven exponential skip (2^errors intervals, capped at 5 → 32× multiplier, with 24h ceiling so a 7-day cadence can't get pushed seven months by five errors); `has_linked_account` early-out so no `scheduled_task_runs` row burns when no account is linked.
 
 ## Cross-cutting conventions
 
@@ -200,21 +186,21 @@ Static `LazyLock`s crossing request boundaries — inventory:
 
 ## Routes
 
-`main.rs` merges these route groups:
+Four route groups in `main.rs`, each with a different auth layer — pick the right group when adding a new route:
 
-- `public_routes` — unauthenticated endpoints (`/login`, `/setup`, `/forgot-password`) wrapped in `csrf_public` so POST paths still enforce Origin/Referer.
-- `protected_routes` — everything behind `require_auth` (library, search, downloads, settings, system, the API endpoints the web UI calls — `/api/health`, `/api/library/*`, `/api/progress/*`, `/api/system/tasks`).
-- `sonarr_routes` + `radarr_routes` — merged **outside** the cookie-auth layer with `arr_auth` middleware instead.
-- `webhook_routes` — merged outside cookie-auth with each receiver's own API-key middleware. Currently only `/api/webhook/autobrr`.
+- **`public_routes`** — unauthenticated; wrapped in `csrf_public` so POSTs still enforce Origin/Referer (`/login`, `/setup`, `/forgot-password`).
+- **`protected_routes`** — behind `require_auth` cookie middleware. Default for all UI routes and web-UI-facing API endpoints.
+- **`sonarr_routes` + `radarr_routes`** — merged *outside* the cookie-auth layer; use `arr_auth::check_api_key` instead.
+- **`webhook_routes`** — outside cookie-auth; each receiver carries its own API-key middleware.
 
-Compression layer wraps everything (`CompressionLayer::new().br(true).gzip(true)`). `/static/*` is served via `ServeDir` with `Cache-Control: public, max-age=3600` (one hour — short enough to pick up edited CSS during local dev on hard reload).
-
-There is no `/healthz`. The closest is `/api/health` (auth-gated, JSON status). **The Docker healthcheck deliberately probes `/login`** (200 with no auth, no config dependency, no side effects).
+There is no `/healthz`. **The Docker healthcheck deliberately probes `/login`** (200 with no auth, no config dependency, no side effects) rather than the auth-gated `/api/health`.
 
 ## Docker
 
-- `docker-entrypoint.sh` runs as root, ensures a `ryokan` user/group with UID/GID matching `PUID` / `PGID` (creating or `usermod`/`groupmod`-ing in place), chowns `/data` to that user, then execs Ryokan under `gosu`. Data-volume chown is gated on "not already correctly owned" so a warm start is a no-op scan; on a PUID change it quietly re-chowns. **User-mounted `/downloads` and `/media/*` paths are intentionally left alone** — chowning a 10TB media library would stall startup for hours and could clobber ownership the rest of an *arr stack relies on. User picks PUID/PGID that already owns those paths on the host (matches linuxserver.io convention).
-- Dockerfile cache: `Cargo.toml` + `Cargo.lock*` (glob — tolerates first build without lockfile) copied first, empty `fn main() {}` written to `src/main.rs`, `cargo build --release` primes the dependency cache. Real `src/`, `templates/`, `static/` copied after, `touch src/main.rs` + second `cargo build --release` rebuilds only Ryokan's own code. **`static/` is copied twice** — once into builder (for `include_str!` of `default_custom_formats.json`), once into runtime (for ServeDir). Not a bug.
+`docker-entrypoint.sh` runs as root, ensures a `ryokan` user/group matching `PUID`/`PGID`, chowns `/data`, then execs under `gosu`. Two non-obvious deliberate choices (don't "fix" either of these):
+
+- **User-mounted `/downloads` and `/media/*` paths are intentionally NOT chowned.** Chowning a 10TB media library would stall startup for hours and could clobber ownership the rest of an *arr stack relies on. The user picks a `PUID`/`PGID` that already owns those paths on the host (linuxserver.io convention).
+- **`static/` is copied into BOTH stages of the Dockerfile.** Builder needs it for `include_str!("../../static/default_custom_formats.json")`; runtime needs it for `ServeDir`. Looks like duplication; isn't.
 
 ## Tests (one-paragraph summary; deep dive in `tests/CLAUDE.md`)
 
@@ -222,7 +208,7 @@ Most tests live inline as `#[cfg(test)] mod tests`; integration tests in `tests/
 
 ## CI
 
-- **`rust.yml`** — push to main/dev + PR to main, `rust-${{ github.ref }}` concurrency with `cancel-in-progress: true`. Order: `cargo fmt --all -- --check` → `cargo clippy --workspace --all-targets --features test-support -- -D warnings` → `cargo build --workspace --locked` → `cargo test --workspace --locked --features test-support`. Always run all four locally before pushing — fmt is easy to forget and the pipeline short-circuits on it before the slower steps.
-- **`cargo-audit.yml`** — push to main, PRs to main touching `Cargo.lock` / `Cargo.toml`, weekly cron Mondays 09:00 UTC. The sqlx `default-features = false` exists to prune the phantom `rsa` RUSTSEC-2023-0071 advisory at source — **don't re-enable sqlx defaults** without confirming upstream resolution.
-- **`docker.yml`** — push to main/dev + `v*.*.*` tags. Per-platform matrix on native amd64 + arm64 runners (no QEMU). Pushes digest-only refs to `ghcr.io/johnthreekay/ryokan` (lowercased — GHCR requires lowercase image names; the repo is capitalized "Ryokan").
-- **`claude.yml`** — Claude Code workflow integration on `@claude` mentions. `actions: read` is required for reading CI results on the PR being commented on.
+Four workflows in `.github/workflows/`: `rust.yml` (fmt → clippy → build → test), `cargo-audit.yml` (weekly + on Cargo lock changes), `docker.yml` (native amd64/arm64 → GHCR on tags), `claude.yml` (`@claude` mentions). Build & Run section above lists the four lint commands to run locally before pushing. Two non-obvious traps:
+
+- **Don't re-enable sqlx default features.** `default-features = false` in `Cargo.toml` is what prunes the phantom `rsa` RUSTSEC-2023-0071 advisory at source. Re-enabling defaults pulls `rsa` back in and turns `cargo-audit.yml` red.
+- **GHCR image name must be lowercase** (`ghcr.io/johnthreekay/ryokan`). The repo is capitalized "Ryokan" but `IMAGE_NAME` lowercases it — GHCR rejects uppercase image names.
