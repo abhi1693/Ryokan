@@ -31,11 +31,6 @@ browser-e2e = ["dep:fantoccini"]
 # the crate buildable both ways: production/Docker builds stay clean,
 # and CI's `cargo test --features test-support` picks up everything.
 [[test]]
-name = "pr0_foundation"
-path = "tests/pr0_foundation.rs"
-required-features = ["test-support"]
-
-[[test]]
 name = "htmx_foundation"
 path = "tests/htmx_foundation.rs"
 required-features = ["test-support"]

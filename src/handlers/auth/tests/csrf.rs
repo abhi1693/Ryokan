@@ -3,10 +3,10 @@
 //! `X-Forwarded-Host` allowed-hosts expansion gated on trust.
 //!
 //! Pure function tests — full middleware wiring (what happens when
-//! `csrf_public` rejects) is covered by integration tests in
-//! `tests/pr0_foundation.rs` style files in later PRs. Here we pin
-//! the decision function itself so the middleware calling it can't
-//! silently change policy without a test failure.
+//! `csrf_public` rejects) is covered by the integration test suite
+//! under `tests/`. Here we pin the decision function itself so the
+//! middleware calling it can't silently change policy without a test
+//! failure.
 
 use axum::body::Body;
 use axum::http::{Method, Request, header};
