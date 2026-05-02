@@ -595,9 +595,16 @@ async fn import_torrent(
     // downloading by definition) so the rest of the import loop
     // works unchanged.
     if files.is_empty() {
-        let walk_root = Path::new(&source_base);
+        let walk_root = Path::new(&source_base).to_path_buf();
         if walk_root.is_dir() {
-            files = walk_video_files(walk_root);
+            // Recursive sync read_dir; cross the >5ms threshold easily on
+            // a SAB BD-pack with hundreds of files. Hop to the blocking
+            // pool so the supervised post-processing tick doesn't stall
+            // the runtime while filesystem I/O waits.
+            let walk_root_for_blocking = walk_root.clone();
+            files = tokio::task::spawn_blocking(move || walk_video_files(&walk_root_for_blocking))
+                .await
+                .unwrap_or_default();
         } else {
             // SAB's `canonical_job_path` case-3 candidate (constructed
             // as `<storage>/<title>/` when SAB reports the parent
@@ -1993,9 +2000,16 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         // empty list is fine (the grab might be a torrent with no
         // .mkv-shaped extension, or the path might not be readable
         // from Ryokan's view).
-        let walk_root = std::path::Path::new(&client_path);
+        let walk_root = std::path::Path::new(&client_path).to_path_buf();
         if walk_root.is_dir() {
-            let videos = walk_video_files(walk_root);
+            // Same blocking-pool hop as the import-time call site —
+            // recursive sync read_dir on a multi-file pack mustn't run
+            // on the runtime thread.
+            let walk_root_for_blocking = walk_root.clone();
+            let videos =
+                tokio::task::spawn_blocking(move || walk_video_files(&walk_root_for_blocking))
+                    .await
+                    .unwrap_or_default();
             let source_paths: Vec<String> = videos
                 .into_iter()
                 .map(|f| walk_root.join(&f.name).display().to_string())
