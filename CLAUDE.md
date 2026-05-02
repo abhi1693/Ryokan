@@ -87,7 +87,7 @@ Axum 0.8 + Tokio · SQLite via sqlx 0.8 (`default-features = false` + `runtime-t
 - **`templates/`** — Askama templates. HTMX patterns + per-page JS lifecycle: **`templates/CLAUDE.md`**.
 - **`static/`** — Modular CSS (`base.css`, `topbar.css`, `forms.css`, `badges.css`, `modals.css` loaded everywhere + per-page `pages/<name>.css`) and per-page `static/js/*.js`. No bundler. `static/default_custom_formats.json` is the only non-CSS / non-JS asset (also embedded via `include_str!` at compile time).
 - **`tests/`** — Integration tests (binary crates importing `ryokan` as a lib). Browser-e2e harness for HTMX UI assertions. **`tests/CLAUDE.md`**.
-- **`fixtures/trash-guides-anime/`** — 28 vendored TRaSH-Guides anime CF JSONs, bundled via `include_str!`.
+- **`fixtures/trash-guides-anime/`** — 28 vendored real-shape TRaSH-Guides anime CF JSONs. **Test-only corpus** for the CF parser (`services/custom_formats/parser.rs::TRASH_ANIME_FIXTURES`); each is `include_str!`'d so the test needs no filesystem / network access. Doubles as a regression guard for the object/array `fields` bug — if either exporter shape stops parsing, every fixture breaks at once. Not user-facing defaults (those live in `static/default_custom_formats.json`).
 
 ## AppState
 
