@@ -678,59 +678,6 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
     *cache.write().await = pool;
 }
 
-pub fn build_download_client(
-    config: &crate::models::config::Config,
-) -> Option<std::sync::Arc<dyn DownloadClient>> {
-    match config.active_client.as_str() {
-        "deluge" => {
-            if config.deluge_url.is_empty() {
-                return None;
-            }
-            Some(std::sync::Arc::new(deluge::DelugeClient::new(
-                &config.deluge_url,
-                &config.deluge_password,
-                &config.deluge_label,
-            )))
-        }
-        "transmission" => {
-            if config.transmission_url.is_empty() {
-                return None;
-            }
-            Some(std::sync::Arc::new(transmission::TransmissionClient::new(
-                &config.transmission_url,
-                &config.transmission_user,
-                &config.transmission_password,
-                &config.transmission_label,
-            )))
-        }
-        "rtorrent" => {
-            if config.rtorrent_url.is_empty() {
-                return None;
-            }
-            Some(std::sync::Arc::new(rtorrent::RtorrentClient::new(
-                &config.rtorrent_url,
-                &config.rtorrent_user,
-                &config.rtorrent_password,
-                &config.rtorrent_label,
-            )))
-        }
-        // "qbittorrent" or any unknown value — qBit is the safe
-        // default to preserve pre-Phase-2 behavior for unrecognized
-        // discriminators.
-        _ => {
-            if config.qbit_url.is_empty() {
-                return None;
-            }
-            Some(std::sync::Arc::new(qbittorrent::QbitClient::new(
-                &config.qbit_url,
-                &config.qbit_user,
-                &config.qbit_pass,
-                &config.qbit_category,
-            )))
-        }
-    }
-}
-
 /// Poll `get_files` until non-empty or `timeout` elapses. 500ms
 /// initial interval, doubling up to a 2s cap. Used by callers that
 /// need the file list before proceeding (e.g. the 180s background
