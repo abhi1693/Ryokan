@@ -53,7 +53,12 @@ ENV PGID=1000
 
 EXPOSE 8978
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# start-period covers cold first-boot work before axum::serve binds:
+# `models::migrate` (idempotent ALTER TABLEs across the schema),
+# `bcrypt::warm_timing_equalizer` spawn_blocking, `rebuild_clients_cache`,
+# optional Jellyfin client init. 10s was tight on a cold-data ARM64
+# first-run; 30s matches the CI smoke-test poll budget.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://localhost:8978/login || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

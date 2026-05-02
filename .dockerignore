@@ -1,0 +1,48 @@
+# Most maintainers build with `cargo`; Docker is for prod/CI. This file
+# exists primarily as a *safety net* so a future `COPY . .` in the
+# Dockerfile can't accidentally pull `data/.ryokan-key` (the AEAD key
+# for OAuth-token encryption) or `data/ryokan.db` (the live SQLite DB)
+# into image layers that ship to GHCR. Build-context size is the
+# secondary win — `target/` alone can be hundreds of GB.
+
+# Cargo build artifacts.
+target/
+
+# Local SQLite database, artwork blob cache, AEAD key, and any sentinel
+# files. The `RYOKAN_ENCRYPTION_KEY` fallback at `data/.ryokan-key`
+# (raw 32 bytes, mode 0600) MUST NOT enter image layers.
+data/
+
+# Git history (the runtime image doesn't need it).
+.git/
+.gitignore
+
+# Local mutation-testing artifacts.
+mutants.out/
+
+# Editor / IDE / OS clutter.
+.vscode/
+.idea/
+.DS_Store
+
+# Claude Code workspace settings — agents/ and skills/ live here but
+# aren't needed in the image. The repo's .gitignore already shares the
+# subset that ships in git.
+.claude/
+
+# Documentation and CI configs aren't compiled into the binary.
+.github/
+*.md
+!README.md
+
+# Build/dev tooling not needed in the image.
+.config/
+.env
+.env.*
+!.env.example
+
+# Tests + fixtures are excluded from the binary build (they're
+# integration test crates gated by `--features test-support`).
+# Keeping them out of the build context shaves the upload further.
+tests/
+fixtures/

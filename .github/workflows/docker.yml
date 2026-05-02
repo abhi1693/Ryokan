@@ -74,18 +74,25 @@ jobs:
             -e LISTEN_ADDR=0.0.0.0:8978 \
             -p 8978:8978 \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          # poll for readiness rather than sleeping
+          # Probe /login (matches the production HEALTHCHECK). 200 means
+          # the auth UI rendered; anything else fails. Polling loop
+          # rather than fixed sleep so a fast cold-boot doesn't waste a
+          # full minute on every CI run.
           for i in {1..30}; do
-            if curl -sf http://localhost:8978/ >/dev/null 2>&1 \
-               || [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8978/)" = "302" ]; then
-              echo "Ryokan responded"
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8978/login)
+            if [ "$code" = "200" ]; then
+              echo "Ryokan /login responded 200"
               exit 0
             fi
             sleep 1
           done
-          echo "Ryokan never came up"
+          echo "Ryokan never came up (last code: $code)"
           docker logs ryokan-smoke
           exit 1
+
+      - name: Tear down smoke-test container
+        if: always() && matrix.platform == 'linux/amd64'
+        run: docker rm -f ryokan-smoke || true
 
       - name: Export digest
         run: |
@@ -114,7 +121,11 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v8
+        # Pinned to v7 to match `upload-artifact@v7` above. v8 of
+        # download-artifact exists but there's no v8 of upload-artifact
+        # yet, and v7↔v8 mixing has produced ambiguous archives in the
+        # past (compression-default change between majors).
+        uses: actions/download-artifact@v7
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
