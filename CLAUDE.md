@@ -14,15 +14,33 @@ Release scoring combines Sonarr-style **Custom Formats** (TRaSH-Guides-compatibl
 
 ```bash
 cargo build [--release]
-cargo run                                              # 0.0.0.0:8978, creates data/ryokan.db
-cargo nextest run --workspace --features test-support  # canonical test entry; ~2-3× faster than cargo test
-cargo nextest run --workspace --features test-support <test_name>   # single-test filter
-cargo test --workspace --features test-support         # CI-shape fallback (doc tests, --locked)
-cargo clippy
+cargo run                                                                # 0.0.0.0:8978, creates data/ryokan.db
 docker compose up -d --build
+
+# Tests — `cargo t` is the canonical alias (defined in .cargo/config.toml)
+cargo t                                                                  # = cargo nextest run --features test-support
+cargo t <test_name>                                                      # single-test filter (same syntax as cargo test <name>)
+cargo nextest run --workspace --features test-support                    # explicit form
+cargo test --workspace --locked --features test-support                  # CI-shape fallback (doc tests, --locked)
+
+# Lint / format / coverage
+cargo fmt --all -- --check                                               # CI runs this first; short-circuits on failure
+cargo clippy --workspace --all-targets --features test-support -- -D warnings   # CI form — `--all-targets` covers tests too
+cargo llvm-cov --workspace --features test-support                       # coverage; cargo-llvm-cov 0.8+ installed locally
 ```
 
-Toolchain: Rust 1.95+ (enforced via `package.rust-version`), C/C++ toolchain (vendored anitomy + bundled SQLite), `cmake` (aws-lc-sys for rustls). No OpenSSL needed — TLS is pure-Rust rustls + aws-lc.
+**Toolchain requirements:**
+
+- **Rust 1.95+** (enforced via `package.rust-version`).
+- **C/C++ toolchain** (vendored anitomy + bundled SQLite) and **`cmake`** (aws-lc-sys for rustls). No OpenSSL — TLS is pure-Rust rustls + aws-lc.
+- **`mold` + `clang`** — `.cargo/config.toml` pins `linker = "clang"` with `-fuse-ld=mold` for x86_64 + aarch64 Linux. Cuts incremental link time 3-5× vs ld/lld; without them a build fails with `"linker 'clang' not found"` or `"ld.mold not found"`. Install: `pacman -S mold clang` (Arch) / `apt install mold clang` (Ubuntu 22.04+). CI installs both via apt before the build steps.
+- **`cargo-nextest`** for `cargo t`. Falls through to `cargo test` if not installed, but nextest is the default. Install: `cargo install cargo-nextest --locked`.
+- **`cargo-llvm-cov`** for coverage (optional). Install: `cargo install cargo-llvm-cov --locked`.
+
+**Test profile / nextest config:**
+
+- `[profile.test.package."*"] opt-level = 1` in `Cargo.toml` — dependencies build optimized so wiremock/sqlx/regex hot paths run 2-3× faster; Ryokan's own code stays at `opt-level = 0` for fast incremental rebuilds.
+- `.config/nextest.toml`: default profile retries failures once (matches `cargo test` behavior so a flaky wiremock port-bind doesn't fail the whole run), slow-warn at 60s and terminate at 180s. The `ci` profile bumps retries to 2, `fail-fast = false`, and emits `junit.xml`.
 
 ## Environment Variables
 
