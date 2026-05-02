@@ -10,7 +10,7 @@ Pinned to htmx **2.x** deliberately. htmx 4 is in beta with substantial breaking
 
 `templates/base.html` loads htmx scripts as `defer` *before* `static/js/page_lifecycle.js` and `static/js/base.js` so any code referencing the `htmx.*` global sees it on first paint.
 
-`htmx.config.historyEnableCache = false` is set inline at the top of `<body>` so back/forward refetches dynamic pages (Downloads queue, System logs) instead of restoring stale snapshots.
+`htmx.config.historyEnableCache = false` is pinned via a `<meta name="htmx-config" content='{"historyEnableCache":false}'>` tag in `<head>` (htmx 2.x reads this meta during init). Back/forward refetches dynamic pages (Downloads queue, System logs) instead of restoring stale snapshots. Pinned by `tests/htmx_foundation.rs::base_pins_history_cache_off_via_meta`.
 
 `htmx-ext-head-support` diff-merges `<head>` so per-page `{% block page_css %}` swaps cleanly between pages.
 
