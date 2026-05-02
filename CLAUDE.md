@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 ## Project Overview
 
-Ryokan is a self-hosted anime PVR (personal video recorder) written in Rust. It searches Nyaa for anime torrent releases, scores them by quality, and sends them to a torrent client for download. Four clients are supported behind a common `DownloadClient` trait — qBittorrent, Deluge, Transmission, and rTorrent — with one active at a time per instance. AniList is the primary metadata source with MAL (via Jikan) and Kitsu as fallbacks.
+Ryokan is a self-hosted anime PVR (personal video recorder) written in Rust. It searches Nyaa for anime releases, scores them by quality, and dispatches grabs to a download client. Five clients are supported behind a common `DownloadClient` trait — **four BT clients** (qBittorrent, Deluge, Transmission, rTorrent) and **one Usenet client** (SABnzbd) — with a multi-client routing pool keyed by indexer pin and per-protocol default. Acquisition surfaces beyond the built-in Nyaa search: a **torznab/newznab indexer system** for Prowlarr/Jackett (`services/indexers/`), **direct RSS feeds** (e.g. SubsPlease), and an **autobrr webhook** (`/api/webhook/autobrr`) for IRC-announce push. AniList is the primary metadata source with MAL (via Jikan) and Kitsu as fallbacks.
 
 Release scoring combines Sonarr-style **Custom Formats** (TRaSH-Guides-compatible), a multi-layer **source classification pipeline**, and optional **SeaDex** (releases.moe) authoritative picks. Ryokan also exposes a Sonarr/Radarr-compatible API shim (**anibridge**) so Seerr and similar tools can request anime through it.
+
+**Nyaa stays out-of-band.** The torznab indexer system runs *alongside* the direct Nyaa scraper, not in place of it — the search pipeline dispatches to Nyaa-direct + fans out to `Indexer` impls in parallel and merges. Source classification reads Nyaa's description body directly; conforming Nyaa to the generic trait would have hidden that coupling.
 
 ## Build & Run
 
@@ -51,18 +53,19 @@ Axum 0.8 + Tokio · SQLite via sqlx 0.8 (`default-features = false` + `runtime-t
 
 ## Code Layout (`src/`)
 
-- **`handlers/`** — Axum route handlers. One module per page/feature: `library`, `search`, `downloads`, `settings`, `system`, `auth`, `media`, `help`, `progress`, `grab` (interactive file-picker — `/api/grab/{preview,confirm,heartbeat,cancel}`), `oauth` (AL+MAL link/submit/unlink/sync-now under `/settings/oauth/*`), plus `sonarr_compat` / `radarr_compat` (the anibridge shims), `arr_auth` (shared API-key middleware), `arr_shared` (DTOs shared between shim sides). Auth deep dive: **`src/handlers/auth/CLAUDE.md`**.
+- **`handlers/`** — Axum route handlers. Page/feature modules: `library`, `search`, `downloads`, `settings`, `system`, `auth`, `media`, `help`, `progress`, `grab` (interactive file-picker — `/api/grab/{preview,confirm,heartbeat,cancel}`), `oauth` (AL+MAL link/submit/unlink/sync-now under `/settings/oauth/*`), `webhook/` (autobrr push at `/api/webhook/autobrr`), plus `sonarr_compat` / `radarr_compat` (the anibridge shims), `arr_auth` (shared API-key middleware), `arr_shared` (DTOs shared between shim sides). Auth deep dive: **`src/handlers/auth/CLAUDE.md`**.
 - **`services/`** — Business logic + external API clients.
   - Metadata chain: `anilist/` → `jikan` → `kitsu`, plus `mal` (OAuth-authenticated, distinct from `jikan` which is the public-fallback path).
-  - `download_client/` — trait + 4 client impls (qBit / Deluge / Transmission / rtorrent). Wire quirks deep dive: **`src/services/download_client/CLAUDE.md`**.
+  - `download_client/` — trait + **5 client impls** (qBit / Deluge / Transmission / rtorrent / **sabnzbd**) + `DownloadClientPool` for multi-client routing. Wire quirks + pool: **`src/services/download_client/CLAUDE.md`**.
+  - `indexers/` — torznab/newznab indexer abstraction (`Indexer` trait, `Release`/`SearchQuery`/`IndexerCaps`, `torznab/` impl). Runs alongside the Nyaa hot path. Deep dive: **`src/services/indexers/CLAUDE.md`**.
   - `source/` + sibling `source_*.rs` — multi-layer source classification pipeline. `quality.rs`, `scoring.rs`, `custom_formats/`, `upgrade.rs`, `auto_search/`, `auto_expand.rs`. Classifier deep dive: **`src/services/source/CLAUDE.md`**.
   - `external_sync/` — AL/MAL watch-list sync (delta cursor, force-full-resync, removal detection, auth-rejection taxonomy).
-  - `crypto.rs` — AEAD wrapper for OAuth tokens. `oauth_state.rs`, `user_score.rs`.
-  - `nyaa/`, `seadex.rs`, `rss/`, `anibridge.rs`, `indexers/`, `indexer_catalog.rs`, `interactive_search_cache.rs`.
+  - `crypto.rs` — AEAD wrapper for OAuth tokens. `oauth_state.rs` (PKCE verifier store), `user_score.rs`.
+  - `nyaa/`, `seadex.rs`, `rss/`, `anibridge.rs`, `interactive_search_cache.rs`, `indexer_catalog.rs` (provisioning), `task_registry.rs` (in-memory supervised-task lifecycle).
   - `post_processing/` — moves/renames completed downloads (hardlink/copy/move). `nfo.rs`, `artwork.rs`, `media.rs`, `jellyfin.rs`.
-  - `monitoring.rs`, `progress.rs`, `task_registry.rs`, `library_link.rs`, `grab_commit.rs`, `grab_sweep.rs`, `metadata_sync.rs`, `html.rs`, `sanitize.rs`, `logger.rs`.
+  - `monitoring.rs`, `progress.rs`, `library_link.rs`, `grab_commit.rs`, `grab_sweep.rs`, `metadata_sync.rs`, `html.rs`, `sanitize.rs`, `logger.rs`.
   - AL deep dive: **`src/services/anilist/CLAUDE.md`**.
-- **`models/`** — DB access + schema. `migrations/` owns most `CREATE TABLE` / `ALTER TABLE`. A few tables own their `CREATE TABLE` next to their model module (`custom_formats`, `group_source_map` + `schema_migrations`, `media_probe_cache`, `nyaa_description_cache`).
+- **`models/`** — DB access + schema. `migrations/` owns most `CREATE TABLE` / `ALTER TABLE`. A few tables own their `CREATE TABLE` next to their model module (`custom_formats`, `group_source_map` + `schema_migrations`, `media_probe_cache`, `nyaa_description_cache`). Notable additions beyond the obvious: `download_clients` (one row per configured client, keyed by id; `is_default` rows are scoped per-protocol — torrent vs usenet — both can coexist), `indexers` (torznab/newznab rows with caps cache + per-indexer `download_client_id` pin), `direct_rss_feeds` (per-feed configuration for direct sources like SubsPlease).
 - **`templates/`** — Askama templates. HTMX patterns + per-page JS lifecycle: **`templates/CLAUDE.md`**.
 - **`static/`** — Modular CSS (`base.css`, `topbar.css`, `forms.css`, `badges.css`, `modals.css` loaded everywhere + per-page `pages/<name>.css`) and per-page `static/js/*.js`. No bundler. `static/default_custom_formats.json` is the only non-CSS / non-JS asset (also embedded via `include_str!` at compile time).
 - **`tests/`** — Integration tests (binary crates importing `ryokan` as a lib). Browser-e2e harness for HTMX UI assertions. **`tests/CLAUDE.md`**.
@@ -70,11 +73,45 @@ Axum 0.8 + Tokio · SQLite via sqlx 0.8 (`default-features = false` + `runtime-t
 
 ## AppState
 
-`SqlitePool` + `Arc<RwLock<Option<Arc<dyn DownloadClient>>>>` (swapped on Settings save via `build_download_client`) + `Arc<RwLock<Option<JellyfinClient>>>` + `CompiledCfCache` (`Arc<RwLock<Arc<Vec<_>>>>` swap-on-write so the scoring hot path runs lock-free; handlers clone the inner `Arc` under read lock) + `ProgressRegistry` for long-running user-triggered jobs + `users_exist: Arc<AtomicBool>` flip-to-true-once cache so the auth middleware can skip a `SELECT COUNT(*) FROM users` on every protected request once setup is complete.
+Defined in `src/lib.rs`. Fields:
+
+- `db: SqlitePool`.
+- `download_clients: DownloadClientsCache = Arc<RwLock<Arc<DownloadClientPool>>>` — **multi-client routing pool** (id-keyed `HashMap<i64, Arc<dyn DownloadClient>>` plus `default_torrent_id` and `default_usenet_id`). The whole `Arc<DownloadClientPool>` swaps atomically on `services::download_client::rebuild_clients_cache` (Settings → Connections → Downloads add/edit/delete). Lookup at grab time is a `HashMap::get` against the cheap-cloned inner Arc — read lock releases before dispatch. Resolved through `AppState::client_for_indexer` / `client_for_nyaa` / `default_download_client` / `client_by_id` / `resolve_grab_client`.
+- `jellyfin: Arc<RwLock<Option<JellyfinClient>>>`.
+- `custom_formats: CompiledCfCache = Arc<RwLock<Arc<Vec<_>>>>` — swap-on-write so the scoring hot path runs lock-free. Handlers clone the inner `Arc` under read lock; rebuilt by `custom_formats::rebuild_cf_cache` on CF create/update/delete.
+- `indexers: IndexerCache = Arc<RwLock<Arc<Vec<Arc<dyn Indexer>>>>>` — same swap-on-write shape as `custom_formats`. Avoids rebuilding `reqwest::Client` instances on every per-target search.
+- `progress: ProgressRegistry` — long-running user-triggered jobs (currently manual auto-search). The frontend mints an opaque `progress_id`, the trigger handler binds it via `register(...).await`, and `/api/progress/{id}` drains buffered events.
+- `users_exist: Arc<AtomicBool>` — flip-to-true-once cache so `require_auth` skips a `SELECT COUNT(*) FROM users` per protected request once setup is complete. While false, the middleware still hits the DB on the setup-pending path so a fresh `/setup` submission is picked up on the very next request.
+- `interactive_search_cache: InteractiveSearchCache` — 5-minute TTL for interactive-search results so rapid modal reloads during UI iteration reuse the previous Nyaa hit. Scoped to interactive only; auto-search / RSS / manual grabs continue to hit Nyaa directly.
+- `oauth_state: OAuthStateStore` — in-memory store for pending MAL OAuth attempts (PKCE verifier between `/start` and `/submit`). 10-minute TTL. AL has no entry — implicit grant, no per-attempt server state.
+- `start_time: chrono::DateTime<Utc>` — wall-clock timestamp captured at boot. Used by Sonarr/Radarr `system_status` so Seerr's UI pill reports actual liveness; the prior hardcoded `2024-01-01T00:00:00Z` claimed the indexer had been up over a year regardless of when Ryokan restarted.
+- `tasks: TaskRegistry = Arc<RwLock<HashMap<&'static str, Arc<TaskState>>>>` — supervised-task lifecycle metadata. Each `supervise()` loop registers itself once at startup, mutates atomics on its `Arc<TaskState>` on every iteration (no further locking until a snapshot read). Distinct from the DB-backed `scheduled_task_runs` table — `tasks` is the in-memory live status view (running / backoff, restart count, last exit kind, current backoff) served at `/api/system/tasks` for the System page.
+
+## Download-client routing (multi-client pool)
+
+`AppState::client_for_indexer_with_id` resolves:
+
+1. **Indexer's `download_client_id` pin** if set and present in the pool.
+2. **Per-protocol default** — torznab indexer with no pin → `default_torrent_id`; newznab → `default_usenet_id`. Unknown indexer kind / not in cache snapshot → torrent default.
+3. None — caller surfaces "no download client configured."
+
+`client_for_nyaa` reads `config.nyaa_download_client_id` then **always falls back to torrent default** (Nyaa items are magnets / .torrent URLs; usenet fallback would just trip the protocol guard at add-time).
+
+`default_download_client` returns the **torrent** default — every internal default-only call site is torrent-flavored (manual grabs, library re-grab, RSS / upgrade "is anything configured" gates). Usenet routing always goes through an indexer pin or its protocol default.
+
+**`resolve_grab_client(download_client_id, hash)`** — used by post-processing's per-grab routing. Three-layer fallback:
+1. The stamped client id, if it still exists in the pool.
+2. **Hash-shape heuristic** — `hash.starts_with("SABnzbd_nzo_")` routes to ANY usenet client in the pool. Old grabs predating the `download_client_id` stamp migration have NULL stamps; without this branch, a SAB nzo_id sent to qBit's `delete` endpoint silently 200s (qBit ignores unknown hashes), and the user's symptom is "delete-from-disk leaves the SAB job alive forever."
+3. The torrent default (legacy fall-through; correct for BT v1 infohashes).
+
+`grabbed_torrents.download_client_id` is stamped at grab time so post-processing routes back through the same client even if defaults change.
 
 ## Background tasks
 
-Each runs as a `tokio::spawn` loop in `main.rs` wrapped in `supervise()`, which catches panics/join errors, logs them, and respawns. **Restart policy is exponential backoff**, not flat 5s: `MIN_BACKOFF = 5s`, `MAX_BACKOFF = 30 min`, `HEALTHY_RUNTIME = 60s`. Healthy ≥60s run resets to 5s; <60s exit doubles up to 30 min. Status into `scheduled_task_runs`.
+Each runs as a `tokio::spawn` loop in `main.rs` wrapped in `supervise()`, which catches panics/join errors, logs them, and respawns. **Restart policy is exponential backoff**, not flat 5s: `MIN_BACKOFF = 5s`, `MAX_BACKOFF = 30 min`, `HEALTHY_RUNTIME = 60s`. Healthy ≥60s run resets to 5s; <60s exit doubles up to 30 min. Two layers of status tracking:
+
+- **`scheduled_task_runs` DB table** — historical record (when did task X last run? success/failure?). Read by the System page for the per-task history pane.
+- **`AppState.tasks: TaskRegistry`** — in-memory live status (`running` / `backoff`, restart count, last exit kind, current backoff). Lock-free hot path — supervise grabs an `Arc<TaskState>` once at register time and mutates atomics; snapshot read happens on `/api/system/tasks`. The exit-kind enum distinguishes `Normal` (returned `()` from outer loop — shouldn't happen with `loop { … }` shape) from `Panic` (real bug to investigate).
 
 | Task | Interval |
 |---|---|
@@ -103,7 +140,8 @@ Each runs as a `tokio::spawn` loop in `main.rs` wrapped in `supervise()`, which 
 - **Parse-ordering in `services/media.rs` is load-bearing.** `parse_episode_number` / `parse_quality` regex branches have explicit ordering: `RE_SXEX` before bare-number, `OVA NN` before generic bare-number, trailing-marker ranges before the marker, WebRip before unified Web (issue #48), and the `RE_SXEX` guard before any dash-delimited branch. Each branch has a regression-guard test. Don't "tidy" the order; new branches go with a pinning test.
 - **HTMX-aware redirects**: `handlers::responses::htmx_aware_redirect` is mandatory for any handler that does `Redirect::to`. Bare `Redirect::to` under body-wide hx-boost gets nested-rendered into the source page. `tests/htmx_redirect_audit.rs` is a CI-enforced lint. See `templates/CLAUDE.md` for the full rationale.
 - **Hardcoded Nyaa hot path**: when adding indexer support, never refactor Nyaa into a generic Indexer trait — Nyaa stays out-of-band as the protected hot path.
-- **Sonarr/Radarr shim auth**: `arr_auth::check_api_key` middleware accepts `X-Api-Key` header *or* `?apikey=` query (percent-encoded), constant-time compared via `subtle` against `config.sonarr_api_key` / `config.radarr_api_key`. Transient config-load failures return **503 + `Retry-After`** (not 500) so Seerr doesn't long-back-off the indexer. Sonarr at `/api/v3/...`; Radarr at `/radarr/api/v3/...` (Seerr only allows two Sonarr + two Radarr slots; both shims must coexist on one host/port). `aliased(&["/camelCase", "/lowercase"], handler)` collapses Seerr's case-variant doublings — don't redirect, some clients won't follow. Provider order is fixed AL-first then MAL — never honor user-facing source toggles for the shim.
+- **Sonarr/Radarr shim auth**: `arr_auth::check_api_key` middleware accepts `X-Api-Key` header *or* `?apikey=` query (percent-encoded), constant-time compared via `subtle` against `config.sonarr_api_key` / `config.radarr_api_key`. Transient config-load failures return **503 + `Retry-After`** (not 500) so Seerr doesn't long-back-off the indexer. Sonarr at `/api/v3/...`; Radarr at `/radarr/api/v3/...` (Seerr only allows two Sonarr + two Radarr slots; both shims must coexist on one host/port). `aliased(&["/camelCase", "/lowercase"], handler)` collapses Seerr's case-variant doublings — don't redirect, some clients won't follow. Provider order is fixed AL-first then MAL — never honor user-facing source toggles for the shim. The `system_status` endpoint reports `AppState.start_time` (boot wall-clock) for the Seerr liveness pill.
+- **Webhook auth**: `handlers::webhook::autobrr` accepts `X-Api-Key` header *or* `?apikey=` query, constant-time compared against `config.autobrr_api_key`. Empty configured key returns **503 + Retry-After** ("autobrr webhook is disabled") rather than treating empty-key match as success. Mismatch is 401. Future webhook receivers (e.g. radarr companion) land as siblings under `handlers/webhook/` so the auth + body-shape pattern stays consistent.
 - **No em dashes in user-facing prose** (templates, README, error messages, toast text). Use `;` or `.` Internal Rust comments / CLAUDE.md / commit messages are exempt. **US English** spellings (color, honor, favorite — not colour, honour, favourite).
 - **Custom Formats** are Sonarr-style (TRaSH-Guides-compatible). The `SpecKind::SeaDexBest` variant in `services/custom_formats.rs` is a Ryokan-only extension matched against SeaDex picks at scoring time — accepted under both `Ryokan.SeaDexBestSpecification` and the shorter `SeaDexBestSpecification` implementation name, emitted in the long form on export. **Presence of a CF using `SeaDexBest` suppresses the separate `seadex_enabled` config toggle** so the CF and toggle don't double-count. Preserve that one-or-the-other invariant.
 - **Post-processing import modes** (`services/post_processing/mod.rs::do_file_op`) keyed off `config.post_processing_mode` (validated to `hardlink` / `copy` / `move`):
@@ -122,15 +160,20 @@ Static `LazyLock`s crossing request boundaries — inventory:
 
 - `services::anilist::rate_limit::*` — throttle state. Deep dive: `src/services/anilist/CLAUDE.md`.
 - `services::anilist::DETAIL_CACHE` — per-AL-id memoization; partial-recovery paths read from it after a failed batch fetch.
+- `services::jikan::DETAIL_CACHE` — per-MAL-id memoization (parallel to AL's).
+- `services::jikan::JIKAN_COOLDOWN_UNTIL` — Jikan's equivalent of AL's rate-limit machine. When Jikan 429s, sets "unavailable until Instant" so subsequent calls return a clean cooldown error instead of hammering and piling up more 429s. **60s default, 300s max.** Honors the response's `Retry-After` when present.
+- `services::source_description::LAST_FETCH` — Process-global throttle for live Nyaa description fetches. **`MIN_FETCH_INTERVAL = 1s`** (Nyaa doesn't publish a rate limit but tarpits scrape-looking patterns fast). Holds the mutex *across the sleep*, deliberately serializing all fetches so two concurrent classifier calls can't burst.
+- `services::anibridge::CACHE` (`RwLock<Option<CacheState>>`) + `DOWNLOAD_LOCK` (`Mutex<()>`) — In-process TMDB↔AniList mapping cache + single-flight download serializer (no TOCTOU race). The `anibridge_refresh` 24h task warms `CACHE`; the disk cache underneath uses conditional GET via stored meta, with multiple `spawn_blocking` sites for read/meta/write paths and an unconditional-read fallback on the 304 path.
 - `services::post_processing::POST_PROC_LOCK` — serializes the post-processing task. Held across the full import sweep including the 60s ffprobe timeout.
 - `services::rss::RSS_SYNC_LOCK` — `try_lock` + readable error so manual run during a tick doesn't queue.
 - `services::external_sync::EXTERNAL_SYNC_LOCK` — same shape; Sync-now click during the supervised loop returns "already running."
 - `services::crypto::ENCRYPTION_KEY` — the AEAD key. Crashing at LazyLock force is intentional.
+- `handlers::settings::CONFIG_WRITE_LOCK` (`tokio::sync::Mutex<()>`) — serializes handler-level read-modify-write of `Config`. Multi-process deployment (which Ryokan doesn't support) would need DB-level locking instead.
 - `handlers::auth::LOGIN_FAILURES` — per-IP throttle map. See `src/handlers/auth/CLAUDE.md`.
 - `handlers::auth::TRUST_PROXY_HEADERS` / `COOKIE_SECURE` — env snapshots.
 - `handlers::system::CLIENT_LOG_HITS` — sliding-window rate limit on the client-side log-ingest endpoint.
 - `handlers::library::reconcile::HYDRATED_CUMULATIVE` — first-grab `cumulative_prior_episodes` lazy-hydration dedup. Uses `.unwrap_or_else(|p| p.into_inner())` recovery.
-- `services::rss::feed::RSS_HTTP_CLIENT` — pre-configured reqwest client.
+- `handlers::oauth::OAUTH_HTTP_CLIENT`, `services::rss::feed::RSS_HTTP_CLIENT`, `services::jikan::HTTP_CLIENT`, `services::mal::HTTP_CLIENT`, `services::artwork::HTTP_CLIENT`, `services::source_description::HTTP_CLIENT` — per-service pre-configured `LazyLock<reqwest::Client>` instances. Each owns its own UA / timeout / TLS config; sharing one client across services would cross-pollinate timeouts. Standard reqwest hygiene — connection-pool reuse means do NOT build a `Client` per request.
 
 ## Database & migrations
 
@@ -139,11 +182,12 @@ Static `LazyLock`s crossing request boundaries — inventory:
 
 ## Routes
 
-`main.rs` merges three logical groups:
+`main.rs` merges these route groups:
 
 - `public_routes` — unauthenticated endpoints (`/login`, `/setup`, `/forgot-password`) wrapped in `csrf_public` so POST paths still enforce Origin/Referer.
-- `protected_routes` — everything behind `require_auth` (library, search, downloads, settings, system, the API endpoints the web UI calls — `/api/health`, `/api/library/*`, `/api/progress/*`).
+- `protected_routes` — everything behind `require_auth` (library, search, downloads, settings, system, the API endpoints the web UI calls — `/api/health`, `/api/library/*`, `/api/progress/*`, `/api/system/tasks`).
 - `sonarr_routes` + `radarr_routes` — merged **outside** the cookie-auth layer with `arr_auth` middleware instead.
+- `webhook_routes` — merged outside cookie-auth with each receiver's own API-key middleware. Currently only `/api/webhook/autobrr`.
 
 Compression layer wraps everything (`CompressionLayer::new().br(true).gzip(true)`). `/static/*` is served via `ServeDir` with `Cache-Control: public, max-age=3600` (one hour — short enough to pick up edited CSS during local dev on hard reload).
 

@@ -27,6 +27,10 @@ Touch the safety margin, threshold, or taxonomy carefully — they're load-beari
 
 Callers match on the **prefix string**, not HTTP codes. Adding new wordings requires updating the tag, not the policy.
 
+## Jikan cooldown (the fallback side)
+
+`services::jikan::JIKAN_COOLDOWN_UNTIL` is the Jikan equivalent of the AL rate-limit machine, simpler. When Jikan 429s, sets "unavailable until Instant" so subsequent calls return a clean cooldown error rather than hammering the API and piling up more 429s. **60s default, 300s max**, honors response `Retry-After` when present. Read `services/jikan.rs` if you're touching how the fallback chain handles rate limits — the AL→Jikan handoff assumes both sides have working cooldowns.
+
 ## `DETAIL_CACHE`
 
 Per-AL-id memoization. Partial-recovery paths read from it after a failed batch fetch — `get_anime_details_batch` aborts on first Err but writes from completed chunks survive in the cache. Auto-expand's transitive neighbor-fetch fallback relies on this.
