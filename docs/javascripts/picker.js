@@ -294,7 +294,7 @@ ${portsBlock}    volumes:
       - ${cfg.paths.appdata}/caddy/data:/data
       - ${cfg.paths.appdata}/caddy/config:/config
     restart: unless-stopped
-    # Stub Caddyfile — drop your hostname in. Caddy auto-provisions
+    # Stub Caddyfile; drop your hostname in. Caddy auto-provisions
     # Let's Encrypt certs once a real domain points at this host.
     # Example:
     #   ryokan.example.com {
@@ -397,7 +397,7 @@ ${portsBlock}    volumes:
     if (proxy) services.push(proxy);
 
     const header = `# =============================================================================
-# Ryokan stack — generated from the picker
+# Ryokan stack: generated from the picker
 # =============================================================================
 #
 # Before first \`docker compose up\`:
