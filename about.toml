@@ -1,7 +1,9 @@
 # `cargo about generate` uses this to bundle every transitive dependency's
-# license text into THIRD_PARTY_LICENSES.md (regenerated on Cargo.lock
-# changes, see the Makefile / CI). The accepted list below covers every
-# SPDX identifier that appears in Ryokan's full dep tree as of writing;
+# license text into licenses/THIRD_PARTY_LICENSES.html. The freshness
+# check in `.github/workflows/rust.yml` runs the regen and diffs the
+# committed file, so a Cargo.lock change without a regen fails CI. The
+# accepted list below covers every SPDX identifier that appears in
+# Ryokan's full dep tree as of writing;
 # `cargo about` will fail loudly if a new dep introduces a new identifier,
 # at which point we audit and either add it here or swap the dep.
 #
