@@ -92,12 +92,21 @@ jobs:
           # fine ~2-3s later. The `000` sentinel keeps the loop
           # iterating; a real "never came up" still falls out the
           # bottom and reports the last code.
+          # Accept 200 OR 303 as "up": a fresh container with no
+          # users yet redirects `/login` → `/setup` (303), which is
+          # correct behavior on first boot. The previous strict
+          # 200-only check failed every fresh-image smoke test and
+          # masked the actual question we want to answer ("did
+          # Ryokan boot and start serving?"). 4xx/5xx still fall
+          # through to the failure path.
           for i in {1..30}; do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:8978/login || echo 000)
-            if [ "$code" = "200" ]; then
-              echo "Ryokan /login responded 200"
-              exit 0
-            fi
+            case "$code" in
+              200|303)
+                echo "Ryokan /login responded $code (Ryokan is up)"
+                exit 0
+                ;;
+            esac
             sleep 1
           done
           echo "Ryokan never came up (last code: $code)"

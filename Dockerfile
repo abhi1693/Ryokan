@@ -53,6 +53,12 @@ ENV RYOKAN_MEDIA_CACHE_DIR=/data/cache/artwork
 # this override the ryokan user can't write the key file at boot
 # and `services::crypto` panics with `Permission denied (os error 13)`.
 ENV RYOKAN_KEY_FILE_PATH=/data/.ryokan-key
+# Anibridge mappings cache — same CWD-relative footgun as the key
+# file. Without this override the ~9MB mappings blob silently
+# fails to persist on every fetch (write to /app/data/... 13s),
+# meaning every container restart re-downloads from the upstream
+# GitHub-hosted JSON instead of using the conditional-GET cache.
+ENV RYOKAN_ANIBRIDGE_CACHE_DIR=/data/cache/anibridge
 # Default UID/GID for the ryokan user. Override via -e PUID=... / PGID=...
 # to match the ownership of host-mounted media and download directories.
 ENV PUID=1000
