@@ -1,23 +1,23 @@
 # Docker
 
-The published image is `ghcr.io/johnthreekay/ryokan:latest`. Architectures: `linux/amd64` and `linux/arm64`. The repo's `docker-compose.yml` is the canonical reference — start there and adjust to taste.
+The published image is `ghcr.io/johnthreekay/ryokan:latest`. Architectures: `linux/amd64` and `linux/arm64`. The repo's `docker-compose.yml` is the canoncal reference. You can start there and adjust to taste.
 
 ## Volume layout
 
 ```yaml
 volumes:
   - ryokan-data:/data
-  # Optional, only for post-processing:
+  # Optional, uncomment for post-processing:
   # - /srv/downloads:/downloads
   # - /srv/media/anime:/media/anime
 ```
 
-**`/data` (required)** holds the SQLite DB, the artwork blob cache, the encryption key, the anibridge mappings cache, and any sentinel files. Loss of `/data` means losing your library state, queued grabs, scoring history, OAuth tokens, etc. — back it up like any other database. The named-volume default (`ryokan-data`) keeps it inside Docker; bind-mount to a host path if you want the DB visible from the host filesystem.
+**`/data` (required)** holds the SQLite DB, the artwork blob cache, the encryption key, the anibridge mappings cache, and any sentinel files. Loss of `/data` means losing your library state, queued grabs, scoring history, OAuth tokens, etc. The named-volume default (`ryokan-data`) keeps it inside Docker; bind-mount to a host path if you want the DB visible from the host filesystem.
 
-**`/downloads`** and **`/media/...`** are the post-processing source and destination. They're optional in the sense that Ryokan boots without them — but post-processing requires both to be visible inside the container at the same paths you configure in Settings → Connections → Downloads (download path) and Settings → Media (media root).
+**`/downloads`** and **`/media/...`** are the post-processing source and destination. They're optional in the sense that Ryokan boots without them, but post-processing requires both to be visible inside the container at the same paths you configure in Settings → Connections → Downloads (download path) and Settings → Media (media root).
 
 !!! warning "User-mounted paths are *not* chowned"
-    The entrypoint chowns `/data` to the runtime UID/GID, but **deliberately not** `/downloads` or `/media/...`. Chowning a 10TB media library would stall startup for hours and could clobber ownership the rest of your *arr stack relies on. Set `PUID` / `PGID` to match the user that already owns those host paths — that's the linuxserver.io convention and what other *arr containers expect.
+    The entrypoint chowns `/data` to the runtime UID/GID, but **deliberately not** `/downloads` or `/media/...`. Chowning a 10TB media library would stall startup for hours and could clobber ownership the rest of your *arr stack relies on. Set `PUID` / `PGID` to match the user that already owns those host paths. That's the linuxserver.io convention and what other *arr containers expect.
 
 ## PUID / PGID
 
@@ -67,7 +67,7 @@ docker compose pull
 docker compose up -d
 ```
 
-The volume preserves your data. The image's binary is replaced; migrations run on next boot (idempotent — applying twice is a no-op).
+The volume preserves your data. The image's binary is replaced; migrations run on next boot (idempotent. Applying twice is a no-op.)
 
 !!! danger "Don't `docker compose down -v`"
     The `-v` flag removes named volumes. With the documented setup that means deleting your DB, encryption key, OAuth tokens, and library state. There's no undo. `down` without `-v` is safe.
