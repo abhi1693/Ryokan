@@ -1101,7 +1101,7 @@ function autoSearchSeries(btn) {
         progressId: pid,
         kind: 'info',
         category: 'auto_search',
-        title: 'Searching missing episodes',
+        title: 'Searching monitored episodes',
         body: seriesTitle,
     });
 
