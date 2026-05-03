@@ -51,9 +51,24 @@ jobs:
       # ~2 min via cargo install).
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest,cargo-about
       - name: Format check
         run: cargo fmt --all -- --check
+      # `licenses/THIRD_PARTY_LICENSES.html` is committed and copied
+      # into the Docker image. cargo-about is deterministic for a given
+      # Cargo.lock, so a Cargo.lock change without a notice-file
+      # regen produces a non-empty diff here. Fail loudly when that
+      # happens so the dev re-runs `cargo about generate` and commits
+      # the result, rather than shipping a binary whose attribution
+      # file is missing the new dep.
+      - name: Third-party license notices freshness
+        run: |
+          cargo about generate -c about.toml about.hbs -o licenses/THIRD_PARTY_LICENSES.html
+          if ! git diff --quiet licenses/THIRD_PARTY_LICENSES.html; then
+            echo "::error::licenses/THIRD_PARTY_LICENSES.html is stale. Run 'cargo about generate -c about.toml about.hbs -o licenses/THIRD_PARTY_LICENSES.html' and commit the result."
+            git --no-pager diff --stat licenses/THIRD_PARTY_LICENSES.html
+            exit 1
+          fi
       - name: Clippy
         # `--features test-support` enables the `ryokan::test_support`
         # re-export that integration tests under `tests/` depend on.

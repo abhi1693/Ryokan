@@ -17,4 +17,7 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 ## This project's being actively developed. Expect some occasional bugs. See [Releases](https://github.com/johnthreekay/Ryokan/releases) for version-to-version changes.
 
 ## License
-Licensed under [GPL-3.0-or-later](LICENSE).
+
+Ryokan is licensed under [GPL-3.0-or-later](LICENSE).
+
+Third-party crate notices (MIT / Apache-2.0 / BSD / ISC) are bundled in [`licenses/THIRD_PARTY_LICENSES.html`](licenses/THIRD_PARTY_LICENSES.html) and baked into the Docker image at `/app/licenses/THIRD_PARTY_LICENSES.html`.
