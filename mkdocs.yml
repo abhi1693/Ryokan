@@ -56,12 +56,19 @@ theme:
 nav:
   - Home: index.md
   - Install: install.md
+  - Stack builder: stack-builder.md
   - Docker: docker.md
   - Configuration: configuration.md
   - Download clients: download-clients.md
   - External accounts: external-accounts.md
   - Troubleshooting: troubleshooting.md
   - FAQ: faq.md
+
+extra_javascript:
+  - javascripts/picker.js
+
+extra_css:
+  - stylesheets/picker.css
 
 markdown_extensions:
   - admonition
