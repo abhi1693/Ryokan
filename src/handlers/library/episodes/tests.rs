@@ -582,14 +582,39 @@ mod cancel_pending_sab_e2e {
     use super::super::cancel_pending_episode;
     use crate::services::download_client::DownloadClient;
     use crate::services::download_client::sabnzbd::SabClient;
-    use crate::test_support::{in_memory_pool, seed_series};
+    use crate::test_support::seed_series;
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
+    use sqlx::SqlitePool;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Single-connection in-memory pool. The shared
+    /// `test_support::in_memory_pool` builds a default `SqlitePool`
+    /// which can hold multiple connections to `:memory:` — and each
+    /// `:memory:` connection has its OWN database, so a row inserted
+    /// via connection A is invisible to connection B. Most tests in
+    /// the codebase happen to land all their queries on a single
+    /// connection by luck, but this test fans out across the seed
+    /// path, the handler's resolve+delete path, and a post-condition
+    /// read — that's enough connection churn to flake (`RowNotFound`
+    /// when the post-cancel grab-state read landed on a different
+    /// connection than the seed). Pinning `max_connections=1` keeps
+    /// every query on the same physical DB.
+    async fn single_connection_in_memory_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(":memory:")
+            .await
+            .expect("open :memory: SQLite");
+        crate::models::migrations::migrate(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
 
     /// Build an `AppState` with the supplied SAB client at id=1,
     /// marked as the torrent default. We pin the grab's
@@ -689,7 +714,7 @@ mod cancel_pending_sab_e2e {
             "test-api-key",
             "ryokan-test",
         ));
-        let db = in_memory_pool().await;
+        let db = single_connection_in_memory_pool().await;
         let anilist_id: i64 = 12345;
         let series_id = seed_series(&db, anilist_id, "Cancel-Pending SAB E2E").await;
         let grab_id = seed_sab_grab(&db, series_id, "SABnzbd_nzo_test123", 1).await;
@@ -772,7 +797,7 @@ mod cancel_pending_sab_e2e {
             "test-api-key",
             "ryokan-test",
         ));
-        let db = in_memory_pool().await;
+        let db = single_connection_in_memory_pool().await;
         let anilist_id: i64 = 12346;
         let series_id = seed_series(&db, anilist_id, "Cancel-Pending SAB Hist Fallback").await;
         seed_sab_grab(&db, series_id, "SABnzbd_nzo_imported456", 1).await;
