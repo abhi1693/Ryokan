@@ -84,6 +84,32 @@ static LAST_AL_REQUEST: LazyLock<StdMutex<Option<Instant>>> = LazyLock::new(|| S
 static ANILIST_COOLDOWN_UNTIL: LazyLock<StdMutex<Option<Instant>>> =
     LazyLock::new(|| StdMutex::new(None));
 
+/// Sliding 60-second window of AL request timestamps issued from
+/// THIS process. Surfaced on 429s so a user staring at "AL says
+/// remaining=0 but I'm not making any calls!" can see exactly how
+/// many requests Ryokan itself fired in the last minute. If the
+/// count is well under AL's 30/min cap and AL still 429s, the
+/// remainder of the cap is being burned by something else on the
+/// same IP — another tab on anilist.co (each page load makes
+/// many GraphQL calls), a second Ryokan instance, an extension or
+/// helper tool sharing the IP. Without this counter every 429 was
+/// indistinguishable from "Ryokan over-fired" vs "external traffic
+/// stole the budget" and the user had to guess.
+///
+/// The window is bounded by `max(N, oldest > now - 60s)`; entries
+/// are popped from the front as they age out, capped at a defensive
+/// `RECENT_AL_REQUESTS_MAX_LEN` so a runaway bug can't grow the
+/// `VecDeque` without bound.
+static RECENT_AL_REQUESTS: LazyLock<StdMutex<std::collections::VecDeque<Instant>>> =
+    LazyLock::new(|| StdMutex::new(std::collections::VecDeque::new()));
+
+/// Hard cap on the recent-requests deque length. The 60s window
+/// should keep this comfortably under 90 (the highest AL limit
+/// Ryokan plausibly paces against if it ever uplifts the clamp);
+/// the larger ceiling defends against an unexpected burst, like a
+/// runaway loop, growing the deque past reasonable size.
+const RECENT_AL_REQUESTS_MAX_LEN: usize = 256;
+
 /// Compute the minimum spacing between AL requests for a given
 /// per-minute limit. 60s / limit, with a 10% safety pad on top so that
 /// clock drift / measurement noise can't accidentally push us above
@@ -229,8 +255,51 @@ pub(super) async fn throttle_before_anilist_request() {
         tokio::time::sleep(wait).await;
     }
 
+    let now = Instant::now();
     if let Ok(mut guard) = LAST_AL_REQUEST.lock() {
-        *guard = Some(Instant::now());
+        *guard = Some(now);
+    }
+    record_recent_al_request(now);
+}
+
+/// Append `at` to the recent-requests deque and prune entries older
+/// than 60s. Called from `throttle_before_anilist_request` after the
+/// throttle decision so every Ryokan-issued AL request is counted —
+/// the window is what surfaces in the 429 diagnostic.
+fn record_recent_al_request(at: Instant) {
+    if let Ok(mut guard) = RECENT_AL_REQUESTS.lock() {
+        let cutoff = at.checked_sub(Duration::from_secs(60));
+        if let Some(cutoff) = cutoff {
+            while matches!(guard.front(), Some(t) if *t < cutoff) {
+                guard.pop_front();
+            }
+        }
+        // Defensive cap — see `RECENT_AL_REQUESTS_MAX_LEN`. Drop
+        // the oldest if we've somehow grown past the ceiling.
+        while guard.len() >= RECENT_AL_REQUESTS_MAX_LEN {
+            guard.pop_front();
+        }
+        guard.push_back(at);
+    }
+}
+
+/// Number of AL requests Ryokan issued from this process in the
+/// last 60 seconds. Used to disambiguate "Ryokan over-fired"
+/// (count at or above the 30/min cap) from "external traffic stole
+/// the budget" (count is small but AL says `remaining=0`) on a
+/// 429. Pruning happens lazily — callers see entries up to 60s
+/// old by definition because every `throttle_before_anilist_request`
+/// call prunes before pushing.
+pub fn recent_al_request_count_60s() -> usize {
+    let now = Instant::now();
+    let cutoff = match now.checked_sub(Duration::from_secs(60)) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if let Ok(guard) = RECENT_AL_REQUESTS.lock() {
+        guard.iter().filter(|t| **t >= cutoff).count()
+    } else {
+        0
     }
 }
 

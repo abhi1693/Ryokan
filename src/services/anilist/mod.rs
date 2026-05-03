@@ -17,6 +17,7 @@ use rate_limit::{
 };
 pub use rate_limit::{
     anilist_cooldown_active, is_rate_limit_error, note_external_anilist_response,
+    recent_al_request_count_60s,
 };
 
 const ANILIST_API_DEFAULT: &str = "https://graphql.anilist.co";
@@ -1536,13 +1537,30 @@ fn format_rate_limit_headers_for_log(headers: &reqwest::header::HeaderMap) -> St
     if let Some(v) = read("retry-after") {
         parts.push(format!("retry_after={v}"));
     }
+    // `ryokan_60s` is the count of AL requests Ryokan ITSELF made
+    // in the last 60 seconds. Surfaced on every 429 so the user
+    // can attribute the budget exhaustion: when AL's `remaining=0`
+    // but `ryokan_60s` is well under 30, the missing budget was
+    // burned by something outside Ryokan on the same IP — another
+    // tab on anilist.co (each page render makes many GraphQL
+    // calls), a second Ryokan instance, an extension or helper
+    // tool. When `ryokan_60s` is >= 30, we have an internal
+    // over-firing bug to fix.
+    //
+    // Tracked separately from `parts` so the "no rate-limit
+    // headers" fallback below stays meaningful — a response with
+    // no AL rate-limit headers shouldn't get a fake `parts.len() > 0`
+    // just because the local counter has a value.
+    let ryokan_60s = format!("ryokan_60s={}", rate_limit::recent_al_request_count_60s());
     if parts.is_empty() {
         // No rate-limit headers at all — strong signal the response
         // came from somewhere other than AL's normal rate-limiter
         // (Cloudflare, an upstream proxy, an auth layer that
-        // misuses 429).
-        "no rate-limit headers".to_string()
+        // misuses 429). Still include the local count so the user
+        // can spot a runaway internal loop in this case too.
+        format!("no rate-limit headers; {ryokan_60s}")
     } else {
+        parts.push(ryokan_60s);
         parts.join(" ")
     }
 }
@@ -1564,24 +1582,33 @@ mod tests {
         assert!(out.contains("retry_after=5"), "got: {out}");
         // `reset` was not present and must not appear as "unknown".
         assert!(
-            !out.contains("reset"),
-            "absent fields must be omitted; got: {out}"
+            !out.contains("reset="),
+            "absent header fields must be omitted; got: {out}"
+        );
+        // `ryokan_60s` is always appended for budget attribution.
+        assert!(
+            out.contains("ryokan_60s="),
+            "local request counter must always surface so the user can tell whether Ryokan or external traffic burned the AL budget; got: {out}"
         );
     }
 
     #[test]
     fn format_rate_limit_headers_falls_back_when_no_headers_present() {
         // When AL (or an intermediary) sends none of the rate-limit
-        // headers on a 429, the summary must say so explicitly —
-        // the "no rate-limit headers" string is a diagnostic hint
-        // that the 429 may have come from somewhere other than AL's
-        // normal rate-limiter (e.g. Cloudflare, an auth layer
-        // misusing 429). Without this fallback, an empty summary
-        // would render as `[]` in the error message and the
-        // distinction would be lost.
+        // headers on a 429, the summary must lead with "no rate-limit
+        // headers" explicitly — that's a diagnostic hint that the
+        // 429 may have come from somewhere other than AL's normal
+        // rate-limiter (Cloudflare, an upstream proxy, an auth
+        // layer misusing 429). The local `ryokan_60s` counter still
+        // appends so a runaway internal loop hitting an upstream
+        // proxy that strips AL's headers is also visible.
         let h = reqwest::header::HeaderMap::new();
         let out = format_rate_limit_headers_for_log(&h);
-        assert_eq!(out, "no rate-limit headers");
+        assert!(out.starts_with("no rate-limit headers"), "got: {out}");
+        assert!(
+            out.contains("ryokan_60s="),
+            "local counter must surface even on the no-headers path; got: {out}"
+        );
     }
 
     #[test]
