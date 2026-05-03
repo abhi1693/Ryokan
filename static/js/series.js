@@ -1850,11 +1850,12 @@ var DL_PROGRESS_HTML_ZERO = '<div class="dl-progress-wrap"><div class="dl-progre
 // search) to patch every row, including rows that weren't previously
 // showing a progress bar.
 //
-// The season summary badge ("5 / 12") is always recomputed — the row
-// patch can flip an episode from queued to on-disk when post-processing
-// imports a file mid-poll, and the badge needs to follow even on the
-// non-force path. Skipping it left the count stuck at the pre-import
-// value until the user reloaded the page.
+// The season summary (badge "5 / 12" + season-size span) is always
+// recomputed: the row patch can flip an episode from queued to on-disk
+// when post-processing imports a file mid-poll, and both surfaces
+// need to follow even on the non-force path. Skipping the recompute
+// left the count and the total-bytes display stuck at pre-import
+// values until the user reloaded the page.
 function refreshEpisodeRows(options) {
     const opts = options || {};
     const force = !!opts.force;

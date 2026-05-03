@@ -666,9 +666,10 @@ mod tests {
     /// just takes the wrong branch and a sweep eats more 429s.
     ///
     /// Touches process-global state, so this test serializes itself
-    /// behind a mutex with the other `set_cooldown` test below to
-    /// avoid cross-test pollution. Other tests in this file are
-    /// pure (compute_* / decide_wait) and don't touch these globals.
+    /// behind `COOLDOWN_TEST_LOCK` to avoid cross-test pollution
+    /// with any future global-state-touching test that adopts the
+    /// same lock. Other tests in this file are pure (compute_* /
+    /// decide_wait) and don't touch these globals.
     #[test]
     fn set_cooldown_clears_rate_limit_state() {
         let _g = COOLDOWN_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
