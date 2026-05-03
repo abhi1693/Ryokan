@@ -46,6 +46,13 @@ ENV RUST_LOG=ryokan=info
 # Persist the on-disk artwork blob cache alongside the SQLite database so
 # image_blobs rows keep matching real files across container restarts.
 ENV RYOKAN_MEDIA_CACHE_DIR=/data/cache/artwork
+# Encryption-key file lives next to the SQLite DB on the persistent
+# /data volume. The default `data/.ryokan-key` is CWD-relative
+# (matching `cargo run`'s working tree), but this image's WORKDIR is
+# /app and the entrypoint chowns /data not /app/data — so without
+# this override the ryokan user can't write the key file at boot
+# and `services::crypto` panics with `Permission denied (os error 13)`.
+ENV RYOKAN_KEY_FILE_PATH=/data/.ryokan-key
 # Default UID/GID for the ryokan user. Override via -e PUID=... / PGID=...
 # to match the ownership of host-mounted media and download directories.
 ENV PUID=1000
