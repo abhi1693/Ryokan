@@ -20,11 +20,4 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 
 Ryokan is licensed under [GPL-3.0-or-later](LICENSE).
 
-Compiled into the binary are ~350 third-party crates under permissive licenses (MIT, Apache-2.0, BSD-3-Clause, ISC, MPL-2.0, Unicode-3.0, Zlib, CDLA-Permissive-2.0). Their copyright and permission notices are bundled in [`THIRD_PARTY_LICENSES.html`](THIRD_PARTY_LICENSES.html) at the repo root, also baked into the Docker image at `/app/THIRD_PARTY_LICENSES.html`.
-
-Regenerate after any `Cargo.lock` change:
-
-```sh
-cargo install cargo-about --locked --features cli   # one-time
-cargo about generate -c about.toml about.hbs -o THIRD_PARTY_LICENSES.html
-```
+Third-party crate notices (MIT / Apache-2.0 / BSD / ISC) are bundled in [`THIRD_PARTY_LICENSES.html`](THIRD_PARTY_LICENSES.html) at the repo root and baked into the Docker image at `/app/THIRD_PARTY_LICENSES.html`.
