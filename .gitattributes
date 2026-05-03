@@ -1,0 +1,19 @@
+# GitHub Linguist overrides. Linguist scans every file in the repo to
+# build the colored Languages bar at the top of the project page;
+# without these directives the 680KB cargo-about-generated license
+# notice file shows the repo as ~15% HTML, and the about.hbs template
+# adds a Handlebars sliver — both misrepresent what's actually in
+# the source tree.
+#
+# `linguist-generated` hides files entirely from the bar AND collapses
+# them by default in PR diffs (so a regenerated THIRD_PARTY_LICENSES
+# diff doesn't drown out actual code review).
+#
+# `linguist-vendored` hides from the bar but still shows in diffs;
+# right for templates and other small bits we maintain but don't want
+# distorting the language stats.
+#
+# Reference: https://github.com/github-linguist/linguist/blob/main/docs/overrides.md
+
+licenses/THIRD_PARTY_LICENSES.html linguist-generated
+about.hbs linguist-vendored
