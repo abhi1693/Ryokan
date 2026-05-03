@@ -1,6 +1,6 @@
 # Download clients
 
-Ryokan supports five clients behind a common trait: qBittorrent, Deluge, Transmission, rTorrent, and SABnzbd. Multiple can be configured simultaneously and routed per-grab via indexer pins or per-protocol defaults.
+Ryokan currently supports five download clients: qBittorrent, Deluge, Transmission, rTorrent, and SABnzbd. Multiple can be configured simultaneously and routed per-grab via indexer pins or per-protocol defaults.
 
 Add clients under **Settings → Connections → Downloads**. Each row needs a URL, credentials (where applicable), and a label / category Ryokan uses to scope its visibility into the client (so it can't see torrents added by other tools and vice versa).
 
@@ -11,7 +11,7 @@ Add clients under **Settings → Connections → Downloads**. Each row needs a U
 - Re-auth on 403 via session cookie; you don't have to manage tokens manually.
 
 !!! warning "Silent grab failures"
-    qBit's `POST /torrents/add` returns `Ok.` and fetches the `.torrent` URL **server-side**. A silent fetch failure (tracker timeout, indexer 404) looks identical to a successful add from Ryokan's perspective. If a grab "vanishes" without showing up in qBit, check qBit's own logs first — that's where the failure lives.
+    qBit's `POST /torrents/add` returns `Ok.` and fetches the `.torrent` URL **server-side**. A silent fetch failure (tracker timeout, indexer 404) looks identical to a successful add from Ryokan's perspective. If a grab "vanishes" without showing up in qBit, check qBit's own logs first since that's where the failure lives.
 
 ## Deluge
 
@@ -34,7 +34,7 @@ Add clients under **Settings → Connections → Downloads**. Each row needs a U
 ## SABnzbd
 
 - **Endpoint shape**: `GET <base>/api?apikey=…&mode=…&output=json`. The user-configured base IS the base — Ryokan appends `/api`. Most SAB installs are at `http://host:8080`; the legacy `URL_BASE=/sabnzbd` configurations want `http://host:8080/sabnzbd` as the configured base.
-- **API key**: SAB has two — the **full API key** and the read-only `nzb_api_key`. Ryokan needs the full one for queue management (cancel, change_cat). The Test-connection probe catches a wrong/missing key at config time instead of at first grab.
+- **API key**: SAB has two: the **full API key** and the read-only `nzb_api_key`. Ryokan needs the full one for queue management (cancel, change_cat). The Test-connection probe catches a wrong/missing key at config time instead of at first grab.
 - **Auto-creates the configured category.** If the category Ryokan was configured with doesn't exist in SAB, the connection-test path creates it via `set_config`. Same auto-create runs on first grab as a safety net for users who skipped the Test button. Without this, NZBs land in SAB's default bucket, Ryokan's `list_scoped` filters them out, and grabs appear to vanish — see [Troubleshooting → SAB downloads vanish](troubleshooting.md#sab-downloads-disappear-from-ryokan-but-still-download-in-sab).
 - **No per-file selection.** NZBs are opaque blobs until SAB extracts them. Interactive picker still works (it shows the file list for selection if SAB has parsed the headers), but the actual file selection is no-op'd at the wire — SAB downloads the whole NZB, then post-processing imports the files Ryokan wanted.
 
