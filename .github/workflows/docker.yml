@@ -78,8 +78,22 @@ jobs:
           # the auth UI rendered; anything else fails. Polling loop
           # rather than fixed sleep so a fast cold-boot doesn't waste a
           # full minute on every CI run.
+          #
+          # `|| code=000` is load-bearing: GitHub Actions runs `run`
+          # blocks under `set -eo pipefail`, so a curl error inside a
+          # command substitution (connection refused = 7, broken
+          # response = 56, etc.) propagates through and kills the
+          # whole loop before the next sleep. Cold-boot races
+          # naturally produce both — the kernel accepts the TCP
+          # connection the moment Axum binds, but a few hundred ms
+          # before the router is actually serving, curl can get an
+          # incomplete response. Without the swallow we observed exit
+          # 56 on run 25254999207 even though the container came up
+          # fine ~2-3s later. The `000` sentinel keeps the loop
+          # iterating; a real "never came up" still falls out the
+          # bottom and reports the last code.
           for i in {1..30}; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8978/login)
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:8978/login || echo 000)
             if [ "$code" = "200" ]; then
               echo "Ryokan /login responded 200"
               exit 0
