@@ -1,0 +1,27 @@
+# `cargo about generate` uses this to bundle every transitive dependency's
+# license text into THIRD_PARTY_LICENSES.md (regenerated on Cargo.lock
+# changes, see the Makefile / CI). The accepted list below covers every
+# SPDX identifier that appears in Ryokan's full dep tree as of writing;
+# `cargo about` will fail loudly if a new dep introduces a new identifier,
+# at which point we audit and either add it here or swap the dep.
+#
+# All listed licenses are GPL-3.0-compatible (Ryokan ships GPL); MPL-2.0
+# is the special case — it's a weak per-file copyleft, GPL-compatible at
+# the combined-work level, and applies to anitomy / anitomy-sys.
+
+accepted = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",   # Linux Foundation permissive data license; used by webpki-roots-style trust stores
+    "GPL-3.0-or-later",      # Ryokan itself; cargo-about checks the active package against this list too
+    "ISC",
+    "MIT",
+    "MIT-0",                 # MIT-zero, no attribution required (still safe to include)
+    "MPL-2.0",               # anitomy / anitomy-sys
+    "Unicode-3.0",           # ICU / Unicode tables
+    "Zlib",
+]
+
+# Ryokan itself is GPL-3.0-or-later; cargo-about excludes the workspace
+# member it's invoked on by default, so we don't need to list our own
+# license here.

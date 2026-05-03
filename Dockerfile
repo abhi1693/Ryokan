@@ -35,6 +35,12 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/ryokan /app/ryokan
 COPY static/ /app/static/
+# License notices required by MIT/Apache/BSD/ISC deps that ship inside
+# the binary. `cargo about generate` produces this file from Cargo.lock;
+# regenerate when deps change. Living at /app/THIRD_PARTY_LICENSES.html
+# so receivers of the Docker image can `docker cp` it out.
+COPY LICENSE /app/LICENSE
+COPY THIRD_PARTY_LICENSES.html /app/THIRD_PARTY_LICENSES.html
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

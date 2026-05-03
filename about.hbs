@@ -1,0 +1,79 @@
+<html>
+
+<head>
+    <style>
+        @media (prefers-color-scheme: dark) {
+            body {
+                background: #333;
+                color: white;
+            }
+            a {
+                color: skyblue;
+            }
+        }
+        .container {
+            font-family: sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .intro {
+            text-align: center;
+        }
+        .licenses-list {
+            list-style-type: none;
+            margin: 0;
+            padding: 0;
+        }
+        .license-used-by {
+            margin-top: -10px;
+        }
+        .license-text {
+            max-height: 200px;
+            overflow-y: scroll;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+    <main class="container">
+        <div class="intro">
+            <h1>Ryokan — Third-Party Licenses</h1>
+            <p>
+                Ryokan is licensed <a href="https://github.com/johnthreekay/Ryokan/blob/main/LICENSE">GPL-3.0-or-later</a>.
+                The crates below ship compiled into Ryokan's binary and Docker image; this file reproduces their copyright
+                and permission notices verbatim to satisfy the attribution clauses of the MIT, Apache-2.0, BSD, ISC, and
+                similar permissive licenses they ship under.
+            </p>
+            <p>
+                Regenerated from <code>Cargo.lock</code> via <code>cargo about generate -c about.toml about.hbs -o
+                THIRD_PARTY_LICENSES.html</code>. Don't hand-edit; the next dep change will overwrite local edits.
+            </p>
+        </div>
+    
+        <h2>Overview of licenses:</h2>
+        <ul class="licenses-overview">
+            {{#each overview}}
+            <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+            {{/each}}
+        </ul>
+
+        <h2>All license text:</h2>
+        <ul class="licenses-list">
+            {{#each licenses}}
+            <li class="license">
+                <h3 id="{{id}}">{{name}}</h3>
+                <h4>Used by:</h4>
+                <ul class="license-used-by">
+                    {{#each used_by}}
+                    <li><a href="{{#if crate.repository}} {{crate.repository}} {{else}} https://crates.io/crates/{{crate.name}} {{/if}}">{{crate.name}} {{crate.version}}</a></li>
+                    {{/each}}
+                </ul>
+                <pre class="license-text">{{text}}</pre>
+            </li>
+            {{/each}}
+        </ul>
+    </main>
+</body>
+
+</html>
