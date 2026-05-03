@@ -1718,10 +1718,7 @@ pub async fn run_once(state: &AppState) {
                 logger::warn(
                     &state.db,
                     LogCategory::PostProcess,
-                    &format!(
-                        "Item removed from download client: '{}'",
-                        grab.torrent_name
-                    ),
+                    &format!("Item removed from download client: '{}'", grab.torrent_name),
                     "Marking as removed (not found in client)",
                 )
                 .await;
