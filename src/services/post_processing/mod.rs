@@ -1702,22 +1702,26 @@ pub async fn run_once(state: &AppState) {
             hit.as_ref().map(|(_, _, t)| t);
 
         let Some(torrent) = matched else {
-            // Torrent not found in qBittorrent. If the grab is old enough
-            // (> 60 seconds), the user likely deleted it — mark as
-            // removed. The grace window used to be 5 minutes to cover
-            // qBit restarts, but in practice the `all_torrents` call
-            // would fail outright during a restart (we'd not even reach
-            // this branch with a valid torrent list), so the long grace
-            // window just delayed reconciliation of manual qBit deletes
-            // for no safety gain. A minute is enough slack for a slow
-            // first-poll after an add-torrent RPC, short enough that
-            // "deleted ep 9 in qBit and it still shows pending" becomes
-            // "shows cancelled within a minute."
+            // Item not found in any configured download client. If the
+            // grab is old enough (> 60 seconds), the user likely
+            // deleted it from the client — mark as removed. The grace
+            // window used to be 5 minutes to cover qBit restarts, but
+            // in practice the `list_scoped` call would fail outright
+            // during a restart (we'd not even reach this branch with
+            // a valid item list), so the long grace window just
+            // delayed reconciliation of manual deletes for no safety
+            // gain. A minute is enough slack for a slow first-poll
+            // after an add-torrent / addurl RPC, short enough that
+            // "deleted ep 9 in the client and it still shows pending"
+            // becomes "shows cancelled within a minute."
             if grab_is_stale(&grab.grabbed_at, 60) {
                 logger::warn(
                     &state.db,
                     LogCategory::PostProcess,
-                    &format!("Torrent removed from qBittorrent: '{}'", grab.torrent_name),
+                    &format!(
+                        "Item removed from download client: '{}'",
+                        grab.torrent_name
+                    ),
                     "Marking as removed (not found in client)",
                 )
                 .await;
@@ -1732,13 +1736,20 @@ pub async fn run_once(state: &AppState) {
             continue;
         };
 
-        // Detect failed/error torrents and mark them.
+        // Detect failed/error items and mark them. The detail line
+        // surfaces both the client's native state string (`Failed`
+        // for SAB, `error` for qBit, etc.) and Ryokan's normalized
+        // `state_kind` slug so a System → Logs reader can diagnose
+        // without having to remember which client uses which
+        // vocabulary. Pre-multi-client this read `qbit_state=`,
+        // which mis-labelled SAB/Deluge/Transmission/rtorrent
+        // failures with a qBit prefix.
         if torrent.state_kind.is_errored() {
             logger::warn(
                 &state.db,
                 LogCategory::PostProcess,
-                &format!("Torrent in error state: '{}'", grab.torrent_name),
-                &format!("qbit_state={}", torrent.state),
+                &format!("Item in error state: '{}'", grab.torrent_name),
+                &format!("state={} kind={:?}", torrent.state, torrent.state_kind),
             )
             .await;
             let _ = grabbed_torrents::mark_failed(&state.db, grab.id).await;
